@@ -59,13 +59,15 @@ attachments are extracted on body fetch (`ReplaceAttachments`) and shown as chip
 in the reader; clicking one downloads it (content-addressed under the cache dir)
 and opens it with `xdg-open`.
 
-The thread list is a virtualized `gtk.ListView`: a `gtk.StringList` of gmail ids
-drives a `SignalListItemFactory` that builds row widgets only for visible items
-(looked up in an in-memory `msgByID` map). It loads up to `threadListCap` (5000)
-messages of metadata per label; true paging-on-scroll is a further optimization.
-A search entry above the list runs instant local FTS5 search (`store.Search`,
-which sanitizes input into a quoted prefix MATCH); clearing it returns to the
-current label.
+The list is grouped by conversation: a virtualized `gtk.ListView` over a
+`gtk.StringList` of thread ids (looked up in a `threadByID` map of
+`model.ThreadSummary`); rows show the newest message + a count. `store`
+provides `ListThreadsByLabel`/`ListThreadMessages`/`GetThreadSummary`. Opening a
+thread renders all its messages stacked in the reader (bodies fetched lazily,
+each a sanitized section); archive/trash apply to the whole thread, reply/star
+to its newest message. A search entry runs instant local FTS5 search
+(`store.Search`, sanitized into a quoted prefix MATCH) whose hits are grouped
+into threads; clearing it returns to the current label.
 Compose supports attachments (a file picker adds them; `BuildMIME` emits
 multipart/mixed with base64 parts). Send is synchronous for compose feedback,
 but a failed send is queued to the `outbox` table and retried by a background

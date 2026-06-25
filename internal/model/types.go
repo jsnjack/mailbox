@@ -83,6 +83,15 @@ type Message struct {
 	Labels         []string
 }
 
+// ThreadSummary describes a conversation for the thread list: its newest message
+// plus how many messages it holds and how many are unread.
+type ThreadSummary struct {
+	ThreadID    string
+	Latest      Message
+	Count       int
+	UnreadCount int
+}
+
 // MessageBody holds the lazily-fetched body parts of a message.
 type MessageBody struct {
 	MessageRowID int64

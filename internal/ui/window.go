@@ -40,8 +40,8 @@ type window struct {
 	current    string
 	startTime  time.Time // only mail arriving after this triggers notifications
 
-	// virtualized thread list: a StringList of gmail ids drives a ListView; the
-	// factory builds row widgets only for visible items, looked up in msgByID.
+	// virtualized list grouped by conversation: a StringList of thread ids drives
+	// a ListView; the factory builds visible rows from threadByID.
 	threadModel    *gtk.StringList
 	threadSel      *gtk.SingleSelection
 	threadView     *gtk.ListView
@@ -49,26 +49,29 @@ type window struct {
 	readerStack    *gtk.Stack // "message" vs "empty" placeholder
 	searchEntry    *gtk.SearchEntry
 	suppressSearch bool // guards SetText from firing a search during label switch
-	msgByID        map[string]model.Message
+	threadByID     map[string]model.ThreadSummary
 
 	header    *gtk.Label
 	attachBox *gtk.Box // chips for the open message's attachments
 	webview   *webkit.WebView
 	sanitizer *bluemonday.Policy
 
-	// reader actions
-	openMsg      model.Message // the message currently shown in the reader
-	replyBtn     *gtk.Button
-	replyAllBtn  *gtk.Button
-	forwardBtn   *gtk.Button
-	archiveBtn   *gtk.Button
-	trashBtn     *gtk.Button
-	unreadBtn    *gtk.Button
-	starBtn      *gtk.ToggleButton
-	imagesBtn    *gtk.ToggleButton
-	translateBtn *gtk.Button
-	draftBtn     *gtk.Button
-	updatingStar bool // guards programmatic star-toggle from firing the handler
+	// reader: the open conversation. openMsg is its newest message (used for
+	// reply/forward/star/unread); openThreadMsgs is all of them (oldest first).
+	openThreadID   string
+	openThreadMsgs []model.Message
+	openMsg        model.Message
+	replyBtn       *gtk.Button
+	replyAllBtn    *gtk.Button
+	forwardBtn     *gtk.Button
+	archiveBtn     *gtk.Button
+	trashBtn       *gtk.Button
+	unreadBtn      *gtk.Button
+	starBtn        *gtk.ToggleButton
+	imagesBtn      *gtk.ToggleButton
+	translateBtn   *gtk.Button
+	draftBtn       *gtk.Button
+	updatingStar   bool // guards programmatic star-toggle from firing the handler
 }
 
 func newWindow(app *adw.Application, deps Deps) *window {
@@ -187,7 +190,7 @@ func (w *window) buildSidebar() *adw.NavigationPage {
 }
 
 func (w *window) buildThreadList() *adw.NavigationPage {
-	w.msgByID = make(map[string]model.Message)
+	w.threadByID = make(map[string]model.ThreadSummary)
 	w.threadModel = gtk.NewStringList(nil)
 	w.threadSel = gtk.NewSingleSelection(w.threadModel)
 	w.threadSel.SetAutoselect(false)
@@ -206,7 +209,7 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 		if !ok {
 			return
 		}
-		li.SetChild(threadRow(w.msgByID[so.String()]))
+		li.SetChild(threadRow(w.threadByID[so.String()]))
 	})
 
 	w.threadView = gtk.NewListView(w.threadSel, &factory.ListItemFactory)
@@ -252,35 +255,50 @@ func (w *window) onSearchChanged() {
 }
 
 // refreshList populates the thread list from either the current label (blank
-// query) or a full-text search.
+// query) or a full-text search (whose message hits are grouped into threads).
 func (w *window) refreshList(query string) {
 	ctx := context.Background()
-	var (
-		msgs []model.Message
-		err  error
-	)
 	if strings.TrimSpace(query) == "" {
-		msgs, err = w.deps.Store.ListByLabel(ctx, w.deps.AccountID, w.current, threadListCap, 0)
-	} else {
-		msgs, err = w.deps.Store.Search(ctx, w.deps.AccountID, query, threadListCap)
-	}
-	if err != nil {
-		slog.Error("ui: refresh list", "query", query, "err", err)
+		sums, err := w.deps.Store.ListThreadsByLabel(ctx, w.deps.AccountID, w.current, threadListCap, 0)
+		if err != nil {
+			slog.Error("ui: list threads", "label", w.current, "err", err)
+			return
+		}
+		w.showThreads(sums)
 		return
 	}
-	w.showMessages(msgs)
+
+	msgs, err := w.deps.Store.Search(ctx, w.deps.AccountID, query, threadListCap)
+	if err != nil {
+		slog.Error("ui: search", "query", query, "err", err)
+		return
+	}
+	seen := make(map[string]bool)
+	var sums []model.ThreadSummary
+	for _, m := range msgs {
+		if seen[m.ThreadID] {
+			continue
+		}
+		seen[m.ThreadID] = true
+		sum, err := w.deps.Store.GetThreadSummary(ctx, w.deps.AccountID, m.ThreadID)
+		if err != nil {
+			continue
+		}
+		sums = append(sums, sum)
+	}
+	w.showThreads(sums)
 }
 
-// showMessages replaces the thread list contents.
-func (w *window) showMessages(msgs []model.Message) {
-	w.msgByID = make(map[string]model.Message, len(msgs))
-	ids := make([]string, len(msgs))
-	for i, m := range msgs {
-		ids[i] = m.GmailID
-		w.msgByID[m.GmailID] = m
+// showThreads replaces the thread list contents.
+func (w *window) showThreads(sums []model.ThreadSummary) {
+	w.threadByID = make(map[string]model.ThreadSummary, len(sums))
+	ids := make([]string, len(sums))
+	for i, s := range sums {
+		ids[i] = s.ThreadID
+		w.threadByID[s.ThreadID] = s
 	}
 	w.threadModel.Splice(0, w.threadModel.NItems(), ids)
-	if len(msgs) == 0 {
+	if len(sums) == 0 {
 		w.threadStack.SetVisibleChildName("empty")
 	} else {
 		w.threadStack.SetVisibleChildName("list")
@@ -312,9 +330,7 @@ func (w *window) onThreadSelected() {
 	if !ok {
 		return
 	}
-	if m, ok := w.msgByID[so.String()]; ok {
-		w.showMessage(m)
-	}
+	w.showThread(so.String())
 }
 
 func (w *window) buildReader() *adw.NavigationPage {
@@ -528,87 +544,123 @@ func (w *window) selectLabel(labelID string) {
 	w.outerSplit.SetShowContent(true)
 }
 
-func (w *window) showMessage(m model.Message) {
-	w.openMsg = m
+// showThread opens a conversation: it loads all its messages, renders them
+// stacked in the reader, and marks any unread ones read.
+func (w *window) showThread(threadID string) {
+	msgs, err := w.deps.Store.ListThreadMessages(context.Background(), w.deps.AccountID, threadID)
+	if err != nil || len(msgs) == 0 {
+		if err != nil {
+			slog.Warn("ui: load thread", "thread", threadID, "err", err)
+		}
+		return
+	}
+	w.openThreadID = threadID
+	w.openThreadMsgs = msgs
+	w.openMsg = msgs[len(msgs)-1] // newest, for reply/forward/star/unread
 	w.setActionsSensitive(true)
 	w.readerStack.SetVisibleChildName("message")
-	// When collapsed, navigate to the reader.
 	w.innerSplit.SetShowContent(true)
 
-	// Reflect the starred state without re-triggering the toggle handler.
 	w.updatingStar = true
-	w.starBtn.SetActive(m.IsStarred)
+	w.starBtn.SetActive(w.openMsg.IsStarred)
 	w.updatingStar = false
 
-	w.renderBody(m)
+	w.renderConversation(msgs)
 
-	// Opening an unread message marks it read (standard mail behaviour).
-	if m.IsUnread && w.deps.ModifyLabels != nil {
-		go func() {
-			if err := w.deps.ModifyLabels(context.Background(), m.AccountID, m.GmailID, nil, []string{model.LabelUnread}); err != nil {
-				slog.Warn("ui: mark read", "id", m.GmailID, "err", err)
-				return
+	// Mark unread messages in the thread read.
+	if w.deps.ModifyLabels != nil {
+		var unread []model.Message
+		for _, m := range msgs {
+			if m.IsUnread {
+				unread = append(unread, m)
 			}
-			dispatch.Main(w.loadLabels)
-		}()
+		}
+		if len(unread) > 0 {
+			go func() {
+				for _, m := range unread {
+					if err := w.deps.ModifyLabels(context.Background(), m.AccountID, m.GmailID, nil, []string{model.LabelUnread}); err != nil {
+						slog.Warn("ui: mark read", "id", m.GmailID, "err", err)
+					}
+				}
+				dispatch.Main(w.loadLabels)
+			}()
+		}
 	}
 }
 
-// renderBody shows the header and body for m, fetching the body on demand.
-func (w *window) renderBody(m model.Message) {
-	w.header.SetMarkup(fmt.Sprintf("<b>%s</b>\n%s",
-		html.EscapeString(m.Subject), html.EscapeString(displayFrom(m))))
-
-	if body, err := w.deps.Store.GetBody(context.Background(), m.RowID); err == nil && (body.HTML != "" || body.Text != "") {
-		w.loadBody(body)
-		w.populateAttachments(m)
-		return
-	}
-
-	if w.deps.FetchBody == nil {
-		w.webview.LoadHtml(wrapHTML("<p>"+html.EscapeString(m.Snippet)+"</p>"), "about:blank")
-		w.populateAttachments(m)
-		return
-	}
-
+// renderConversation fetches each message's body (lazily) and renders the whole
+// thread as stacked sections in the reader.
+func (w *window) renderConversation(msgs []model.Message) {
+	latest := msgs[len(msgs)-1]
+	w.header.SetMarkup(fmt.Sprintf("<b>%s</b>\n%d message(s)",
+		html.EscapeString(latest.Subject), len(msgs)))
 	w.webview.LoadHtml(wrapHTML("<p><i>Loading…</i></p>"), "about:blank")
+
 	go func() {
-		err := w.deps.FetchBody(context.Background(), m.AccountID, m.GmailID)
-		dispatch.Main(func() {
-			if err != nil {
-				slog.Warn("ui: fetch body", "id", m.GmailID, "err", err)
-				w.webview.LoadHtml(wrapHTML("<p>Could not load this message.</p>"), "about:blank")
-				return
+		ctx := context.Background()
+		for i := range msgs {
+			if !msgs[i].BodyFetched && w.deps.FetchBody != nil {
+				if err := w.deps.FetchBody(ctx, msgs[i].AccountID, msgs[i].GmailID); err != nil {
+					slog.Warn("ui: fetch body", "id", msgs[i].GmailID, "err", err)
+				}
 			}
-			body, _ := w.deps.Store.GetBody(context.Background(), m.RowID)
-			w.loadBody(body)
-			w.populateAttachments(m)
+		}
+		var b strings.Builder
+		for _, m := range msgs {
+			body, _ := w.deps.Store.GetBody(ctx, m.RowID)
+			b.WriteString(conversationSection(m, body, w.sanitizer.Sanitize))
+		}
+		out := b.String()
+		dispatch.Main(func() {
+			w.webview.LoadHtml(wrapHTML(out), "about:blank")
+			w.populateThreadAttachments(msgs)
 		})
 	}()
 }
 
-// populateAttachments rebuilds the attachment chip bar for the open message.
-func (w *window) populateAttachments(m model.Message) {
+func conversationSection(m model.Message, body model.MessageBody, sanitize func(string) string) string {
+	header := fmt.Sprintf(
+		`<div style="border-top:1px solid #ddd;margin-top:18px;padding-top:8px;color:#555;font-size:90%%"><b>%s</b> · %s</div>`,
+		html.EscapeString(displayFrom(m)), m.InternalDate.Format("Jan 2, 2006 15:04"))
+	switch {
+	case body.HTML != "":
+		return header + sanitize(body.HTML)
+	case body.Text != "":
+		return header + "<pre style=\"white-space:pre-wrap\">" + html.EscapeString(body.Text) + "</pre>"
+	default:
+		return header + "<p>" + html.EscapeString(m.Snippet) + "</p>"
+	}
+}
+
+// populateThreadAttachments shows chips for all attachments across the thread,
+// each opening via its own message.
+func (w *window) populateThreadAttachments(msgs []model.Message) {
 	for child := w.attachBox.FirstChild(); child != nil; child = w.attachBox.FirstChild() {
 		w.attachBox.Remove(child)
 	}
-	atts, err := w.deps.Store.ListAttachments(context.Background(), m.RowID)
-	if err != nil {
-		slog.Warn("ui: list attachments", "id", m.GmailID, "err", err)
-	}
-	if len(atts) == 0 || w.deps.OpenAttach == nil {
+	if w.deps.OpenAttach == nil {
 		w.attachBox.SetVisible(false)
 		return
 	}
-	for _, a := range atts {
-		att := a
-		btn := gtk.NewButton()
-		btn.SetChild(attachmentChip(att))
-		btn.SetTooltipText(att.MimeType)
-		btn.ConnectClicked(func() { w.openAttachment(m.GmailID, att.ID) })
-		w.attachBox.Append(btn)
+	any := false
+	for _, m := range msgs {
+		atts, err := w.deps.Store.ListAttachments(context.Background(), m.RowID)
+		if err != nil {
+			slog.Warn("ui: list attachments", "id", m.GmailID, "err", err)
+			continue
+		}
+		gmailID := m.GmailID
+		for _, a := range atts {
+			att := a
+			btn := gtk.NewButton()
+			btn.SetChild(attachmentChip(att))
+			btn.SetTooltipText(att.MimeType)
+			btn.ConnectClicked(func() { w.openAttachment(gmailID, att.ID) })
+			w.attachBox.Append(btn)
+			any = true
+		}
 	}
-	w.attachBox.SetVisible(true)
+	w.attachBox.SetVisible(any)
 }
 
 func (w *window) openAttachment(gmailID string, attID int64) {
@@ -635,15 +687,11 @@ func attachmentChip(a model.Attachment) *gtk.Box {
 }
 
 func (w *window) onArchive() {
-	if w.openMsg.GmailID != "" {
-		w.runAction(w.openMsg, nil, []string{model.LabelInbox})
-	}
+	w.runThreadAction(nil, []string{model.LabelInbox})
 }
 
 func (w *window) onTrash() {
-	if w.openMsg.GmailID != "" {
-		w.runAction(w.openMsg, []string{model.LabelTrash}, []string{model.LabelInbox})
-	}
+	w.runThreadAction([]string{model.LabelTrash}, []string{model.LabelInbox})
 }
 
 func (w *window) onMarkUnread() {
@@ -665,8 +713,8 @@ func (w *window) onToggleStar() {
 
 func (w *window) onToggleImages() {
 	w.webview.Settings().SetAutoLoadImages(w.imagesBtn.Active())
-	if w.openMsg.GmailID != "" {
-		w.renderBody(w.openMsg)
+	if len(w.openThreadMsgs) > 0 {
+		w.renderConversation(w.openThreadMsgs)
 	}
 }
 
@@ -767,8 +815,8 @@ func (w *window) showAIStream(title string, start func(ctx context.Context) (<-c
 	}()
 }
 
-// runAction applies a label change in the background, then refreshes the label
-// counts and the current message list.
+// runAction applies a label change to one message in the background, then
+// refreshes the label counts and the current list (preserving any search).
 func (w *window) runAction(m model.Message, add, remove []string) {
 	if w.deps.ModifyLabels == nil {
 		return
@@ -780,17 +828,29 @@ func (w *window) runAction(m model.Message, add, remove []string) {
 				slog.Warn("ui: action", "id", m.GmailID, "err", err)
 			}
 			w.loadLabels()
-			w.selectLabel(w.current)
+			w.refreshList(w.searchEntry.Text())
 		})
 	}()
 }
 
-func (w *window) loadBody(b model.MessageBody) {
-	if b.HTML != "" {
-		w.webview.LoadHtml(wrapHTML(w.sanitizer.Sanitize(b.HTML)), "about:blank")
+// runThreadAction applies a label change to every message in the open thread
+// (e.g. archive or trash the whole conversation).
+func (w *window) runThreadAction(add, remove []string) {
+	if w.deps.ModifyLabels == nil || len(w.openThreadMsgs) == 0 {
 		return
 	}
-	w.webview.LoadHtml(wrapHTML("<pre style=\"white-space:pre-wrap\">"+html.EscapeString(b.Text)+"</pre>"), "about:blank")
+	msgs := w.openThreadMsgs
+	go func() {
+		for _, m := range msgs {
+			if err := w.deps.ModifyLabels(context.Background(), m.AccountID, m.GmailID, add, remove); err != nil {
+				slog.Warn("ui: thread action", "id", m.GmailID, "err", err)
+			}
+		}
+		dispatch.Main(func() {
+			w.loadLabels()
+			w.refreshList(w.searchEntry.Text())
+		})
+	}()
 }
 
 // subscribe refreshes label counts when the sync engine reports changes. The
@@ -852,15 +912,22 @@ func labelRow(name string, count int) *gtk.Box {
 	return box
 }
 
-func threadRow(m model.Message) *gtk.Box {
+func threadRow(t model.ThreadSummary) *gtk.Box {
+	m := t.Latest
+	unread := t.UnreadCount > 0
+
 	box := gtk.NewBox(gtk.OrientationVertical, 2)
 	setMargins(box, 12, 12, 6, 6)
 
 	top := gtk.NewBox(gtk.OrientationHorizontal, 6)
-	from := gtk.NewLabel(displayFrom(m))
+	fromText := displayFrom(m)
+	if t.Count > 1 {
+		fromText += fmt.Sprintf("  (%d)", t.Count)
+	}
+	from := gtk.NewLabel(fromText)
 	from.SetXAlign(0)
 	from.SetHExpand(true)
-	if m.IsUnread {
+	if unread {
 		from.AddCSSClass("heading")
 	}
 	top.Append(from)
@@ -873,7 +940,7 @@ func threadRow(m model.Message) *gtk.Box {
 
 	subj := gtk.NewLabel(m.Subject)
 	subj.SetXAlign(0)
-	if !m.IsUnread {
+	if !unread {
 		subj.AddCSSClass("dim-label")
 	}
 	box.Append(subj)

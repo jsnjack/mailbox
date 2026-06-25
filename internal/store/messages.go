@@ -295,6 +295,12 @@ func reindexFTS(ctx context.Context, tx *sql.Tx, rowID int64) error {
 	return nil
 }
 
+// scanMessagesAndClose scans all rows into messages and closes the rows.
+func scanMessagesAndClose(rows *sql.Rows) ([]model.Message, error) {
+	defer func() { _ = rows.Close() }()
+	return scanMessages(rows)
+}
+
 func scanMessages(rows *sql.Rows) ([]model.Message, error) {
 	var out []model.Message
 	for rows.Next() {
