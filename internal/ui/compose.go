@@ -24,6 +24,19 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 		return
 	}
 
+	// With more than one account connected, the user picks which to send from;
+	// otherwise the message goes from the active account.
+	accounts := w.deps.Accounts
+	var accountDD *gtk.DropDown
+	selectedAccount := func() AccountInfo {
+		if accountDD != nil {
+			if i := int(accountDD.Selected()); i >= 0 && i < len(accounts) {
+				return accounts[i]
+			}
+		}
+		return AccountInfo{ID: w.activeID, Email: w.activeEmail}
+	}
+
 	toEntry := gtk.NewEntry()
 	toEntry.SetPlaceholderText("To")
 	toEntry.SetText(init.To)
@@ -72,6 +85,24 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 	box.Append(scroller)
 	box.Append(status)
 
+	if len(accounts) > 1 {
+		emails := make([]string, len(accounts))
+		active := 0
+		for i, a := range accounts {
+			emails[i] = a.Email
+			if a.ID == w.activeID {
+				active = i
+			}
+		}
+		accountDD = gtk.NewDropDownFromStrings(emails)
+		accountDD.SetSelected(uint(active))
+		accountDD.SetHExpand(true)
+		fromRow := gtk.NewBox(gtk.OrientationHorizontal, 8)
+		fromRow.Append(gtk.NewLabel("From"))
+		fromRow.Append(accountDD)
+		box.Prepend(fromRow)
+	}
+
 	hb := adw.NewHeaderBar()
 	send := gtk.NewButtonWithLabel("Send")
 	send.AddCSSClass("suggested-action")
@@ -103,7 +134,7 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 
 	gather := func() model.OutgoingMessage {
 		return model.OutgoingMessage{
-			From:        w.activeEmail,
+			From:        selectedAccount().Email,
 			To:          strings.TrimSpace(toEntry.Text()),
 			Cc:          strings.TrimSpace(ccEntry.Text()),
 			Bcc:         strings.TrimSpace(bccEntry.Text()),
@@ -186,8 +217,8 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 	})
 
 	send.ConnectClicked(func() {
-		msg := gather() // reads w.activeEmail on the main thread
-		acctID := w.activeID
+		msg := gather() // reads the selected account on the main thread
+		acctID := selectedAccount().ID
 		send.SetSensitive(false)
 		status.SetVisible(true)
 		status.SetText("Sending…")
@@ -209,7 +240,7 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 	if draftBtn != nil {
 		draftBtn.ConnectClicked(func() {
 			msg := gather()
-			acctID := w.activeID
+			acctID := selectedAccount().ID
 			draftBtn.SetSensitive(false)
 			status.SetVisible(true)
 			status.SetText("Saving draft…")
