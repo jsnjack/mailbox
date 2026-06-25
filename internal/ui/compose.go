@@ -4,9 +4,13 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"mime"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/diamondburned/gotk4-adwaita/pkg/adw"
+	"github.com/diamondburned/gotk4/pkg/gio/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 	"github.com/jsnjack/mailbox/internal/dispatch"
 	"github.com/jsnjack/mailbox/internal/model"
@@ -50,11 +54,16 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 	status.SetXAlign(0)
 	status.SetVisible(false)
 
+	var attachments []model.OutgoingAttachment
+	attachRow := gtk.NewBox(gtk.OrientationHorizontal, 6)
+	attachRow.SetVisible(false)
+
 	box := gtk.NewBox(gtk.OrientationVertical, 6)
 	setMargins(box, 12, 12, 12, 12)
 	box.Append(toEntry)
 	box.Append(ccEntry)
 	box.Append(subjEntry)
+	box.Append(attachRow)
 	box.Append(scroller)
 	box.Append(status)
 
@@ -68,6 +77,10 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 		draftBtn = gtk.NewButtonWithLabel("Save draft")
 		hb.PackStart(draftBtn)
 	}
+
+	attachBtn := gtk.NewButtonFromIconName("mail-attachment-symbolic")
+	attachBtn.SetTooltipText("Attach a file")
+	hb.PackEnd(attachBtn)
 
 	tv := adw.NewToolbarView()
 	tv.AddTopBar(hb)
@@ -86,16 +99,52 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 
 	gather := func() model.OutgoingMessage {
 		return model.OutgoingMessage{
-			From:       w.deps.AccountEmail,
-			To:         strings.TrimSpace(toEntry.Text()),
-			Cc:         strings.TrimSpace(ccEntry.Text()),
-			Subject:    subjEntry.Text(),
-			Body:       bodyText(buf),
-			InReplyTo:  init.InReplyTo,
-			References: init.References,
-			ThreadID:   init.ThreadID,
+			From:        w.deps.AccountEmail,
+			To:          strings.TrimSpace(toEntry.Text()),
+			Cc:          strings.TrimSpace(ccEntry.Text()),
+			Subject:     subjEntry.Text(),
+			Body:        bodyText(buf),
+			InReplyTo:   init.InReplyTo,
+			References:  init.References,
+			ThreadID:    init.ThreadID,
+			Attachments: attachments,
 		}
 	}
+
+	attachBtn.ConnectClicked(func() {
+		dialog := gtk.NewFileDialog()
+		dialog.SetTitle("Attach a file")
+		dialog.Open(context.Background(), &win.Window, func(res gio.AsyncResulter) {
+			file, err := dialog.OpenFinish(res)
+			if err != nil || file == nil {
+				return // cancelled
+			}
+			path := file.Path()
+			if path == "" {
+				return
+			}
+			go func() {
+				data, err := os.ReadFile(path)
+				if err != nil {
+					slog.Warn("ui: read attachment", "path", path, "err", err)
+					return
+				}
+				name := filepath.Base(path)
+				mtype := mime.TypeByExtension(filepath.Ext(name))
+				if mtype == "" {
+					mtype = "application/octet-stream"
+				}
+				dispatch.Main(func() {
+					attachments = append(attachments, model.OutgoingAttachment{Filename: name, MimeType: mtype, Data: data})
+					chip := gtk.NewBox(gtk.OrientationHorizontal, 4)
+					chip.Append(gtk.NewImageFromIconName("mail-attachment-symbolic"))
+					chip.Append(gtk.NewLabel(name))
+					attachRow.Append(chip)
+					attachRow.SetVisible(true)
+				})
+			}()
+		})
+	})
 
 	send.ConnectClicked(func() {
 		msg := gather()

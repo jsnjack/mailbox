@@ -3,8 +3,12 @@ package gmailapi
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/base64"
 	"fmt"
+	"io"
 	"mime"
+	"mime/multipart"
+	"net/textproto"
 	"strings"
 	"time"
 
@@ -35,11 +39,75 @@ func BuildMIME(m model.OutgoingMessage) ([]byte, error) {
 		header("References", m.References)
 	}
 	header("MIME-Version", "1.0")
-	header("Content-Type", "text/plain; charset=\"utf-8\"")
-	header("Content-Transfer-Encoding", "8bit")
+
+	if len(m.Attachments) == 0 {
+		header("Content-Type", "text/plain; charset=\"utf-8\"")
+		header("Content-Transfer-Encoding", "8bit")
+		b.WriteString("\r\n")
+		b.WriteString(normalizeNewlines(m.Body))
+		return b.Bytes(), nil
+	}
+	return buildMultipart(&b, header, m)
+}
+
+// buildMultipart writes a multipart/mixed body (text part + base64 attachments)
+// after the already-written top headers.
+func buildMultipart(b *bytes.Buffer, header func(k, v string), m model.OutgoingMessage) ([]byte, error) {
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+
+	text, err := mw.CreatePart(textproto.MIMEHeader{
+		"Content-Type":              {"text/plain; charset=\"utf-8\""},
+		"Content-Transfer-Encoding": {"8bit"},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create text part: %w", err)
+	}
+	if _, err := text.Write([]byte(normalizeNewlines(m.Body))); err != nil {
+		return nil, fmt.Errorf("write text part: %w", err)
+	}
+
+	for _, a := range m.Attachments {
+		mtype := a.MimeType
+		if mtype == "" {
+			mtype = "application/octet-stream"
+		}
+		part, err := mw.CreatePart(textproto.MIMEHeader{
+			"Content-Type":              {mtype},
+			"Content-Transfer-Encoding": {"base64"},
+			"Content-Disposition":       {fmt.Sprintf("attachment; filename=%q", a.Filename)},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("create attachment part %q: %w", a.Filename, err)
+		}
+		if err := writeWrappedBase64(part, a.Data); err != nil {
+			return nil, fmt.Errorf("encode attachment %q: %w", a.Filename, err)
+		}
+	}
+	if err := mw.Close(); err != nil {
+		return nil, fmt.Errorf("close multipart: %w", err)
+	}
+
+	header("Content-Type", "multipart/mixed; boundary=\""+mw.Boundary()+"\"")
 	b.WriteString("\r\n")
-	b.WriteString(normalizeNewlines(m.Body))
+	b.Write(body.Bytes())
 	return b.Bytes(), nil
+}
+
+// writeWrappedBase64 writes data as base64 wrapped at 76 columns (RFC 2045).
+func writeWrappedBase64(w io.Writer, data []byte) error {
+	const cols = 76
+	enc := base64.StdEncoding.EncodeToString(data)
+	for i := 0; i < len(enc); i += cols {
+		end := i + cols
+		if end > len(enc) {
+			end = len(enc)
+		}
+		if _, err := io.WriteString(w, enc[i:end]+"\r\n"); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // generateMessageID returns a unique Message-ID using the sender's domain.

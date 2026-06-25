@@ -91,17 +91,25 @@ type MessageBody struct {
 	RawHeaders   string
 }
 
+// OutgoingAttachment is a file to attach to an outgoing message.
+type OutgoingAttachment struct {
+	Filename string
+	MimeType string
+	Data     []byte
+}
+
 // OutgoingMessage is a message to be sent. For replies and forwards the
 // threading fields (InReplyTo, References, ThreadID) tie it to the conversation.
 type OutgoingMessage struct {
-	From       string
-	To         string
-	Cc         string
-	Subject    string
-	Body       string // plain text
-	InReplyTo  string // original Message-ID header
-	References string // existing References plus the original Message-ID
-	ThreadID   string // Gmail threadId, so Gmail files it in the conversation
+	From        string
+	To          string
+	Cc          string
+	Subject     string
+	Body        string // plain text
+	InReplyTo   string // original Message-ID header
+	References  string // existing References plus the original Message-ID
+	ThreadID    string // Gmail threadId, so Gmail files it in the conversation
+	Attachments []OutgoingAttachment
 }
 
 // OutboxItem is a queued outgoing message awaiting (re)send.

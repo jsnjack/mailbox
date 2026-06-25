@@ -57,6 +57,35 @@ func TestBuildMIMEAllowsEmptyRecipient(t *testing.T) {
 	}
 }
 
+func TestBuildMIMEWithAttachment(t *testing.T) {
+	raw, err := BuildMIME(model.OutgoingMessage{
+		From:    "me@example.com",
+		To:      "you@example.com",
+		Subject: "Files",
+		Body:    "see attached",
+		Attachments: []model.OutgoingAttachment{
+			{Filename: "a.txt", MimeType: "text/plain", Data: []byte("hello world")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildMIME: %v", err)
+	}
+	s := string(raw)
+	if !strings.Contains(s, "Content-Type: multipart/mixed; boundary=") {
+		t.Errorf("missing multipart content type:\n%s", s)
+	}
+	if !strings.Contains(s, `Content-Disposition: attachment; filename="a.txt"`) {
+		t.Errorf("missing attachment disposition:\n%s", s)
+	}
+	if !strings.Contains(s, "Content-Transfer-Encoding: base64") {
+		t.Errorf("attachment not base64 encoded:\n%s", s)
+	}
+	// "hello world" base64 is "aGVsbG8gd29ybGQ=".
+	if !strings.Contains(s, "aGVsbG8gd29ybGQ=") {
+		t.Errorf("attachment bytes not present:\n%s", s)
+	}
+}
+
 func TestBuildMIMESubjectEncoding(t *testing.T) {
 	raw, err := BuildMIME(model.OutgoingMessage{To: "a@b.com", Subject: "Schöne Grüße", Body: "hi"})
 	if err != nil {
