@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/diamondburned/gotk4-adwaita/pkg/adw"
+	"github.com/diamondburned/gotk4/pkg/gdk/v4"
 	"github.com/diamondburned/gotk4/pkg/gio/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 	"github.com/jsnjack/mailbox/internal/dispatch"
@@ -105,6 +106,7 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 
 	hb := adw.NewHeaderBar()
 	send := gtk.NewButtonWithLabel("Send")
+	send.SetTooltipText("Send (Ctrl+Enter)")
 	send.AddCSSClass("suggested-action")
 	hb.PackStart(send)
 
@@ -291,6 +293,20 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 		})
 		hb.PackEnd(aiBtn)
 	}
+
+	// Ctrl+Enter sends, from anywhere in the window. Capture phase so it fires
+	// before the body TextView would treat Return as a newline; plain Return
+	// (no Ctrl) falls through untouched.
+	keyCtl := gtk.NewEventControllerKey()
+	keyCtl.SetPropagationPhase(gtk.PhaseCapture)
+	keyCtl.ConnectKeyPressed(func(keyval, _ uint, state gdk.ModifierType) bool {
+		if state&gdk.ControlMask != 0 && (keyval == gdk.KEY_Return || keyval == gdk.KEY_KP_Enter || keyval == gdk.KEY_ISO_Enter) {
+			send.Activate()
+			return true
+		}
+		return false
+	})
+	win.AddController(keyCtl)
 
 	win.SetVisible(true)
 }
