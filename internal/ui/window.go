@@ -41,6 +41,8 @@ type window struct {
 	innerSplit   *adw.NavigationSplitView
 	accountBox   *gtk.ListBox
 	labelBox     *gtk.ListBox
+	refreshBtn   *gtk.Button
+	syncSpinner  *gtk.Spinner  // shown in place of refreshBtn during a manual sync
 	sidebar      []sidebarItem // one entry per row in labelBox (incl. headings)
 	current      string
 	activeID     int64 // the account currently shown
@@ -374,11 +376,16 @@ func (w *window) buildSidebar() *adw.NavigationPage {
 	})
 	hb.PackStart(newBtn)
 
-	refreshBtn := gtk.NewButtonFromIconName("view-refresh-symbolic")
-	refreshBtn.SetTooltipText("Sync now")
-	refreshBtn.SetSensitive(w.deps.Sync != nil)
-	refreshBtn.ConnectClicked(w.onRefresh)
-	hb.PackEnd(refreshBtn)
+	w.refreshBtn = gtk.NewButtonFromIconName("view-refresh-symbolic")
+	w.refreshBtn.SetTooltipText("Sync now")
+	w.refreshBtn.SetSensitive(w.deps.Sync != nil)
+	w.refreshBtn.ConnectClicked(w.onRefresh)
+	hb.PackEnd(w.refreshBtn)
+
+	w.syncSpinner = gtk.NewSpinner()
+	w.syncSpinner.SetTooltipText("Syncing…")
+	w.syncSpinner.SetVisible(false)
+	hb.PackEnd(w.syncSpinner)
 
 	prefsBtn := gtk.NewButtonFromIconName("emblem-system-symbolic")
 	prefsBtn.SetTooltipText("Preferences")
@@ -557,16 +564,31 @@ func (w *window) onRefresh() {
 		return
 	}
 	acctID := w.activeID
+	w.setSyncing(true)
 	go func() {
-		if err := w.deps.Sync(context.Background(), acctID); err != nil {
-			slog.Warn("ui: sync now", "err", err)
-			return
-		}
+		err := w.deps.Sync(context.Background(), acctID)
 		dispatch.Main(func() {
+			w.setSyncing(false)
+			if err != nil {
+				slog.Warn("ui: sync now", "err", err)
+				return
+			}
 			w.loadLabels()
 			w.refreshList(w.searchEntry.Text())
 		})
 	}()
+}
+
+// setSyncing swaps the refresh button for a running spinner while a manual sync
+// is in flight (and back when it finishes), giving the user visible feedback.
+func (w *window) setSyncing(on bool) {
+	w.refreshBtn.SetVisible(!on)
+	w.syncSpinner.SetVisible(on)
+	if on {
+		w.syncSpinner.Start()
+	} else {
+		w.syncSpinner.Stop()
+	}
 }
 
 func (w *window) onThreadSelected() {
