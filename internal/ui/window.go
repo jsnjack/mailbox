@@ -1248,24 +1248,69 @@ func threadRow(t model.ThreadSummary) *gtk.Box {
 	from := gtk.NewLabel(fromText)
 	from.SetXAlign(0)
 	from.SetHExpand(true)
+	from.SetEllipsize(pango.EllipsizeEnd)
 	if unread {
 		from.AddCSSClass("heading")
 	}
 	top.Append(from)
-	if !m.InternalDate.IsZero() {
-		date := gtk.NewLabel(m.InternalDate.Format("Jan 2"))
+	if m.HasAttachments {
+		clip := gtk.NewImageFromIconName("mail-attachment-symbolic")
+		clip.AddCSSClass("dim-label")
+		top.Append(clip)
+	}
+	if d := relativeDate(m.InternalDate, time.Now()); d != "" {
+		date := gtk.NewLabel(d)
 		date.AddCSSClass("dim-label")
+		date.AddCSSClass("caption")
 		top.Append(date)
 	}
 	box.Append(top)
 
-	subj := gtk.NewLabel(m.Subject)
+	subjText := m.Subject
+	if strings.TrimSpace(subjText) == "" {
+		subjText = "(no subject)"
+	}
+	subj := gtk.NewLabel(subjText)
 	subj.SetXAlign(0)
+	subj.SetEllipsize(pango.EllipsizeEnd)
 	if !unread {
 		subj.AddCSSClass("dim-label")
 	}
 	box.Append(subj)
+
+	if m.Snippet != "" {
+		// Decode any HTML entities in older cached snippets (new ones arrive
+		// already decoded); harmless on plain text.
+		snip := gtk.NewLabel(html.UnescapeString(m.Snippet))
+		snip.SetXAlign(0)
+		snip.SetEllipsize(pango.EllipsizeEnd)
+		snip.AddCSSClass("dim-label")
+		snip.AddCSSClass("caption")
+		box.Append(snip)
+	}
 	return box
+}
+
+// relativeDate renders a compact timestamp relative to now: a clock time for
+// today, the weekday within the past week, "Jan 2" within the current year, and
+// "Jan 2, 2006" beyond that. It returns "" for a zero time.
+func relativeDate(t, now time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	t = t.In(now.Location())
+	y, mo, d := now.Date()
+	startOfToday := time.Date(y, mo, d, 0, 0, 0, 0, now.Location())
+	switch {
+	case !t.Before(startOfToday):
+		return t.Format("15:04")
+	case !t.Before(startOfToday.AddDate(0, 0, -6)):
+		return t.Format("Mon")
+	case t.Year() == now.Year():
+		return t.Format("Jan 2")
+	default:
+		return t.Format("Jan 2, 2006")
+	}
 }
 
 func displayFrom(m model.Message) string {

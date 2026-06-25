@@ -1,6 +1,8 @@
 package gmailapi
 
 import (
+	"html"
+
 	"github.com/jsnjack/mailbox/internal/model"
 	gmail "google.golang.org/api/gmail/v1"
 )
@@ -15,16 +17,17 @@ func ToMessage(accountID int64, m *gmail.Message) model.Message {
 	name, addr := parseFromHeader(headerValue(headers, "From"))
 	unread, starred := decodeFlags(m.LabelIds)
 	return model.Message{
-		AccountID:      accountID,
-		GmailID:        m.Id,
-		ThreadID:       m.ThreadId,
-		InternalDate:   internalDate(m.InternalDate),
-		FromName:       name,
-		FromAddr:       addr,
-		ToAddrs:        headerValue(headers, "To"),
-		CcAddrs:        headerValue(headers, "Cc"),
-		Subject:        headerValue(headers, "Subject"),
-		Snippet:        m.Snippet,
+		AccountID:    accountID,
+		GmailID:      m.Id,
+		ThreadID:     m.ThreadId,
+		InternalDate: internalDate(m.InternalDate),
+		FromName:     name,
+		FromAddr:     addr,
+		ToAddrs:      headerValue(headers, "To"),
+		CcAddrs:      headerValue(headers, "Cc"),
+		Subject:      headerValue(headers, "Subject"),
+		// Gmail's snippet is HTML-escaped (e.g. "it&#39;s"); store it as plain text.
+		Snippet:        html.UnescapeString(m.Snippet),
 		RFC822MsgID:    headerValue(headers, "Message-ID"),
 		InReplyTo:      headerValue(headers, "In-Reply-To"),
 		References:     headerValue(headers, "References"),

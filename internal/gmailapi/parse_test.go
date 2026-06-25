@@ -7,6 +7,17 @@ import (
 	gmail "google.golang.org/api/gmail/v1"
 )
 
+func TestToMessageDecodesSnippet(t *testing.T) {
+	m := ToMessage(1, &gmail.Message{
+		Id:       "m1",
+		ThreadId: "t1",
+		Snippet:  "Here&#39;s the plan &amp; details &lt;3",
+	})
+	if want := "Here's the plan & details <3"; m.Snippet != want {
+		t.Fatalf("Snippet = %q, want %q", m.Snippet, want)
+	}
+}
+
 func TestDecodeFlags(t *testing.T) {
 	tests := []struct {
 		name            string
