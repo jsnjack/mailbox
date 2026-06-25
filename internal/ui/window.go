@@ -1642,7 +1642,18 @@ func setMargins(w gtk.Widgetter, start, end, top, bottom int) {
 }
 
 func wrapHTML(inner string) string {
+	// The CSS makes email fit the reader's width instead of overflowing into a
+	// horizontal scrollbar: cap every element (and especially images and fixed-
+	// width tables) at 100% of the viewport, wrap long unbreakable strings, and
+	// clip any residual overflow as a final backstop.
+	const style = `
+html{overflow-x:hidden;width:100%}
+body{font-family:sans-serif;margin:16px;color:#222;line-height:1.4;overflow-wrap:anywhere}
+*{max-width:100%!important}
+img,video{height:auto!important}
+table{table-layout:auto!important}
+pre{font-family:monospace;white-space:pre-wrap}`
 	return `<!doctype html><html><head><meta charset="utf-8">` +
-		`<style>body{font-family:sans-serif;margin:16px;color:#222;line-height:1.4}` +
-		`pre{font-family:monospace}</style></head><body>` + inner + `</body></html>`
+		`<meta name="viewport" content="width=device-width, initial-scale=1">` +
+		`<style>` + style + `</style></head><body>` + inner + `</body></html>`
 }
