@@ -95,6 +95,41 @@ func TestUpsertMessageIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestSearchMultiWordAndPrefix(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	acc := seedAccount(t, s)
+
+	if _, err := s.UpsertMessage(ctx, model.Message{
+		AccountID: acc, GmailID: "m1", ThreadID: "t1",
+		Subject: "Quarterly invoice", FromName: "Dana", Labels: []string{"INBOX"}}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	// Prefix, multi-word (implicit AND), and case-insensitive.
+	for _, q := range []string{"quart", "quarterly invoice", "INVOICE", "quar inv"} {
+		res, err := s.Search(ctx, acc, q, 10)
+		if err != nil {
+			t.Fatalf("search %q: %v", q, err)
+		}
+		if len(res) != 1 {
+			t.Fatalf("search %q: got %d, want 1", q, len(res))
+		}
+	}
+	// A term that doesn't match.
+	if res, _ := s.Search(ctx, acc, "zzz", 10); len(res) != 0 {
+		t.Fatalf("expected no match for zzz, got %d", len(res))
+	}
+	// Special characters must not break the query (quotes/parens).
+	if _, err := s.Search(ctx, acc, `"(weird] query`, 10); err != nil {
+		t.Fatalf("special-char query errored: %v", err)
+	}
+	// Blank query returns nothing without error.
+	if res, err := s.Search(ctx, acc, "   ", 10); err != nil || len(res) != 0 {
+		t.Fatalf("blank query: res=%d err=%v", len(res), err)
+	}
+}
+
 func TestModifyLabels(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()

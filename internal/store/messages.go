@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jsnjack/mailbox/internal/model"
@@ -176,19 +177,43 @@ func (s *Store) ListByLabel(ctx context.Context, accountID int64, labelID string
 	return scanMessages(rows)
 }
 
-// Search runs a full-text query scoped to an account, best matches first.
+// Search runs a full-text query scoped to an account, best matches first. The
+// raw user query is turned into a safe FTS5 expression (each whitespace token is
+// quoted and made a prefix match), so arbitrary input cannot break the syntax.
 func (s *Store) Search(ctx context.Context, accountID int64, query string, limit int) ([]model.Message, error) {
+	match := ftsQuery(query)
+	if match == "" {
+		return nil, nil
+	}
 	rows, err := s.reader.QueryContext(ctx, `
 		SELECT `+msgCols+`
 		FROM messages_fts JOIN messages m ON m.rowid = messages_fts.rowid
 		WHERE messages_fts MATCH ? AND m.account_id = ?
 		ORDER BY rank
-		LIMIT ?`, query, accountID, limit)
+		LIMIT ?`, match, accountID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("search: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 	return scanMessages(rows)
+}
+
+// ftsQuery converts free-text input into an FTS5 MATCH expression: each token is
+// double-quoted (escaping embedded quotes) and given a trailing prefix wildcard,
+// joined by implicit AND. Returns "" for blank input.
+func ftsQuery(raw string) string {
+	fields := strings.Fields(raw)
+	if len(fields) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for i, f := range fields {
+		if i > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteString(`"` + strings.ReplaceAll(f, `"`, `""`) + `"*`)
+	}
+	return b.String()
 }
 
 // GetMessage returns a single message (with its labels) by Gmail id.

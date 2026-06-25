@@ -60,6 +60,9 @@ The thread list is a virtualized `gtk.ListView`: a `gtk.StringList` of gmail ids
 drives a `SignalListItemFactory` that builds row widgets only for visible items
 (looked up in an in-memory `msgByID` map). It loads up to `threadListCap` (5000)
 messages of metadata per label; true paging-on-scroll is a further optimization.
+A search entry above the list runs instant local FTS5 search (`store.Search`,
+which sanitizes input into a quoted prefix MATCH); clearing it returns to the
+current label.
 Compose supports attachments (a file picker adds them; `BuildMIME` emits
 multipart/mixed with base64 parts). Send is synchronous for compose feedback,
 but a failed send is queued to the `outbox` table and retried by a background

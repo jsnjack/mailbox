@@ -38,12 +38,14 @@ type window struct {
 
 	// virtualized thread list: a StringList of gmail ids drives a ListView; the
 	// factory builds row widgets only for visible items, looked up in msgByID.
-	threadModel *gtk.StringList
-	threadSel   *gtk.SingleSelection
-	threadView  *gtk.ListView
-	threadStack *gtk.Stack // "list" vs "empty" placeholder
-	readerStack *gtk.Stack // "message" vs "empty" placeholder
-	msgByID     map[string]model.Message
+	threadModel    *gtk.StringList
+	threadSel      *gtk.SingleSelection
+	threadView     *gtk.ListView
+	threadStack    *gtk.Stack // "list" vs "empty" placeholder
+	readerStack    *gtk.Stack // "message" vs "empty" placeholder
+	searchEntry    *gtk.SearchEntry
+	suppressSearch bool // guards SetText from firing a search during label switch
+	msgByID        map[string]model.Message
 
 	header    *gtk.Label
 	attachBox *gtk.Box // chips for the open message's attachments
@@ -123,7 +125,10 @@ func (w *window) present() {
 	w.subscribe()
 	w.selectLabel(w.current)
 
-	// Optionally open the newest message on launch (off by default).
+	// Test hooks (off by default).
+	if q := os.Getenv("MAILBOX_SEARCH"); q != "" {
+		w.searchEntry.SetText(q) // fires the search-changed handler
+	}
 	if os.Getenv("MAILBOX_OPEN_FIRST") == "1" && w.threadModel.NItems() > 0 {
 		w.threadSel.SetSelected(0)
 	}
@@ -206,14 +211,67 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 	empty.SetDescription("This label has no messages in the local cache.")
 
 	w.threadStack = gtk.NewStack()
+	w.threadStack.SetVExpand(true)
 	w.threadStack.AddNamed(scroller, "list")
 	w.threadStack.AddNamed(empty, "empty")
 	w.threadStack.SetVisibleChildName("list")
 
+	w.searchEntry = gtk.NewSearchEntry()
+	w.searchEntry.SetPlaceholderText("Search cached messages")
+	setMargins(w.searchEntry, 6, 6, 6, 6)
+	w.searchEntry.ConnectSearchChanged(w.onSearchChanged)
+
+	content := gtk.NewBox(gtk.OrientationVertical, 0)
+	content.Append(w.searchEntry)
+	content.Append(w.threadStack)
+
 	tv := adw.NewToolbarView()
 	tv.AddTopBar(adw.NewHeaderBar())
-	tv.SetContent(w.threadStack)
+	tv.SetContent(content)
 	return adw.NewNavigationPage(tv, "Messages")
+}
+
+func (w *window) onSearchChanged() {
+	if w.suppressSearch {
+		return
+	}
+	w.refreshList(w.searchEntry.Text())
+}
+
+// refreshList populates the thread list from either the current label (blank
+// query) or a full-text search.
+func (w *window) refreshList(query string) {
+	ctx := context.Background()
+	var (
+		msgs []model.Message
+		err  error
+	)
+	if strings.TrimSpace(query) == "" {
+		msgs, err = w.deps.Store.ListByLabel(ctx, w.deps.AccountID, w.current, threadListCap, 0)
+	} else {
+		msgs, err = w.deps.Store.Search(ctx, w.deps.AccountID, query, threadListCap)
+	}
+	if err != nil {
+		slog.Error("ui: refresh list", "query", query, "err", err)
+		return
+	}
+	w.showMessages(msgs)
+}
+
+// showMessages replaces the thread list contents.
+func (w *window) showMessages(msgs []model.Message) {
+	w.msgByID = make(map[string]model.Message, len(msgs))
+	ids := make([]string, len(msgs))
+	for i, m := range msgs {
+		ids[i] = m.GmailID
+		w.msgByID[m.GmailID] = m
+	}
+	w.threadModel.Splice(0, w.threadModel.NItems(), ids)
+	if len(msgs) == 0 {
+		w.threadStack.SetVisibleChildName("empty")
+	} else {
+		w.threadStack.SetVisibleChildName("list")
+	}
 }
 
 func (w *window) onThreadSelected() {
@@ -376,23 +434,11 @@ const threadListCap = 5000
 
 func (w *window) selectLabel(labelID string) {
 	w.current = labelID
-	msgs, err := w.deps.Store.ListByLabel(context.Background(), w.deps.AccountID, labelID, threadListCap, 0)
-	if err != nil {
-		slog.Error("ui: list by label", "label", labelID, "err", err)
-		return
-	}
-	w.msgByID = make(map[string]model.Message, len(msgs))
-	ids := make([]string, len(msgs))
-	for i, m := range msgs {
-		ids[i] = m.GmailID
-		w.msgByID[m.GmailID] = m
-	}
-	w.threadModel.Splice(0, w.threadModel.NItems(), ids)
-	if len(msgs) == 0 {
-		w.threadStack.SetVisibleChildName("empty")
-	} else {
-		w.threadStack.SetVisibleChildName("list")
-	}
+	// Switching label clears any active search without re-triggering it.
+	w.suppressSearch = true
+	w.searchEntry.SetText("")
+	w.suppressSearch = false
+	w.refreshList("")
 	// When collapsed, reveal the thread list for the chosen label.
 	w.outerSplit.SetShowContent(true)
 }
