@@ -96,7 +96,7 @@ func newWindow(app *adw.Application, deps Deps) *window {
 		deps:      deps,
 		current:   model.LabelInbox,
 		startTime: time.Now(),
-		sanitizer: bluemonday.UGCPolicy(),
+		sanitizer: emailPolicy(),
 	}
 	if len(deps.Accounts) > 0 {
 		w.activeID = deps.Accounts[0].ID
