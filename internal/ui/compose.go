@@ -97,10 +97,9 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 	win.SetContent(tv)
 
 	aiCtx, cancelAI := context.WithCancel(context.Background())
-	win.ConnectCloseRequest(func() bool {
-		cancelAI()
-		return false
-	})
+	// sent becomes true once the message is sent, saved as a draft, or the user
+	// confirms discarding it — so the close-request guard lets the window close.
+	sent := false
 
 	gather := func() model.OutgoingMessage {
 		return model.OutgoingMessage{
@@ -116,6 +115,40 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 			Attachments: attachments,
 		}
 	}
+
+	// dirty reports whether the user has changed anything from the initial draft
+	// (a reply/forward starts with prefilled, unedited content).
+	dirty := func() bool {
+		c := gather()
+		return strings.TrimSpace(c.To) != strings.TrimSpace(init.To) ||
+			strings.TrimSpace(c.Cc) != strings.TrimSpace(init.Cc) ||
+			strings.TrimSpace(c.Bcc) != strings.TrimSpace(init.Bcc) ||
+			c.Subject != init.Subject ||
+			c.Body != init.Body ||
+			len(c.Attachments) > 0
+	}
+
+	win.ConnectCloseRequest(func() bool {
+		if sent || !dirty() {
+			cancelAI()
+			return false // allow the close
+		}
+		confirm := adw.NewAlertDialog("Discard message?", "This message has not been sent.")
+		confirm.AddResponse("cancel", "Cancel")
+		confirm.AddResponse("discard", "Discard")
+		confirm.SetResponseAppearance("discard", adw.ResponseDestructive)
+		confirm.SetDefaultResponse("cancel")
+		confirm.SetCloseResponse("cancel")
+		confirm.ConnectResponse(func(response string) {
+			if response == "discard" {
+				sent = true // bypass the guard on the programmatic close below
+				cancelAI()
+				win.Close()
+			}
+		})
+		confirm.Present(win)
+		return true // block this close; the dialog drives the actual close
+	})
 
 	attachBtn.ConnectClicked(func() {
 		dialog := gtk.NewFileDialog()
@@ -167,6 +200,7 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 					send.SetSensitive(true)
 					return
 				}
+				sent = true
 				win.Close()
 			})
 		}()
@@ -188,6 +222,7 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 						draftBtn.SetSensitive(true)
 						return
 					}
+					sent = true
 					win.Close()
 				})
 			}()
