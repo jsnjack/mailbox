@@ -40,6 +40,8 @@ type window struct {
 	threadModel *gtk.StringList
 	threadSel   *gtk.SingleSelection
 	threadView  *gtk.ListView
+	threadStack *gtk.Stack // "list" vs "empty" placeholder
+	readerStack *gtk.Stack // "message" vs "empty" placeholder
 	msgByID     map[string]model.Message
 
 	header    *gtk.Label
@@ -196,9 +198,19 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 	scroller.SetHExpand(true)
 	scroller.SetChild(w.threadView)
 
+	empty := adw.NewStatusPage()
+	empty.SetIconName("mail-archive-symbolic")
+	empty.SetTitle("No messages")
+	empty.SetDescription("This label has no messages in the local cache.")
+
+	w.threadStack = gtk.NewStack()
+	w.threadStack.AddNamed(scroller, "list")
+	w.threadStack.AddNamed(empty, "empty")
+	w.threadStack.SetVisibleChildName("list")
+
 	tv := adw.NewToolbarView()
 	tv.AddTopBar(adw.NewHeaderBar())
-	tv.SetContent(scroller)
+	tv.SetContent(w.threadStack)
 	return adw.NewNavigationPage(tv, "Messages")
 }
 
@@ -232,6 +244,16 @@ func (w *window) buildReader() *adw.NavigationPage {
 	box := gtk.NewBox(gtk.OrientationVertical, 0)
 	box.Append(w.header)
 	box.Append(w.webview)
+
+	empty := adw.NewStatusPage()
+	empty.SetIconName("mail-unread-symbolic")
+	empty.SetTitle("No message selected")
+	empty.SetDescription("Choose a message from the list to read it here.")
+
+	w.readerStack = gtk.NewStack()
+	w.readerStack.AddNamed(empty, "empty")
+	w.readerStack.AddNamed(box, "message")
+	w.readerStack.SetVisibleChildName("empty")
 
 	hb := adw.NewHeaderBar()
 
@@ -281,7 +303,7 @@ func (w *window) buildReader() *adw.NavigationPage {
 
 	tv := adw.NewToolbarView()
 	tv.AddTopBar(hb)
-	tv.SetContent(box)
+	tv.SetContent(w.readerStack)
 	return adw.NewNavigationPage(tv, "Reader")
 }
 
@@ -359,6 +381,11 @@ func (w *window) selectLabel(labelID string) {
 		w.msgByID[m.GmailID] = m
 	}
 	w.threadModel.Splice(0, w.threadModel.NItems(), ids)
+	if len(msgs) == 0 {
+		w.threadStack.SetVisibleChildName("empty")
+	} else {
+		w.threadStack.SetVisibleChildName("list")
+	}
 	// When collapsed, reveal the thread list for the chosen label.
 	w.outerSplit.SetShowContent(true)
 }
@@ -366,6 +393,7 @@ func (w *window) selectLabel(labelID string) {
 func (w *window) showMessage(m model.Message) {
 	w.openMsg = m
 	w.setActionsSensitive(true)
+	w.readerStack.SetVisibleChildName("message")
 	// When collapsed, navigate to the reader.
 	w.innerSplit.SetShowContent(true)
 
