@@ -135,13 +135,20 @@ func (w *window) build() {
 }
 
 // addShortcuts wires single-key navigation/actions. The controller runs in the
-// bubble phase, so a focused text entry consumes letters first (typing in search
-// won't trigger these). Keyvals for printable keys equal their ASCII rune.
+// capture phase so the shortcut fires even when focus is inside the message
+// WebView or the thread list (which would otherwise swallow the key); it bails
+// out when a text field is focused so typing in search still works. Keyvals for
+// printable keys equal their ASCII rune.
 func (w *window) addShortcuts() {
 	ec := gtk.NewEventControllerKey()
+	ec.SetPropagationPhase(gtk.PhaseCapture)
 	ec.ConnectKeyPressed(func(keyval, keycode uint, state gdk.ModifierType) bool {
 		if state&(gdk.ControlMask|gdk.AltMask|gdk.SuperMask) != 0 {
 			return false
+		}
+		switch w.win.Focus().(type) {
+		case *gtk.Text, *gtk.TextView:
+			return false // user is typing in a field; don't hijack the key
 		}
 		switch keyval {
 		case 'j':
