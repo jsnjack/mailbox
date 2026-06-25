@@ -104,6 +104,18 @@ type OutgoingMessage struct {
 	ThreadID   string // Gmail threadId, so Gmail files it in the conversation
 }
 
+// OutboxItem is a queued outgoing message awaiting (re)send.
+type OutboxItem struct {
+	ID        int64
+	LocalUUID string
+	AccountID int64
+	ThreadID  string
+	RFC822    []byte
+	State     string // queued | failed
+	Attempts  int
+	LastError string
+}
+
 // Attachment points to an attachment's bytes; the bytes are stored on disk
 // (content-addressed by SHA-256), not in the database.
 type Attachment struct {

@@ -59,8 +59,10 @@ The thread list is a virtualized `gtk.ListView`: a `gtk.StringList` of gmail ids
 drives a `SignalListItemFactory` that builds row widgets only for visible items
 (looked up in an in-memory `msgByID` map). It loads up to `threadListCap` (5000)
 messages of metadata per label; true paging-on-scroll is a further optimization.
-Compose is text-only for now (sending attachments + the resilient outbox sweeper
-are follow-ups; send is currently direct). The window collapses responsively via
+Compose is text-only for now (sending attachments are a follow-up). Send is
+synchronous for compose feedback, but a failed send is queued to the `outbox`
+table and retried by a background sweeper (`SweepOutbox`, ~45s). The window
+collapses responsively via
 `adw.Breakpoint` (3 panes → list+reader below ~860sp → single pane below ~520sp),
 with `SetShowContent` driving navigation when collapsed. Test hooks:
 `MAILBOX_OPEN_FIRST=1` opens the newest message on launch; `MAILBOX_WIN_SIZE=WxH`

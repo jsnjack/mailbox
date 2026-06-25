@@ -80,6 +80,7 @@ func launchUI() error {
 			return engine.OpenAttachment(ctx, client, gmailID, attID)
 		}
 		go backgroundSync(ctx, engine, client, acc.ID)
+		go backgroundSweep(ctx, engine, client, acc.ID)
 	}
 
 	if asst, err := buildAssistant(); err != nil {
@@ -137,6 +138,25 @@ func buildClientForAccount(ctx context.Context, email string) (*gmailapi.Client,
 		return nil, err
 	}
 	return gmailapi.NewClient(srv), nil
+}
+
+// sweepInterval is how often the outbox is retried while the GUI is open.
+const sweepInterval = 45 * time.Second
+
+// backgroundSweep retries queued outbox messages on a timer.
+func backgroundSweep(ctx context.Context, engine *syncer.Engine, client *gmailapi.Client, accountID int64) {
+	ticker := time.NewTicker(sweepInterval)
+	defer ticker.Stop()
+	for {
+		if _, err := engine.SweepOutbox(ctx, client, accountID); err != nil {
+			fmt.Fprintf(os.Stderr, "outbox sweep: %v\n", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 // backgroundSync runs an incremental sync immediately and then on a timer.

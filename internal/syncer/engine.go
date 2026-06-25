@@ -169,17 +169,50 @@ func (e *Engine) OpenAttachment(ctx context.Context, c *gmailapi.Client, gmailID
 	return path, nil
 }
 
-// Send builds and transmits an outgoing message via Gmail. After it returns, the
-// sent message arrives in the local cache through the next incremental sync.
+// maxOutboxAttempts bounds how many times the sweeper retries a queued message.
+const maxOutboxAttempts = 5
+
+// Send builds and transmits an outgoing message via Gmail. On a transient
+// failure it queues the message to the outbox for the background sweeper to
+// retry, and returns the error so the caller can inform the user. After a
+// successful send the message arrives in the local cache via incremental sync.
 func (e *Engine) Send(ctx context.Context, c *gmailapi.Client, accountID int64, msg model.OutgoingMessage) error {
 	raw, err := gmailapi.BuildMIME(msg)
 	if err != nil {
 		return err
 	}
 	if _, err := c.Send(ctx, raw, msg.ThreadID); err != nil {
-		return err
+		if qerr := e.Store.EnqueueOutbox(ctx, accountID, msg.ThreadID, raw); qerr != nil {
+			return fmt.Errorf("send failed (%v) and could not queue: %w", err, qerr)
+		}
+		return fmt.Errorf("send failed, queued for retry: %w", err)
 	}
 	return nil
+}
+
+// SweepOutbox retries queued/failed messages for an account, returning how many
+// were sent. It is run periodically in the background.
+func (e *Engine) SweepOutbox(ctx context.Context, c *gmailapi.Client, accountID int64) (int, error) {
+	items, err := e.Store.ListSendableOutbox(ctx, accountID, maxOutboxAttempts)
+	if err != nil {
+		return 0, err
+	}
+	sent := 0
+	for _, it := range items {
+		if _, err := c.Send(ctx, it.RFC822, it.ThreadID); err != nil {
+			if mErr := e.Store.MarkOutboxFailed(ctx, it.ID, err.Error()); mErr != nil {
+				return sent, mErr
+			}
+			slog.Default().Warn("outbox: retry failed", "id", it.ID, "attempt", it.Attempts+1, "err", err)
+			continue
+		}
+		if err := e.Store.MarkOutboxSent(ctx, it.ID); err != nil {
+			return sent, err
+		}
+		e.publish(Change{Kind: SendStateChanged, AccountID: accountID})
+		sent++
+	}
+	return sent, nil
 }
 
 // ModifyLabels applies a label change locally first (instant, optimistic) and

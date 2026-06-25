@@ -22,6 +22,8 @@ const (
 	BackfillComplete
 	// AuthExpired means the account needs re-authentication.
 	AuthExpired
+	// SendStateChanged means an outbox item was sent or its state changed.
+	SendStateChanged
 )
 
 // Change is a lightweight notification carrying ids only; subscribers re-query
