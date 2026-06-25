@@ -35,15 +35,16 @@ type window struct {
 	app  *adw.Application
 	deps Deps
 
-	win         *adw.ApplicationWindow
-	outerSplit  *adw.NavigationSplitView
-	innerSplit  *adw.NavigationSplitView
-	accountBox  *gtk.ListBox
-	labelBox    *gtk.ListBox
-	sidebar     []sidebarItem // one entry per row in labelBox (incl. headings)
-	current     string
-	activeID    int64 // the account currently shown
-	activeEmail string
+	win          *adw.ApplicationWindow
+	toastOverlay *adw.ToastOverlay
+	outerSplit   *adw.NavigationSplitView
+	innerSplit   *adw.NavigationSplitView
+	accountBox   *gtk.ListBox
+	labelBox     *gtk.ListBox
+	sidebar      []sidebarItem // one entry per row in labelBox (incl. headings)
+	current      string
+	activeID     int64 // the account currently shown
+	activeEmail  string
 	// suppressLabelSelect guards the row-selected handler while loadLabels
 	// restores the visual highlight, so a background refresh doesn't reset the
 	// list or clear an active search.
@@ -123,7 +124,9 @@ func (w *window) build() {
 	w.outerSplit.SetSidebar(w.buildSidebar())
 	w.outerSplit.SetContent(adw.NewNavigationPage(w.innerSplit, "Mail"))
 
-	w.win.SetContent(w.outerSplit)
+	w.toastOverlay = adw.NewToastOverlay()
+	w.toastOverlay.SetChild(w.outerSplit)
+	w.win.SetContent(w.toastOverlay)
 	w.addBreakpoints()
 	w.addShortcuts()
 }
@@ -962,16 +965,16 @@ func attachmentChip(a model.Attachment) *gtk.Box {
 }
 
 func (w *window) onArchive() {
-	w.applyLabels(w.openThreadMsgs, nil, []string{model.LabelInbox})
+	w.removeFromList("Archived", nil, []string{model.LabelInbox})
 }
 
 func (w *window) onTrash() {
-	w.applyLabels(w.openThreadMsgs, []string{model.LabelTrash}, []string{model.LabelInbox})
+	w.removeFromList("Moved to Trash", []string{model.LabelTrash}, []string{model.LabelInbox})
 }
 
 func (w *window) onMarkUnread() {
 	if w.openMsg.GmailID != "" {
-		w.applyLabels([]model.Message{w.openMsg}, []string{model.LabelUnread}, nil)
+		w.applyLabels([]model.Message{w.openMsg}, []string{model.LabelUnread}, nil, nil)
 	}
 }
 
@@ -980,9 +983,9 @@ func (w *window) onToggleStar() {
 		return
 	}
 	if w.starBtn.Active() {
-		w.applyLabels([]model.Message{w.openMsg}, []string{model.LabelStarred}, nil)
+		w.applyLabels([]model.Message{w.openMsg}, []string{model.LabelStarred}, nil, nil)
 	} else {
-		w.applyLabels([]model.Message{w.openMsg}, nil, []string{model.LabelStarred})
+		w.applyLabels([]model.Message{w.openMsg}, nil, []string{model.LabelStarred}, nil)
 	}
 }
 
@@ -1092,7 +1095,8 @@ func (w *window) showAIStream(title string, start func(ctx context.Context) (<-c
 
 // applyLabels applies a label change to the given messages in the background,
 // then refreshes the label counts and the current list (preserving any search).
-func (w *window) applyLabels(msgs []model.Message, add, remove []string) {
+// If after is non-nil it runs on the main thread once the list has refreshed.
+func (w *window) applyLabels(msgs []model.Message, add, remove []string, after func()) {
 	if w.deps.ModifyLabels == nil || len(msgs) == 0 {
 		return
 	}
@@ -1105,8 +1109,56 @@ func (w *window) applyLabels(msgs []model.Message, add, remove []string) {
 		dispatch.Main(func() {
 			w.loadLabels()
 			w.refreshList(w.searchEntry.Text())
+			if after != nil {
+				after()
+			}
 		})
 	}()
+}
+
+// removeFromList applies a destructive label change to the whole open thread
+// (archive or trash), advances the selection to the next conversation, and shows
+// an undo toast that reverses the change.
+func (w *window) removeFromList(toastTitle string, add, remove []string) {
+	msgs := w.openThreadMsgs
+	if w.deps.ModifyLabels == nil || len(msgs) == 0 {
+		return
+	}
+	pos := w.threadSel.Selected()
+	w.applyLabels(msgs, add, remove, func() { w.advanceSelection(pos) })
+	w.showUndoToast(toastTitle, msgs, add, remove)
+}
+
+// advanceSelection selects the conversation that now occupies pos (the one after
+// the removed thread), clamped to the list, or clears the reader if empty.
+func (w *window) advanceSelection(pos uint) {
+	const invalidPos = 0xffffffff // GTK_INVALID_LIST_POSITION
+	n := w.threadModel.NItems()
+	if n == 0 {
+		w.clearReader()
+		return
+	}
+	if pos == invalidPos || pos >= n {
+		pos = n - 1
+	}
+	// The list was just spliced, so the selection is currently invalid; setting it
+	// fires the selection-changed handler, which opens the conversation.
+	w.threadSel.SetSelected(pos)
+}
+
+// showUndoToast presents an undo toast that reverses the add/remove applied to
+// msgs (re-adding what was removed and vice versa).
+func (w *window) showUndoToast(title string, msgs []model.Message, add, remove []string) {
+	if w.toastOverlay == nil {
+		return
+	}
+	t := adw.NewToast(title)
+	t.SetButtonLabel("Undo")
+	t.SetTimeout(6)
+	t.ConnectButtonClicked(func() {
+		w.applyLabels(msgs, remove, add, nil) // swap to reverse the change
+	})
+	w.toastOverlay.AddToast(t)
 }
 
 // subscribe refreshes label counts when the sync engine reports changes. The
