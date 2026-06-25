@@ -57,6 +57,7 @@ type window struct {
 	replyBtn     *gtk.Button
 	forwardBtn   *gtk.Button
 	archiveBtn   *gtk.Button
+	trashBtn     *gtk.Button
 	unreadBtn    *gtk.Button
 	starBtn      *gtk.ToggleButton
 	imagesBtn    *gtk.ToggleButton
@@ -334,6 +335,10 @@ func (w *window) buildReader() *adw.NavigationPage {
 	w.archiveBtn.SetTooltipText("Archive")
 	w.archiveBtn.ConnectClicked(w.onArchive)
 
+	w.trashBtn = gtk.NewButtonFromIconName("user-trash-symbolic")
+	w.trashBtn.SetTooltipText("Move to Trash")
+	w.trashBtn.ConnectClicked(w.onTrash)
+
 	w.unreadBtn = gtk.NewButtonFromIconName("mail-mark-unread-symbolic")
 	w.unreadBtn.SetTooltipText("Mark unread")
 	w.unreadBtn.ConnectClicked(w.onMarkUnread)
@@ -359,6 +364,7 @@ func (w *window) buildReader() *adw.NavigationPage {
 	hb.PackStart(w.replyBtn)
 	hb.PackStart(w.forwardBtn)
 	hb.PackStart(w.archiveBtn)
+	hb.PackStart(w.trashBtn)
 	hb.PackStart(w.unreadBtn)
 	hb.PackStart(w.starBtn)
 	hb.PackEnd(w.imagesBtn)
@@ -375,6 +381,7 @@ func (w *window) buildReader() *adw.NavigationPage {
 func (w *window) setActionsSensitive(on bool) {
 	canModify := on && w.deps.ModifyLabels != nil
 	w.archiveBtn.SetSensitive(canModify)
+	w.trashBtn.SetSensitive(canModify)
 	w.unreadBtn.SetSensitive(canModify)
 	w.starBtn.SetSensitive(canModify)
 	canSend := on && w.deps.Send != nil
@@ -393,6 +400,7 @@ func (w *window) onReply() {
 	init := model.OutgoingMessage{
 		To:         m.FromAddr,
 		Subject:    ensureRePrefix(m.Subject),
+		Body:       quoteOriginal(m, w.bodyTextFor(m)),
 		InReplyTo:  m.RFC822MsgID,
 		References: strings.TrimSpace(m.References + " " + m.RFC822MsgID),
 		ThreadID:   m.ThreadID,
@@ -552,6 +560,12 @@ func attachmentChip(a model.Attachment) *gtk.Box {
 func (w *window) onArchive() {
 	if w.openMsg.GmailID != "" {
 		w.runAction(w.openMsg, nil, []string{model.LabelInbox})
+	}
+}
+
+func (w *window) onTrash() {
+	if w.openMsg.GmailID != "" {
+		w.runAction(w.openMsg, []string{model.LabelTrash}, []string{model.LabelInbox})
 	}
 }
 
