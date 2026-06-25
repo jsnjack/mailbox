@@ -31,6 +31,9 @@ type Sender func(ctx context.Context, msg model.OutgoingMessage) error
 // AttachmentOpener ensures an attachment is cached locally and returns its path.
 type AttachmentOpener func(ctx context.Context, gmailID string, attID int64) (string, error)
 
+// SyncNow runs an immediate incremental sync.
+type SyncNow func(ctx context.Context) error
+
 // Deps are the dependencies the UI needs. FetchBody, ModifyLabels and Hub may be
 // nil (the UI then renders the cache read-only without live updates, on-demand
 // bodies, or message actions).
@@ -44,6 +47,7 @@ type Deps struct {
 	Send         Sender
 	SaveDraft    Sender
 	OpenAttach   AttachmentOpener
+	Sync         SyncNow
 	Assistant    *ai.Assistant
 }
 

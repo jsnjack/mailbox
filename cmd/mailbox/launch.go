@@ -82,6 +82,10 @@ func launchUI() error {
 		deps.OpenAttach = func(ctx context.Context, gmailID string, attID int64) (string, error) {
 			return engine.OpenAttachment(ctx, client, gmailID, attID)
 		}
+		deps.Sync = func(ctx context.Context) error {
+			_, err := engine.Incremental(ctx, client, acc.ID)
+			return err
+		}
 		go backgroundSync(ctx, engine, client, acc.ID)
 		go backgroundSweep(ctx, engine, client, acc.ID)
 	}

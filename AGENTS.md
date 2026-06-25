@@ -50,7 +50,7 @@ a 60s background incremental sync updates label counts through `dispatch`→`Hub
 and new inbox mail (arriving after launch) raises a desktop notification via
 `gio.Notification`. (The GApplication app-id `com.surfly.mailbox` matches the
 installed `com.surfly.mailbox.desktop`, which GNOME requires for notifications.)
-Reply / forward / new compose in a separate window (text/plain via
+Reply / reply-all / forward / new compose in a separate window (text/plain via
 `gmailapi.BuildMIME` + `messages.send`, threading headers + threadId on replies);
 the compose window has an AI-draft button that streams a reply into the body, and
 a Save-draft button (`users.drafts.create`).

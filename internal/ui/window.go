@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"html"
 	"log/slog"
+	"net/mail"
 	"os"
 	"os/exec"
 	"strings"
@@ -58,6 +59,7 @@ type window struct {
 	// reader actions
 	openMsg      model.Message // the message currently shown in the reader
 	replyBtn     *gtk.Button
+	replyAllBtn  *gtk.Button
 	forwardBtn   *gtk.Button
 	archiveBtn   *gtk.Button
 	trashBtn     *gtk.Button
@@ -172,6 +174,12 @@ func (w *window) buildSidebar() *adw.NavigationPage {
 	})
 	hb.PackStart(newBtn)
 
+	refreshBtn := gtk.NewButtonFromIconName("view-refresh-symbolic")
+	refreshBtn.SetTooltipText("Sync now")
+	refreshBtn.SetSensitive(w.deps.Sync != nil)
+	refreshBtn.ConnectClicked(w.onRefresh)
+	hb.PackEnd(refreshBtn)
+
 	tv := adw.NewToolbarView()
 	tv.AddTopBar(hb)
 	tv.SetContent(box)
@@ -279,6 +287,22 @@ func (w *window) showMessages(msgs []model.Message) {
 	}
 }
 
+func (w *window) onRefresh() {
+	if w.deps.Sync == nil {
+		return
+	}
+	go func() {
+		if err := w.deps.Sync(context.Background()); err != nil {
+			slog.Warn("ui: sync now", "err", err)
+			return
+		}
+		dispatch.Main(func() {
+			w.loadLabels()
+			w.refreshList(w.searchEntry.Text())
+		})
+	}()
+}
+
 func (w *window) onThreadSelected() {
 	item := w.threadSel.SelectedItem()
 	if item == nil {
@@ -331,6 +355,10 @@ func (w *window) buildReader() *adw.NavigationPage {
 	w.replyBtn.SetTooltipText("Reply")
 	w.replyBtn.ConnectClicked(w.onReply)
 
+	w.replyAllBtn = gtk.NewButtonFromIconName("mail-reply-all-symbolic")
+	w.replyAllBtn.SetTooltipText("Reply all")
+	w.replyAllBtn.ConnectClicked(w.onReplyAll)
+
 	w.forwardBtn = gtk.NewButtonFromIconName("mail-forward-symbolic")
 	w.forwardBtn.SetTooltipText("Forward")
 	w.forwardBtn.ConnectClicked(w.onForward)
@@ -366,6 +394,7 @@ func (w *window) buildReader() *adw.NavigationPage {
 	w.draftBtn.ConnectClicked(w.onDraftReply)
 
 	hb.PackStart(w.replyBtn)
+	hb.PackStart(w.replyAllBtn)
 	hb.PackStart(w.forwardBtn)
 	hb.PackStart(w.archiveBtn)
 	hb.PackStart(w.trashBtn)
@@ -390,6 +419,7 @@ func (w *window) setActionsSensitive(on bool) {
 	w.starBtn.SetSensitive(canModify)
 	canSend := on && w.deps.Send != nil
 	w.replyBtn.SetSensitive(canSend)
+	w.replyAllBtn.SetSensitive(canSend)
 	w.forwardBtn.SetSensitive(canSend)
 	canAI := on && w.deps.Assistant != nil
 	w.translateBtn.SetSensitive(canAI)
@@ -410,6 +440,49 @@ func (w *window) onReply() {
 		ThreadID:   m.ThreadID,
 	}
 	w.openCompose(init, w.threadContextFor(m), "Reply")
+}
+
+func (w *window) onReplyAll() {
+	m := w.openMsg
+	if m.GmailID == "" {
+		return
+	}
+	to, cc := replyAllRecipients(m, w.deps.AccountEmail)
+	init := model.OutgoingMessage{
+		To:         to,
+		Cc:         cc,
+		Subject:    ensureRePrefix(m.Subject),
+		Body:       quoteOriginal(m, w.bodyTextFor(m)),
+		InReplyTo:  m.RFC822MsgID,
+		References: strings.TrimSpace(m.References + " " + m.RFC822MsgID),
+		ThreadID:   m.ThreadID,
+	}
+	w.openCompose(init, w.threadContextFor(m), "Reply all")
+}
+
+// replyAllRecipients computes To (original sender + original To) and Cc (original
+// Cc), excluding the account's own address and de-duplicating.
+func replyAllRecipients(m model.Message, self string) (to, cc string) {
+	seen := map[string]bool{strings.ToLower(strings.TrimSpace(self)): true}
+	collect := func(raw string) []string {
+		addrs, err := mail.ParseAddressList(raw)
+		if err != nil {
+			return nil
+		}
+		var out []string
+		for _, a := range addrs {
+			key := strings.ToLower(a.Address)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, a.Address)
+		}
+		return out
+	}
+	toList := append(collect(m.FromAddr), collect(m.ToAddrs)...)
+	ccList := collect(m.CcAddrs)
+	return strings.Join(toList, ", "), strings.Join(ccList, ", ")
 }
 
 func (w *window) onForward() {
