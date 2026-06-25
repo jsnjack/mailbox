@@ -73,7 +73,9 @@ multipart/mixed with base64 parts). Send is synchronous for compose feedback,
 but a failed send is queued to the `outbox` table and retried by a background
 sweeper (`SweepOutbox`, ~45s). The window collapses responsively via
 `adw.Breakpoint` (3 panes → list+reader below ~860sp → single pane below ~520sp),
-with `SetShowContent` driving navigation when collapsed. Test hooks:
+with `SetShowContent` driving navigation when collapsed. Single-key shortcuts
+(bubble-phase key controller, so text entries keep their input): j/k navigate
+threads, r reply, a archive, c compose, / focus search. Test hooks:
 `MAILBOX_OPEN_FIRST=1` opens the newest message on launch; `MAILBOX_WIN_SIZE=WxH`
 overrides the initial window size.
 

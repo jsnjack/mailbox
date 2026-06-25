@@ -14,6 +14,7 @@ import (
 	"github.com/diamondburned/gotk4-adwaita/pkg/adw"
 	webkit "github.com/diamondburned/gotk4-webkitgtk/pkg/webkit/v6"
 	coreglib "github.com/diamondburned/gotk4/pkg/core/glib"
+	"github.com/diamondburned/gotk4/pkg/gdk/v4"
 	"github.com/diamondburned/gotk4/pkg/gio/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 	"github.com/jsnjack/mailbox/internal/ai"
@@ -111,6 +112,59 @@ func (w *window) build() {
 
 	w.win.SetContent(w.outerSplit)
 	w.addBreakpoints()
+	w.addShortcuts()
+}
+
+// addShortcuts wires single-key navigation/actions. The controller runs in the
+// bubble phase, so a focused text entry consumes letters first (typing in search
+// won't trigger these). Keyvals for printable keys equal their ASCII rune.
+func (w *window) addShortcuts() {
+	ec := gtk.NewEventControllerKey()
+	ec.ConnectKeyPressed(func(keyval, keycode uint, state gdk.ModifierType) bool {
+		if state&(gdk.ControlMask|gdk.AltMask|gdk.SuperMask) != 0 {
+			return false
+		}
+		switch keyval {
+		case 'j':
+			w.selectAdjacent(1)
+		case 'k':
+			w.selectAdjacent(-1)
+		case 'r':
+			w.onReply()
+		case 'a':
+			w.onArchive()
+		case 'c':
+			if w.deps.Send != nil {
+				w.openCompose(model.OutgoingMessage{}, "", "New message")
+			}
+		case '/':
+			w.searchEntry.GrabFocus()
+		default:
+			return false
+		}
+		return true
+	})
+	w.win.AddController(ec)
+}
+
+// selectAdjacent moves the thread selection by delta, clamped to the list.
+func (w *window) selectAdjacent(delta int) {
+	n := int(w.threadModel.NItems())
+	if n == 0 {
+		return
+	}
+	const invalidPos = 0xffffffff // GTK_INVALID_LIST_POSITION
+	next := 0
+	if cur := w.threadSel.Selected(); cur != invalidPos {
+		next = int(cur) + delta
+	}
+	if next < 0 {
+		next = 0
+	}
+	if next >= n {
+		next = n - 1
+	}
+	w.threadSel.SetSelected(uint(next))
 }
 
 // addBreakpoints collapses the panes as the window narrows: below ~860sp the
