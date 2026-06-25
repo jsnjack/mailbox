@@ -110,7 +110,7 @@ func (w *window) build() {
 	w.win = adw.NewApplicationWindow(&w.app.Application)
 	w.win.SetTitle("Mailbox")
 	// Size precedence: env override (test hook) > last-remembered size > default.
-	winW, winH := 1200, 760
+	winW, winH := 1280, 800
 	if st, err := config.LoadWindowState(); err == nil && st.Width >= 400 && st.Height >= 300 {
 		winW, winH = st.Width, st.Height
 	}
@@ -132,15 +132,19 @@ func (w *window) build() {
 		return false
 	})
 
+	// Keep the two sidebars compact so the reader gets the majority of the width
+	// (HTML email is typically laid out for ~600px). NavigationSplitView sizes a
+	// sidebar as fraction*total clamped to [min,max]; capping the maxes low is
+	// what actually widens the reader on a roomy window.
 	w.innerSplit = adw.NewNavigationSplitView()
-	w.innerSplit.SetMinSidebarWidth(340)
-	w.innerSplit.SetMaxSidebarWidth(520)
+	w.innerSplit.SetMinSidebarWidth(280)
+	w.innerSplit.SetMaxSidebarWidth(360)
 	w.innerSplit.SetSidebar(w.buildThreadList())
 	w.innerSplit.SetContent(w.buildReader())
 
 	w.outerSplit = adw.NewNavigationSplitView()
-	w.outerSplit.SetMinSidebarWidth(220)
-	w.outerSplit.SetMaxSidebarWidth(300)
+	w.outerSplit.SetMinSidebarWidth(200)
+	w.outerSplit.SetMaxSidebarWidth(240)
 	w.outerSplit.SetSidebar(w.buildSidebar())
 	w.outerSplit.SetContent(adw.NewNavigationPage(w.innerSplit, "Mail"))
 
