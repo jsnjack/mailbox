@@ -20,6 +20,7 @@ import (
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 	"github.com/diamondburned/gotk4/pkg/pango"
 	"github.com/jsnjack/mailbox/internal/ai"
+	"github.com/jsnjack/mailbox/internal/config"
 	"github.com/jsnjack/mailbox/internal/dispatch"
 	"github.com/jsnjack/mailbox/internal/model"
 	"github.com/jsnjack/mailbox/internal/syncer"
@@ -108,13 +109,28 @@ func newWindow(app *adw.Application, deps Deps) *window {
 func (w *window) build() {
 	w.win = adw.NewApplicationWindow(&w.app.Application)
 	w.win.SetTitle("Mailbox")
+	// Size precedence: env override (test hook) > last-remembered size > default.
 	winW, winH := 1200, 760
+	if st, err := config.LoadWindowState(); err == nil && st.Width >= 400 && st.Height >= 300 {
+		winW, winH = st.Width, st.Height
+	}
 	if s := os.Getenv("MAILBOX_WIN_SIZE"); s != "" {
-		if _, err := fmt.Sscanf(s, "%dx%d", &winW, &winH); err != nil {
-			winW, winH = 1200, 760
+		var ew, eh int
+		if _, err := fmt.Sscanf(s, "%dx%d", &ew, &eh); err == nil {
+			winW, winH = ew, eh
 		}
 	}
 	w.win.SetDefaultSize(winW, winH)
+	// Remember the size on close (skip while maximized so we keep the windowed
+	// dimensions rather than the full-screen ones).
+	w.win.ConnectCloseRequest(func() bool {
+		if !w.win.IsMaximized() {
+			if err := config.SaveWindowState(config.WindowState{Width: w.win.Width(), Height: w.win.Height()}); err != nil {
+				slog.Warn("ui: save window state", "err", err)
+			}
+		}
+		return false
+	})
 
 	w.innerSplit = adw.NewNavigationSplitView()
 	w.innerSplit.SetMinSidebarWidth(340)
