@@ -61,6 +61,7 @@ type window struct {
 	threadStack    *gtk.Stack // "list" vs "empty" placeholder
 	readerStack    *gtk.Stack // "message" vs "empty" placeholder
 	markReadBtn    *gtk.Button
+	readOnlyBanner *adw.Banner // revealed when no Gmail client (live features off)
 	outboxBanner   *adw.Banner // revealed when sends are queued/failed
 	searchEntry    *gtk.SearchEntry
 	suppressSearch bool // guards SetText from firing a search during label switch
@@ -216,6 +217,23 @@ func (w *window) toggleStar() {
 // window is narrow enough that the panes are stacked.
 func (w *window) goBack() {
 	w.innerSplit.SetShowContent(false)
+}
+
+// showConnectHelp explains how to enable live features when the app is running
+// read-only (no Gmail client could be built).
+func (w *window) showConnectHelp() {
+	body := "Mailbox couldn't connect to Gmail, so it's showing the local cache " +
+		"read-only.\n\n" +
+		"1. Put your Google OAuth client secret at:\n" +
+		"   ~/.config/mailbox/credentials.json\n\n" +
+		"2. Connect the account (opens a browser to sign in):\n" +
+		"   mailbox sync --account you@gmail.com\n\n" +
+		"3. Restart Mailbox."
+	dialog := adw.NewAlertDialog("Not connected to Gmail", body)
+	dialog.AddResponse("ok", "Got it")
+	dialog.SetDefaultResponse("ok")
+	dialog.SetCloseResponse("ok")
+	dialog.Present(w.win)
 }
 
 // showShortcuts presents a dialog listing the keyboard shortcuts.
@@ -462,7 +480,15 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 	w.outboxBanner.SetRevealed(false)
 	w.outboxBanner.ConnectButtonClicked(w.openOutbox)
 
+	// When no Gmail client could be built the UI is read-only; say so instead of
+	// leaving the actions silently inert.
+	w.readOnlyBanner = adw.NewBanner("Read-only — not connected to Gmail")
+	w.readOnlyBanner.SetButtonLabel("How to connect")
+	w.readOnlyBanner.ConnectButtonClicked(w.showConnectHelp)
+	w.readOnlyBanner.SetRevealed(w.deps.ModifyLabels == nil)
+
 	content := gtk.NewBox(gtk.OrientationVertical, 0)
+	content.Append(w.readOnlyBanner)
 	content.Append(w.outboxBanner)
 	content.Append(w.searchEntry)
 	content.Append(w.threadStack)
