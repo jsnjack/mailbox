@@ -18,6 +18,7 @@ import (
 	"github.com/diamondburned/gotk4/pkg/gdk/v4"
 	"github.com/diamondburned/gotk4/pkg/gio/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
+	"github.com/diamondburned/gotk4/pkg/pango"
 	"github.com/jsnjack/mailbox/internal/ai"
 	"github.com/jsnjack/mailbox/internal/dispatch"
 	"github.com/jsnjack/mailbox/internal/model"
@@ -39,11 +40,15 @@ type window struct {
 	innerSplit  *adw.NavigationSplitView
 	accountBox  *gtk.ListBox
 	labelBox    *gtk.ListBox
-	labels      []model.Label
+	sidebar     []sidebarItem // one entry per row in labelBox (incl. headings)
 	current     string
 	activeID    int64 // the account currently shown
 	activeEmail string
-	startTime   time.Time // only mail arriving after this triggers notifications
+	// suppressLabelSelect guards the row-selected handler while loadLabels
+	// restores the visual highlight, so a background refresh doesn't reset the
+	// list or clear an active search.
+	suppressLabelSelect bool
+	startTime           time.Time // only mail arriving after this triggers notifications
 
 	// virtualized list grouped by conversation: a StringList of thread ids drives
 	// a ListView; the factory builds visible rows from threadByID.
@@ -206,15 +211,48 @@ func (w *window) present() {
 	}
 }
 
+// allMailID is the sentinel "folder" id for the All Mail view, which lists every
+// cached thread regardless of label (it is not a real Gmail label).
+const allMailID = "__all_mail__"
+
+// sidebarItem records what a row in the sidebar list maps to. Heading rows are
+// non-selectable and carry an empty id.
+type sidebarItem struct {
+	id         string
+	selectable bool
+}
+
+// folderDef is a curated system "folder" presented in the sidebar, in display
+// order, with a friendly name and a (libadwaita-available) symbolic icon.
+type folderDef struct {
+	id, name, icon string
+}
+
+// systemFolders are the standard mailboxes shown at the top of the sidebar, in
+// order. Raw Gmail system labels not listed here (UNREAD, CHAT, CATEGORY_*, …)
+// are intentionally hidden — they are not navigable folders.
+var systemFolders = []folderDef{
+	{model.LabelInbox, "Inbox", "mail-unread-symbolic"},
+	{model.LabelStarred, "Starred", "starred-symbolic"},
+	{model.LabelImportant, "Important", "mail-mark-important-symbolic"},
+	{model.LabelSent, "Sent", "mail-send-symbolic"},
+	{model.LabelDraft, "Drafts", "document-edit-symbolic"},
+	{model.LabelSpam, "Spam", "mail-mark-junk-symbolic"},
+	{model.LabelTrash, "Trash", "user-trash-symbolic"},
+	{allMailID, "All Mail", "folder-symbolic"},
+}
+
 func (w *window) buildSidebar() *adw.NavigationPage {
 	w.labelBox = gtk.NewListBox()
 	w.labelBox.AddCSSClass("navigation-sidebar")
 	w.labelBox.ConnectRowSelected(func(row *gtk.ListBoxRow) {
-		if row == nil {
+		if row == nil || w.suppressLabelSelect {
 			return
 		}
-		if i := row.Index(); i >= 0 && i < len(w.labels) {
-			w.selectLabel(w.labels[i].GmailID)
+		if i := row.Index(); i >= 0 && i < len(w.sidebar) {
+			if it := w.sidebar[i]; it.selectable {
+				w.selectLabel(it.id)
+			}
 		}
 	})
 
@@ -375,7 +413,7 @@ func (w *window) onSearchChanged() {
 func (w *window) refreshList(query string) {
 	ctx := context.Background()
 	if strings.TrimSpace(query) == "" {
-		sums, err := w.deps.Store.ListThreadsByLabel(ctx, w.activeID, w.current, threadListCap, 0)
+		sums, err := w.threadsForCurrent(ctx)
 		if err != nil {
 			slog.Error("ui: list threads", "label", w.current, "err", err)
 			return
@@ -403,6 +441,15 @@ func (w *window) refreshList(query string) {
 		sums = append(sums, sum)
 	}
 	w.showThreads(sums)
+}
+
+// threadsForCurrent lists the threads for the selected folder: the All Mail
+// pseudo-folder spans every label, others are label-scoped.
+func (w *window) threadsForCurrent(ctx context.Context) ([]model.ThreadSummary, error) {
+	if w.current == allMailID {
+		return w.deps.Store.ListAllThreads(ctx, w.activeID, threadListCap, 0)
+	}
+	return w.deps.Store.ListThreadsByLabel(ctx, w.activeID, w.current, threadListCap, 0)
 }
 
 // showThreads replaces the thread list contents.
@@ -630,6 +677,9 @@ func (w *window) onForward() {
 	w.openCompose(init, "", "Forward")
 }
 
+// loadLabels rebuilds the sidebar: the curated standard folders first (only those
+// the account actually has), then the user's own labels under a heading. Raw
+// Gmail system labels that aren't folders are omitted.
 func (w *window) loadLabels() {
 	ctx := context.Background()
 	labels, err := w.deps.Store.ListLabels(ctx, w.activeID)
@@ -637,11 +687,77 @@ func (w *window) loadLabels() {
 		slog.Error("ui: load labels", "err", err)
 		return
 	}
-	w.labels = labels
-	w.labelBox.RemoveAll()
+	have := make(map[string]bool, len(labels))
 	for _, l := range labels {
+		have[l.GmailID] = true
+	}
+
+	w.labelBox.RemoveAll()
+	w.sidebar = w.sidebar[:0]
+
+	for _, f := range systemFolders {
+		var count int
+		if f.id == allMailID {
+			count, _ = w.deps.Store.CountAll(ctx, w.activeID)
+		} else {
+			if !have[f.id] {
+				continue
+			}
+			count, _ = w.deps.Store.CountByLabel(ctx, w.activeID, f.id)
+		}
+		w.appendFolder(f.id, f.icon, f.name, count)
+	}
+
+	// User-created labels, alphabetical (ListLabels already orders by name).
+	firstUser := true
+	for _, l := range labels {
+		if l.Type != model.LabelUser {
+			continue
+		}
+		if firstUser {
+			w.appendHeading("Labels")
+			firstUser = false
+		}
 		n, _ := w.deps.Store.CountByLabel(ctx, w.activeID, l.GmailID)
-		w.labelBox.Append(labelRow(l.Name, n))
+		w.appendFolder(l.GmailID, "user-bookmarks-symbolic", l.Name, n)
+	}
+
+	w.restoreSidebarSelection()
+}
+
+// appendFolder adds a selectable folder/label row mapped to id.
+func (w *window) appendFolder(id, icon, name string, count int) {
+	w.labelBox.Append(folderRow(icon, name, count))
+	w.sidebar = append(w.sidebar, sidebarItem{id: id, selectable: true})
+}
+
+// appendHeading adds a non-selectable section heading row.
+func (w *window) appendHeading(text string) {
+	lbl := gtk.NewLabel(text)
+	lbl.AddCSSClass("dim-label")
+	lbl.SetXAlign(0)
+	setMargins(lbl, 12, 12, 10, 4)
+	row := gtk.NewListBoxRow()
+	row.SetChild(lbl)
+	row.SetSelectable(false)
+	row.SetActivatable(false)
+	w.labelBox.Append(row)
+	w.sidebar = append(w.sidebar, sidebarItem{selectable: false})
+}
+
+// restoreSidebarSelection re-highlights the row for the current folder after a
+// rebuild, without firing the selection handler (so it doesn't reset the list or
+// clear an active search on a background refresh).
+func (w *window) restoreSidebarSelection() {
+	for i, it := range w.sidebar {
+		if it.selectable && it.id == w.current {
+			w.suppressLabelSelect = true
+			if r := w.labelBox.RowAtIndex(i); r != nil {
+				w.labelBox.SelectRow(r)
+			}
+			w.suppressLabelSelect = false
+			return
+		}
 	}
 }
 
@@ -1044,12 +1160,18 @@ func (w *window) notifyNewMail(accountID int64, m model.Message) {
 	w.app.SendNotification(fmt.Sprintf("mailbox-mail-%d-%s", accountID, m.GmailID), n)
 }
 
-func labelRow(name string, count int) *gtk.Box {
-	box := gtk.NewBox(gtk.OrientationHorizontal, 6)
-	setMargins(box, 12, 12, 4, 4)
+// folderRow builds a sidebar row: a leading symbolic icon, the folder name, and
+// an optional dim count badge.
+func folderRow(icon, name string, count int) *gtk.Box {
+	box := gtk.NewBox(gtk.OrientationHorizontal, 8)
+	setMargins(box, 12, 12, 6, 6)
+	if icon != "" {
+		box.Append(gtk.NewImageFromIconName(icon))
+	}
 	n := gtk.NewLabel(name)
 	n.SetXAlign(0)
 	n.SetHExpand(true)
+	n.SetEllipsize(pango.EllipsizeEnd)
 	box.Append(n)
 	if count > 0 {
 		c := gtk.NewLabel(fmt.Sprintf("%d", count))

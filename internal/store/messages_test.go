@@ -136,6 +136,31 @@ func TestSearchMultiWordAndPrefix(t *testing.T) {
 	}
 }
 
+func TestCountAll(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	acc := seedAccount(t, s)
+
+	for _, m := range []model.Message{
+		{AccountID: acc, GmailID: "m1", ThreadID: "t1", Subject: "inbox", Labels: []string{"INBOX"}},
+		{AccountID: acc, GmailID: "m2", ThreadID: "t2", Subject: "sent", Labels: []string{"SENT"}},
+		{AccountID: acc, GmailID: "m3", ThreadID: "t3", Subject: "trashed", Labels: []string{"TRASH"}},
+		{AccountID: acc, GmailID: "m4", ThreadID: "t4", Subject: "spammy", Labels: []string{"SPAM"}},
+	} {
+		if _, err := s.UpsertMessage(ctx, m); err != nil {
+			t.Fatalf("upsert %s: %v", m.GmailID, err)
+		}
+	}
+
+	n, err := s.CountAll(ctx, acc)
+	if err != nil {
+		t.Fatalf("CountAll: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("CountAll = %d, want 2 (Spam and Trash excluded)", n)
+	}
+}
+
 func TestModifyLabels(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()

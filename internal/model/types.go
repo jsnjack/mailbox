@@ -16,13 +16,14 @@ const (
 
 // Well-known Gmail system label IDs used for flag decoding and mutations.
 const (
-	LabelInbox   = "INBOX"
-	LabelUnread  = "UNREAD"
-	LabelStarred = "STARRED"
-	LabelSent    = "SENT"
-	LabelTrash   = "TRASH"
-	LabelSpam    = "SPAM"
-	LabelDraft   = "DRAFT"
+	LabelInbox     = "INBOX"
+	LabelUnread    = "UNREAD"
+	LabelStarred   = "STARRED"
+	LabelImportant = "IMPORTANT"
+	LabelSent      = "SENT"
+	LabelTrash     = "TRASH"
+	LabelSpam      = "SPAM"
+	LabelDraft     = "DRAFT"
 )
 
 // Account is a connected Gmail account. The OAuth refresh token is never stored

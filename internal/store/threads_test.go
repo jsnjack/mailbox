@@ -59,6 +59,41 @@ func TestListThreadsByLabel(t *testing.T) {
 	}
 }
 
+func TestListAllThreads(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	acc := seedAccount(t, s)
+
+	// A: two inbox messages. B: one sent message. T: latest in Trash (excluded).
+	// S: latest in Spam (excluded).
+	for _, m := range []model.Message{
+		{AccountID: acc, GmailID: "a1", ThreadID: "A", InternalDate: time.Unix(100, 0), Subject: "A first", Labels: []string{"INBOX"}},
+		{AccountID: acc, GmailID: "a2", ThreadID: "A", InternalDate: time.Unix(300, 0), Subject: "A latest", Labels: []string{"INBOX"}},
+		{AccountID: acc, GmailID: "b1", ThreadID: "B", InternalDate: time.Unix(500, 0), Subject: "B sent", Labels: []string{"SENT"}},
+		{AccountID: acc, GmailID: "t1", ThreadID: "T", InternalDate: time.Unix(700, 0), Subject: "trashed", Labels: []string{"TRASH"}},
+		{AccountID: acc, GmailID: "s1", ThreadID: "S", InternalDate: time.Unix(900, 0), Subject: "spammy", Labels: []string{"SPAM"}},
+	} {
+		if _, err := s.UpsertMessage(ctx, m); err != nil {
+			t.Fatalf("upsert %s: %v", m.GmailID, err)
+		}
+	}
+
+	threads, err := s.ListAllThreads(ctx, acc, 50, 0)
+	if err != nil {
+		t.Fatalf("ListAllThreads: %v", err)
+	}
+	if len(threads) != 2 {
+		t.Fatalf("got %d threads, want 2 (A, B); Spam/Trash must be excluded", len(threads))
+	}
+	// Newest first: B (500) before A (300).
+	if threads[0].ThreadID != "B" || threads[1].ThreadID != "A" {
+		t.Fatalf("order: %s, %s", threads[0].ThreadID, threads[1].ThreadID)
+	}
+	if threads[1].Latest.GmailID != "a2" || threads[1].Count != 2 {
+		t.Fatalf("thread A summary wrong: %+v", threads[1])
+	}
+}
+
 func TestListThreadsByLabelTiesAndNullDates(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()

@@ -203,6 +203,21 @@ func (s *Store) CountByLabel(ctx context.Context, accountID int64, labelID strin
 	return n, nil
 }
 
+// CountAll returns the number of cached messages in the account that are not in
+// Spam or Trash. It backs the "All Mail" folder's count.
+func (s *Store) CountAll(ctx context.Context, accountID int64) (int, error) {
+	var n int
+	if err := s.reader.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM messages m
+		WHERE m.account_id = ? AND NOT EXISTS (
+			SELECT 1 FROM message_labels mx
+			WHERE mx.message_rowid = m.rowid AND mx.label_id IN (?, ?)
+		)`, accountID, model.LabelSpam, model.LabelTrash).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count all: %w", err)
+	}
+	return n, nil
+}
+
 // ListByLabel returns a page of messages carrying labelID, newest first. Labels
 // are not populated on list rows (the list view needs only headers and flags).
 func (s *Store) ListByLabel(ctx context.Context, accountID int64, labelID string, limit, offset int) ([]model.Message, error) {
