@@ -856,16 +856,17 @@ func (w *window) loadLabels() {
 	w.labelBox.RemoveAll()
 	w.sidebar = w.sidebar[:0]
 
+	// Badges show unread counts (like a standard mail client). All Mail spans
+	// every label, so it carries no badge — matching Gmail.
 	for _, f := range systemFolders {
-		var count int
 		if f.id == allMailID {
-			count, _ = w.deps.Store.CountAll(ctx, w.activeID)
-		} else {
-			if !have[f.id] {
-				continue
-			}
-			count, _ = w.deps.Store.CountByLabel(ctx, w.activeID, f.id)
+			w.appendFolder(f.id, f.icon, f.name, 0)
+			continue
 		}
+		if !have[f.id] {
+			continue
+		}
+		count, _ := w.deps.Store.CountUnreadByLabel(ctx, w.activeID, f.id)
 		w.appendFolder(f.id, f.icon, f.name, count)
 	}
 
@@ -879,7 +880,7 @@ func (w *window) loadLabels() {
 			w.appendHeading("Labels")
 			firstUser = false
 		}
-		n, _ := w.deps.Store.CountByLabel(ctx, w.activeID, l.GmailID)
+		n, _ := w.deps.Store.CountUnreadByLabel(ctx, w.activeID, l.GmailID)
 		w.appendFolder(l.GmailID, "user-bookmarks-symbolic", l.Name, n)
 	}
 
@@ -1500,8 +1501,9 @@ func (w *window) notifyNewMail(accountID int64, m model.Message) {
 }
 
 // folderRow builds a sidebar row: a leading symbolic icon, the folder name, and
-// an optional dim count badge.
-func folderRow(icon, name string, count int) *gtk.Box {
+// an unread-count badge. When there are unread messages the name is emphasized,
+// like a standard mail client.
+func folderRow(icon, name string, unread int) *gtk.Box {
 	box := gtk.NewBox(gtk.OrientationHorizontal, 8)
 	setMargins(box, 12, 12, 6, 6)
 	if icon != "" {
@@ -1511,9 +1513,13 @@ func folderRow(icon, name string, count int) *gtk.Box {
 	n.SetXAlign(0)
 	n.SetHExpand(true)
 	n.SetEllipsize(pango.EllipsizeEnd)
+	if unread > 0 {
+		n.AddCSSClass("heading")
+	}
 	box.Append(n)
-	if count > 0 {
-		c := gtk.NewLabel(fmt.Sprintf("%d", count))
+	if unread > 0 {
+		c := gtk.NewLabel(fmt.Sprintf("%d", unread))
+		c.AddCSSClass("numeric")
 		c.AddCSSClass("dim-label")
 		box.Append(c)
 	}

@@ -203,17 +203,16 @@ func (s *Store) CountByLabel(ctx context.Context, accountID int64, labelID strin
 	return n, nil
 }
 
-// CountAll returns the number of cached messages in the account that are not in
-// Spam or Trash. It backs the "All Mail" folder's count.
-func (s *Store) CountAll(ctx context.Context, accountID int64) (int, error) {
+// CountUnreadByLabel returns the number of unread messages carrying the given
+// label — used for the sidebar's unread badges.
+func (s *Store) CountUnreadByLabel(ctx context.Context, accountID int64, labelID string) (int, error) {
 	var n int
 	if err := s.reader.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM messages m
-		WHERE m.account_id = ? AND NOT EXISTS (
-			SELECT 1 FROM message_labels mx
-			WHERE mx.message_rowid = m.rowid AND mx.label_id IN (?, ?)
-		)`, accountID, model.LabelSpam, model.LabelTrash).Scan(&n); err != nil {
-		return 0, fmt.Errorf("count all: %w", err)
+		JOIN message_labels ml ON ml.message_rowid = m.rowid AND ml.label_id = ?
+		WHERE m.account_id = ? AND m.is_unread = 1`,
+		labelID, accountID).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count unread by label: %w", err)
 	}
 	return n, nil
 }

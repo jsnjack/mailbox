@@ -136,28 +136,27 @@ func TestSearchMultiWordAndPrefix(t *testing.T) {
 	}
 }
 
-func TestCountAll(t *testing.T) {
+func TestCountUnreadByLabel(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 	acc := seedAccount(t, s)
 
 	for _, m := range []model.Message{
-		{AccountID: acc, GmailID: "m1", ThreadID: "t1", Subject: "inbox", Labels: []string{"INBOX"}},
-		{AccountID: acc, GmailID: "m2", ThreadID: "t2", Subject: "sent", Labels: []string{"SENT"}},
-		{AccountID: acc, GmailID: "m3", ThreadID: "t3", Subject: "trashed", Labels: []string{"TRASH"}},
-		{AccountID: acc, GmailID: "m4", ThreadID: "t4", Subject: "spammy", Labels: []string{"SPAM"}},
+		{AccountID: acc, GmailID: "u1", ThreadID: "t1", Subject: "a", IsUnread: true, Labels: []string{"INBOX", "UNREAD"}},
+		{AccountID: acc, GmailID: "u2", ThreadID: "t2", Subject: "b", IsUnread: true, Labels: []string{"INBOX", "UNREAD"}},
+		{AccountID: acc, GmailID: "r1", ThreadID: "t3", Subject: "c", IsUnread: false, Labels: []string{"INBOX"}},
+		{AccountID: acc, GmailID: "o1", ThreadID: "t4", Subject: "d", IsUnread: true, Labels: []string{"SENT", "UNREAD"}},
 	} {
 		if _, err := s.UpsertMessage(ctx, m); err != nil {
 			t.Fatalf("upsert %s: %v", m.GmailID, err)
 		}
 	}
 
-	n, err := s.CountAll(ctx, acc)
-	if err != nil {
-		t.Fatalf("CountAll: %v", err)
+	if n, err := s.CountUnreadByLabel(ctx, acc, "INBOX"); err != nil || n != 2 {
+		t.Fatalf("INBOX unread = %d (err %v), want 2", n, err)
 	}
-	if n != 2 {
-		t.Fatalf("CountAll = %d, want 2 (Spam and Trash excluded)", n)
+	if n, _ := s.CountUnreadByLabel(ctx, acc, "SENT"); n != 1 {
+		t.Fatalf("SENT unread = %d, want 1", n)
 	}
 }
 
