@@ -543,6 +543,30 @@ func (w *window) threadsForCurrent(ctx context.Context) ([]model.ThreadSummary, 
 	return w.deps.Store.ListThreadsByLabel(ctx, w.activeID, w.current, threadListCap, 0)
 }
 
+// liveRefreshList updates the thread list in response to a background change
+// (new mail, label edits) while keeping the open conversation selected, so the
+// reader is not disturbed.
+func (w *window) liveRefreshList() {
+	w.refreshList(w.searchEntry.Text())
+	w.reselectOpenThread()
+}
+
+// reselectOpenThread restores the list selection to the open conversation after
+// the model was respliced. onThreadSelected no-ops when the selection already
+// matches the open thread, so this does not trigger a re-render.
+func (w *window) reselectOpenThread() {
+	if w.openThreadID == "" {
+		return
+	}
+	n := w.threadModel.NItems()
+	for i := uint(0); i < n; i++ {
+		if w.threadModel.String(i) == w.openThreadID {
+			w.threadSel.SetSelected(i)
+			return
+		}
+	}
+}
+
 // showThreads replaces the thread list contents.
 func (w *window) showThreads(sums []model.ThreadSummary) {
 	w.threadByID = make(map[string]model.ThreadSummary, len(sums))
@@ -601,7 +625,11 @@ func (w *window) onThreadSelected() {
 	if !ok {
 		return
 	}
-	w.showThread(so.String())
+	id := so.String()
+	if id == w.openThreadID {
+		return // already shown; avoids a re-render when the list refreshes live
+	}
+	w.showThread(id)
 }
 
 func (w *window) buildReader() *adw.NavigationPage {
@@ -1362,11 +1390,17 @@ func (w *window) subscribe() {
 	}()
 }
 
-// onChange refreshes the active account's label counts (only for changes to that
-// account) and notifies for genuinely new inbox mail on any account.
+// onChange reacts to a background sync change: it refreshes the active account's
+// label counts and thread list (keeping the open conversation in place) and
+// notifies for genuinely new inbox mail on any account.
 func (w *window) onChange(c syncer.Change) {
 	switch c.Kind {
-	case syncer.MessageUpserted, syncer.MessageDeleted, syncer.LabelsSynced:
+	case syncer.MessageUpserted, syncer.MessageDeleted:
+		if c.AccountID == w.activeID {
+			w.loadLabels()
+			w.liveRefreshList()
+		}
+	case syncer.LabelsSynced:
 		if c.AccountID == w.activeID {
 			w.loadLabels()
 		}
