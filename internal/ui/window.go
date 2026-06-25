@@ -147,14 +147,24 @@ func (w *window) addShortcuts() {
 			w.selectAdjacent(-1)
 		case 'r':
 			w.onReply()
-		case 'a':
+		case 'f':
+			w.onForward()
+		case 'a', 'e':
 			w.onArchive()
+		case '#', gdk.KEY_Delete:
+			w.onTrash()
+		case 's':
+			w.toggleStar()
 		case 'c':
 			if w.deps.Send != nil {
 				w.openCompose(model.OutgoingMessage{}, "", "New message")
 			}
 		case '/':
 			w.searchEntry.GrabFocus()
+		case gdk.KEY_Escape:
+			w.goBack()
+		case '?':
+			w.showShortcuts()
 		default:
 			return false
 		}
@@ -181,6 +191,62 @@ func (w *window) selectAdjacent(delta int) {
 		next = n - 1
 	}
 	w.threadSel.SetSelected(uint(next))
+}
+
+// toggleStar flips the star on the open message via the toolbar button (which
+// runs the optimistic label change). No-op when nothing is open.
+func (w *window) toggleStar() {
+	if w.openMsg.GmailID == "" {
+		return
+	}
+	w.starBtn.SetActive(!w.starBtn.Active())
+}
+
+// goBack collapses the reader back to the thread list — meaningful when the
+// window is narrow enough that the panes are stacked.
+func (w *window) goBack() {
+	w.innerSplit.SetShowContent(false)
+}
+
+// showShortcuts presents a dialog listing the keyboard shortcuts.
+func (w *window) showShortcuts() {
+	rows := [][2]string{
+		{"j / k", "Next / previous conversation"},
+		{"r", "Reply"},
+		{"f", "Forward"},
+		{"a / e", "Archive"},
+		{"# / Delete", "Move to Trash"},
+		{"s", "Star / unstar"},
+		{"c", "Compose"},
+		{"/", "Search"},
+		{"Esc", "Back to list"},
+		{"?", "Keyboard shortcuts"},
+	}
+	grid := gtk.NewGrid()
+	grid.SetRowSpacing(10)
+	grid.SetColumnSpacing(24)
+	setMargins(grid, 18, 18, 18, 18)
+	for i, r := range rows {
+		key := gtk.NewLabel(r[0])
+		key.SetXAlign(1)
+		key.AddCSSClass("heading")
+		desc := gtk.NewLabel(r[1])
+		desc.SetXAlign(0)
+		desc.SetHExpand(true)
+		grid.Attach(key, 0, i, 1, 1)
+		grid.Attach(desc, 1, i, 1, 1)
+	}
+
+	tv := adw.NewToolbarView()
+	tv.AddTopBar(adw.NewHeaderBar())
+	tv.SetContent(grid)
+
+	dialog := adw.NewDialog()
+	dialog.SetTitle("Keyboard Shortcuts")
+	dialog.SetChild(tv)
+	dialog.SetContentWidth(380)
+	dialog.SetFollowsContentSize(true)
+	dialog.Present(w.win)
 }
 
 // addBreakpoints collapses the panes as the window narrows: below ~860sp the
@@ -315,6 +381,11 @@ func (w *window) buildSidebar() *adw.NavigationPage {
 	prefsBtn.SetSensitive(w.deps.AISettings != nil)
 	prefsBtn.ConnectClicked(w.openSettings)
 	hb.PackEnd(prefsBtn)
+
+	shortcutsBtn := gtk.NewButtonFromIconName("preferences-desktop-keyboard-shortcuts-symbolic")
+	shortcutsBtn.SetTooltipText("Keyboard shortcuts (?)")
+	shortcutsBtn.ConnectClicked(w.showShortcuts)
+	hb.PackEnd(shortcutsBtn)
 
 	tv := adw.NewToolbarView()
 	tv.AddTopBar(hb)
