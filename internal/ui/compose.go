@@ -1,0 +1,177 @@
+package ui
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"strings"
+
+	"github.com/diamondburned/gotk4-adwaita/pkg/adw"
+	"github.com/diamondburned/gotk4/pkg/gtk/v4"
+	"github.com/jsnjack/mailbox/internal/dispatch"
+	"github.com/jsnjack/mailbox/internal/model"
+)
+
+// openCompose opens a compose window prefilled from init. aiContext, when
+// non-empty and an assistant is configured, enables an "AI draft" button that
+// streams a drafted reply into the body. title labels the window.
+func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string) {
+	if w.deps.Send == nil {
+		return
+	}
+
+	toEntry := gtk.NewEntry()
+	toEntry.SetPlaceholderText("To")
+	toEntry.SetText(init.To)
+	toEntry.SetHExpand(true)
+
+	ccEntry := gtk.NewEntry()
+	ccEntry.SetPlaceholderText("Cc")
+	ccEntry.SetText(init.Cc)
+
+	subjEntry := gtk.NewEntry()
+	subjEntry.SetPlaceholderText("Subject")
+	subjEntry.SetText(init.Subject)
+
+	bodyView := gtk.NewTextView()
+	bodyView.SetWrapMode(gtk.WrapWordChar)
+	bodyView.SetVExpand(true)
+	bodyView.SetLeftMargin(8)
+	bodyView.SetTopMargin(8)
+	buf := bodyView.Buffer()
+	buf.SetText(init.Body)
+
+	scroller := gtk.NewScrolledWindow()
+	scroller.SetVExpand(true)
+	scroller.SetHExpand(true)
+	scroller.SetChild(bodyView)
+
+	status := gtk.NewLabel("")
+	status.SetXAlign(0)
+	status.SetVisible(false)
+
+	box := gtk.NewBox(gtk.OrientationVertical, 6)
+	setMargins(box, 12, 12, 12, 12)
+	box.Append(toEntry)
+	box.Append(ccEntry)
+	box.Append(subjEntry)
+	box.Append(scroller)
+	box.Append(status)
+
+	hb := adw.NewHeaderBar()
+	send := gtk.NewButtonWithLabel("Send")
+	send.AddCSSClass("suggested-action")
+	hb.PackStart(send)
+
+	tv := adw.NewToolbarView()
+	tv.AddTopBar(hb)
+	tv.SetContent(box)
+
+	win := adw.NewWindow()
+	win.SetTitle(title)
+	win.SetDefaultSize(640, 560)
+	win.SetContent(tv)
+
+	aiCtx, cancelAI := context.WithCancel(context.Background())
+	win.ConnectCloseRequest(func() bool {
+		cancelAI()
+		return false
+	})
+
+	send.ConnectClicked(func() {
+		msg := model.OutgoingMessage{
+			From:       w.deps.AccountEmail,
+			To:         strings.TrimSpace(toEntry.Text()),
+			Cc:         strings.TrimSpace(ccEntry.Text()),
+			Subject:    subjEntry.Text(),
+			Body:       bodyText(buf),
+			InReplyTo:  init.InReplyTo,
+			References: init.References,
+			ThreadID:   init.ThreadID,
+		}
+		send.SetSensitive(false)
+		status.SetVisible(true)
+		status.SetText("Sending…")
+		go func() {
+			err := w.deps.Send(context.Background(), msg)
+			dispatch.Main(func() {
+				if err != nil {
+					slog.Warn("ui: send", "err", err)
+					status.SetText("Send failed: " + err.Error())
+					send.SetSensitive(true)
+					return
+				}
+				win.Close()
+			})
+		}()
+	})
+
+	if w.deps.Assistant != nil && aiContext != "" {
+		aiBtn := gtk.NewButtonWithLabel("AI draft")
+		aiBtn.SetTooltipText("Draft this reply with AI")
+		aiBtn.ConnectClicked(func() {
+			aiBtn.SetSensitive(false)
+			buf.SetText("")
+			go func() {
+				ch, err := w.deps.Assistant.DraftReply(aiCtx, aiContext, "")
+				if err != nil {
+					msg := err.Error()
+					dispatch.Main(func() {
+						buf.SetText("AI error: " + msg)
+						aiBtn.SetSensitive(true)
+					})
+					return
+				}
+				var acc strings.Builder
+				for c := range ch {
+					cc := c
+					dispatch.Main(func() {
+						if cc.Err == nil {
+							acc.WriteString(cc.Text)
+							buf.SetText(acc.String())
+						}
+					})
+				}
+				dispatch.Main(func() { aiBtn.SetSensitive(true) })
+			}()
+		})
+		hb.PackEnd(aiBtn)
+	}
+
+	win.SetVisible(true)
+}
+
+// bodyText returns the full text content of a text buffer.
+func bodyText(buf *gtk.TextBuffer) string {
+	start, end := buf.Bounds()
+	return buf.Text(start, end, false)
+}
+
+// ensureRePrefix prefixes "Re: " unless the subject already has one.
+func ensureRePrefix(subject string) string {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(subject)), "re:") {
+		return subject
+	}
+	return "Re: " + subject
+}
+
+// ensureFwdPrefix prefixes "Fwd: " unless the subject already has one.
+func ensureFwdPrefix(subject string) string {
+	low := strings.ToLower(strings.TrimSpace(subject))
+	if strings.HasPrefix(low, "fwd:") || strings.HasPrefix(low, "fw:") {
+		return subject
+	}
+	return "Fwd: " + subject
+}
+
+// quoteOriginal renders a simple quoted block of the original message.
+func quoteOriginal(m model.Message, body string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "\n\nOn %s, %s wrote:\n", m.InternalDate.Format("Jan 2, 2006 15:04"), displayFrom(m))
+	for _, line := range strings.Split(body, "\n") {
+		b.WriteString("> ")
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	return b.String()
+}

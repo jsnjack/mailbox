@@ -1,0 +1,9 @@
+bin/
+/mailbox
+.monova*
+*.rpm
+rpmbuild/
+mailbox.db
+# OAuth client secrets — never commit
+credentials.json
+client_secret*.json
