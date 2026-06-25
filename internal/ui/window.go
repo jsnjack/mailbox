@@ -78,6 +78,7 @@ type window struct {
 	archiveBtn     *gtk.Button
 	trashBtn       *gtk.Button
 	unreadBtn      *gtk.Button
+	labelsBtn      *gtk.MenuButton
 	starBtn        *gtk.ToggleButton
 	imagesBtn      *gtk.ToggleButton
 	translateBtn   *gtk.Button
@@ -629,6 +630,15 @@ func (w *window) buildReader() *adw.NavigationPage {
 	w.unreadBtn.SetTooltipText("Mark unread")
 	w.unreadBtn.ConnectClicked(w.onMarkUnread)
 
+	w.labelsBtn = gtk.NewMenuButton()
+	w.labelsBtn.SetIconName("user-bookmarks-symbolic")
+	w.labelsBtn.SetTooltipText("Labels")
+	labelsPop := gtk.NewPopover()
+	w.labelsBtn.SetPopover(labelsPop)
+	w.labelsBtn.SetCreatePopupFunc(func(*gtk.MenuButton) {
+		labelsPop.SetChild(w.buildLabelsMenu())
+	})
+
 	w.starBtn = gtk.NewToggleButton()
 	w.starBtn.SetIconName("starred-symbolic")
 	w.starBtn.SetTooltipText("Star")
@@ -653,6 +663,7 @@ func (w *window) buildReader() *adw.NavigationPage {
 	hb.PackStart(w.archiveBtn)
 	hb.PackStart(w.trashBtn)
 	hb.PackStart(w.unreadBtn)
+	hb.PackStart(w.labelsBtn)
 	hb.PackStart(w.starBtn)
 	hb.PackEnd(w.imagesBtn)
 	hb.PackEnd(w.draftBtn)
@@ -670,6 +681,7 @@ func (w *window) setActionsSensitive(on bool) {
 	w.archiveBtn.SetSensitive(canModify)
 	w.trashBtn.SetSensitive(canModify)
 	w.unreadBtn.SetSensitive(canModify)
+	w.labelsBtn.SetSensitive(canModify)
 	w.starBtn.SetSensitive(canModify)
 	canSend := on && w.deps.Send != nil
 	w.replyBtn.SetSensitive(canSend)
@@ -1067,6 +1079,53 @@ func (w *window) onToggleStar() {
 	} else {
 		w.applyLabels([]model.Message{w.openMsg}, nil, []string{model.LabelStarred}, nil)
 	}
+}
+
+// buildLabelsMenu builds the popover content for the labels button: a checkbox
+// per user label, ticked when the open thread already carries it. Toggling
+// applies or removes that label across the whole conversation.
+func (w *window) buildLabelsMenu() gtk.Widgetter {
+	box := gtk.NewBox(gtk.OrientationVertical, 2)
+	setMargins(box, 8, 8, 8, 8)
+	if w.openThreadID == "" {
+		box.Append(gtk.NewLabel("No conversation open"))
+		return box
+	}
+	ctx := context.Background()
+	labels, err := w.deps.Store.ListLabels(ctx, w.activeID)
+	if err != nil {
+		slog.Warn("ui: labels menu", "err", err)
+		box.Append(gtk.NewLabel("Could not load labels"))
+		return box
+	}
+	applied, err := w.deps.Store.ThreadLabels(ctx, w.activeID, w.openThreadID)
+	if err != nil {
+		slog.Warn("ui: thread labels", "err", err)
+		applied = map[string]bool{}
+	}
+	msgs := w.openThreadMsgs
+	any := false
+	for _, l := range labels {
+		if l.Type != model.LabelUser {
+			continue
+		}
+		any = true
+		labelID := l.GmailID
+		cb := gtk.NewCheckButtonWithLabel(l.Name)
+		cb.SetActive(applied[labelID]) // set before connecting so it doesn't self-fire
+		cb.ConnectToggled(func() {
+			if cb.Active() {
+				w.applyLabels(msgs, []string{labelID}, nil, nil)
+			} else {
+				w.applyLabels(msgs, nil, []string{labelID}, nil)
+			}
+		})
+		box.Append(cb)
+	}
+	if !any {
+		box.Append(gtk.NewLabel("No labels"))
+	}
+	return box
 }
 
 func (w *window) onToggleImages() {

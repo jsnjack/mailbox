@@ -108,6 +108,29 @@ func (s *Store) ListThreadMessages(ctx context.Context, accountID int64, threadI
 	return scanMessagesAndClose(rows)
 }
 
+// ThreadLabels returns the set of label ids applied to any message in the
+// thread — used to reflect which labels are currently on a conversation.
+func (s *Store) ThreadLabels(ctx context.Context, accountID int64, threadID string) (map[string]bool, error) {
+	rows, err := s.reader.QueryContext(ctx, `
+		SELECT DISTINCT ml.label_id
+		FROM message_labels ml
+		JOIN messages m ON m.rowid = ml.message_rowid
+		WHERE m.account_id = ? AND m.thread_id = ?`, accountID, threadID)
+	if err != nil {
+		return nil, fmt.Errorf("thread labels: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := make(map[string]bool)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan thread label: %w", err)
+		}
+		out[id] = true
+	}
+	return out, rows.Err()
+}
+
 // GetThreadSummary returns the summary for a single thread (all messages, not
 // label-scoped) — used to present search hits as threads.
 func (s *Store) GetThreadSummary(ctx context.Context, accountID int64, threadID string) (model.ThreadSummary, error) {

@@ -59,6 +59,36 @@ func TestListThreadsByLabel(t *testing.T) {
 	}
 }
 
+func TestThreadLabels(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	acc := seedAccount(t, s)
+
+	for _, m := range []model.Message{
+		{AccountID: acc, GmailID: "a1", ThreadID: "A", Subject: "one", Labels: []string{"INBOX", "UNREAD"}},
+		{AccountID: acc, GmailID: "a2", ThreadID: "A", Subject: "two", Labels: []string{"INBOX", "Label_7"}},
+		{AccountID: acc, GmailID: "b1", ThreadID: "B", Subject: "other", Labels: []string{"SENT"}},
+	} {
+		if _, err := s.UpsertMessage(ctx, m); err != nil {
+			t.Fatalf("upsert %s: %v", m.GmailID, err)
+		}
+	}
+
+	got, err := s.ThreadLabels(ctx, acc, "A")
+	if err != nil {
+		t.Fatalf("ThreadLabels: %v", err)
+	}
+	// Union across both messages in thread A, deduplicated.
+	for _, want := range []string{"INBOX", "UNREAD", "Label_7"} {
+		if !got[want] {
+			t.Fatalf("thread A missing label %q in %v", want, got)
+		}
+	}
+	if got["SENT"] {
+		t.Fatalf("thread A should not carry SENT (that's thread B): %v", got)
+	}
+}
+
 func TestListAllThreads(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
