@@ -113,6 +113,7 @@ type OutgoingMessage struct {
 	From        string
 	To          string
 	Cc          string
+	Bcc         string
 	Subject     string
 	Body        string // plain text
 	InReplyTo   string // original Message-ID header

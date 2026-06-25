@@ -33,6 +33,10 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 	ccEntry.SetPlaceholderText("Cc")
 	ccEntry.SetText(init.Cc)
 
+	bccEntry := gtk.NewEntry()
+	bccEntry.SetPlaceholderText("Bcc")
+	bccEntry.SetText(init.Bcc)
+
 	subjEntry := gtk.NewEntry()
 	subjEntry.SetPlaceholderText("Subject")
 	subjEntry.SetText(init.Subject)
@@ -62,6 +66,7 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 	setMargins(box, 12, 12, 12, 12)
 	box.Append(toEntry)
 	box.Append(ccEntry)
+	box.Append(bccEntry)
 	box.Append(subjEntry)
 	box.Append(attachRow)
 	box.Append(scroller)
@@ -102,6 +107,7 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 			From:        w.deps.AccountEmail,
 			To:          strings.TrimSpace(toEntry.Text()),
 			Cc:          strings.TrimSpace(ccEntry.Text()),
+			Bcc:         strings.TrimSpace(bccEntry.Text()),
 			Subject:     subjEntry.Text(),
 			Body:        bodyText(buf),
 			InReplyTo:   init.InReplyTo,

@@ -29,6 +29,10 @@ func BuildMIME(m model.OutgoingMessage) ([]byte, error) {
 	if strings.TrimSpace(m.Cc) != "" {
 		header("Cc", m.Cc)
 	}
+	// Gmail honors a Bcc header for delivery and strips it from recipients' copies.
+	if strings.TrimSpace(m.Bcc) != "" {
+		header("Bcc", m.Bcc)
+	}
 	header("Subject", mime.QEncoding.Encode("utf-8", m.Subject))
 	header("Date", time.Now().Format(time.RFC1123Z))
 	header("Message-ID", generateMessageID(m.From))
