@@ -58,6 +58,7 @@ type window struct {
 	threadView     *gtk.ListView
 	threadStack    *gtk.Stack // "list" vs "empty" placeholder
 	readerStack    *gtk.Stack // "message" vs "empty" placeholder
+	markReadBtn    *gtk.Button
 	searchEntry    *gtk.SearchEntry
 	suppressSearch bool // guards SetText from firing a search during label switch
 	threadByID     map[string]model.ThreadSummary
@@ -447,11 +448,11 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 	content.Append(w.threadStack)
 
 	hb := adw.NewHeaderBar()
-	markReadBtn := gtk.NewButtonFromIconName("mail-mark-read-symbolic")
-	markReadBtn.SetTooltipText("Mark all as read")
-	markReadBtn.SetSensitive(w.deps.MarkAllRead != nil)
-	markReadBtn.ConnectClicked(w.onMarkAllRead)
-	hb.PackEnd(markReadBtn)
+	w.markReadBtn = gtk.NewButtonFromIconName("mail-mark-read-symbolic")
+	w.markReadBtn.SetTooltipText("Mark all as read")
+	w.markReadBtn.SetSensitive(w.deps.MarkAllRead != nil)
+	w.markReadBtn.ConnectClicked(w.onMarkAllRead)
+	hb.PackEnd(w.markReadBtn)
 
 	tv := adw.NewToolbarView()
 	tv.AddTopBar(hb)
@@ -460,7 +461,7 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 }
 
 func (w *window) onMarkAllRead() {
-	if w.deps.MarkAllRead == nil {
+	if w.deps.MarkAllRead == nil || w.current == allMailID {
 		return
 	}
 	label := w.current
@@ -877,6 +878,9 @@ func (w *window) clearReader() {
 
 func (w *window) selectLabel(labelID string) {
 	w.current = labelID
+	// "Mark all read" is meaningful per folder, but not for the All Mail view
+	// (it spans every label and Gmail offers no such bulk op there).
+	w.markReadBtn.SetSensitive(w.deps.MarkAllRead != nil && labelID != allMailID)
 	// Switching label clears any active search without re-triggering it.
 	w.suppressSearch = true
 	w.searchEntry.SetText("")
