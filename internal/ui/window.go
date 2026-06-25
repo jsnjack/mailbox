@@ -28,10 +28,12 @@ type window struct {
 	app  *adw.Application
 	deps Deps
 
-	win      *adw.ApplicationWindow
-	labelBox *gtk.ListBox
-	labels   []model.Label
-	current  string
+	win        *adw.ApplicationWindow
+	outerSplit *adw.NavigationSplitView
+	innerSplit *adw.NavigationSplitView
+	labelBox   *gtk.ListBox
+	labels     []model.Label
+	current    string
 
 	// virtualized thread list: a StringList of gmail ids drives a ListView; the
 	// factory builds row widgets only for visible items, looked up in msgByID.
@@ -71,21 +73,44 @@ func newWindow(app *adw.Application, deps Deps) *window {
 func (w *window) build() {
 	w.win = adw.NewApplicationWindow(&w.app.Application)
 	w.win.SetTitle("Mailbox")
-	w.win.SetDefaultSize(1200, 760)
+	winW, winH := 1200, 760
+	if s := os.Getenv("MAILBOX_WIN_SIZE"); s != "" {
+		if _, err := fmt.Sscanf(s, "%dx%d", &winW, &winH); err != nil {
+			winW, winH = 1200, 760
+		}
+	}
+	w.win.SetDefaultSize(winW, winH)
 
-	inner := adw.NewNavigationSplitView()
-	inner.SetMinSidebarWidth(340)
-	inner.SetMaxSidebarWidth(520)
-	inner.SetSidebar(w.buildThreadList())
-	inner.SetContent(w.buildReader())
+	w.innerSplit = adw.NewNavigationSplitView()
+	w.innerSplit.SetMinSidebarWidth(340)
+	w.innerSplit.SetMaxSidebarWidth(520)
+	w.innerSplit.SetSidebar(w.buildThreadList())
+	w.innerSplit.SetContent(w.buildReader())
 
-	outer := adw.NewNavigationSplitView()
-	outer.SetMinSidebarWidth(220)
-	outer.SetMaxSidebarWidth(300)
-	outer.SetSidebar(w.buildSidebar())
-	outer.SetContent(adw.NewNavigationPage(inner, "Mail"))
+	w.outerSplit = adw.NewNavigationSplitView()
+	w.outerSplit.SetMinSidebarWidth(220)
+	w.outerSplit.SetMaxSidebarWidth(300)
+	w.outerSplit.SetSidebar(w.buildSidebar())
+	w.outerSplit.SetContent(adw.NewNavigationPage(w.innerSplit, "Mail"))
 
-	w.win.SetContent(outer)
+	w.win.SetContent(w.outerSplit)
+	w.addBreakpoints()
+}
+
+// addBreakpoints collapses the panes as the window narrows: below ~860sp the
+// accounts sidebar collapses (list + reader), and below ~520sp the thread list
+// collapses too (single pane with back navigation).
+func (w *window) addBreakpoints() {
+	medium := adw.NewBreakpoint(adw.NewBreakpointConditionLength(
+		adw.BreakpointConditionMaxWidth, 860, adw.LengthUnitSp))
+	medium.AddSetter(w.outerSplit, "collapsed", coreglib.NewValue(true))
+	w.win.AddBreakpoint(medium)
+
+	narrow := adw.NewBreakpoint(adw.NewBreakpointConditionLength(
+		adw.BreakpointConditionMaxWidth, 520, adw.LengthUnitSp))
+	narrow.AddSetter(w.outerSplit, "collapsed", coreglib.NewValue(true))
+	narrow.AddSetter(w.innerSplit, "collapsed", coreglib.NewValue(true))
+	w.win.AddBreakpoint(narrow)
 }
 
 func (w *window) present() {
@@ -334,11 +359,15 @@ func (w *window) selectLabel(labelID string) {
 		w.msgByID[m.GmailID] = m
 	}
 	w.threadModel.Splice(0, w.threadModel.NItems(), ids)
+	// When collapsed, reveal the thread list for the chosen label.
+	w.outerSplit.SetShowContent(true)
 }
 
 func (w *window) showMessage(m model.Message) {
 	w.openMsg = m
 	w.setActionsSensitive(true)
+	// When collapsed, navigate to the reader.
+	w.innerSplit.SetShowContent(true)
 
 	// Reflect the starred state without re-triggering the toggle handler.
 	w.updatingStar = true
