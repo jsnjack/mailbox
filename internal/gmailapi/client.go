@@ -193,6 +193,28 @@ func (c *Client) Send(ctx context.Context, raw []byte, threadID string) (string,
 	return sent.Id, nil
 }
 
+// GetAttachment downloads and decodes an attachment's bytes.
+func (c *Client) GetAttachment(ctx context.Context, messageID, attachmentID string) ([]byte, error) {
+	var body *gmail.MessagePartBody
+	err := c.do(ctx, costMessageGet, func() error {
+		r, e := c.srv.Users.Messages.Attachments.Get("me", messageID, attachmentID).Context(ctx).Do()
+		body = r
+		return e
+	})
+	if err != nil {
+		return nil, fmt.Errorf("get attachment %s: %w", attachmentID, err)
+	}
+	data, err := base64.URLEncoding.DecodeString(body.Data)
+	if err != nil {
+		// Gmail attachment data is web-safe base64, sometimes unpadded.
+		data, err = base64.RawURLEncoding.DecodeString(body.Data)
+		if err != nil {
+			return nil, fmt.Errorf("decode attachment %s: %w", attachmentID, err)
+		}
+	}
+	return data, nil
+}
+
 // ModifyLabels adds and removes Gmail label ids on a message (e.g. remove UNREAD
 // to mark read, remove INBOX to archive, add/remove STARRED).
 func (c *Client) ModifyLabels(ctx context.Context, id string, add, remove []string) error {

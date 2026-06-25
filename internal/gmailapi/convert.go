@@ -42,6 +42,34 @@ func ToBody(m *gmail.Message) model.MessageBody {
 	return model.MessageBody{Text: text, HTML: html}
 }
 
+// AttachmentsFromMessage extracts attachment metadata (named parts with an
+// attachmentId) from a full-format Gmail message. Bytes are fetched separately.
+func AttachmentsFromMessage(m *gmail.Message) []model.Attachment {
+	if m == nil || m.Payload == nil {
+		return nil
+	}
+	var out []model.Attachment
+	var walk func(p *gmail.MessagePart)
+	walk = func(p *gmail.MessagePart) {
+		if p == nil {
+			return
+		}
+		if p.Filename != "" && p.Body != nil && p.Body.AttachmentId != "" {
+			out = append(out, model.Attachment{
+				GmailAttID: p.Body.AttachmentId,
+				Filename:   p.Filename,
+				MimeType:   p.MimeType,
+				SizeBytes:  p.Body.Size,
+			})
+		}
+		for _, c := range p.Parts {
+			walk(c)
+		}
+	}
+	walk(m.Payload)
+	return out
+}
+
 // ToLabel converts a Gmail label into the domain model.
 func ToLabel(accountID int64, l *gmail.Label) model.Label {
 	typ := model.LabelUser

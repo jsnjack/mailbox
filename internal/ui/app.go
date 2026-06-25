@@ -28,6 +28,9 @@ type LabelModifier func(ctx context.Context, accountID int64, gmailID string, ad
 // Sender transmits an outgoing message.
 type Sender func(ctx context.Context, msg model.OutgoingMessage) error
 
+// AttachmentOpener ensures an attachment is cached locally and returns its path.
+type AttachmentOpener func(ctx context.Context, gmailID string, attID int64) (string, error)
+
 // Deps are the dependencies the UI needs. FetchBody, ModifyLabels and Hub may be
 // nil (the UI then renders the cache read-only without live updates, on-demand
 // bodies, or message actions).
@@ -39,6 +42,7 @@ type Deps struct {
 	FetchBody    BodyFetcher
 	ModifyLabels LabelModifier
 	Send         Sender
+	OpenAttach   AttachmentOpener
 	Assistant    *ai.Assistant
 }
 

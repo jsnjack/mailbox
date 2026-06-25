@@ -50,14 +50,17 @@ a 60s background incremental sync updates label counts through `dispatch`→`Hub
 Reply / forward / new compose in a separate window (text/plain via
 `gmailapi.BuildMIME` + `messages.send`, threading headers + threadId on replies);
 the compose window has an AI-draft button that streams a reply into the body.
-Translate / draft-reply stream into a window via the `ai` provider.
+Translate / draft-reply stream into a window via the `ai` provider. Incoming
+attachments are extracted on body fetch (`ReplaceAttachments`) and shown as chips
+in the reader; clicking one downloads it (content-addressed under the cache dir)
+and opens it with `xdg-open`.
 
 The thread list is a virtualized `gtk.ListView`: a `gtk.StringList` of gmail ids
 drives a `SignalListItemFactory` that builds row widgets only for visible items
 (looked up in an in-memory `msgByID` map). It loads up to `threadListCap` (5000)
 messages of metadata per label; true paging-on-scroll is a further optimization.
-Compose is text-only for now (attachments + the resilient outbox sweeper are
-follow-ups; send is currently direct). The window collapses responsively via
+Compose is text-only for now (sending attachments + the resilient outbox sweeper
+are follow-ups; send is currently direct). The window collapses responsively via
 `adw.Breakpoint` (3 panes → list+reader below ~860sp → single pane below ~520sp),
 with `SetShowContent` driving navigation when collapsed. Test hooks:
 `MAILBOX_OPEN_FIRST=1` opens the newest message on launch; `MAILBOX_WIN_SIZE=WxH`

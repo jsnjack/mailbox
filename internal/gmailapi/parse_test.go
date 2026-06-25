@@ -68,6 +68,24 @@ func TestExtractBodyMultipart(t *testing.T) {
 	}
 }
 
+func TestAttachmentsFromMessage(t *testing.T) {
+	m := &gmail.Message{Payload: &gmail.MessagePart{
+		MimeType: "multipart/mixed",
+		Parts: []*gmail.MessagePart{
+			{MimeType: "text/plain", Body: &gmail.MessagePartBody{Data: b64("hi")}},
+			{Filename: "doc.pdf", MimeType: "application/pdf", Body: &gmail.MessagePartBody{AttachmentId: "att-1", Size: 4096}},
+			{Filename: "pic.png", MimeType: "image/png", Body: &gmail.MessagePartBody{AttachmentId: "att-2", Size: 8192}},
+		},
+	}}
+	atts := AttachmentsFromMessage(m)
+	if len(atts) != 2 {
+		t.Fatalf("got %d attachments, want 2", len(atts))
+	}
+	if atts[0].Filename != "doc.pdf" || atts[0].GmailAttID != "att-1" || atts[0].SizeBytes != 4096 {
+		t.Fatalf("unexpected attachment: %+v", atts[0])
+	}
+}
+
 func TestHasAttachments(t *testing.T) {
 	withAtt := &gmail.MessagePart{
 		MimeType: "multipart/mixed",

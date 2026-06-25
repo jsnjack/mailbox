@@ -6,6 +6,7 @@ import (
 	"html"
 	"log/slog"
 	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/diamondburned/gotk4-adwaita/pkg/adw"
@@ -45,6 +46,7 @@ type window struct {
 	msgByID     map[string]model.Message
 
 	header    *gtk.Label
+	attachBox *gtk.Box // chips for the open message's attachments
 	webview   *webkit.WebView
 	sanitizer *bluemonday.Policy
 
@@ -241,8 +243,13 @@ func (w *window) buildReader() *adw.NavigationPage {
 	w.header.SetWrap(true)
 	setMargins(w.header, 12, 12, 8, 8)
 
+	w.attachBox = gtk.NewBox(gtk.OrientationHorizontal, 6)
+	setMargins(w.attachBox, 12, 12, 0, 8)
+	w.attachBox.SetVisible(false)
+
 	box := gtk.NewBox(gtk.OrientationVertical, 0)
 	box.Append(w.header)
+	box.Append(w.attachBox)
 	box.Append(w.webview)
 
 	empty := adw.NewStatusPage()
@@ -423,11 +430,13 @@ func (w *window) renderBody(m model.Message) {
 
 	if body, err := w.deps.Store.GetBody(context.Background(), m.RowID); err == nil && (body.HTML != "" || body.Text != "") {
 		w.loadBody(body)
+		w.populateAttachments(m)
 		return
 	}
 
 	if w.deps.FetchBody == nil {
 		w.webview.LoadHtml(wrapHTML("<p>"+html.EscapeString(m.Snippet)+"</p>"), "about:blank")
+		w.populateAttachments(m)
 		return
 	}
 
@@ -442,8 +451,56 @@ func (w *window) renderBody(m model.Message) {
 			}
 			body, _ := w.deps.Store.GetBody(context.Background(), m.RowID)
 			w.loadBody(body)
+			w.populateAttachments(m)
 		})
 	}()
+}
+
+// populateAttachments rebuilds the attachment chip bar for the open message.
+func (w *window) populateAttachments(m model.Message) {
+	for child := w.attachBox.FirstChild(); child != nil; child = w.attachBox.FirstChild() {
+		w.attachBox.Remove(child)
+	}
+	atts, err := w.deps.Store.ListAttachments(context.Background(), m.RowID)
+	if err != nil {
+		slog.Warn("ui: list attachments", "id", m.GmailID, "err", err)
+	}
+	if len(atts) == 0 || w.deps.OpenAttach == nil {
+		w.attachBox.SetVisible(false)
+		return
+	}
+	for _, a := range atts {
+		att := a
+		btn := gtk.NewButton()
+		btn.SetChild(attachmentChip(att))
+		btn.SetTooltipText(att.MimeType)
+		btn.ConnectClicked(func() { w.openAttachment(m.GmailID, att.ID) })
+		w.attachBox.Append(btn)
+	}
+	w.attachBox.SetVisible(true)
+}
+
+func (w *window) openAttachment(gmailID string, attID int64) {
+	if w.deps.OpenAttach == nil {
+		return
+	}
+	go func() {
+		path, err := w.deps.OpenAttach(context.Background(), gmailID, attID)
+		if err != nil {
+			slog.Warn("ui: open attachment", "id", gmailID, "err", err)
+			return
+		}
+		if err := exec.Command("xdg-open", path).Start(); err != nil {
+			slog.Warn("ui: xdg-open", "path", path, "err", err)
+		}
+	}()
+}
+
+func attachmentChip(a model.Attachment) *gtk.Box {
+	box := gtk.NewBox(gtk.OrientationHorizontal, 4)
+	box.Append(gtk.NewImageFromIconName("mail-attachment-symbolic"))
+	box.Append(gtk.NewLabel(a.Filename))
+	return box
 }
 
 func (w *window) onArchive() {

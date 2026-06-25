@@ -76,6 +76,9 @@ func launchUI() error {
 		deps.Send = func(ctx context.Context, msg model.OutgoingMessage) error {
 			return engine.Send(ctx, client, acc.ID, msg)
 		}
+		deps.OpenAttach = func(ctx context.Context, gmailID string, attID int64) (string, error) {
+			return engine.OpenAttachment(ctx, client, gmailID, attID)
+		}
 		go backgroundSync(ctx, engine, client, acc.ID)
 	}
 

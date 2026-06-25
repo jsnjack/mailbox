@@ -2,12 +2,17 @@ package syncer
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 
+	"github.com/jsnjack/mailbox/internal/config"
 	"github.com/jsnjack/mailbox/internal/gmailapi"
 	"github.com/jsnjack/mailbox/internal/model"
 	"github.com/jsnjack/mailbox/internal/store"
@@ -120,8 +125,48 @@ func (e *Engine) FetchBody(ctx context.Context, c *gmailapi.Client, accountID in
 	if err := e.Store.UpsertBody(ctx, body); err != nil {
 		return err
 	}
+	if err := e.Store.ReplaceAttachments(ctx, m.RowID, gmailapi.AttachmentsFromMessage(full)); err != nil {
+		slog.Default().Warn("store attachments", "id", gmailID, "err", err)
+	}
 	e.publish(Change{Kind: MessageUpserted, AccountID: accountID, GmailID: gmailID})
 	return nil
+}
+
+// OpenAttachment ensures an attachment's bytes are cached on disk (downloading
+// them if needed) and returns the local file path. The file is content-addressed
+// by SHA-256 under the attachment cache directory.
+func (e *Engine) OpenAttachment(ctx context.Context, c *gmailapi.Client, gmailID string, attID int64) (string, error) {
+	a, err := e.Store.GetAttachmentByID(ctx, attID)
+	if err != nil {
+		return "", err
+	}
+	if a.DiskPath != "" {
+		if _, err := os.Stat(a.DiskPath); err == nil {
+			return a.DiskPath, nil
+		}
+	}
+	data, err := c.GetAttachment(ctx, gmailID, a.GmailAttID)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(data)
+	sha := hex.EncodeToString(sum[:])
+	dir, err := config.AttachmentsDir()
+	if err != nil {
+		return "", err
+	}
+	sub := filepath.Join(dir, sha[:2])
+	if err := os.MkdirAll(sub, 0o700); err != nil {
+		return "", fmt.Errorf("create attachment dir: %w", err)
+	}
+	path := filepath.Join(sub, sha+filepath.Ext(a.Filename))
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return "", fmt.Errorf("write attachment: %w", err)
+	}
+	if err := e.Store.SetAttachmentDownloaded(ctx, attID, sha, path); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 // Send builds and transmits an outgoing message via Gmail. After it returns, the
