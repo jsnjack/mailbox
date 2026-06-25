@@ -45,9 +45,15 @@ func TestBuildMIME(t *testing.T) {
 	}
 }
 
-func TestBuildMIMENoRecipient(t *testing.T) {
-	if _, err := BuildMIME(model.OutgoingMessage{From: "me@example.com", Subject: "x"}); err == nil {
-		t.Fatal("expected error with no recipient")
+func TestBuildMIMEAllowsEmptyRecipient(t *testing.T) {
+	// Drafts may have no recipient yet; BuildMIME must not require one (the
+	// recipient check lives in the send path).
+	raw, err := BuildMIME(model.OutgoingMessage{From: "me@example.com", Subject: "draft"})
+	if err != nil {
+		t.Fatalf("BuildMIME with empty To: %v", err)
+	}
+	if strings.Contains(string(raw), "\r\nTo:") {
+		t.Errorf("did not expect a To header:\n%s", raw)
 	}
 }
 

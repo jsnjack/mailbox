@@ -193,6 +193,24 @@ func (c *Client) Send(ctx context.Context, raw []byte, threadID string) (string,
 	return sent.Id, nil
 }
 
+// SaveDraft stores a raw RFC 5322 message as a Gmail draft, returning the draft id.
+func (c *Client) SaveDraft(ctx context.Context, raw []byte, threadID string) (string, error) {
+	var draft *gmail.Draft
+	err := c.do(ctx, costMessageGet, func() error {
+		msg := &gmail.Message{Raw: base64.URLEncoding.EncodeToString(raw)}
+		if threadID != "" {
+			msg.ThreadId = threadID
+		}
+		r, e := c.srv.Users.Drafts.Create("me", &gmail.Draft{Message: msg}).Context(ctx).Do()
+		draft = r
+		return e
+	})
+	if err != nil {
+		return "", fmt.Errorf("create draft: %w", err)
+	}
+	return draft.Id, nil
+}
+
 // GetAttachment downloads and decodes an attachment's bytes.
 func (c *Client) GetAttachment(ctx context.Context, messageID, attachmentID string) ([]byte, error) {
 	var body *gmail.MessagePartBody

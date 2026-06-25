@@ -49,7 +49,8 @@ optimistic `ModifyLabels` + Gmail mirror; opening an unread message marks it rea
 a 60s background incremental sync updates label counts through `dispatch`→`Hub`.
 Reply / forward / new compose in a separate window (text/plain via
 `gmailapi.BuildMIME` + `messages.send`, threading headers + threadId on replies);
-the compose window has an AI-draft button that streams a reply into the body.
+the compose window has an AI-draft button that streams a reply into the body, and
+a Save-draft button (`users.drafts.create`).
 Translate / draft-reply stream into a window via the `ai` provider. Incoming
 attachments are extracted on body fetch (`ReplaceAttachments`) and shown as chips
 in the reader; clicking one downloads it (content-addressed under the cache dir)

@@ -15,14 +15,13 @@ import (
 // The body's newlines are normalized to CRLF. Threading headers are included when
 // present so replies/forwards thread correctly.
 func BuildMIME(m model.OutgoingMessage) ([]byte, error) {
-	if strings.TrimSpace(m.To) == "" {
-		return nil, fmt.Errorf("message has no recipient")
-	}
 	var b bytes.Buffer
 	header := func(k, v string) { fmt.Fprintf(&b, "%s: %s\r\n", k, v) }
 
 	header("From", m.From)
-	header("To", m.To)
+	if strings.TrimSpace(m.To) != "" {
+		header("To", m.To)
+	}
 	if strings.TrimSpace(m.Cc) != "" {
 		header("Cc", m.Cc)
 	}

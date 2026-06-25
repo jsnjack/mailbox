@@ -42,6 +42,7 @@ type Deps struct {
 	FetchBody    BodyFetcher
 	ModifyLabels LabelModifier
 	Send         Sender
+	SaveDraft    Sender
 	OpenAttach   AttachmentOpener
 	Assistant    *ai.Assistant
 }

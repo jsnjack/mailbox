@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -177,6 +178,9 @@ const maxOutboxAttempts = 5
 // retry, and returns the error so the caller can inform the user. After a
 // successful send the message arrives in the local cache via incremental sync.
 func (e *Engine) Send(ctx context.Context, c *gmailapi.Client, accountID int64, msg model.OutgoingMessage) error {
+	if strings.TrimSpace(msg.To) == "" {
+		return fmt.Errorf("message has no recipient")
+	}
 	raw, err := gmailapi.BuildMIME(msg)
 	if err != nil {
 		return err
@@ -186,6 +190,18 @@ func (e *Engine) Send(ctx context.Context, c *gmailapi.Client, accountID int64, 
 			return fmt.Errorf("send failed (%v) and could not queue: %w", err, qerr)
 		}
 		return fmt.Errorf("send failed, queued for retry: %w", err)
+	}
+	return nil
+}
+
+// SaveDraft builds an outgoing message and stores it as a Gmail draft.
+func (e *Engine) SaveDraft(ctx context.Context, c *gmailapi.Client, accountID int64, msg model.OutgoingMessage) error {
+	raw, err := gmailapi.BuildMIME(msg)
+	if err != nil {
+		return err
+	}
+	if _, err := c.SaveDraft(ctx, raw, msg.ThreadID); err != nil {
+		return err
 	}
 	return nil
 }

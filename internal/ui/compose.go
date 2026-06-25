@@ -63,6 +63,12 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 	send.AddCSSClass("suggested-action")
 	hb.PackStart(send)
 
+	var draftBtn *gtk.Button
+	if w.deps.SaveDraft != nil {
+		draftBtn = gtk.NewButtonWithLabel("Save draft")
+		hb.PackStart(draftBtn)
+	}
+
 	tv := adw.NewToolbarView()
 	tv.AddTopBar(hb)
 	tv.SetContent(box)
@@ -78,8 +84,8 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 		return false
 	})
 
-	send.ConnectClicked(func() {
-		msg := model.OutgoingMessage{
+	gather := func() model.OutgoingMessage {
+		return model.OutgoingMessage{
 			From:       w.deps.AccountEmail,
 			To:         strings.TrimSpace(toEntry.Text()),
 			Cc:         strings.TrimSpace(ccEntry.Text()),
@@ -89,6 +95,10 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 			References: init.References,
 			ThreadID:   init.ThreadID,
 		}
+	}
+
+	send.ConnectClicked(func() {
+		msg := gather()
 		send.SetSensitive(false)
 		status.SetVisible(true)
 		status.SetText("Sending…")
@@ -105,6 +115,27 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 			})
 		}()
 	})
+
+	if draftBtn != nil {
+		draftBtn.ConnectClicked(func() {
+			msg := gather()
+			draftBtn.SetSensitive(false)
+			status.SetVisible(true)
+			status.SetText("Saving draft…")
+			go func() {
+				err := w.deps.SaveDraft(context.Background(), msg)
+				dispatch.Main(func() {
+					if err != nil {
+						slog.Warn("ui: save draft", "err", err)
+						status.SetText("Could not save draft: " + err.Error())
+						draftBtn.SetSensitive(true)
+						return
+					}
+					win.Close()
+				})
+			}()
+		})
+	}
 
 	if w.deps.Assistant != nil && aiContext != "" {
 		aiBtn := gtk.NewButtonWithLabel("AI draft")
