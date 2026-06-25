@@ -77,17 +77,15 @@ type window struct {
 	openThreadMsgs []model.Message
 	openMsg        model.Message
 	replyBtn       *gtk.Button
-	replyAllBtn    *gtk.Button
 	forwardBtn     *gtk.Button
 	archiveBtn     *gtk.Button
 	trashBtn       *gtk.Button
-	unreadBtn      *gtk.Button
 	labelsBtn      *gtk.MenuButton
 	starBtn        *gtk.ToggleButton
-	imagesBtn      *gtk.ToggleButton
-	translateBtn   *gtk.Button
-	draftBtn       *gtk.Button
-	updatingStar   bool // guards programmatic star-toggle from firing the handler
+	overflowBtn    *gtk.MenuButton // "more actions" menu in the reader header
+	readerMenuPop  *gtk.Popover    // overflow menu content (built lazily)
+	imagesEnabled  bool            // whether remote images are loaded in the reader
+	updatingStar   bool            // guards programmatic star-toggle from firing the handler
 }
 
 func newWindow(app *adw.Application, deps Deps) *window {
@@ -666,29 +664,27 @@ func (w *window) buildReader() *adw.NavigationPage {
 
 	hb := adw.NewHeaderBar()
 
+	// Primary triage actions, icon-only.
 	w.replyBtn = gtk.NewButtonFromIconName("mail-reply-sender-symbolic")
 	w.replyBtn.SetTooltipText("Reply")
 	w.replyBtn.ConnectClicked(w.onReply)
-
-	w.replyAllBtn = gtk.NewButtonFromIconName("mail-reply-all-symbolic")
-	w.replyAllBtn.SetTooltipText("Reply all")
-	w.replyAllBtn.ConnectClicked(w.onReplyAll)
 
 	w.forwardBtn = gtk.NewButtonFromIconName("mail-forward-symbolic")
 	w.forwardBtn.SetTooltipText("Forward")
 	w.forwardBtn.ConnectClicked(w.onForward)
 
-	w.archiveBtn = gtk.NewButtonFromIconName("mail-archive-symbolic")
-	w.archiveBtn.SetTooltipText("Archive")
+	w.archiveBtn = gtk.NewButtonFromIconName("folder-download-symbolic")
+	w.archiveBtn.SetTooltipText("Archive (a)")
 	w.archiveBtn.ConnectClicked(w.onArchive)
 
 	w.trashBtn = gtk.NewButtonFromIconName("user-trash-symbolic")
 	w.trashBtn.SetTooltipText("Move to Trash")
 	w.trashBtn.ConnectClicked(w.onTrash)
 
-	w.unreadBtn = gtk.NewButtonFromIconName("mail-mark-unread-symbolic")
-	w.unreadBtn.SetTooltipText("Mark unread")
-	w.unreadBtn.ConnectClicked(w.onMarkUnread)
+	w.starBtn = gtk.NewToggleButton()
+	w.starBtn.SetIconName("starred-symbolic")
+	w.starBtn.SetTooltipText("Star")
+	w.starBtn.ConnectToggled(w.onToggleStar)
 
 	w.labelsBtn = gtk.NewMenuButton()
 	w.labelsBtn.SetIconName("user-bookmarks-symbolic")
@@ -699,35 +695,23 @@ func (w *window) buildReader() *adw.NavigationPage {
 		labelsPop.SetChild(w.buildLabelsMenu())
 	})
 
-	w.starBtn = gtk.NewToggleButton()
-	w.starBtn.SetIconName("starred-symbolic")
-	w.starBtn.SetTooltipText("Star")
-	w.starBtn.ConnectToggled(w.onToggleStar)
-
-	w.imagesBtn = gtk.NewToggleButton()
-	w.imagesBtn.SetIconName("image-x-generic-symbolic")
-	w.imagesBtn.SetTooltipText("Show remote images")
-	w.imagesBtn.ConnectToggled(w.onToggleImages)
-
-	w.translateBtn = gtk.NewButtonWithLabel("Translate")
-	w.translateBtn.SetTooltipText("Translate this email to English")
-	w.translateBtn.ConnectClicked(w.onTranslate)
-
-	w.draftBtn = gtk.NewButtonWithLabel("Draft reply")
-	w.draftBtn.SetTooltipText("Draft a reply with AI")
-	w.draftBtn.ConnectClicked(w.onDraftReply)
+	// Secondary actions live in an overflow menu so the bar stays uncluttered.
+	w.overflowBtn = gtk.NewMenuButton()
+	w.overflowBtn.SetIconName("view-more-symbolic")
+	w.overflowBtn.SetTooltipText("More actions")
+	w.readerMenuPop = gtk.NewPopover()
+	w.overflowBtn.SetPopover(w.readerMenuPop)
+	w.overflowBtn.SetCreatePopupFunc(func(*gtk.MenuButton) {
+		w.readerMenuPop.SetChild(w.buildReaderMenu())
+	})
 
 	hb.PackStart(w.replyBtn)
-	hb.PackStart(w.replyAllBtn)
 	hb.PackStart(w.forwardBtn)
 	hb.PackStart(w.archiveBtn)
 	hb.PackStart(w.trashBtn)
-	hb.PackStart(w.unreadBtn)
-	hb.PackStart(w.labelsBtn)
-	hb.PackStart(w.starBtn)
-	hb.PackEnd(w.imagesBtn)
-	hb.PackEnd(w.draftBtn)
-	hb.PackEnd(w.translateBtn)
+	hb.PackEnd(w.overflowBtn)
+	hb.PackEnd(w.labelsBtn)
+	hb.PackEnd(w.starBtn)
 	w.setActionsSensitive(false)
 
 	tv := adw.NewToolbarView()
@@ -740,16 +724,14 @@ func (w *window) setActionsSensitive(on bool) {
 	canModify := on && w.deps.ModifyLabels != nil
 	w.archiveBtn.SetSensitive(canModify)
 	w.trashBtn.SetSensitive(canModify)
-	w.unreadBtn.SetSensitive(canModify)
 	w.labelsBtn.SetSensitive(canModify)
 	w.starBtn.SetSensitive(canModify)
 	canSend := on && w.deps.Send != nil
 	w.replyBtn.SetSensitive(canSend)
-	w.replyAllBtn.SetSensitive(canSend)
 	w.forwardBtn.SetSensitive(canSend)
-	canAI := on && w.deps.Assistant != nil
-	w.translateBtn.SetSensitive(canAI)
-	w.draftBtn.SetSensitive(canAI)
+	// The overflow menu builds its own items conditionally; enable it whenever a
+	// message is open.
+	w.overflowBtn.SetSensitive(on)
 }
 
 func (w *window) onReply() {
@@ -1194,8 +1176,56 @@ func (w *window) buildLabelsMenu() gtk.Widgetter {
 	return box
 }
 
-func (w *window) onToggleImages() {
-	w.webview.Settings().SetAutoLoadImages(w.imagesBtn.Active())
+// buildReaderMenu is the overflow popover for less-common reader actions.
+func (w *window) buildReaderMenu() gtk.Widgetter {
+	box := gtk.NewBox(gtk.OrientationVertical, 2)
+	setMargins(box, 6, 6, 6, 6)
+	box.SetSizeRequest(200, -1)
+
+	if w.deps.Send != nil {
+		box.Append(w.readerMenuItem("Reply all", w.onReplyAll))
+	}
+	if w.deps.ModifyLabels != nil {
+		box.Append(w.readerMenuItem("Mark as unread", w.onMarkUnread))
+	}
+
+	img := gtk.NewCheckButtonWithLabel("Show remote images")
+	img.SetActive(w.imagesEnabled)
+	setMargins(img, 8, 8, 6, 6)
+	img.ConnectToggled(func() {
+		w.readerMenuPop.Popdown()
+		w.setImagesEnabled(img.Active())
+	})
+	box.Append(img)
+
+	if w.deps.Assistant != nil {
+		box.Append(gtk.NewSeparator(gtk.OrientationHorizontal))
+		box.Append(w.readerMenuItem("Translate to English", w.onTranslate))
+		box.Append(w.readerMenuItem("Draft reply with AI", w.onDraftReply))
+	}
+	return box
+}
+
+// readerMenuItem returns a flat, full-width, left-aligned button styled like a
+// menu row; clicking it closes the overflow popover and runs fn.
+func (w *window) readerMenuItem(label string, fn func()) *gtk.Button {
+	b := gtk.NewButton()
+	l := gtk.NewLabel(label)
+	l.SetXAlign(0)
+	l.SetHExpand(true)
+	b.SetChild(l)
+	b.AddCSSClass("flat")
+	b.ConnectClicked(func() {
+		w.readerMenuPop.Popdown()
+		fn()
+	})
+	return b
+}
+
+// setImagesEnabled toggles remote-image loading and re-renders the open thread.
+func (w *window) setImagesEnabled(on bool) {
+	w.imagesEnabled = on
+	w.webview.Settings().SetAutoLoadImages(on)
 	if len(w.openThreadMsgs) > 0 {
 		w.renderConversation(w.openThreadMsgs)
 	}
