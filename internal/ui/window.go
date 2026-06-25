@@ -237,6 +237,12 @@ func (w *window) buildSidebar() *adw.NavigationPage {
 	refreshBtn.ConnectClicked(w.onRefresh)
 	hb.PackEnd(refreshBtn)
 
+	prefsBtn := gtk.NewButtonFromIconName("emblem-system-symbolic")
+	prefsBtn.SetTooltipText("Preferences")
+	prefsBtn.SetSensitive(w.deps.AISettings != nil)
+	prefsBtn.ConnectClicked(w.openSettings)
+	hb.PackEnd(prefsBtn)
+
 	tv := adw.NewToolbarView()
 	tv.AddTopBar(hb)
 	tv.SetContent(box)

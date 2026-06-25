@@ -95,6 +95,21 @@ func TestNewProvider(t *testing.T) {
 	}
 }
 
+func TestSaveConfigRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sub", "config.toml") // dir created by SaveConfig
+	want := Config{Provider: "anthropic", Endpoint: "https://api.anthropic.com/v1", Model: "claude-sonnet-4-6"}
+	if err := SaveConfig(path, want); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	got, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if got != want {
+		t.Fatalf("round-trip mismatch: got %+v, want %+v", got, want)
+	}
+}
+
 func TestMissingConfigFileNotAnError(t *testing.T) {
 	cfg, err := LoadConfig(filepath.Join(t.TempDir(), "absent.toml"))
 	if err != nil {

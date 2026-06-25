@@ -3,6 +3,7 @@ package ai
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/BurntSushi/toml"
 )
@@ -40,6 +41,23 @@ func LoadConfig(path string) (Config, error) {
 		cfg.Model = v
 	}
 	return cfg, nil
+}
+
+// SaveConfig writes cfg as the [ai] table of the TOML file at path, creating the
+// directory if needed. The API key is never written here.
+func SaveConfig(path string, cfg Config) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("create config: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+	if err := toml.NewEncoder(f).Encode(fileConfig{AI: cfg}); err != nil {
+		return fmt.Errorf("encode config: %w", err)
+	}
+	return nil
 }
 
 // Configured reports whether enough is set to build a provider.

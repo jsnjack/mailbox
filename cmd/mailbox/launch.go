@@ -59,6 +59,17 @@ func launchUI() error {
 		AccountEmail: acc.Email,
 	}
 
+	// AI settings are editable regardless of account/client state.
+	if cfgPath, err := config.ConfigFilePath(); err == nil {
+		deps.AISettings = func() (string, string, string) {
+			c, _ := ai.LoadConfig(cfgPath)
+			return c.Provider, c.Endpoint, c.Model
+		}
+		deps.SaveAISettings = func(provider, endpoint, model string) error {
+			return ai.SaveConfig(cfgPath, ai.Config{Provider: provider, Endpoint: endpoint, Model: model})
+		}
+	}
+
 	// If credentials are available, wire a live client for lazy body fetch and a
 	// background incremental sync. Otherwise the UI renders the cache read-only.
 	if client, err := buildClientForAccount(ctx, acc.Email); err != nil {

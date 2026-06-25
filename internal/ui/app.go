@@ -53,6 +53,11 @@ type Deps struct {
 	Sync         SyncNow
 	MarkAllRead  LabelReader
 	Assistant    *ai.Assistant
+
+	// AISettings/SaveAISettings read and persist the [ai] config (provider,
+	// endpoint, model). Always wired, independent of whether an account exists.
+	AISettings     func() (provider, endpoint, model string)
+	SaveAISettings func(provider, endpoint, model string) error
 }
 
 // Run launches the GTK application and blocks until the window is closed.
