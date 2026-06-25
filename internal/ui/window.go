@@ -59,6 +59,7 @@ type window struct {
 	threadStack    *gtk.Stack // "list" vs "empty" placeholder
 	readerStack    *gtk.Stack // "message" vs "empty" placeholder
 	markReadBtn    *gtk.Button
+	outboxBanner   *adw.Banner // revealed when sends are queued/failed
 	searchEntry    *gtk.SearchEntry
 	suppressSearch bool // guards SetText from firing a search during label switch
 	threadByID     map[string]model.ThreadSummary
@@ -272,6 +273,7 @@ func (w *window) present() {
 	w.loadLabels()
 	w.subscribe()
 	w.selectLabel(w.current)
+	w.refreshOutbox()
 
 	// Test hooks (off by default).
 	if q := os.Getenv("MAILBOX_SEARCH"); q != "" {
@@ -443,7 +445,13 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 	setMargins(w.searchEntry, 6, 6, 6, 6)
 	w.searchEntry.ConnectSearchChanged(w.onSearchChanged)
 
+	w.outboxBanner = adw.NewBanner("")
+	w.outboxBanner.SetButtonLabel("Outbox")
+	w.outboxBanner.SetRevealed(false)
+	w.outboxBanner.ConnectButtonClicked(w.openOutbox)
+
 	content := gtk.NewBox(gtk.OrientationVertical, 0)
+	content.Append(w.outboxBanner)
 	content.Append(w.searchEntry)
 	content.Append(w.threadStack)
 
@@ -864,6 +872,7 @@ func (w *window) setActiveAccount(a AccountInfo) {
 	w.clearReader()
 	w.loadLabels()
 	w.selectLabel(model.LabelInbox)
+	w.refreshOutbox()
 }
 
 // clearReader returns the reader to its empty state and forgets the open
@@ -1326,6 +1335,10 @@ func (w *window) onChange(c syncer.Change) {
 	case syncer.MessageUpserted, syncer.MessageDeleted, syncer.LabelsSynced:
 		if c.AccountID == w.activeID {
 			w.loadLabels()
+		}
+	case syncer.SendStateChanged:
+		if c.AccountID == w.activeID {
+			w.refreshOutbox()
 		}
 	}
 	if c.Kind != syncer.MessageUpserted || c.GmailID == "" {

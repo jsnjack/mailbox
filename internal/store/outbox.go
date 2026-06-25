@@ -54,6 +54,68 @@ func (s *Store) ListSendableOutbox(ctx context.Context, accountID int64, maxAtte
 	return out, rows.Err()
 }
 
+// CountPendingOutbox returns how many of an account's messages are awaiting
+// send (queued or failed), regardless of attempt count.
+func (s *Store) CountPendingOutbox(ctx context.Context, accountID int64) (int, error) {
+	var n int
+	if err := s.reader.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM outbox WHERE account_id = ? AND state IN ('queued','failed')`,
+		accountID).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count pending outbox: %w", err)
+	}
+	return n, nil
+}
+
+// ListPendingOutbox returns all of an account's queued/failed messages, oldest
+// first — including ones that have exhausted their retry budget (those are the
+// stuck sends the user most needs to see).
+func (s *Store) ListPendingOutbox(ctx context.Context, accountID int64) ([]model.OutboxItem, error) {
+	rows, err := s.reader.QueryContext(ctx, `
+		SELECT id, local_uuid, account_id, thread_id, rfc822, state, attempts, last_error
+		FROM outbox
+		WHERE account_id = ? AND state IN ('queued','failed')
+		ORDER BY id`, accountID)
+	if err != nil {
+		return nil, fmt.Errorf("list pending outbox: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []model.OutboxItem
+	for rows.Next() {
+		var (
+			it       model.OutboxItem
+			threadID sql.NullString
+			lastErr  sql.NullString
+		)
+		if err := rows.Scan(&it.ID, &it.LocalUUID, &it.AccountID, &threadID, &it.RFC822, &it.State, &it.Attempts, &lastErr); err != nil {
+			return nil, fmt.Errorf("scan outbox: %w", err)
+		}
+		it.ThreadID = threadID.String
+		it.LastError = lastErr.String
+		out = append(out, it)
+	}
+	return out, rows.Err()
+}
+
+// RequeueOutbox resets an item to queued and clears its failure state so the
+// next sweep retries it, even if it had exhausted its attempts.
+func (s *Store) RequeueOutbox(ctx context.Context, id int64) error {
+	if _, err := s.writer.ExecContext(ctx,
+		`UPDATE outbox SET state = 'queued', attempts = 0, last_error = NULL WHERE id = ?`,
+		id); err != nil {
+		return fmt.Errorf("requeue outbox: %w", err)
+	}
+	return nil
+}
+
+// DeleteOutbox discards a queued/failed message without sending it.
+func (s *Store) DeleteOutbox(ctx context.Context, id int64) error {
+	if _, err := s.writer.ExecContext(ctx, `DELETE FROM outbox WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("delete outbox: %w", err)
+	}
+	return nil
+}
+
 // MarkOutboxSent removes a successfully sent message from the outbox.
 func (s *Store) MarkOutboxSent(ctx context.Context, id int64) error {
 	if _, err := s.writer.ExecContext(ctx, `DELETE FROM outbox WHERE id = ?`, id); err != nil {

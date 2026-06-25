@@ -51,6 +51,31 @@ func TestReplyAllRecipients(t *testing.T) {
 	}
 }
 
+func TestOutboxHeaders(t *testing.T) {
+	raw := []byte("From: me@x.com\r\nTo: Bob <bob@x.com>\r\nSubject: Lunch?\r\n\r\nbody here\r\n")
+	to, subject := outboxHeaders(raw)
+	if to != "Bob <bob@x.com>" {
+		t.Fatalf("to = %q", to)
+	}
+	if subject != "Lunch?" {
+		t.Fatalf("subject = %q", subject)
+	}
+	// Garbage must not panic; it yields empty strings.
+	if to, subject := outboxHeaders([]byte("not a message")); to != "" || subject != "" {
+		t.Fatalf("garbage parsed to %q / %q", to, subject)
+	}
+}
+
+func TestOutboxStatus(t *testing.T) {
+	if got := outboxStatus(model.OutboxItem{State: "queued"}); got != "Queued" {
+		t.Fatalf("queued status = %q", got)
+	}
+	got := outboxStatus(model.OutboxItem{State: "failed", Attempts: 2, LastError: "timeout"})
+	if got != "Failed (attempt 2): timeout" {
+		t.Fatalf("failed status = %q", got)
+	}
+}
+
 func TestEnsurePrefixes(t *testing.T) {
 	if got := ensureRePrefix("Hello"); got != "Re: Hello" {
 		t.Fatalf("ensureRePrefix = %q", got)

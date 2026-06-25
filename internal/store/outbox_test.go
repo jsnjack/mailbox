@@ -48,3 +48,54 @@ func TestOutboxLifecycle(t *testing.T) {
 		t.Fatalf("expected empty outbox after send, got %d", len(items))
 	}
 }
+
+func TestOutboxPendingRequeueAndDelete(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	acc := seedAccount(t, s)
+
+	if err := s.EnqueueOutbox(ctx, acc, "t1", []byte("a")); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	if err := s.EnqueueOutbox(ctx, acc, "t2", []byte("b")); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	// Drive one item past the retry cap; it stays pending and visible.
+	stuck, _ := s.ListPendingOutbox(ctx, acc)
+	for i := 0; i < maxStuck; i++ {
+		if err := s.MarkOutboxFailed(ctx, stuck[0].ID, "boom"); err != nil {
+			t.Fatalf("mark failed: %v", err)
+		}
+	}
+
+	if n, err := s.CountPendingOutbox(ctx, acc); err != nil || n != 2 {
+		t.Fatalf("CountPendingOutbox = %d (err %v), want 2", n, err)
+	}
+	pending, err := s.ListPendingOutbox(ctx, acc)
+	if err != nil || len(pending) != 2 {
+		t.Fatalf("ListPendingOutbox = %d (err %v), want 2", len(pending), err)
+	}
+	// The stuck item is excluded from the sendable set but still listed pending.
+	if sendable, _ := s.ListSendableOutbox(ctx, acc, maxStuck); len(sendable) != 1 {
+		t.Fatalf("sendable = %d, want 1 (stuck one excluded)", len(sendable))
+	}
+
+	// Requeue clears the failure state so it becomes sendable again.
+	if err := s.RequeueOutbox(ctx, stuck[0].ID); err != nil {
+		t.Fatalf("RequeueOutbox: %v", err)
+	}
+	if sendable, _ := s.ListSendableOutbox(ctx, acc, maxStuck); len(sendable) != 2 {
+		t.Fatalf("after requeue, sendable = %d, want 2", len(sendable))
+	}
+
+	// Delete removes an item entirely.
+	if err := s.DeleteOutbox(ctx, stuck[0].ID); err != nil {
+		t.Fatalf("DeleteOutbox: %v", err)
+	}
+	if n, _ := s.CountPendingOutbox(ctx, acc); n != 1 {
+		t.Fatalf("after delete, count = %d, want 1", n)
+	}
+}
+
+const maxStuck = 5

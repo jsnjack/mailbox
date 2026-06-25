@@ -46,21 +46,30 @@ type SyncNow func(ctx context.Context, accountID int64) error
 // LabelReader marks every unread message in a label as read.
 type LabelReader func(ctx context.Context, accountID int64, labelID string) error
 
+// OutboxSweeper attempts to send all of an account's queued messages now.
+type OutboxSweeper func(ctx context.Context, accountID int64) error
+
+// OutboxAction acts on a single outbox item (retry or discard) by id.
+type OutboxAction func(ctx context.Context, accountID, id int64) error
+
 // Deps are the dependencies the UI needs. FetchBody, ModifyLabels and Hub may be
 // nil (the UI then renders the cache read-only without live updates, on-demand
 // bodies, or message actions).
 type Deps struct {
-	Store        *store.Store
-	Hub          *syncer.Hub
-	Accounts     []AccountInfo
-	FetchBody    BodyFetcher
-	ModifyLabels LabelModifier
-	Send         Sender
-	SaveDraft    Sender
-	OpenAttach   AttachmentOpener
-	Sync         SyncNow
-	MarkAllRead  LabelReader
-	Assistant    *ai.Assistant
+	Store         *store.Store
+	Hub           *syncer.Hub
+	Accounts      []AccountInfo
+	FetchBody     BodyFetcher
+	ModifyLabels  LabelModifier
+	Send          Sender
+	SaveDraft     Sender
+	OpenAttach    AttachmentOpener
+	Sync          SyncNow
+	MarkAllRead   LabelReader
+	SweepOutbox   OutboxSweeper
+	RetryOutbox   OutboxAction
+	DiscardOutbox OutboxAction
+	Assistant     *ai.Assistant
 
 	// AISettings/SaveAISettings read and persist the [ai] config (provider,
 	// endpoint, model). Always wired, independent of whether an account exists.

@@ -76,7 +76,9 @@ into threads; clearing it returns to the current label.
 Compose supports attachments (a file picker adds them; `BuildMIME` emits
 multipart/mixed with base64 parts). Send is synchronous for compose feedback,
 but a failed send is queued to the `outbox` table and retried by a background
-sweeper (`SweepOutbox`, ~45s). The window collapses responsively via
+sweeper (`SweepOutbox`, ~45s); pending/failed sends are surfaced by an
+`adw.Banner` over the thread list and an Outbox dialog (per-item retry/discard
+plus "send now"). The window collapses responsively via
 `adw.Breakpoint` (3 panes → list+reader below ~860sp → single pane below ~520sp),
 with `SetShowContent` driving navigation when collapsed. Single-key shortcuts
 (bubble-phase key controller, so text entries keep their input): j/k navigate

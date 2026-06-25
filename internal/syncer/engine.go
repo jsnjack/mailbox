@@ -189,8 +189,30 @@ func (e *Engine) Send(ctx context.Context, c *gmailapi.Client, accountID int64, 
 		if qerr := e.Store.EnqueueOutbox(ctx, accountID, msg.ThreadID, raw); qerr != nil {
 			return fmt.Errorf("send failed (%v) and could not queue: %w", err, qerr)
 		}
+		e.publish(Change{Kind: SendStateChanged, AccountID: accountID})
 		return fmt.Errorf("send failed, queued for retry: %w", err)
 	}
+	return nil
+}
+
+// RetryOutbox requeues a single outbox item (clearing its failed state and
+// attempt count) and immediately attempts to send everything sendable for the
+// account — used by the user's manual "retry" action.
+func (e *Engine) RetryOutbox(ctx context.Context, c *gmailapi.Client, accountID, id int64) error {
+	if err := e.Store.RequeueOutbox(ctx, id); err != nil {
+		return err
+	}
+	e.publish(Change{Kind: SendStateChanged, AccountID: accountID})
+	_, err := e.SweepOutbox(ctx, c, accountID)
+	return err
+}
+
+// DiscardOutbox removes a queued/failed message without sending it.
+func (e *Engine) DiscardOutbox(ctx context.Context, accountID, id int64) error {
+	if err := e.Store.DeleteOutbox(ctx, id); err != nil {
+		return err
+	}
+	e.publish(Change{Kind: SendStateChanged, AccountID: accountID})
 	return nil
 }
 

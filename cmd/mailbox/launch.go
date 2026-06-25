@@ -146,6 +146,26 @@ func launchUI() error {
 			}
 			return engine.MarkLabelRead(ctx, c, accountID, labelID)
 		}
+		deps.SweepOutbox = func(ctx context.Context, accountID int64) error {
+			c, err := clientFor(accountID)
+			if err != nil {
+				return err
+			}
+			_, err = engine.SweepOutbox(ctx, c, accountID)
+			return err
+		}
+		deps.RetryOutbox = func(ctx context.Context, accountID, id int64) error {
+			c, err := clientFor(accountID)
+			if err != nil {
+				return err
+			}
+			return engine.RetryOutbox(ctx, c, accountID, id)
+		}
+		// Discarding needs no Gmail client, so a stuck send can be cleared even
+		// when the account currently has no working connection.
+		deps.DiscardOutbox = func(ctx context.Context, accountID, id int64) error {
+			return engine.DiscardOutbox(ctx, accountID, id)
+		}
 	}
 
 	if asst, err := buildAssistant(); err != nil {
