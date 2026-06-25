@@ -11,22 +11,25 @@ import (
 // labelID, newest first. The summary's Latest is the newest labeled message; the
 // counts cover the labeled messages in that thread.
 func (s *Store) ListThreadsByLabel(ctx context.Context, accountID int64, labelID string, limit, offset int) ([]model.ThreadSummary, error) {
-	// Latest labeled message per thread (the MAX(internal_date) row).
+	// Exactly one row per thread: the labeled message with the greatest
+	// (internal_date, rowid). The rowid tiebreak avoids duplicate rows when two
+	// messages share a whole-second internal_date, and ordering by rowid means a
+	// thread whose dates are all NULL still resolves to a single latest message.
 	rows, err := s.reader.QueryContext(ctx, `
 		SELECT `+msgCols+`
 		FROM messages m
 		JOIN message_labels ml ON ml.message_rowid = m.rowid AND ml.label_id = ?
-		JOIN (
-			SELECT m2.thread_id AS tid, MAX(m2.internal_date) AS maxd
+		WHERE m.account_id = ? AND m.rowid = (
+			SELECT m2.rowid
 			FROM messages m2
 			JOIN message_labels ml2 ON ml2.message_rowid = m2.rowid AND ml2.label_id = ?
-			WHERE m2.account_id = ?
-			GROUP BY m2.thread_id
-		) agg ON agg.tid = m.thread_id AND agg.maxd = m.internal_date
-		WHERE m.account_id = ?
-		ORDER BY m.internal_date DESC
+			WHERE m2.account_id = m.account_id AND m2.thread_id = m.thread_id
+			ORDER BY m2.internal_date DESC, m2.rowid DESC
+			LIMIT 1
+		)
+		ORDER BY m.internal_date DESC, m.rowid DESC
 		LIMIT ? OFFSET ?`,
-		labelID, labelID, accountID, accountID, limit, offset)
+		labelID, accountID, labelID, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("list threads: %w", err)
 	}

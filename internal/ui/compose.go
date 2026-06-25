@@ -153,12 +153,13 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 	})
 
 	send.ConnectClicked(func() {
-		msg := gather()
+		msg := gather() // reads w.activeEmail on the main thread
+		acctID := w.activeID
 		send.SetSensitive(false)
 		status.SetVisible(true)
 		status.SetText("Sending…")
 		go func() {
-			err := w.deps.Send(context.Background(), w.activeID, msg)
+			err := w.deps.Send(context.Background(), acctID, msg)
 			dispatch.Main(func() {
 				if err != nil {
 					slog.Warn("ui: send", "err", err)
@@ -174,11 +175,12 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 	if draftBtn != nil {
 		draftBtn.ConnectClicked(func() {
 			msg := gather()
+			acctID := w.activeID
 			draftBtn.SetSensitive(false)
 			status.SetVisible(true)
 			status.SetText("Saving draft…")
 			go func() {
-				err := w.deps.SaveDraft(context.Background(), w.activeID, msg)
+				err := w.deps.SaveDraft(context.Background(), acctID, msg)
 				dispatch.Main(func() {
 					if err != nil {
 						slog.Warn("ui: save draft", "err", err)

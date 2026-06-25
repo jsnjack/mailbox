@@ -244,18 +244,18 @@ func (s *Store) Search(ctx context.Context, accountID int64, query string, limit
 // double-quoted (escaping embedded quotes) and given a trailing prefix wildcard,
 // joined by implicit AND. Returns "" for blank input.
 func ftsQuery(raw string) string {
-	fields := strings.Fields(raw)
-	if len(fields) == 0 {
-		return ""
-	}
-	var b strings.Builder
-	for i, f := range fields {
-		if i > 0 {
-			b.WriteByte(' ')
+	var terms []string
+	for _, f := range strings.Fields(raw) {
+		// Strip double quotes entirely (they can't be meaningfully matched and a
+		// quote-only token would otherwise produce an invalid FTS5 expression),
+		// then quote the token and make it a prefix match.
+		t := strings.ReplaceAll(f, `"`, "")
+		if t == "" {
+			continue
 		}
-		b.WriteString(`"` + strings.ReplaceAll(f, `"`, `""`) + `"*`)
+		terms = append(terms, `"`+t+`"*`)
 	}
-	return b.String()
+	return strings.Join(terms, " ")
 }
 
 // GetMessage returns a single message (with its labels) by Gmail id.

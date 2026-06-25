@@ -58,3 +58,39 @@ func TestListThreadsByLabel(t *testing.T) {
 		t.Fatalf("GetThreadSummary wrong: %+v", sum)
 	}
 }
+
+func TestListThreadsByLabelTiesAndNullDates(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	acc := seedAccount(t, s)
+
+	// Thread T: two messages with the SAME internal_date (whole-second tie).
+	// Thread N: messages with no date at all (NULL internal_date).
+	for _, m := range []model.Message{
+		{AccountID: acc, GmailID: "t1", ThreadID: "T", InternalDate: time.Unix(500, 0), Subject: "tie one", Labels: []string{"INBOX"}},
+		{AccountID: acc, GmailID: "t2", ThreadID: "T", InternalDate: time.Unix(500, 0), Subject: "tie two", Labels: []string{"INBOX"}},
+		{AccountID: acc, GmailID: "n1", ThreadID: "N", Subject: "no date a", Labels: []string{"INBOX"}},
+		{AccountID: acc, GmailID: "n2", ThreadID: "N", Subject: "no date b", Labels: []string{"INBOX"}},
+	} {
+		if _, err := s.UpsertMessage(ctx, m); err != nil {
+			t.Fatalf("upsert %s: %v", m.GmailID, err)
+		}
+	}
+
+	threads, err := s.ListThreadsByLabel(ctx, acc, "INBOX", 50, 0)
+	if err != nil {
+		t.Fatalf("ListThreadsByLabel: %v", err)
+	}
+	// Exactly one row per thread — no duplicate for the tie, and the NULL-date
+	// thread is not dropped.
+	seen := map[string]int{}
+	for _, th := range threads {
+		seen[th.ThreadID]++
+	}
+	if seen["T"] != 1 {
+		t.Fatalf("tie thread T appeared %d times, want 1", seen["T"])
+	}
+	if seen["N"] != 1 {
+		t.Fatalf("NULL-date thread N appeared %d times, want 1", seen["N"])
+	}
+}

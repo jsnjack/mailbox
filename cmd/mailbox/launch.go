@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"time"
 
@@ -60,7 +61,10 @@ func launchUI() error {
 	// AI settings are editable regardless of account/client state.
 	if cfgPath, err := config.ConfigFilePath(); err == nil {
 		deps.AISettings = func() (string, string, string) {
-			c, _ := ai.LoadConfig(cfgPath)
+			c, err := ai.LoadConfig(cfgPath)
+			if err != nil {
+				slog.Warn("load ai config", "err", err)
+			}
 			return c.Provider, c.Endpoint, c.Model
 		}
 		deps.SaveAISettings = func(provider, endpoint, model string) error {

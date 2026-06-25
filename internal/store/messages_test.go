@@ -124,6 +124,12 @@ func TestSearchMultiWordAndPrefix(t *testing.T) {
 	if _, err := s.Search(ctx, acc, `"(weird] query`, 10); err != nil {
 		t.Fatalf("special-char query errored: %v", err)
 	}
+	// A quote-only query must not produce an invalid FTS5 expression.
+	for _, q := range []string{`"`, `""`, `" "`} {
+		if _, err := s.Search(ctx, acc, q, 10); err != nil {
+			t.Fatalf("quote-only query %q errored: %v", q, err)
+		}
+	}
 	// Blank query returns nothing without error.
 	if res, err := s.Search(ctx, acc, "   ", 10); err != nil || len(res) != 0 {
 		t.Fatalf("blank query: res=%d err=%v", len(res), err)

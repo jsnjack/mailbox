@@ -252,13 +252,13 @@ func (e *Engine) ModifyLabels(ctx context.Context, c *gmailapi.Client, accountID
 func (e *Engine) MarkLabelRead(ctx context.Context, c *gmailapi.Client, accountID int64, labelID string) error {
 	ids, err := e.Store.UnreadIDsByLabel(ctx, accountID, labelID)
 	if err != nil {
-		return err
+		return fmt.Errorf("mark label read: %w", err)
 	}
 	if len(ids) == 0 {
 		return nil
 	}
 	if err := e.Store.MarkLabelReadLocal(ctx, accountID, labelID); err != nil {
-		return err
+		return fmt.Errorf("mark label read: %w", err)
 	}
 	e.publish(Change{Kind: LabelsSynced, AccountID: accountID})
 	if c != nil {

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/diamondburned/gotk4-adwaita/pkg/adw"
@@ -657,8 +658,19 @@ func (w *window) setActiveAccount(a AccountInfo) {
 	w.activeID = a.ID
 	w.activeEmail = a.Email
 	w.current = model.LabelInbox
+	w.clearReader()
 	w.loadLabels()
 	w.selectLabel(model.LabelInbox)
+}
+
+// clearReader returns the reader to its empty state and forgets the open
+// conversation, so stale actions can't target a thread from another account.
+func (w *window) clearReader() {
+	w.openThreadID = ""
+	w.openThreadMsgs = nil
+	w.openMsg = model.Message{}
+	w.setActionsSensitive(false)
+	w.readerStack.SetVisibleChildName("empty")
 }
 
 func (w *window) selectLabel(labelID string) {
@@ -724,14 +736,29 @@ func (w *window) renderConversation(msgs []model.Message) {
 		html.EscapeString(latest.Subject), len(msgs)))
 	w.webview.LoadHtml(wrapHTML("<p><i>Loading…</i></p>"), "about:blank")
 
+	threadID := w.openThreadID // guard against a newer thread being opened mid-render
 	go func() {
 		ctx := context.Background()
-		for i := range msgs {
-			if !msgs[i].BodyFetched && w.deps.FetchBody != nil {
-				if err := w.deps.FetchBody(ctx, msgs[i].AccountID, msgs[i].GmailID); err != nil {
-					slog.Warn("ui: fetch body", "id", msgs[i].GmailID, "err", err)
+		// Fetch missing bodies concurrently (bounded); the Gmail client also caps
+		// in-flight requests and quota use.
+		if w.deps.FetchBody != nil {
+			sem := make(chan struct{}, 6)
+			var wg sync.WaitGroup
+			for _, m := range msgs {
+				if m.BodyFetched {
+					continue
 				}
+				wg.Add(1)
+				sem <- struct{}{}
+				go func(m model.Message) {
+					defer wg.Done()
+					defer func() { <-sem }()
+					if err := w.deps.FetchBody(ctx, m.AccountID, m.GmailID); err != nil {
+						slog.Warn("ui: fetch body", "id", m.GmailID, "err", err)
+					}
+				}(m)
 			}
+			wg.Wait()
 		}
 		var b strings.Builder
 		for _, m := range msgs {
@@ -740,6 +767,9 @@ func (w *window) renderConversation(msgs []model.Message) {
 		}
 		out := b.String()
 		dispatch.Main(func() {
+			if w.openThreadID != threadID {
+				return // user switched to another conversation while this rendered
+			}
 			w.webview.LoadHtml(wrapHTML(out), "about:blank")
 			w.populateThreadAttachments(msgs)
 		})
@@ -816,16 +846,16 @@ func attachmentChip(a model.Attachment) *gtk.Box {
 }
 
 func (w *window) onArchive() {
-	w.runThreadAction(nil, []string{model.LabelInbox})
+	w.applyLabels(w.openThreadMsgs, nil, []string{model.LabelInbox})
 }
 
 func (w *window) onTrash() {
-	w.runThreadAction([]string{model.LabelTrash}, []string{model.LabelInbox})
+	w.applyLabels(w.openThreadMsgs, []string{model.LabelTrash}, []string{model.LabelInbox})
 }
 
 func (w *window) onMarkUnread() {
 	if w.openMsg.GmailID != "" {
-		w.runAction(w.openMsg, []string{model.LabelUnread}, nil)
+		w.applyLabels([]model.Message{w.openMsg}, []string{model.LabelUnread}, nil)
 	}
 }
 
@@ -834,9 +864,9 @@ func (w *window) onToggleStar() {
 		return
 	}
 	if w.starBtn.Active() {
-		w.runAction(w.openMsg, []string{model.LabelStarred}, nil)
+		w.applyLabels([]model.Message{w.openMsg}, []string{model.LabelStarred}, nil)
 	} else {
-		w.runAction(w.openMsg, nil, []string{model.LabelStarred})
+		w.applyLabels([]model.Message{w.openMsg}, nil, []string{model.LabelStarred})
 	}
 }
 
@@ -944,35 +974,16 @@ func (w *window) showAIStream(title string, start func(ctx context.Context) (<-c
 	}()
 }
 
-// runAction applies a label change to one message in the background, then
-// refreshes the label counts and the current list (preserving any search).
-func (w *window) runAction(m model.Message, add, remove []string) {
-	if w.deps.ModifyLabels == nil {
+// applyLabels applies a label change to the given messages in the background,
+// then refreshes the label counts and the current list (preserving any search).
+func (w *window) applyLabels(msgs []model.Message, add, remove []string) {
+	if w.deps.ModifyLabels == nil || len(msgs) == 0 {
 		return
 	}
-	go func() {
-		err := w.deps.ModifyLabels(context.Background(), m.AccountID, m.GmailID, add, remove)
-		dispatch.Main(func() {
-			if err != nil {
-				slog.Warn("ui: action", "id", m.GmailID, "err", err)
-			}
-			w.loadLabels()
-			w.refreshList(w.searchEntry.Text())
-		})
-	}()
-}
-
-// runThreadAction applies a label change to every message in the open thread
-// (e.g. archive or trash the whole conversation).
-func (w *window) runThreadAction(add, remove []string) {
-	if w.deps.ModifyLabels == nil || len(w.openThreadMsgs) == 0 {
-		return
-	}
-	msgs := w.openThreadMsgs
 	go func() {
 		for _, m := range msgs {
 			if err := w.deps.ModifyLabels(context.Background(), m.AccountID, m.GmailID, add, remove); err != nil {
-				slog.Warn("ui: thread action", "id", m.GmailID, "err", err)
+				slog.Warn("ui: apply labels", "id", m.GmailID, "err", err)
 			}
 		}
 		dispatch.Main(func() {
@@ -992,15 +1003,20 @@ func (w *window) subscribe() {
 	ch, _ := w.deps.Hub.Subscribe()
 	go func() {
 		for c := range ch {
-			c := c
 			dispatch.Main(func() { w.onChange(c) })
 		}
 	}()
 }
 
-// onChange refreshes label counts and notifies for genuinely new inbox mail.
+// onChange refreshes the active account's label counts (only for changes to that
+// account) and notifies for genuinely new inbox mail on any account.
 func (w *window) onChange(c syncer.Change) {
-	w.loadLabels()
+	switch c.Kind {
+	case syncer.MessageUpserted, syncer.MessageDeleted, syncer.LabelsSynced:
+		if c.AccountID == w.activeID {
+			w.loadLabels()
+		}
+	}
 	if c.Kind != syncer.MessageUpserted || c.GmailID == "" {
 		return
 	}
@@ -1010,20 +1026,22 @@ func (w *window) onChange(c syncer.Change) {
 	}
 	for _, l := range m.Labels {
 		if l == model.LabelInbox {
-			w.notifyNewMail(m)
+			w.notifyNewMail(c.AccountID, m)
 			return
 		}
 	}
 }
 
-func (w *window) notifyNewMail(m model.Message) {
+func (w *window) notifyNewMail(accountID int64, m model.Message) {
 	n := gio.NewNotification("New mail")
 	body := displayFrom(m)
 	if m.Subject != "" {
 		body += " — " + m.Subject
 	}
 	n.SetBody(body)
-	w.app.SendNotification("mailbox-new-mail", n)
+	// Unique id per message so concurrent accounts' notifications don't replace
+	// one another.
+	w.app.SendNotification(fmt.Sprintf("mailbox-mail-%d-%s", accountID, m.GmailID), n)
 }
 
 func labelRow(name string, count int) *gtk.Box {
