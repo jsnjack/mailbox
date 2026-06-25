@@ -51,12 +51,10 @@ func launchUI() error {
 	if len(accounts) == 0 {
 		return fmt.Errorf("no account connected yet; run: mailbox sync --account <email> --credentials <client_secret.json>")
 	}
-	acc := accounts[0]
 
-	deps := ui.Deps{
-		Store:        st,
-		AccountID:    acc.ID,
-		AccountEmail: acc.Email,
+	deps := ui.Deps{Store: st}
+	for _, a := range accounts {
+		deps.Accounts = append(deps.Accounts, ui.AccountInfo{ID: a.ID, Email: a.Email})
 	}
 
 	// AI settings are editable regardless of account/client state.
@@ -70,38 +68,80 @@ func launchUI() error {
 		}
 	}
 
-	// If credentials are available, wire a live client for lazy body fetch and a
-	// background incremental sync. Otherwise the UI renders the cache read-only.
-	if client, err := buildClientForAccount(ctx, acc.Email); err != nil {
-		fmt.Fprintf(os.Stderr, "live sync disabled (%v); rendering cached mail read-only\n", err)
-	} else {
-		hub := syncer.NewHub()
-		engine := syncer.NewEngine(st, hub)
+	// Build a Gmail client per account (those without a usable token are
+	// rendered read-only). Operations are routed by account id.
+	hub := syncer.NewHub()
+	engine := syncer.NewEngine(st, hub)
+	clients := make(map[int64]*gmailapi.Client)
+	for _, a := range accounts {
+		client, err := buildClientForAccount(ctx, a.Email)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "live features disabled for %s (%v)\n", a.Email, err)
+			continue
+		}
+		clients[a.ID] = client
+		go backgroundSync(ctx, engine, client, a.ID)
+		go backgroundSweep(ctx, engine, client, a.ID)
+	}
+
+	if len(clients) > 0 {
 		deps.Hub = hub
+		clientFor := func(accountID int64) (*gmailapi.Client, error) {
+			if c := clients[accountID]; c != nil {
+				return c, nil
+			}
+			return nil, fmt.Errorf("account %d has no connected client", accountID)
+		}
 		deps.FetchBody = func(ctx context.Context, accountID int64, gmailID string) error {
-			return engine.FetchBody(ctx, client, accountID, gmailID)
+			c, err := clientFor(accountID)
+			if err != nil {
+				return err
+			}
+			return engine.FetchBody(ctx, c, accountID, gmailID)
 		}
 		deps.ModifyLabels = func(ctx context.Context, accountID int64, gmailID string, add, remove []string) error {
-			return engine.ModifyLabels(ctx, client, accountID, gmailID, add, remove)
+			c, err := clientFor(accountID)
+			if err != nil {
+				return err
+			}
+			return engine.ModifyLabels(ctx, c, accountID, gmailID, add, remove)
 		}
-		deps.Send = func(ctx context.Context, msg model.OutgoingMessage) error {
-			return engine.Send(ctx, client, acc.ID, msg)
+		deps.Send = func(ctx context.Context, accountID int64, msg model.OutgoingMessage) error {
+			c, err := clientFor(accountID)
+			if err != nil {
+				return err
+			}
+			return engine.Send(ctx, c, accountID, msg)
 		}
-		deps.SaveDraft = func(ctx context.Context, msg model.OutgoingMessage) error {
-			return engine.SaveDraft(ctx, client, acc.ID, msg)
+		deps.SaveDraft = func(ctx context.Context, accountID int64, msg model.OutgoingMessage) error {
+			c, err := clientFor(accountID)
+			if err != nil {
+				return err
+			}
+			return engine.SaveDraft(ctx, c, accountID, msg)
 		}
-		deps.OpenAttach = func(ctx context.Context, gmailID string, attID int64) (string, error) {
-			return engine.OpenAttachment(ctx, client, gmailID, attID)
+		deps.OpenAttach = func(ctx context.Context, accountID int64, gmailID string, attID int64) (string, error) {
+			c, err := clientFor(accountID)
+			if err != nil {
+				return "", err
+			}
+			return engine.OpenAttachment(ctx, c, gmailID, attID)
 		}
-		deps.Sync = func(ctx context.Context) error {
-			_, err := engine.Incremental(ctx, client, acc.ID)
+		deps.Sync = func(ctx context.Context, accountID int64) error {
+			c, err := clientFor(accountID)
+			if err != nil {
+				return err
+			}
+			_, err = engine.Incremental(ctx, c, accountID)
 			return err
 		}
-		deps.MarkAllRead = func(ctx context.Context, labelID string) error {
-			return engine.MarkLabelRead(ctx, client, acc.ID, labelID)
+		deps.MarkAllRead = func(ctx context.Context, accountID int64, labelID string) error {
+			c, err := clientFor(accountID)
+			if err != nil {
+				return err
+			}
+			return engine.MarkLabelRead(ctx, c, accountID, labelID)
 		}
-		go backgroundSync(ctx, engine, client, acc.ID)
-		go backgroundSweep(ctx, engine, client, acc.ID)
 	}
 
 	if asst, err := buildAssistant(); err != nil {

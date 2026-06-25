@@ -104,7 +104,7 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 
 	gather := func() model.OutgoingMessage {
 		return model.OutgoingMessage{
-			From:        w.deps.AccountEmail,
+			From:        w.activeEmail,
 			To:          strings.TrimSpace(toEntry.Text()),
 			Cc:          strings.TrimSpace(ccEntry.Text()),
 			Bcc:         strings.TrimSpace(bccEntry.Text()),
@@ -158,7 +158,7 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 		status.SetVisible(true)
 		status.SetText("Sending…")
 		go func() {
-			err := w.deps.Send(context.Background(), msg)
+			err := w.deps.Send(context.Background(), w.activeID, msg)
 			dispatch.Main(func() {
 				if err != nil {
 					slog.Warn("ui: send", "err", err)
@@ -178,7 +178,7 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 			status.SetVisible(true)
 			status.SetText("Saving draft…")
 			go func() {
-				err := w.deps.SaveDraft(context.Background(), msg)
+				err := w.deps.SaveDraft(context.Background(), w.activeID, msg)
 				dispatch.Main(func() {
 					if err != nil {
 						slog.Warn("ui: save draft", "err", err)

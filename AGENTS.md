@@ -42,6 +42,11 @@ internal/
   ui/                all GTK/adw/webkit widget code (3-pane shell, list, reader, actions)
 ```
 
+Multi-account: the launcher builds one Gmail client per connected account and
+syncs each; the UI tracks an active account (a switcher appears in the sidebar
+when more than one is connected) and routes every operation by account id. New
+accounts are added via `mailbox sync --account`.
+
 UI state (implemented): 3-pane shell renders the cached account live; clicking a
 message lazily fetches + sanitizes + renders its body (WebKit, JS off, remote
 images off behind a toggle); reader actions archive / mark-unread / star via

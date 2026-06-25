@@ -33,13 +33,16 @@ type window struct {
 	app  *adw.Application
 	deps Deps
 
-	win        *adw.ApplicationWindow
-	outerSplit *adw.NavigationSplitView
-	innerSplit *adw.NavigationSplitView
-	labelBox   *gtk.ListBox
-	labels     []model.Label
-	current    string
-	startTime  time.Time // only mail arriving after this triggers notifications
+	win         *adw.ApplicationWindow
+	outerSplit  *adw.NavigationSplitView
+	innerSplit  *adw.NavigationSplitView
+	accountBox  *gtk.ListBox
+	labelBox    *gtk.ListBox
+	labels      []model.Label
+	current     string
+	activeID    int64 // the account currently shown
+	activeEmail string
+	startTime   time.Time // only mail arriving after this triggers notifications
 
 	// virtualized list grouped by conversation: a StringList of thread ids drives
 	// a ListView; the factory builds visible rows from threadByID.
@@ -82,6 +85,10 @@ func newWindow(app *adw.Application, deps Deps) *window {
 		current:   model.LabelInbox,
 		startTime: time.Now(),
 		sanitizer: bluemonday.UGCPolicy(),
+	}
+	if len(deps.Accounts) > 0 {
+		w.activeID = deps.Accounts[0].ID
+		w.activeEmail = deps.Accounts[0].Email
 	}
 	w.build()
 	return w
@@ -215,11 +222,35 @@ func (w *window) buildSidebar() *adw.NavigationPage {
 	scroller.SetChild(w.labelBox)
 
 	box := gtk.NewBox(gtk.OrientationVertical, 0)
-	acct := gtk.NewLabel(w.deps.AccountEmail)
-	acct.AddCSSClass("heading")
-	acct.SetXAlign(0)
-	setMargins(acct, 12, 12, 12, 6)
-	box.Append(acct)
+	if len(w.deps.Accounts) > 1 {
+		w.accountBox = gtk.NewListBox()
+		w.accountBox.AddCSSClass("navigation-sidebar")
+		for _, a := range w.deps.Accounts {
+			row := gtk.NewLabel(a.Email)
+			row.SetXAlign(0)
+			setMargins(row, 12, 12, 4, 4)
+			w.accountBox.Append(row)
+		}
+		w.accountBox.ConnectRowSelected(func(row *gtk.ListBoxRow) {
+			if row == nil {
+				return
+			}
+			if i := row.Index(); i >= 0 && i < len(w.deps.Accounts) {
+				w.setActiveAccount(w.deps.Accounts[i])
+			}
+		})
+		if r := w.accountBox.RowAtIndex(0); r != nil {
+			w.accountBox.SelectRow(r)
+		}
+		box.Append(w.accountBox)
+		box.Append(gtk.NewSeparator(gtk.OrientationHorizontal))
+	} else {
+		acct := gtk.NewLabel(w.activeEmail)
+		acct.AddCSSClass("heading")
+		acct.SetXAlign(0)
+		setMargins(acct, 12, 12, 12, 6)
+		box.Append(acct)
+	}
 	box.Append(scroller)
 
 	hb := adw.NewHeaderBar()
@@ -319,8 +350,9 @@ func (w *window) onMarkAllRead() {
 		return
 	}
 	label := w.current
+	acctID := w.activeID
 	go func() {
-		if err := w.deps.MarkAllRead(context.Background(), label); err != nil {
+		if err := w.deps.MarkAllRead(context.Background(), acctID, label); err != nil {
 			slog.Warn("ui: mark all read", "label", label, "err", err)
 		}
 		dispatch.Main(func() {
@@ -342,7 +374,7 @@ func (w *window) onSearchChanged() {
 func (w *window) refreshList(query string) {
 	ctx := context.Background()
 	if strings.TrimSpace(query) == "" {
-		sums, err := w.deps.Store.ListThreadsByLabel(ctx, w.deps.AccountID, w.current, threadListCap, 0)
+		sums, err := w.deps.Store.ListThreadsByLabel(ctx, w.activeID, w.current, threadListCap, 0)
 		if err != nil {
 			slog.Error("ui: list threads", "label", w.current, "err", err)
 			return
@@ -351,7 +383,7 @@ func (w *window) refreshList(query string) {
 		return
 	}
 
-	msgs, err := w.deps.Store.Search(ctx, w.deps.AccountID, query, threadListCap)
+	msgs, err := w.deps.Store.Search(ctx, w.activeID, query, threadListCap)
 	if err != nil {
 		slog.Error("ui: search", "query", query, "err", err)
 		return
@@ -363,7 +395,7 @@ func (w *window) refreshList(query string) {
 			continue
 		}
 		seen[m.ThreadID] = true
-		sum, err := w.deps.Store.GetThreadSummary(ctx, w.deps.AccountID, m.ThreadID)
+		sum, err := w.deps.Store.GetThreadSummary(ctx, w.activeID, m.ThreadID)
 		if err != nil {
 			continue
 		}
@@ -392,8 +424,9 @@ func (w *window) onRefresh() {
 	if w.deps.Sync == nil {
 		return
 	}
+	acctID := w.activeID
 	go func() {
-		if err := w.deps.Sync(context.Background()); err != nil {
+		if err := w.deps.Sync(context.Background(), acctID); err != nil {
 			slog.Warn("ui: sync now", "err", err)
 			return
 		}
@@ -546,7 +579,7 @@ func (w *window) onReplyAll() {
 	if m.GmailID == "" {
 		return
 	}
-	to, cc := replyAllRecipients(m, w.deps.AccountEmail)
+	to, cc := replyAllRecipients(m, w.activeEmail)
 	init := model.OutgoingMessage{
 		To:         to,
 		Cc:         cc,
@@ -598,7 +631,7 @@ func (w *window) onForward() {
 
 func (w *window) loadLabels() {
 	ctx := context.Background()
-	labels, err := w.deps.Store.ListLabels(ctx, w.deps.AccountID)
+	labels, err := w.deps.Store.ListLabels(ctx, w.activeID)
 	if err != nil {
 		slog.Error("ui: load labels", "err", err)
 		return
@@ -606,7 +639,7 @@ func (w *window) loadLabels() {
 	w.labels = labels
 	w.labelBox.RemoveAll()
 	for _, l := range labels {
-		n, _ := w.deps.Store.CountByLabel(ctx, w.deps.AccountID, l.GmailID)
+		n, _ := w.deps.Store.CountByLabel(ctx, w.activeID, l.GmailID)
 		w.labelBox.Append(labelRow(l.Name, n))
 	}
 }
@@ -615,6 +648,18 @@ func (w *window) loadLabels() {
 // virtualizes row widgets, so this only bounds metadata held in memory; a truly
 // windowed model (paging on scroll) is a further optimization.
 const threadListCap = 5000
+
+// setActiveAccount switches the displayed account, reloading its labels and inbox.
+func (w *window) setActiveAccount(a AccountInfo) {
+	if a.ID == w.activeID {
+		return
+	}
+	w.activeID = a.ID
+	w.activeEmail = a.Email
+	w.current = model.LabelInbox
+	w.loadLabels()
+	w.selectLabel(model.LabelInbox)
+}
 
 func (w *window) selectLabel(labelID string) {
 	w.current = labelID
@@ -630,7 +675,7 @@ func (w *window) selectLabel(labelID string) {
 // showThread opens a conversation: it loads all its messages, renders them
 // stacked in the reader, and marks any unread ones read.
 func (w *window) showThread(threadID string) {
-	msgs, err := w.deps.Store.ListThreadMessages(context.Background(), w.deps.AccountID, threadID)
+	msgs, err := w.deps.Store.ListThreadMessages(context.Background(), w.activeID, threadID)
 	if err != nil || len(msgs) == 0 {
 		if err != nil {
 			slog.Warn("ui: load thread", "thread", threadID, "err", err)
@@ -733,12 +778,13 @@ func (w *window) populateThreadAttachments(msgs []model.Message) {
 			continue
 		}
 		gmailID := m.GmailID
+		accountID := m.AccountID
 		for _, a := range atts {
 			att := a
 			btn := gtk.NewButton()
 			btn.SetChild(attachmentChip(att))
 			btn.SetTooltipText(att.MimeType)
-			btn.ConnectClicked(func() { w.openAttachment(gmailID, att.ID) })
+			btn.ConnectClicked(func() { w.openAttachment(accountID, gmailID, att.ID) })
 			w.attachBox.Append(btn)
 			any = true
 		}
@@ -746,12 +792,12 @@ func (w *window) populateThreadAttachments(msgs []model.Message) {
 	w.attachBox.SetVisible(any)
 }
 
-func (w *window) openAttachment(gmailID string, attID int64) {
+func (w *window) openAttachment(accountID int64, gmailID string, attID int64) {
 	if w.deps.OpenAttach == nil {
 		return
 	}
 	go func() {
-		path, err := w.deps.OpenAttach(context.Background(), gmailID, attID)
+		path, err := w.deps.OpenAttach(context.Background(), accountID, gmailID, attID)
 		if err != nil {
 			slog.Warn("ui: open attachment", "id", gmailID, "err", err)
 			return

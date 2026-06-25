@@ -18,6 +18,15 @@ import (
 // appID is the GTK/D-Bus application identifier.
 const appID = "com.surfly.mailbox"
 
+// AccountInfo identifies a connected account for the switcher.
+type AccountInfo struct {
+	ID    int64
+	Email string
+}
+
+// All operations are account-routed: the caller passes the account id so the
+// dependency can dispatch to that account's Gmail client.
+
 // BodyFetcher lazily downloads and caches a message body when it is opened.
 type BodyFetcher func(ctx context.Context, accountID int64, gmailID string) error
 
@@ -25,17 +34,17 @@ type BodyFetcher func(ctx context.Context, accountID int64, gmailID string) erro
 // the mirrored Gmail call).
 type LabelModifier func(ctx context.Context, accountID int64, gmailID string, add, remove []string) error
 
-// Sender transmits an outgoing message.
-type Sender func(ctx context.Context, msg model.OutgoingMessage) error
+// Sender transmits an outgoing message from the given account.
+type Sender func(ctx context.Context, accountID int64, msg model.OutgoingMessage) error
 
 // AttachmentOpener ensures an attachment is cached locally and returns its path.
-type AttachmentOpener func(ctx context.Context, gmailID string, attID int64) (string, error)
+type AttachmentOpener func(ctx context.Context, accountID int64, gmailID string, attID int64) (string, error)
 
-// SyncNow runs an immediate incremental sync.
-type SyncNow func(ctx context.Context) error
+// SyncNow runs an immediate incremental sync for an account.
+type SyncNow func(ctx context.Context, accountID int64) error
 
 // LabelReader marks every unread message in a label as read.
-type LabelReader func(ctx context.Context, labelID string) error
+type LabelReader func(ctx context.Context, accountID int64, labelID string) error
 
 // Deps are the dependencies the UI needs. FetchBody, ModifyLabels and Hub may be
 // nil (the UI then renders the cache read-only without live updates, on-demand
@@ -43,8 +52,7 @@ type LabelReader func(ctx context.Context, labelID string) error
 type Deps struct {
 	Store        *store.Store
 	Hub          *syncer.Hub
-	AccountID    int64
-	AccountEmail string
+	Accounts     []AccountInfo
 	FetchBody    BodyFetcher
 	ModifyLabels LabelModifier
 	Send         Sender
