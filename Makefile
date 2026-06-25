@@ -4,6 +4,8 @@ VERSION := 0.0.0
 MONOVA  := $(shell which monova 2> /dev/null)
 PKGPATH := github.com/jsnjack/mailbox/cmd/mailbox
 LDFLAGS  = -ldflags="-X $(PKGPATH).Version=$(VERSION)"
+# RPM needs a concrete version even before any git tag exists.
+RPMVERSION := $(shell monova 2>/dev/null || echo 0.0.0)
 
 export PATH := $(PATH):$(shell go env GOPATH)/bin
 # This is a cgo/GTK app: it links against system GTK4/WebKit via pkg-config and
@@ -60,7 +62,9 @@ run: build
 
 rpm: packaging/mailbox.spec build
 	rpmbuild -bb --define "_topdir $(CURDIR)/rpmbuild" \
-	    --define "appversion $(VERSION)" packaging/mailbox.spec
+	    --define "srcdir $(CURDIR)" \
+	    --define "appversion $(RPMVERSION)" packaging/mailbox.spec
+	@echo "==> RPM(s):"; find rpmbuild/RPMS -name '*.rpm' 2>/dev/null
 
 clean:
 	rm -rf bin/ rpmbuild/ $(BINARY)

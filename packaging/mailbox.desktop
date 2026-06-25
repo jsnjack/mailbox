@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Mailbox
+GenericName=Email Client
+Comment=A native, fast Gmail client
+Exec=mailbox
+Icon=mailbox
+Terminal=false
+Categories=Network;Email;GTK;GNOME;
+Keywords=Email;Gmail;Mail;
+StartupNotify=true
