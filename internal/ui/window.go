@@ -967,9 +967,18 @@ func (w *window) renderConversation(msgs []model.Message) {
 }
 
 func conversationSection(m model.Message, body model.MessageBody, sanitize func(string) string) string {
-	header := fmt.Sprintf(
-		`<div style="border-top:1px solid #ddd;margin-top:18px;padding-top:8px;color:#555;font-size:90%%"><b>%s</b> · %s</div>`,
+	var hb strings.Builder
+	hb.WriteString(`<div style="border-top:1px solid #ddd;margin-top:18px;padding-top:8px;color:#555;font-size:90%">`)
+	fmt.Fprintf(&hb, `<b>%s</b> · %s`,
 		html.EscapeString(displayFrom(m)), m.InternalDate.Format("Jan 2, 2006 15:04"))
+	if to := strings.TrimSpace(m.ToAddrs); to != "" {
+		fmt.Fprintf(&hb, `<br><span style="color:#888">to %s</span>`, html.EscapeString(to))
+	}
+	if cc := strings.TrimSpace(m.CcAddrs); cc != "" {
+		fmt.Fprintf(&hb, `<br><span style="color:#888">cc %s</span>`, html.EscapeString(cc))
+	}
+	hb.WriteString(`</div>`)
+	header := hb.String()
 	switch {
 	case body.HTML != "":
 		return header + sanitize(body.HTML)
