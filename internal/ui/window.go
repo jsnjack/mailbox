@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/diamondburned/gotk4-adwaita/pkg/adw"
 	webkit "github.com/diamondburned/gotk4-webkitgtk/pkg/webkit/v6"
@@ -17,6 +18,7 @@ import (
 	"github.com/jsnjack/mailbox/internal/ai"
 	"github.com/jsnjack/mailbox/internal/dispatch"
 	"github.com/jsnjack/mailbox/internal/model"
+	"github.com/jsnjack/mailbox/internal/syncer"
 	"github.com/microcosm-cc/bluemonday"
 )
 
@@ -35,6 +37,7 @@ type window struct {
 	labelBox   *gtk.ListBox
 	labels     []model.Label
 	current    string
+	startTime  time.Time // only mail arriving after this triggers notifications
 
 	// virtualized thread list: a StringList of gmail ids drives a ListView; the
 	// factory builds row widgets only for visible items, looked up in msgByID.
@@ -71,6 +74,7 @@ func newWindow(app *adw.Application, deps Deps) *window {
 		app:       app,
 		deps:      deps,
 		current:   model.LabelInbox,
+		startTime: time.Now(),
 		sanitizer: bluemonday.UGCPolicy(),
 	}
 	w.build()
@@ -725,10 +729,39 @@ func (w *window) subscribe() {
 	}
 	ch, _ := w.deps.Hub.Subscribe()
 	go func() {
-		for range ch {
-			dispatch.Main(w.loadLabels)
+		for c := range ch {
+			c := c
+			dispatch.Main(func() { w.onChange(c) })
 		}
 	}()
+}
+
+// onChange refreshes label counts and notifies for genuinely new inbox mail.
+func (w *window) onChange(c syncer.Change) {
+	w.loadLabels()
+	if c.Kind != syncer.MessageUpserted || c.GmailID == "" {
+		return
+	}
+	m, err := w.deps.Store.GetMessage(context.Background(), c.AccountID, c.GmailID)
+	if err != nil || !m.IsUnread || !m.InternalDate.After(w.startTime) {
+		return
+	}
+	for _, l := range m.Labels {
+		if l == model.LabelInbox {
+			w.notifyNewMail(m)
+			return
+		}
+	}
+}
+
+func (w *window) notifyNewMail(m model.Message) {
+	n := gio.NewNotification("New mail")
+	body := displayFrom(m)
+	if m.Subject != "" {
+		body += " — " + m.Subject
+	}
+	n.SetBody(body)
+	w.app.SendNotification("mailbox-new-mail", n)
 }
 
 func labelRow(name string, count int) *gtk.Box {
