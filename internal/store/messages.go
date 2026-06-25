@@ -150,6 +150,48 @@ func (s *Store) ModifyLabels(ctx context.Context, accountID int64, gmailID strin
 	})
 }
 
+// UnreadIDsByLabel returns the Gmail ids of unread messages carrying labelID.
+func (s *Store) UnreadIDsByLabel(ctx context.Context, accountID int64, labelID string) ([]string, error) {
+	rows, err := s.reader.QueryContext(ctx, `
+		SELECT m.gmail_id FROM messages m
+		JOIN message_labels ml ON ml.message_rowid = m.rowid AND ml.label_id = ?
+		WHERE m.account_id = ? AND m.is_unread = 1`, labelID, accountID)
+	if err != nil {
+		return nil, fmt.Errorf("unread ids: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan unread id: %w", err)
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// MarkLabelReadLocal clears the unread flag and removes the UNREAD label from
+// every message in a label (optimistic local mirror of a bulk mark-read).
+func (s *Store) MarkLabelReadLocal(ctx context.Context, accountID int64, labelID string) error {
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE messages SET is_unread = 0
+			WHERE account_id = ? AND rowid IN (
+				SELECT message_rowid FROM message_labels WHERE account_id = ? AND label_id = ?)`,
+			accountID, accountID, labelID); err != nil {
+			return fmt.Errorf("clear unread flags: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM message_labels WHERE label_id = ? AND message_rowid IN (
+				SELECT message_rowid FROM message_labels WHERE account_id = ? AND label_id = ?)`,
+			model.LabelUnread, accountID, labelID); err != nil {
+			return fmt.Errorf("remove unread labels: %w", err)
+		}
+		return nil
+	})
+}
+
 // CountByLabel returns the number of messages carrying the given label.
 func (s *Store) CountByLabel(ctx context.Context, accountID int64, labelID string) (int, error) {
 	var n int

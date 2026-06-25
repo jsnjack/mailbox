@@ -86,6 +86,9 @@ func launchUI() error {
 			_, err := engine.Incremental(ctx, client, acc.ID)
 			return err
 		}
+		deps.MarkAllRead = func(ctx context.Context, labelID string) error {
+			return engine.MarkLabelRead(ctx, client, acc.ID, labelID)
+		}
 		go backgroundSync(ctx, engine, client, acc.ID)
 		go backgroundSweep(ctx, engine, client, acc.ID)
 	}

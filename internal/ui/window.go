@@ -241,10 +241,33 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 	content.Append(w.searchEntry)
 	content.Append(w.threadStack)
 
+	hb := adw.NewHeaderBar()
+	markReadBtn := gtk.NewButtonFromIconName("mail-mark-read-symbolic")
+	markReadBtn.SetTooltipText("Mark all as read")
+	markReadBtn.SetSensitive(w.deps.MarkAllRead != nil)
+	markReadBtn.ConnectClicked(w.onMarkAllRead)
+	hb.PackEnd(markReadBtn)
+
 	tv := adw.NewToolbarView()
-	tv.AddTopBar(adw.NewHeaderBar())
+	tv.AddTopBar(hb)
 	tv.SetContent(content)
 	return adw.NewNavigationPage(tv, "Messages")
+}
+
+func (w *window) onMarkAllRead() {
+	if w.deps.MarkAllRead == nil {
+		return
+	}
+	label := w.current
+	go func() {
+		if err := w.deps.MarkAllRead(context.Background(), label); err != nil {
+			slog.Warn("ui: mark all read", "label", label, "err", err)
+		}
+		dispatch.Main(func() {
+			w.loadLabels()
+			w.refreshList(w.searchEntry.Text())
+		})
+	}()
 }
 
 func (w *window) onSearchChanged() {

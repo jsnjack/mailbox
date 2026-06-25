@@ -173,6 +173,42 @@ func TestModifyLabels(t *testing.T) {
 	}
 }
 
+func TestMarkLabelRead(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	acc := seedAccount(t, s)
+
+	mk := func(id string, unread bool, labels ...string) model.Message {
+		return model.Message{AccountID: acc, GmailID: id, ThreadID: id, IsUnread: unread, Labels: labels}
+	}
+	for _, m := range []model.Message{
+		mk("u1", true, "INBOX", "UNREAD"),
+		mk("u2", true, "INBOX", "UNREAD"),
+		mk("r1", false, "INBOX"),
+		mk("o1", true, "Label_3", "UNREAD"), // unread but not in INBOX
+	} {
+		if _, err := s.UpsertMessage(ctx, m); err != nil {
+			t.Fatalf("upsert %s: %v", m.GmailID, err)
+		}
+	}
+
+	ids, err := s.UnreadIDsByLabel(ctx, acc, "INBOX")
+	if err != nil || len(ids) != 2 {
+		t.Fatalf("unread INBOX ids: %v (err %v)", ids, err)
+	}
+
+	if err := s.MarkLabelReadLocal(ctx, acc, "INBOX"); err != nil {
+		t.Fatalf("MarkLabelReadLocal: %v", err)
+	}
+	if ids, _ := s.UnreadIDsByLabel(ctx, acc, "INBOX"); len(ids) != 0 {
+		t.Fatalf("expected 0 unread in INBOX after mark-read, got %d", len(ids))
+	}
+	// The non-INBOX unread message is untouched.
+	if n, _ := s.CountByLabel(ctx, acc, "UNREAD"); n != 1 {
+		t.Fatalf("UNREAD count = %d, want 1 (the non-INBOX message)", n)
+	}
+}
+
 func TestModifyLabelsMissing(t *testing.T) {
 	s := openTestStore(t)
 	acc := seedAccount(t, s)

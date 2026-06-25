@@ -34,6 +34,9 @@ type AttachmentOpener func(ctx context.Context, gmailID string, attID int64) (st
 // SyncNow runs an immediate incremental sync.
 type SyncNow func(ctx context.Context) error
 
+// LabelReader marks every unread message in a label as read.
+type LabelReader func(ctx context.Context, labelID string) error
+
 // Deps are the dependencies the UI needs. FetchBody, ModifyLabels and Hub may be
 // nil (the UI then renders the cache read-only without live updates, on-demand
 // bodies, or message actions).
@@ -48,6 +51,7 @@ type Deps struct {
 	SaveDraft    Sender
 	OpenAttach   AttachmentOpener
 	Sync         SyncNow
+	MarkAllRead  LabelReader
 	Assistant    *ai.Assistant
 }
 

@@ -247,6 +247,28 @@ func (e *Engine) ModifyLabels(ctx context.Context, c *gmailapi.Client, accountID
 	return nil
 }
 
+// MarkLabelRead marks every unread message in a label as read: optimistically
+// in the store, then mirrored to Gmail with a single batch call.
+func (e *Engine) MarkLabelRead(ctx context.Context, c *gmailapi.Client, accountID int64, labelID string) error {
+	ids, err := e.Store.UnreadIDsByLabel(ctx, accountID, labelID)
+	if err != nil {
+		return err
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	if err := e.Store.MarkLabelReadLocal(ctx, accountID, labelID); err != nil {
+		return err
+	}
+	e.publish(Change{Kind: LabelsSynced, AccountID: accountID})
+	if c != nil {
+		if err := c.BatchModify(ctx, ids, nil, []string{model.LabelUnread}); err != nil {
+			return fmt.Errorf("mark label read on server: %w", err)
+		}
+	}
+	return nil
+}
+
 // Incremental applies Gmail history since the account's stored watermark:
 // additions and label changes are re-fetched and upserted, deletions removed.
 // It returns ErrHistoryExpired if the watermark is too old to use.

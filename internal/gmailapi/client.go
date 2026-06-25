@@ -233,6 +233,31 @@ func (c *Client) GetAttachment(ctx context.Context, messageID, attachmentID stri
 	return data, nil
 }
 
+// batchModifyMax is Gmail's per-call id limit for batchModify.
+const batchModifyMax = 1000
+
+// BatchModify applies a label change to many messages, chunked to Gmail's limit.
+func (c *Client) BatchModify(ctx context.Context, ids []string, add, remove []string) error {
+	for start := 0; start < len(ids); start += batchModifyMax {
+		end := start + batchModifyMax
+		if end > len(ids) {
+			end = len(ids)
+		}
+		chunk := ids[start:end]
+		err := c.do(ctx, costMessageList, func() error {
+			return c.srv.Users.Messages.BatchModify("me", &gmail.BatchModifyMessagesRequest{
+				Ids:            chunk,
+				AddLabelIds:    add,
+				RemoveLabelIds: remove,
+			}).Context(ctx).Do()
+		})
+		if err != nil {
+			return fmt.Errorf("batch modify: %w", err)
+		}
+	}
+	return nil
+}
+
 // ModifyLabels adds and removes Gmail label ids on a message (e.g. remove UNREAD
 // to mark read, remove INBOX to archive, add/remove STARRED).
 func (c *Client) ModifyLabels(ctx context.Context, id string, add, remove []string) error {
