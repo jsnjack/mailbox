@@ -77,10 +77,12 @@ func (w *window) openOutbox() {
 		sendNow.ConnectClicked(func() {
 			acctID := w.activeID
 			go func() {
-				if err := w.deps.SweepOutbox(context.Background(), acctID); err != nil {
-					slog.Warn("ui: sweep outbox", "err", err)
-				}
+				err := w.deps.SweepOutbox(context.Background(), acctID)
 				dispatch.Main(func() {
+					if err != nil {
+						slog.Warn("ui: sweep outbox", "err", err)
+						w.toast("Couldn't send — messages stay queued")
+					}
 					rebuild()
 					w.refreshOutbox()
 				})
@@ -152,10 +154,12 @@ func (w *window) outboxRow(it model.OutboxItem, rebuild func()) *gtk.Box {
 		retry.ConnectClicked(func() {
 			acctID := w.activeID
 			go func() {
-				if err := w.deps.RetryOutbox(context.Background(), acctID, id); err != nil {
-					slog.Warn("ui: retry outbox", "err", err)
-				}
+				err := w.deps.RetryOutbox(context.Background(), acctID, id)
 				dispatch.Main(func() {
+					if err != nil {
+						slog.Warn("ui: retry outbox", "err", err)
+						w.toast("Retry failed — message stays queued")
+					}
 					rebuild()
 					w.refreshOutbox()
 				})
@@ -171,10 +175,12 @@ func (w *window) outboxRow(it model.OutboxItem, rebuild func()) *gtk.Box {
 		discard.ConnectClicked(func() {
 			acctID := w.activeID
 			go func() {
-				if err := w.deps.DiscardOutbox(context.Background(), acctID, id); err != nil {
-					slog.Warn("ui: discard outbox", "err", err)
-				}
+				err := w.deps.DiscardOutbox(context.Background(), acctID, id)
 				dispatch.Main(func() {
+					if err != nil {
+						slog.Warn("ui: discard outbox", "err", err)
+						w.toast("Couldn't discard message")
+					}
 					rebuild()
 					w.refreshOutbox()
 				})

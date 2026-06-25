@@ -571,6 +571,7 @@ func (w *window) onRefresh() {
 			w.setSyncing(false)
 			if err != nil {
 				slog.Warn("ui: sync now", "err", err)
+				w.toast("Sync failed — will retry automatically")
 				return
 			}
 			w.loadLabels()
@@ -1076,10 +1077,12 @@ func (w *window) openAttachment(accountID int64, gmailID string, attID int64) {
 		path, err := w.deps.OpenAttach(context.Background(), accountID, gmailID, attID)
 		if err != nil {
 			slog.Warn("ui: open attachment", "id", gmailID, "err", err)
+			dispatch.Main(func() { w.toast("Couldn't download attachment") })
 			return
 		}
 		if err := exec.Command("xdg-open", path).Start(); err != nil {
 			slog.Warn("ui: xdg-open", "path", path, "err", err)
+			dispatch.Main(func() { w.toast("Couldn't open attachment") })
 		}
 	}()
 }
@@ -1318,6 +1321,15 @@ func (w *window) advanceSelection(pos uint) {
 	// The list was just spliced, so the selection is currently invalid; setting it
 	// fires the selection-changed handler, which opens the conversation.
 	w.threadSel.SetSelected(pos)
+}
+
+// toast shows a transient message over the window. Safe to call from the main
+// thread only (like all widget access).
+func (w *window) toast(msg string) {
+	if w.toastOverlay == nil {
+		return
+	}
+	w.toastOverlay.AddToast(adw.NewToast(msg))
 }
 
 // showUndoToast presents an undo toast that reverses the add/remove applied to
