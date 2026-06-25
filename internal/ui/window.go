@@ -10,6 +10,7 @@ import (
 
 	"github.com/diamondburned/gotk4-adwaita/pkg/adw"
 	webkit "github.com/diamondburned/gotk4-webkitgtk/pkg/webkit/v6"
+	coreglib "github.com/diamondburned/gotk4/pkg/core/glib"
 	"github.com/diamondburned/gotk4/pkg/gio/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 	"github.com/jsnjack/mailbox/internal/ai"
@@ -27,12 +28,18 @@ type window struct {
 	app  *adw.Application
 	deps Deps
 
-	win       *adw.ApplicationWindow
-	labelBox  *gtk.ListBox
-	labels    []model.Label
-	threadBox *gtk.ListBox
-	msgs      []model.Message
-	current   string
+	win      *adw.ApplicationWindow
+	labelBox *gtk.ListBox
+	labels   []model.Label
+	current  string
+
+	// virtualized thread list: a StringList of gmail ids drives a ListView; the
+	// factory builds row widgets only for visible items, looked up in msgByID.
+	threadModel *gtk.StringList
+	threadSel   *gtk.SingleSelection
+	threadView  *gtk.ListView
+	msgByID     map[string]model.Message
+
 	header    *gtk.Label
 	webview   *webkit.WebView
 	sanitizer *bluemonday.Policy
@@ -88,10 +95,8 @@ func (w *window) present() {
 	w.selectLabel(w.current)
 
 	// Optionally open the newest message on launch (off by default).
-	if os.Getenv("MAILBOX_OPEN_FIRST") == "1" {
-		if row := w.threadBox.RowAtIndex(0); row != nil {
-			w.threadBox.SelectRow(row)
-		}
+	if os.Getenv("MAILBOX_OPEN_FIRST") == "1" && w.threadModel.NItems() > 0 {
+		w.threadSel.SetSelected(0)
 	}
 }
 
@@ -135,25 +140,55 @@ func (w *window) buildSidebar() *adw.NavigationPage {
 }
 
 func (w *window) buildThreadList() *adw.NavigationPage {
-	w.threadBox = gtk.NewListBox()
-	w.threadBox.ConnectRowSelected(func(row *gtk.ListBoxRow) {
-		if row == nil {
+	w.msgByID = make(map[string]model.Message)
+	w.threadModel = gtk.NewStringList(nil)
+	w.threadSel = gtk.NewSingleSelection(w.threadModel)
+	w.threadSel.SetAutoselect(false)
+	w.threadSel.SetCanUnselect(true)
+	w.threadSel.ConnectSelectionChanged(func(position, nItems uint) {
+		w.onThreadSelected()
+	})
+
+	factory := gtk.NewSignalListItemFactory()
+	factory.ConnectBind(func(obj *coreglib.Object) {
+		li, ok := obj.Cast().(*gtk.ListItem)
+		if !ok {
 			return
 		}
-		if i := row.Index(); i >= 0 && i < len(w.msgs) {
-			w.showMessage(w.msgs[i])
+		so, ok := li.Item().Cast().(*gtk.StringObject)
+		if !ok {
+			return
 		}
+		li.SetChild(threadRow(w.msgByID[so.String()]))
 	})
+
+	w.threadView = gtk.NewListView(w.threadSel, &factory.ListItemFactory)
+	w.threadView.SetVExpand(true)
+	w.threadView.SetHExpand(true)
 
 	scroller := gtk.NewScrolledWindow()
 	scroller.SetVExpand(true)
 	scroller.SetHExpand(true)
-	scroller.SetChild(w.threadBox)
+	scroller.SetChild(w.threadView)
 
 	tv := adw.NewToolbarView()
 	tv.AddTopBar(adw.NewHeaderBar())
 	tv.SetContent(scroller)
 	return adw.NewNavigationPage(tv, "Messages")
+}
+
+func (w *window) onThreadSelected() {
+	item := w.threadSel.SelectedItem()
+	if item == nil {
+		return
+	}
+	so, ok := item.Cast().(*gtk.StringObject)
+	if !ok {
+		return
+	}
+	if m, ok := w.msgByID[so.String()]; ok {
+		w.showMessage(m)
+	}
 }
 
 func (w *window) buildReader() *adw.NavigationPage {
@@ -280,18 +315,25 @@ func (w *window) loadLabels() {
 	}
 }
 
+// threadListCap bounds how many messages a label loads at once. The ListView
+// virtualizes row widgets, so this only bounds metadata held in memory; a truly
+// windowed model (paging on scroll) is a further optimization.
+const threadListCap = 5000
+
 func (w *window) selectLabel(labelID string) {
 	w.current = labelID
-	msgs, err := w.deps.Store.ListByLabel(context.Background(), w.deps.AccountID, labelID, 500, 0)
+	msgs, err := w.deps.Store.ListByLabel(context.Background(), w.deps.AccountID, labelID, threadListCap, 0)
 	if err != nil {
 		slog.Error("ui: list by label", "label", labelID, "err", err)
 		return
 	}
-	w.msgs = msgs
-	w.threadBox.RemoveAll()
-	for _, m := range msgs {
-		w.threadBox.Append(threadRow(m))
+	w.msgByID = make(map[string]model.Message, len(msgs))
+	ids := make([]string, len(msgs))
+	for i, m := range msgs {
+		ids[i] = m.GmailID
+		w.msgByID[m.GmailID] = m
 	}
+	w.threadModel.Splice(0, w.threadModel.NItems(), ids)
 }
 
 func (w *window) showMessage(m model.Message) {

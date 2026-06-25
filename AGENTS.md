@@ -52,8 +52,10 @@ Reply / forward / new compose in a separate window (text/plain via
 the compose window has an AI-draft button that streams a reply into the body.
 Translate / draft-reply stream into a window via the `ai` provider.
 
-The thread list currently uses a `gtk.ListBox` (loads up to 500 rows) — the
-windowed `gtk.ListView` for very large mailboxes is a pending optimization.
+The thread list is a virtualized `gtk.ListView`: a `gtk.StringList` of gmail ids
+drives a `SignalListItemFactory` that builds row widgets only for visible items
+(looked up in an in-memory `msgByID` map). It loads up to `threadListCap` (5000)
+messages of metadata per label; true paging-on-scroll is a further optimization.
 Compose is text-only for now (attachments + the resilient outbox sweeper are
 follow-ups; send is currently direct). `MAILBOX_OPEN_FIRST=1` opens the newest
 message on launch.
