@@ -77,7 +77,9 @@ A sender-authentication badge shows Gmail's SPF/DKIM/DMARC verdict
 → green verified / amber partial / red possible-spoof), plus deterministic
 anti-phishing heuristics (`phishing.go`: display-name spoofing and deceptive
 link text, compared at the registrable-domain level — no AI/network) surfaced as
-an amber caution line. A thread is rendered newest-message-first. An AI-summary button reveals a card
+an amber caution line; a shield button additionally runs an on-demand AI
+phishing analysis (`AnalyzeEmail` — verdict + reasons, fed the auth/heuristic
+signals, shown in the shared AI card). A thread is rendered newest-message-first. An AI-summary button reveals a card
 pinned above the conversation that streams a bullet summary (`SummarizeThread`),
 cached by the thread's message-id fingerprint (`summaryKey`) so reopening is
 instant and a new reply auto-invalidates it. Reader actions archive /
