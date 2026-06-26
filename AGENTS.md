@@ -92,8 +92,13 @@ optimistic `ModifyLabels` + Gmail mirror; opening an unread message marks it rea
 Ctrl +/-/0 zoom the message view (`WebView.SetZoomLevel`, persisted);
 a 60s background incremental sync updates label counts through `dispatch`→`Hub`,
 and new inbox mail (arriving after launch) raises a desktop notification via
-`gio.Notification`. (The GApplication app-id `com.surfly.mailbox` matches the
-installed `com.surfly.mailbox.desktop`, which GNOME requires for notifications.)
+`gio.Notification`. (GNOME routes a notification only when it can resolve the
+GApplication app-id `com.surfly.mailbox` to an installed `*.desktop` entry; the
+RPM ships `com.surfly.mailbox.desktop` under `/usr/share/applications`, and for a
+binary run from `bin/` `ensureDesktopFile` self-installs a user-level entry —
+pointed at the running binary — into `~/.local/share/applications` at startup,
+skipping it when a system or user entry already exists so it never shadows a
+real install.)
 Reply / reply-all / forward / new compose in a separate window (text/plain via
 `gmailapi.BuildMIME` + `messages.send`, threading headers + threadId on replies);
 To/Cc/Bcc autocomplete from past correspondents (`store.Contacts` ranks

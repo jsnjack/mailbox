@@ -102,6 +102,9 @@ type Deps struct {
 
 // Run launches the GTK application and blocks until the window is closed.
 func Run(deps Deps) error {
+	// Notifications are routed by the desktop environment via the app id's
+	// installed desktop entry; make sure one exists before any can fire.
+	ensureDesktopFile()
 	app := newAdwApplication()
 	app.ConnectActivate(func() {
 		slog.Debug("ui: activate")
