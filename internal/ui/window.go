@@ -91,6 +91,7 @@ type window struct {
 	attachBox    *gtk.Box   // chips for the open message's attachments
 	trackerLabel *gtk.Label // "N trackers blocked" indicator
 	webview      *webkit.WebView
+	readerZoom   float64 // reader message zoom (Ctrl +/-/0), persisted
 	sanitizer    *bluemonday.Policy
 
 	// reader: the open conversation. openMsg is its newest message (used for
@@ -134,6 +135,7 @@ func newWindow(app *adw.Application, deps Deps) *window {
 		translationCache: map[string]string{},
 		summaryCache:     map[string]string{},
 		accountBadges:    map[int64]*gtk.Label{},
+		readerZoom:       1.0,
 	}
 	w.accountNames, _ = config.LoadAccountNames()
 	w.signature, _ = config.LoadSignature()
@@ -248,6 +250,21 @@ func (w *window) addShortcuts() {
 	ec := gtk.NewEventControllerKey()
 	ec.SetPropagationPhase(gtk.PhaseCapture)
 	ec.ConnectKeyPressed(func(keyval, keycode uint, state gdk.ModifierType) bool {
+		// Ctrl +/-/0 zoom the message view (works while reading, incl. focus in
+		// the WebView), like a browser.
+		if state&gdk.ControlMask != 0 {
+			switch keyval {
+			case gdk.KEY_plus, gdk.KEY_equal, gdk.KEY_KP_Add:
+				w.adjustZoom(0.1)
+				return true
+			case gdk.KEY_minus, gdk.KEY_KP_Subtract:
+				w.adjustZoom(-0.1)
+				return true
+			case gdk.KEY_0, gdk.KEY_KP_0:
+				w.setZoom(1.0)
+				return true
+			}
+		}
 		if state&(gdk.ControlMask|gdk.AltMask|gdk.SuperMask) != 0 {
 			return false
 		}
@@ -390,7 +407,11 @@ func (w *window) present() {
 			w.unreadOnly = true
 			w.unreadToggle.SetActive(true)
 		}
+		if vs.Zoom >= 0.5 && vs.Zoom <= 3.0 {
+			w.readerZoom = vs.Zoom
+		}
 	}
+	w.webview.SetZoomLevel(w.readerZoom)
 	w.selectLabel(w.current)
 	w.refreshOutbox()
 
@@ -1268,9 +1289,25 @@ func (w *window) selectLabel(labelID string) {
 // saveViewState persists the current folder and unread filter so the next
 // launch reopens here.
 func (w *window) saveViewState() {
-	if err := config.SaveViewState(config.ViewState{Folder: w.current, UnreadOnly: w.unreadOnly}); err != nil {
+	if err := config.SaveViewState(config.ViewState{Folder: w.current, UnreadOnly: w.unreadOnly, Zoom: w.readerZoom}); err != nil {
 		slog.Warn("ui: save view state", "err", err)
 	}
+}
+
+// adjustZoom changes the reader zoom by delta; setZoom clamps to a sane range,
+// applies it to the message view, and remembers it.
+func (w *window) adjustZoom(delta float64) { w.setZoom(w.readerZoom + delta) }
+
+func (w *window) setZoom(z float64) {
+	switch {
+	case z < 0.5:
+		z = 0.5
+	case z > 3.0:
+		z = 3.0
+	}
+	w.readerZoom = z
+	w.webview.SetZoomLevel(z)
+	w.saveViewState()
 }
 
 // showThread opens a conversation: it loads all its messages, renders them

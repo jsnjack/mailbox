@@ -11,8 +11,9 @@ import (
 // ViewState remembers the last-used folder and unread filter so the app reopens
 // where the user left off.
 type ViewState struct {
-	Folder     string `json:"folder"`
-	UnreadOnly bool   `json:"unread_only"`
+	Folder     string  `json:"folder"`
+	UnreadOnly bool    `json:"unread_only"`
+	Zoom       float64 `json:"zoom"` // reader zoom level (0 = default 1.0)
 }
 
 func viewStatePath() (string, error) {

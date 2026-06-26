@@ -24,6 +24,7 @@ func shortcutList() [][2]string {
 		{"t", "Translate to English"},
 		{"c", "Compose"},
 		{"/", "Search"},
+		{"Ctrl + / Ctrl − / Ctrl 0", "Zoom message in / out / reset"},
 		{"Esc", "Back to list"},
 		{"?", "Open preferences"},
 	}

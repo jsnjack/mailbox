@@ -12,7 +12,7 @@ func TestViewStateRoundTrip(t *testing.T) {
 		t.Fatalf("absent state: %+v err=%v, want zero", s, err)
 	}
 
-	want := ViewState{Folder: "SENT", UnreadOnly: true}
+	want := ViewState{Folder: "SENT", UnreadOnly: true, Zoom: 1.2}
 	if err := SaveViewState(want); err != nil {
 		t.Fatalf("SaveViewState: %v", err)
 	}
