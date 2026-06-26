@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/diamondburned/gotk4-adwaita/pkg/adw"
+	coreglib "github.com/diamondburned/gotk4/pkg/core/glib"
 	"github.com/diamondburned/gotk4/pkg/gdk/v4"
 	"github.com/diamondburned/gotk4/pkg/gio/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
@@ -422,6 +423,25 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 	})
 	win.AddController(keyCtl)
 
+	// Recipient autocomplete from past correspondents (built off the main thread,
+	// then attached to the To/Cc/Bcc fields).
+	go func() {
+		contacts, err := w.deps.Store.Contacts(context.Background(), w.activeID, w.activeEmail, 1500)
+		if err != nil {
+			slog.Warn("ui: load contacts", "err", err)
+			return
+		}
+		if len(contacts) == 0 {
+			return
+		}
+		dispatch.Main(func() {
+			st := buildContactStore(contacts)
+			attachRecipientCompletion(toEntry, st)
+			attachRecipientCompletion(ccEntry, st)
+			attachRecipientCompletion(bccEntry, st)
+		})
+	}()
+
 	win.SetVisible(true)
 
 	switch {
@@ -541,6 +561,67 @@ func mentionsAttachment(body string) bool {
 		}
 	}
 	return false
+}
+
+// formatContact renders a contact as an RFC-5322-ish recipient token.
+func formatContact(c model.Contact) string {
+	if c.Name != "" && !strings.EqualFold(c.Name, c.Address) {
+		return fmt.Sprintf("%s <%s>", c.Name, c.Address)
+	}
+	return c.Address
+}
+
+// buildContactStore builds a single-column list model of recipient tokens to
+// back the autocompletion on the To/Cc/Bcc fields.
+//
+// required to back a GtkEntryCompletion (gio.ListStore is not a GtkTreeModel).
+//
+//nolint:staticcheck // GtkListStore/TreeModel are deprecated in GTK4 but are
+func buildContactStore(contacts []model.Contact) *gtk.ListStore {
+	st := gtk.NewListStore([]coreglib.Type{coreglib.TypeString})
+	for _, c := range contacts {
+		st.SetValue(st.Append(), 0, coreglib.NewValue(formatContact(c)))
+	}
+	return st
+}
+
+// attachRecipientCompletion wires past-correspondent autocompletion onto a
+// recipient entry. Matching and insertion operate on the last comma-separated
+// token, so it works for multi-recipient fields.
+//
+// practical way to complete a text entry; the list-model widgets don't replace it.
+//
+//nolint:staticcheck // GtkEntryCompletion is deprecated in GTK4 but is still the
+func attachRecipientCompletion(entry *gtk.Entry, st *gtk.ListStore) {
+	lastToken := func() (prefix, token string) {
+		t := entry.Text()
+		if i := strings.LastIndexByte(t, ','); i >= 0 {
+			return t[:i+1] + " ", strings.TrimSpace(t[i+1:])
+		}
+		return "", strings.TrimSpace(t)
+	}
+
+	comp := gtk.NewEntryCompletion()
+	comp.SetModel(st)
+	comp.SetTextColumn(0)
+	comp.SetMinimumKeyLength(1)
+	comp.SetPopupCompletion(true)
+	comp.SetMatchFunc(func(_ *gtk.EntryCompletion, _ string, iter *gtk.TreeIter) bool {
+		_, token := lastToken()
+		if token == "" {
+			return false
+		}
+		val := st.Value(iter, 0)
+		return strings.Contains(strings.ToLower(val.String()), strings.ToLower(token))
+	})
+	comp.ConnectMatchSelected(func(_ gtk.TreeModeller, iter *gtk.TreeIter) bool {
+		prefix, _ := lastToken()
+		val := st.Value(iter, 0)
+		entry.SetText(prefix + val.String() + ", ")
+		entry.SetPosition(-1)
+		return true
+	})
+	entry.SetCompletion(comp)
 }
 
 // bodyText returns the full text content of a text buffer.

@@ -124,6 +124,15 @@ type OutgoingMessage struct {
 	Attachments []OutgoingAttachment
 }
 
+// Contact is a correspondent derived from cached mail, used for recipient
+// autocomplete. Count and LastSeen drive ranking (most/recently used first).
+type Contact struct {
+	Name     string
+	Address  string
+	Count    int
+	LastSeen time.Time
+}
+
 // OutboxItem is a queued outgoing message awaiting (re)send.
 type OutboxItem struct {
 	ID        int64
