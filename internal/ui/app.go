@@ -48,6 +48,10 @@ type DraftFinder func(ctx context.Context, accountID int64, gmailID string) (str
 // SyncNow runs an immediate incremental sync for an account.
 type SyncNow func(ctx context.Context, accountID int64) error
 
+// ServerSearcher runs a Gmail server-side search, caches the matches, and
+// returns the matching message ids.
+type ServerSearcher func(ctx context.Context, accountID int64, query string, max int) ([]string, error)
+
 // LabelReader marks every unread message in a label as read.
 type LabelReader func(ctx context.Context, accountID int64, labelID string) error
 
@@ -71,6 +75,7 @@ type Deps struct {
 	FindDraftID   DraftFinder
 	OpenAttach    AttachmentOpener
 	Sync          SyncNow
+	SearchServer  ServerSearcher
 	MarkAllRead   LabelReader
 	SweepOutbox   OutboxSweeper
 	RetryOutbox   OutboxAction

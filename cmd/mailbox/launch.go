@@ -161,6 +161,13 @@ func launchUI() error {
 			_, err = engine.Incremental(ctx, c, accountID)
 			return err
 		}
+		deps.SearchServer = func(ctx context.Context, accountID int64, query string, max int) ([]string, error) {
+			c, err := clientFor(accountID)
+			if err != nil {
+				return nil, err
+			}
+			return engine.SearchServer(ctx, c, accountID, query, max)
+		}
 		deps.MarkAllRead = func(ctx context.Context, accountID int64, labelID string) error {
 			c, err := clientFor(accountID)
 			if err != nil {

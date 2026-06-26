@@ -878,6 +878,54 @@ func (w *window) bulkApply(verb string, add, remove []string) {
 	w.toast(fmt.Sprintf("%s %d conversations", verb, n))
 }
 
+// onSearchAllMail runs a Gmail server-side search for the current query, caches
+// the matches, and shows them — finding mail beyond the local cache.
+func (w *window) onSearchAllMail() {
+	q := strings.TrimSpace(w.searchEntry.Text())
+	if q == "" || w.deps.SearchServer == nil {
+		return
+	}
+	w.emptyPage.SetChild(nil)
+	w.emptyPage.SetIconName("edit-find-symbolic")
+	w.emptyPage.SetTitle("Searching all mail…")
+	w.emptyPage.SetDescription("")
+	acctID := w.activeID
+	go func() {
+		ids, err := w.deps.SearchServer(context.Background(), acctID, q, 50)
+		dispatch.Main(func() {
+			if strings.TrimSpace(w.searchEntry.Text()) != q || w.activeID != acctID {
+				return // the query changed while searching
+			}
+			if err != nil {
+				slog.Warn("ui: search all mail", "err", err)
+				w.toast("Couldn't search all mail")
+				w.showThreads(nil)
+				return
+			}
+			ctx := context.Background()
+			seen := make(map[string]bool)
+			var sums []model.ThreadSummary
+			for _, id := range ids {
+				m, err := w.deps.Store.GetMessage(ctx, acctID, id)
+				if err != nil || seen[m.ThreadID] {
+					continue
+				}
+				seen[m.ThreadID] = true
+				if sum, err := w.deps.Store.GetThreadSummary(ctx, acctID, m.ThreadID); err == nil {
+					sums = append(sums, sum)
+				}
+			}
+			sort.SliceStable(sums, func(i, j int) bool {
+				return sums[i].Latest.InternalDate.After(sums[j].Latest.InternalDate)
+			})
+			w.showThreads(sums)
+			if len(sums) == 0 {
+				w.toast("No messages found")
+			}
+		})
+	}()
+}
+
 func (w *window) onSearchChanged() {
 	if w.suppressSearch {
 		return
@@ -982,12 +1030,22 @@ func (w *window) showThreads(sums []model.ThreadSummary) {
 	}
 	w.threadModel.Splice(0, w.threadModel.NItems(), ids)
 	if len(sums) == 0 {
+		w.emptyPage.SetChild(nil)
 		switch {
 		case strings.TrimSpace(w.searchEntry.Text()) != "":
 			q := strings.TrimSpace(w.searchEntry.Text())
 			w.emptyPage.SetIconName("edit-find-symbolic")
 			w.emptyPage.SetTitle("No matches")
 			w.emptyPage.SetDescription(fmt.Sprintf("No cached messages match %q.", q))
+			// Offer to look beyond the local cache.
+			if w.deps.SearchServer != nil {
+				btn := gtk.NewButtonWithLabel("Search all mail")
+				btn.AddCSSClass("pill")
+				btn.AddCSSClass("suggested-action")
+				btn.SetHAlign(gtk.AlignCenter)
+				btn.ConnectClicked(w.onSearchAllMail)
+				w.emptyPage.SetChild(btn)
+			}
 		case w.unreadOnly:
 			w.emptyPage.SetIconName("mail-read-symbolic")
 			w.emptyPage.SetTitle("No unread messages")

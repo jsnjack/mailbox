@@ -112,6 +112,37 @@ feed:
 	return int(done.Load()), feedErr
 }
 
+// SearchServer runs a Gmail server-side search (query is Gmail's q= syntax),
+// caches the matching messages' metadata that isn't already local, and returns
+// the matching message ids (Gmail's relevance order). This lets the user find
+// mail beyond the local cache.
+func (e *Engine) SearchServer(ctx context.Context, c *gmailapi.Client, accountID int64, query string, max int) ([]string, error) {
+	ids, err := c.ListMessageIDs(ctx, query, max)
+	if err != nil {
+		return nil, fmt.Errorf("search list ids: %w", err)
+	}
+	fetched := 0
+	for _, id := range ids {
+		if _, err := e.Store.GetMessage(ctx, accountID, id); err == nil {
+			continue // already cached
+		}
+		msg, err := c.GetMessageMetadata(ctx, id)
+		if err != nil {
+			slog.Default().Warn("search: fetch metadata", "id", id, "err", err)
+			continue
+		}
+		if _, err := e.Store.UpsertMessage(ctx, gmailapi.ToMessage(accountID, msg)); err != nil {
+			slog.Default().Warn("search: upsert", "id", id, "err", err)
+			continue
+		}
+		fetched++
+	}
+	if fetched > 0 {
+		e.publish(Change{Kind: MessageUpserted, AccountID: accountID})
+	}
+	return ids, nil
+}
+
 // FetchBody downloads a message's full body and caches it, marking it fetched.
 func (e *Engine) FetchBody(ctx context.Context, c *gmailapi.Client, accountID int64, gmailID string) error {
 	start := time.Now()
