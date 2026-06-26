@@ -45,7 +45,18 @@ internal/
 Multi-account: the launcher builds one Gmail client per connected account and
 syncs each; the UI tracks an active account (a switcher appears in the sidebar
 when more than one is connected) and routes every operation by account id. New
-accounts are added via `mailbox sync --account`.
+accounts are added via `mailbox sync --account`. Each switcher row shows a
+colour `adw.Avatar`, the account's display name, and an unread-INBOX count pill;
+names are user-assigned in Preferences → Accounts (`config.{Load,Save}AccountName`,
+stored in `<data>/accounts.json` keyed by email — when set, the name is primary
+and the email becomes a caption). Per-account badges refresh on any sidebar
+reload and whenever a non-active account syncs (`refreshAccountBadges`).
+
+Colour: a small application stylesheet (`internal/ui/theme.go`, registered on
+the default display in `build`) adds colour without any non-symbolic chrome —
+per-mailbox folder-icon hues, accent count pills (`countBadge`/`.badge-pill`),
+an accent dot + accent sender on unread conversations, and the summary-card /
+tracker-shield tints. It references `@accent_color` so it tracks light/dark.
 
 UI state (implemented): 3-pane shell renders the cached account live; clicking a
 message lazily fetches + sanitizes + renders its body (WebKit; remote images off
@@ -55,7 +66,14 @@ behind a toggle). The reader sanitizes with an email-tuned bluemonday policy
 (no horizontal scrollbar, no cropping). JavaScript is enabled **only** for that
 script: a strict per-render CSP (`script-src` pinned to a nonce, `default-src
 'none'`) plus the sanitizer mean no email-supplied script can run or reach the
-network. Reader actions archive / mark-unread / star via
+network. Remote images load by default, but tracking pixels are stripped before
+render (`stripTrackers`: 1x1/tiny imgs, 1px-styled imgs, and known open-tracker
+URL patterns) and the count is surfaced as a "🛡 N trackers blocked" indicator.
+A thread is rendered newest-message-first. An AI-summary button reveals a card
+pinned above the conversation that streams a bullet summary (`SummarizeThread`),
+cached by the thread's message-id fingerprint (`summaryKey`) so reopening is
+instant and a new reply auto-invalidates it. Reader actions archive /
+mark-unread / star / move-to-inbox via
 optimistic `ModifyLabels` + Gmail mirror; opening an unread message marks it read;
 a 60s background incremental sync updates label counts through `dispatch`→`Hub`,
 and new inbox mail (arriving after launch) raises a desktop notification via
@@ -129,6 +147,7 @@ afterward. The `sync` command and the headless packages build without GTK.
 - Config file: `~/.config/mailbox/config.toml`, `[ai]` table: `provider` (`openai`|`litellm`|`anthropic`), `endpoint` (base URL incl. `/v1`), `model`. Editable in-app via the Preferences dialog (`ai.SaveConfig`; applies on next launch). Env overrides: `MAILBOX_AI_{PROVIDER,ENDPOINT,MODEL,KEY}`.
 - AI API key: keyring service `mailbox-ai` (user = provider) or `MAILBOX_AI_KEY`; never in the config file. Store it with `printf '%s' "$KEY" | mailbox set-ai-key`.
 - Persistent state (SQLite DB): `~/.local/share/mailbox/mailbox.db`.
+- Account display names: `~/.local/share/mailbox/accounts.json` (email → name).
 - Attachment cache: `~/.cache/mailbox/attachments/` (content-addressed by sha256).
 - Secrets (OAuth refresh tokens, AI API keys): OS keyring via Secret Service.
 - Trace log: `/tmp/mailbox.log` (truncated each start; enabled with `--trace`).
