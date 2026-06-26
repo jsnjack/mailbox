@@ -124,10 +124,15 @@ thread renders all its messages stacked in the reader (bodies fetched lazily,
 each a sanitized section); archive/trash apply to the whole thread, reply/star
 to its newest message. A search entry runs instant local FTS5 search
 (`store.Search`, sanitized into a quoted prefix MATCH) whose hits are grouped
-into threads; clearing it returns to the current label.
+into threads; clearing it returns to the current label. A selection-mode toggle
+turns rows into checkboxes with a bulk-action bar (Archive / Trash / Mark read),
+applying the change to every selected conversation in one batched `ModifyLabels`
+call (`bulkApply`). Below the reader, on-demand AI Smart-Reply chips
+(`SmartReplies`) suggest short one-tap replies.
 Compose supports attachments (a file picker adds them; `BuildMIME` emits
-multipart/mixed with base64 parts). Send is synchronous for compose feedback,
-but a failed send is queued to the `outbox` table and retried by a background
+multipart/mixed with base64 parts). Sending uses Undo Send: the compose closes
+and the message is held ~5s behind an "Undo" toast (`deferSend`) before it goes
+out; a failed send is queued to the `outbox` table and retried by a background
 sweeper (`SweepOutbox`, ~45s); pending/failed sends are surfaced by an
 `adw.Banner` over the thread list and an Outbox dialog (per-item retry/discard
 plus "send now"). The window collapses responsively via
