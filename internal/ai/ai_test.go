@@ -119,3 +119,28 @@ func TestMissingConfigFileNotAnError(t *testing.T) {
 		t.Fatal("absent config should not be Configured")
 	}
 }
+
+func TestParseTranslatedSegments(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want []string
+		ok   bool
+	}{
+		{"plain array", `["Hallo","Welt"]`, []string{"Hallo", "Welt"}, true},
+		{"code fence", "```json\n[\"a\",\"b\"]\n```", []string{"a", "b"}, true},
+		{"prose around", `Sure! ["x"] done`, []string{"x"}, true},
+		{"no array", `not json`, nil, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := parseTranslatedSegments(c.in)
+			if c.ok != (err == nil) {
+				t.Fatalf("err=%v, ok=%v", err, c.ok)
+			}
+			if c.ok && (len(got) != len(c.want) || (len(got) > 0 && got[0] != c.want[0])) {
+				t.Fatalf("got %v, want %v", got, c.want)
+			}
+		})
+	}
+}

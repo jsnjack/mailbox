@@ -1418,7 +1418,11 @@ func (w *window) onTranslate() {
 	}
 
 	go func() {
-		ch, err := w.deps.Assistant.TranslateHTML(ctx, source, "English")
+		// Translate only the text segments (cheap) and reinsert them into the
+		// original markup locally, so the model never regenerates the HTML.
+		out, err := translateHTMLText(source, func(segs []string) ([]string, error) {
+			return w.deps.Assistant.TranslateSegments(ctx, segs, "English")
+		})
 		if err != nil {
 			msg := err.Error()
 			dispatch.Main(func() {
@@ -1428,20 +1432,7 @@ func (w *window) onTranslate() {
 			})
 			return
 		}
-		var acc strings.Builder
-		var last time.Time
-		for c := range ch {
-			if c.Err != nil {
-				continue
-			}
-			acc.WriteString(c.Text)
-			// Throttle live re-renders so streaming stays smooth, not flickery.
-			if time.Since(last) > 350*time.Millisecond {
-				last = time.Now()
-				render(acc.String(), false)
-			}
-		}
-		render(acc.String(), true)
+		render(out, true)
 	}()
 }
 

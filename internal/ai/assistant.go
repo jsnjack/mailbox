@@ -1,6 +1,11 @@
 package ai
 
-import "context"
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
+)
 
 // Assistant builds task-specific prompts on top of a Provider.
 type Assistant struct {
@@ -13,21 +18,48 @@ func NewAssistant(p Provider) *Assistant { return &Assistant{p: p} }
 // ProviderName returns the underlying provider's name.
 func (a *Assistant) ProviderName() string { return a.p.Name() }
 
-// Translate streams a translation of plain-text body into targetLang.
-func (a *Assistant) Translate(ctx context.Context, body, targetLang string) (<-chan Chunk, error) {
-	system := "You are a translation engine. Translate the user's email into " + targetLang +
-		". Preserve meaning, tone, and formatting. Output only the translation, with no preamble or explanation."
-	return a.p.Stream(ctx, system, []Msg{{Role: RoleUser, Content: body}})
+// TranslateSegments translates each text snippet into targetLang and returns the
+// translations in the same order. It sends only the text (as a compact JSON
+// array), never the surrounding markup, so the model generates a small fraction
+// of the tokens it would for whole-HTML translation — far faster. The caller
+// reinserts the results into the original markup, preserving styling.
+func (a *Assistant) TranslateSegments(ctx context.Context, segments []string, targetLang string) ([]string, error) {
+	payload, err := json.Marshal(segments)
+	if err != nil {
+		return nil, fmt.Errorf("encode segments: %w", err)
+	}
+	system := "You are a translation engine. The user message is a JSON array of short text snippets from " +
+		"an email. Translate each snippet into " + targetLang + " and reply with ONLY a JSON array of the " +
+		"same length and order, where each element is the translation of the corresponding input snippet. " +
+		"Leave snippets that are URLs, email addresses, numbers, or pure symbols unchanged. Do not merge or " +
+		"split snippets. No commentary and no code fences."
+	ch, err := a.p.Stream(ctx, system, []Msg{{Role: RoleUser, Content: string(payload)}})
+	if err != nil {
+		return nil, err
+	}
+	var b strings.Builder
+	for c := range ch {
+		if c.Err != nil {
+			return nil, c.Err
+		}
+		b.WriteString(c.Text)
+	}
+	return parseTranslatedSegments(b.String())
 }
 
-// TranslateHTML streams a translation of an HTML email into targetLang while
-// preserving the markup, so the rendered translation keeps the email's styling.
-func (a *Assistant) TranslateHTML(ctx context.Context, htmlBody, targetLang string) (<-chan Chunk, error) {
-	system := "You are a translation engine for HTML email. Translate all human-readable text into " +
-		targetLang + ". Keep every HTML tag, attribute, inline style, and URL exactly as-is — translate " +
-		"only the visible text between tags plus alt and title text. Do not add, remove, or reformat any " +
-		"markup. Output only the translated HTML, with no code fences and no commentary."
-	return a.p.Stream(ctx, system, []Msg{{Role: RoleUser, Content: htmlBody}})
+// parseTranslatedSegments extracts a JSON array of strings from a model reply,
+// tolerating code fences or surrounding prose by salvaging the outermost array.
+func parseTranslatedSegments(raw string) ([]string, error) {
+	start := strings.IndexByte(raw, '[')
+	end := strings.LastIndexByte(raw, ']')
+	if start < 0 || end <= start {
+		return nil, fmt.Errorf("no JSON array in translation reply")
+	}
+	var out []string
+	if err := json.Unmarshal([]byte(raw[start:end+1]), &out); err != nil {
+		return nil, fmt.Errorf("parse translation array: %w", err)
+	}
+	return out, nil
 }
 
 // DraftReply streams a reply drafted from the thread context. instruction is an
