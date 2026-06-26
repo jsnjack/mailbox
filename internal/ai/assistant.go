@@ -69,8 +69,8 @@ func (a *Assistant) SummarizeThread(ctx context.Context, threadContext string) (
 	system := "You are an email assistant. Summarize the following email thread for someone catching up " +
 		"quickly. Reply with 2-5 short bullet points, one per line, each starting with '- ', covering the key " +
 		"points, decisions, and any open questions or action items awaiting a response. Be concise and " +
-		"factual. Write the summary in the same language as the thread. Output only the bullet points — no " +
-		"heading, no preamble such as 'Here is', and no code fences."
+		"factual. Always write the summary in English, even when the thread is in another language. Output " +
+		"only the bullet points — no heading, no preamble such as 'Here is', and no code fences."
 	user := "Email thread to summarize:\n\n" + threadContext
 	return a.p.Stream(ctx, system, []Msg{{Role: RoleUser, Content: user}})
 }

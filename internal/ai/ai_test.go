@@ -51,6 +51,10 @@ func TestSummarizeThread(t *testing.T) {
 	if !strings.Contains(fp.gotSystem, "bullet") {
 		t.Fatalf("system prompt missing bullet instruction: %q", fp.gotSystem)
 	}
+	// Summaries must always be produced in English.
+	if !strings.Contains(fp.gotSystem, "English") {
+		t.Fatalf("system prompt should force English: %q", fp.gotSystem)
+	}
 }
 
 func TestDraftNew(t *testing.T) {
