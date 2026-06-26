@@ -167,6 +167,7 @@ func (w *window) openFromNotification(target string) {
 }
 
 func (w *window) build() {
+	loadAppCSS() // register the colour stylesheet before any widgets are built
 	w.win = adw.NewApplicationWindow(&w.app.Application)
 	w.win.SetTitle("Mailbox")
 	// Size precedence: env override (test hook) > last-remembered size > default.
@@ -380,23 +381,24 @@ type sidebarItem struct {
 }
 
 // folderDef is a curated system "folder" presented in the sidebar, in display
-// order, with a friendly name and a (libadwaita-available) symbolic icon.
+// order, with a friendly name, a (libadwaita-available) symbolic icon, and a CSS
+// class that tints that icon (see appCSS).
 type folderDef struct {
-	id, name, icon string
+	id, name, icon, css string
 }
 
 // systemFolders are the standard mailboxes shown at the top of the sidebar, in
 // order. Raw Gmail system labels not listed here (UNREAD, CHAT, CATEGORY_*, …)
 // are intentionally hidden — they are not navigable folders.
 var systemFolders = []folderDef{
-	{model.LabelInbox, "Inbox", "mail-unread-symbolic"},
-	{model.LabelStarred, "Starred", "starred-symbolic"},
-	{model.LabelImportant, "Important", "mail-mark-important-symbolic"},
-	{model.LabelSent, "Sent", "mail-send-symbolic"},
-	{model.LabelDraft, "Drafts", "document-edit-symbolic"},
-	{model.LabelSpam, "Spam", "mail-mark-junk-symbolic"},
-	{model.LabelTrash, "Trash", "user-trash-symbolic"},
-	{allMailID, "All Mail", "folder-symbolic"},
+	{model.LabelInbox, "Inbox", "mail-unread-symbolic", "folder-inbox"},
+	{model.LabelStarred, "Starred", "starred-symbolic", "folder-starred"},
+	{model.LabelImportant, "Important", "mail-mark-important-symbolic", "folder-important"},
+	{model.LabelSent, "Sent", "mail-send-symbolic", "folder-sent"},
+	{model.LabelDraft, "Drafts", "document-edit-symbolic", "folder-draft"},
+	{model.LabelSpam, "Spam", "mail-mark-junk-symbolic", "folder-spam"},
+	{model.LabelTrash, "Trash", "user-trash-symbolic", "folder-trash"},
+	{allMailID, "All Mail", "folder-symbolic", "folder-all"},
 }
 
 func (w *window) buildSidebar() *adw.NavigationPage {
@@ -983,14 +985,14 @@ func (w *window) loadLabels() {
 	// every label, so it carries no badge — matching Gmail.
 	for _, f := range systemFolders {
 		if f.id == allMailID {
-			w.appendFolder(f.id, f.icon, f.name, 0)
+			w.appendFolder(f.id, f.icon, f.css, f.name, 0)
 			continue
 		}
 		if !have[f.id] {
 			continue
 		}
 		count, _ := w.deps.Store.CountUnreadByLabel(ctx, w.activeID, f.id)
-		w.appendFolder(f.id, f.icon, f.name, count)
+		w.appendFolder(f.id, f.icon, f.css, f.name, count)
 	}
 
 	// User-created labels, alphabetical (ListLabels already orders by name).
@@ -1004,15 +1006,16 @@ func (w *window) loadLabels() {
 			firstUser = false
 		}
 		n, _ := w.deps.Store.CountUnreadByLabel(ctx, w.activeID, l.GmailID)
-		w.appendFolder(l.GmailID, "user-bookmarks-symbolic", l.Name, n)
+		w.appendFolder(l.GmailID, "user-bookmarks-symbolic", "folder-label", l.Name, n)
 	}
 
 	w.restoreSidebarSelection()
 }
 
-// appendFolder adds a selectable folder/label row mapped to id.
-func (w *window) appendFolder(id, icon, name string, count int) {
-	w.labelBox.Append(folderRow(icon, name, count))
+// appendFolder adds a selectable folder/label row mapped to id. iconCSS tints
+// the row's symbolic icon (see appCSS).
+func (w *window) appendFolder(id, icon, iconCSS, name string, count int) {
+	w.labelBox.Append(folderRow(icon, iconCSS, name, count))
 	w.sidebar = append(w.sidebar, sidebarItem{id: id, selectable: true})
 }
 
@@ -1735,11 +1738,15 @@ func (w *window) notifyNewMail(accountID int64, m model.Message) {
 // folderRow builds a sidebar row: a leading symbolic icon, the folder name, and
 // an unread-count badge. When there are unread messages the name is emphasized,
 // like a standard mail client.
-func folderRow(icon, name string, unread int) *gtk.Box {
+func folderRow(icon, iconCSS, name string, unread int) *gtk.Box {
 	box := gtk.NewBox(gtk.OrientationHorizontal, 8)
 	setMargins(box, 12, 12, 6, 6)
 	if icon != "" {
-		box.Append(gtk.NewImageFromIconName(icon))
+		img := gtk.NewImageFromIconName(icon)
+		if iconCSS != "" {
+			img.AddCSSClass(iconCSS)
+		}
+		box.Append(img)
 	}
 	n := gtk.NewLabel(name)
 	n.SetXAlign(0)
@@ -1750,12 +1757,19 @@ func folderRow(icon, name string, unread int) *gtk.Box {
 	}
 	box.Append(n)
 	if unread > 0 {
-		c := gtk.NewLabel(fmt.Sprintf("%d", unread))
-		c.AddCSSClass("numeric")
-		c.AddCSSClass("dim-label")
-		box.Append(c)
+		box.Append(countBadge(unread))
 	}
 	return box
+}
+
+// countBadge returns an accent-pill label showing n (used for folder unread
+// counts and per-account unread totals).
+func countBadge(n int) *gtk.Label {
+	c := gtk.NewLabel(fmt.Sprintf("%d", n))
+	c.AddCSSClass("badge-pill")
+	c.AddCSSClass("numeric")
+	c.SetVAlign(gtk.AlignCenter)
+	return c
 }
 
 func threadRow(t model.ThreadSummary) *gtk.Box {
@@ -1766,6 +1780,13 @@ func threadRow(t model.ThreadSummary) *gtk.Box {
 	setMargins(box, 12, 12, 6, 6)
 
 	top := gtk.NewBox(gtk.OrientationHorizontal, 6)
+	if unread {
+		// A small accent dot marks an unread conversation at a glance.
+		dot := gtk.NewLabel("●")
+		dot.AddCSSClass("unread-dot")
+		dot.SetVAlign(gtk.AlignCenter)
+		top.Append(dot)
+	}
 	fromText := displayFrom(m)
 	if t.Count > 1 {
 		fromText += fmt.Sprintf("  (%d)", t.Count)
@@ -1776,6 +1797,7 @@ func threadRow(t model.ThreadSummary) *gtk.Box {
 	from.SetEllipsize(pango.EllipsizeEnd)
 	if unread {
 		from.AddCSSClass("heading")
+		from.AddCSSClass("unread-accent")
 	}
 	top.Append(from)
 	if m.HasAttachments {
