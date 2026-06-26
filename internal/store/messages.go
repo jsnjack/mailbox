@@ -23,47 +23,77 @@ const msgCols = `m.rowid, m.account_id, m.gmail_id, m.thread_id, m.internal_date
 func (s *Store) UpsertMessage(ctx context.Context, m model.Message) (int64, error) {
 	var rowid int64
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
-		var idate any
-		if !m.InternalDate.IsZero() {
-			idate = m.InternalDate.Unix()
-		}
-		err := tx.QueryRowContext(ctx, `
-			INSERT INTO messages (
-				account_id, gmail_id, thread_id, internal_date, from_name, from_addr,
-				to_addrs, cc_addrs, subject, snippet, rfc822_msgid, in_reply_to,
-				references_hdr, is_unread, is_starred, has_attachments, size_estimate)
-			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-			ON CONFLICT(account_id, gmail_id) DO UPDATE SET
-				thread_id=excluded.thread_id, internal_date=excluded.internal_date,
-				from_name=excluded.from_name, from_addr=excluded.from_addr,
-				to_addrs=excluded.to_addrs, cc_addrs=excluded.cc_addrs,
-				subject=excluded.subject, snippet=excluded.snippet,
-				rfc822_msgid=excluded.rfc822_msgid, in_reply_to=excluded.in_reply_to,
-				references_hdr=excluded.references_hdr, is_unread=excluded.is_unread,
-				is_starred=excluded.is_starred, has_attachments=excluded.has_attachments,
-				size_estimate=excluded.size_estimate
-			RETURNING rowid`,
-			m.AccountID, m.GmailID, m.ThreadID, idate, m.FromName, m.FromAddr,
-			m.ToAddrs, m.CcAddrs, m.Subject, m.Snippet, m.RFC822MsgID, m.InReplyTo,
-			m.References, b2i(m.IsUnread), b2i(m.IsStarred), b2i(m.HasAttachments), m.SizeEstimate,
-		).Scan(&rowid)
-		if err != nil {
-			return fmt.Errorf("upsert message %q: %w", m.GmailID, err)
-		}
-
-		if _, err := tx.ExecContext(ctx, `DELETE FROM message_labels WHERE message_rowid = ?`, rowid); err != nil {
-			return fmt.Errorf("clear labels: %w", err)
-		}
-		for _, lbl := range m.Labels {
-			if _, err := tx.ExecContext(ctx,
-				`INSERT INTO message_labels (message_rowid, account_id, label_id) VALUES (?,?,?)`,
-				rowid, m.AccountID, lbl); err != nil {
-				return fmt.Errorf("insert label %q: %w", lbl, err)
-			}
-		}
-		return reindexFTS(ctx, tx, rowid)
+		var err error
+		rowid, err = upsertMessageTx(ctx, tx, m)
+		return err
 	})
 	return rowid, err
+}
+
+// UpsertMessages upserts many messages in a single transaction. Backfill and
+// incremental sync use this so a run that touches N messages costs one
+// commit/fsync instead of N — the dominant cost when catching up a mailbox.
+func (s *Store) UpsertMessages(ctx context.Context, msgs []model.Message) error {
+	if len(msgs) == 0 {
+		return nil
+	}
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		for _, m := range msgs {
+			if _, err := upsertMessageTx(ctx, tx, m); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// upsertMessageTx upserts one message's metadata, replaces its label set, and
+// refreshes its FTS entry within tx, returning the message's rowid. It is the
+// shared body of UpsertMessage and UpsertMessages.
+func upsertMessageTx(ctx context.Context, tx *sql.Tx, m model.Message) (int64, error) {
+	var idate any
+	if !m.InternalDate.IsZero() {
+		idate = m.InternalDate.Unix()
+	}
+	var rowid int64
+	err := tx.QueryRowContext(ctx, `
+		INSERT INTO messages (
+			account_id, gmail_id, thread_id, internal_date, from_name, from_addr,
+			to_addrs, cc_addrs, subject, snippet, rfc822_msgid, in_reply_to,
+			references_hdr, is_unread, is_starred, has_attachments, size_estimate)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(account_id, gmail_id) DO UPDATE SET
+			thread_id=excluded.thread_id, internal_date=excluded.internal_date,
+			from_name=excluded.from_name, from_addr=excluded.from_addr,
+			to_addrs=excluded.to_addrs, cc_addrs=excluded.cc_addrs,
+			subject=excluded.subject, snippet=excluded.snippet,
+			rfc822_msgid=excluded.rfc822_msgid, in_reply_to=excluded.in_reply_to,
+			references_hdr=excluded.references_hdr, is_unread=excluded.is_unread,
+			is_starred=excluded.is_starred, has_attachments=excluded.has_attachments,
+			size_estimate=excluded.size_estimate
+		RETURNING rowid`,
+		m.AccountID, m.GmailID, m.ThreadID, idate, m.FromName, m.FromAddr,
+		m.ToAddrs, m.CcAddrs, m.Subject, m.Snippet, m.RFC822MsgID, m.InReplyTo,
+		m.References, b2i(m.IsUnread), b2i(m.IsStarred), b2i(m.HasAttachments), m.SizeEstimate,
+	).Scan(&rowid)
+	if err != nil {
+		return 0, fmt.Errorf("upsert message %q: %w", m.GmailID, err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM message_labels WHERE message_rowid = ?`, rowid); err != nil {
+		return 0, fmt.Errorf("clear labels: %w", err)
+	}
+	for _, lbl := range m.Labels {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO message_labels (message_rowid, account_id, label_id) VALUES (?,?,?)`,
+			rowid, m.AccountID, lbl); err != nil {
+			return 0, fmt.Errorf("insert label %q: %w", lbl, err)
+		}
+	}
+	if err := reindexFTS(ctx, tx, rowid); err != nil {
+		return 0, err
+	}
+	return rowid, nil
 }
 
 // UpsertBody stores a message's body parts, marks the message body-fetched, and
@@ -90,24 +120,47 @@ func (s *Store) UpsertBody(ctx context.Context, b model.MessageBody) error {
 // attachments cascade) plus its FTS entry. It is a no-op if the message is absent.
 func (s *Store) DeleteMessage(ctx context.Context, accountID int64, gmailID string) error {
 	return s.withTx(ctx, func(tx *sql.Tx) error {
-		var rowID int64
-		err := tx.QueryRowContext(ctx,
-			`SELECT rowid FROM messages WHERE account_id = ? AND gmail_id = ?`,
-			accountID, gmailID).Scan(&rowID)
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("find message to delete: %w", err)
-		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM messages_fts WHERE rowid = ?`, rowID); err != nil {
-			return fmt.Errorf("delete fts row: %w", err)
-		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM messages WHERE rowid = ?`, rowID); err != nil {
-			return fmt.Errorf("delete message: %w", err)
+		return deleteMessageTx(ctx, tx, accountID, gmailID)
+	})
+}
+
+// DeleteMessages removes many messages (and their FTS rows) in one transaction;
+// missing ids are skipped. Used by incremental sync so a batch of deletions is
+// one commit, not one per id.
+func (s *Store) DeleteMessages(ctx context.Context, accountID int64, gmailIDs []string) error {
+	if len(gmailIDs) == 0 {
+		return nil
+	}
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		for _, id := range gmailIDs {
+			if err := deleteMessageTx(ctx, tx, accountID, id); err != nil {
+				return err
+			}
 		}
 		return nil
 	})
+}
+
+// deleteMessageTx deletes one message and its FTS row within tx; absent ids are
+// a no-op. Shared by DeleteMessage and DeleteMessages.
+func deleteMessageTx(ctx context.Context, tx *sql.Tx, accountID int64, gmailID string) error {
+	var rowID int64
+	err := tx.QueryRowContext(ctx,
+		`SELECT rowid FROM messages WHERE account_id = ? AND gmail_id = ?`,
+		accountID, gmailID).Scan(&rowID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("find message to delete: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM messages_fts WHERE rowid = ?`, rowID); err != nil {
+		return fmt.Errorf("delete fts row: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM messages WHERE rowid = ?`, rowID); err != nil {
+		return fmt.Errorf("delete message: %w", err)
+	}
+	return nil
 }
 
 // ModifyLabels applies a label delta to a message (adding and removing label

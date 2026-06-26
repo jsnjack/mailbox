@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/jsnjack/mailbox/internal/config"
@@ -28,6 +27,11 @@ var ErrHistoryExpired = errors.New("gmail historyId expired; full resync require
 // engine. The Gmail client additionally caps in-flight requests and quota use,
 // so this only needs to keep the pipeline full.
 const backfillWorkers = 20
+
+// backfillBatch is how many fetched messages are committed per transaction
+// during backfill and search hydration — large enough to amortize commit/fsync
+// overhead, small enough to keep memory and lock-hold time bounded.
+const backfillBatch = 200
 
 // Engine runs sync operations against the store and publishes changes.
 type Engine struct {
@@ -70,10 +74,14 @@ func (e *Engine) Backfill(ctx context.Context, c *gmailapi.Client, accountID int
 		return 0, fmt.Errorf("list message ids: %w", err)
 	}
 
+	// Fetch metadata concurrently, but write in batches: each worker only does
+	// network work and hands the converted message to a single collector that
+	// commits ~backfillBatch rows per transaction. This keeps the network
+	// parallelism while turning N transactions/fsyncs into N/batch.
 	var (
-		wg   sync.WaitGroup
-		done atomic.Int64
-		idCh = make(chan string)
+		wg    sync.WaitGroup
+		idCh  = make(chan string)
+		resCh = make(chan model.Message, backfillWorkers)
 	)
 	for i := 0; i < backfillWorkers; i++ {
 		wg.Add(1)
@@ -85,31 +93,53 @@ func (e *Engine) Backfill(ctx context.Context, c *gmailapi.Client, accountID int
 					slog.Default().Warn("backfill: fetch metadata", "id", id, "err", err)
 					continue
 				}
-				if _, err := e.Store.UpsertMessage(ctx, gmailapi.ToMessage(accountID, msg)); err != nil {
-					slog.Default().Warn("backfill: upsert", "id", id, "err", err)
-					continue
-				}
-				n := done.Add(1)
-				e.publish(Change{Kind: BackfillProgress, AccountID: accountID, Count: int(n)})
+				resCh <- gmailapi.ToMessage(accountID, msg)
 			}
 		}()
 	}
+	go func() { wg.Wait(); close(resCh) }() // close results once all fetchers done
 
-	var feedErr error
-feed:
-	for _, id := range ids {
-		select {
-		case <-ctx.Done():
-			feedErr = ctx.Err()
-			break feed
-		case idCh <- id:
+	// Feed ids on a goroutine so the collector below runs concurrently and the
+	// bounded resCh never deadlocks.
+	go func() {
+		defer close(idCh)
+		for _, id := range ids {
+			select {
+			case <-ctx.Done():
+				return
+			case idCh <- id:
+			}
+		}
+	}()
+
+	stored := 0
+	batch := make([]model.Message, 0, backfillBatch)
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		if err := e.Store.UpsertMessages(ctx, batch); err != nil {
+			return fmt.Errorf("backfill upsert: %w", err)
+		}
+		stored += len(batch)
+		e.publish(Change{Kind: BackfillProgress, AccountID: accountID, Count: stored})
+		batch = batch[:0]
+		return nil
+	}
+	for m := range resCh {
+		batch = append(batch, m)
+		if len(batch) >= backfillBatch {
+			if err := flush(); err != nil {
+				return stored, err
+			}
 		}
 	}
-	close(idCh)
-	wg.Wait()
+	if err := flush(); err != nil {
+		return stored, err
+	}
 
-	e.publish(Change{Kind: BackfillComplete, AccountID: accountID, Count: int(done.Load())})
-	return int(done.Load()), feedErr
+	e.publish(Change{Kind: BackfillComplete, AccountID: accountID, Count: stored})
+	return stored, ctx.Err()
 }
 
 // SearchServer runs a Gmail server-side search (query is Gmail's q= syntax),
@@ -121,7 +151,7 @@ func (e *Engine) SearchServer(ctx context.Context, c *gmailapi.Client, accountID
 	if err != nil {
 		return nil, fmt.Errorf("search list ids: %w", err)
 	}
-	fetched := 0
+	var fetched []model.Message
 	for _, id := range ids {
 		if _, err := e.Store.GetMessage(ctx, accountID, id); err == nil {
 			continue // already cached
@@ -131,13 +161,12 @@ func (e *Engine) SearchServer(ctx context.Context, c *gmailapi.Client, accountID
 			slog.Default().Warn("search: fetch metadata", "id", id, "err", err)
 			continue
 		}
-		if _, err := e.Store.UpsertMessage(ctx, gmailapi.ToMessage(accountID, msg)); err != nil {
-			slog.Default().Warn("search: upsert", "id", id, "err", err)
-			continue
-		}
-		fetched++
+		fetched = append(fetched, gmailapi.ToMessage(accountID, msg))
 	}
-	if fetched > 0 {
+	if len(fetched) > 0 {
+		if err := e.Store.UpsertMessages(ctx, fetched); err != nil {
+			return nil, fmt.Errorf("search upsert: %w", err)
+		}
 		e.publish(Change{Kind: MessageUpserted, AccountID: accountID})
 	}
 	return ids, nil
@@ -468,13 +497,26 @@ func (e *Engine) Incremental(ctx context.Context, c *gmailapi.Client, accountID 
 	}
 
 	changed := 0
-	for id := range deletes {
-		if err := e.Store.DeleteMessage(ctx, accountID, id); err != nil {
+	if len(deletes) > 0 {
+		delIDs := make([]string, 0, len(deletes))
+		for id := range deletes {
+			delIDs = append(delIDs, id)
+		}
+		if err := e.Store.DeleteMessages(ctx, accountID, delIDs); err != nil {
 			return changed, err
 		}
-		e.publish(Change{Kind: MessageDeleted, AccountID: accountID, GmailID: id})
-		changed++
+		// One event per id so per-message consumers still see each deletion; the
+		// UI coalesces the resulting refresh.
+		for _, id := range delIDs {
+			e.publish(Change{Kind: MessageDeleted, AccountID: accountID, GmailID: id})
+		}
+		changed += len(delIDs)
 	}
+
+	// Fetch all changed messages, write them in one transaction, then publish a
+	// per-id event so new-mail notifications (which need the id) still fire.
+	msgs := make([]model.Message, 0, len(refetch))
+	fetchedIDs := make([]string, 0, len(refetch))
 	for id := range refetch {
 		msg, err := c.GetMessageMetadata(ctx, id)
 		if err != nil {
@@ -483,11 +525,17 @@ func (e *Engine) Incremental(ctx context.Context, c *gmailapi.Client, accountID 
 			slog.Default().Warn("incremental: fetch metadata", "id", id, "err", err)
 			continue
 		}
-		if _, err := e.Store.UpsertMessage(ctx, gmailapi.ToMessage(accountID, msg)); err != nil {
+		msgs = append(msgs, gmailapi.ToMessage(accountID, msg))
+		fetchedIDs = append(fetchedIDs, id)
+	}
+	if len(msgs) > 0 {
+		if err := e.Store.UpsertMessages(ctx, msgs); err != nil {
 			return changed, err
 		}
-		e.publish(Change{Kind: MessageUpserted, AccountID: accountID, GmailID: id})
-		changed++
+		for _, id := range fetchedIDs {
+			e.publish(Change{Kind: MessageUpserted, AccountID: accountID, GmailID: id})
+		}
+		changed += len(msgs)
 	}
 
 	if err := e.Store.SetLastHistoryID(ctx, accountID, newest); err != nil {

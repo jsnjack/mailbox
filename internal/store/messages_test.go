@@ -17,6 +17,75 @@ func seedAccount(t *testing.T, s *Store) int64 {
 	return id
 }
 
+func TestUpsertMessagesBatch(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	acc := seedAccount(t, s)
+
+	msgs := []model.Message{
+		{AccountID: acc, GmailID: "m1", ThreadID: "t1", InternalDate: time.Unix(100, 0), Subject: "alpha report", Labels: []string{"INBOX", "UNREAD"}, IsUnread: true},
+		{AccountID: acc, GmailID: "m2", ThreadID: "t2", InternalDate: time.Unix(200, 0), Subject: "beta memo", Labels: []string{"INBOX"}},
+		{AccountID: acc, GmailID: "m3", ThreadID: "t2", InternalDate: time.Unix(300, 0), Subject: "beta follow-up", Labels: []string{"INBOX"}},
+	}
+	if err := s.UpsertMessages(ctx, msgs); err != nil {
+		t.Fatalf("UpsertMessages: %v", err)
+	}
+
+	// All three are stored and label-indexed.
+	got, err := s.ListByLabel(ctx, acc, "INBOX", 50, 0)
+	if err != nil {
+		t.Fatalf("ListByLabel: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("got %d messages, want 3", len(got))
+	}
+	// FTS was written in the same transaction, so search finds a batched row.
+	hits, err := s.Search(ctx, acc, "beta", 50)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(hits) != 2 {
+		t.Fatalf("search 'beta' got %d, want 2", len(hits))
+	}
+
+	// Empty input is a no-op, not an error.
+	if err := s.UpsertMessages(ctx, nil); err != nil {
+		t.Fatalf("UpsertMessages(nil): %v", err)
+	}
+}
+
+func TestDeleteMessagesBatch(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	acc := seedAccount(t, s)
+
+	for _, m := range []model.Message{
+		{AccountID: acc, GmailID: "m1", ThreadID: "t1", Subject: "one", Labels: []string{"INBOX"}},
+		{AccountID: acc, GmailID: "m2", ThreadID: "t2", Subject: "two", Labels: []string{"INBOX"}},
+		{AccountID: acc, GmailID: "m3", ThreadID: "t3", Subject: "three", Labels: []string{"INBOX"}},
+	} {
+		if _, err := s.UpsertMessage(ctx, m); err != nil {
+			t.Fatalf("seed %s: %v", m.GmailID, err)
+		}
+	}
+
+	// Delete two present ids plus one missing id (skipped, not an error).
+	if err := s.DeleteMessages(ctx, acc, []string{"m1", "m3", "missing"}); err != nil {
+		t.Fatalf("DeleteMessages: %v", err)
+	}
+	got, err := s.ListByLabel(ctx, acc, "INBOX", 50, 0)
+	if err != nil {
+		t.Fatalf("ListByLabel: %v", err)
+	}
+	if len(got) != 1 || got[0].GmailID != "m2" {
+		t.Fatalf("after delete want only m2, got %+v", got)
+	}
+	// The deleted rows are gone from FTS too.
+	if hits, err := s.Search(ctx, acc, "three", 50); err != nil || len(hits) != 0 {
+		t.Fatalf("search 'three' after delete: %d hits, err %v", len(hits), err)
+	}
+}
+
 func TestUpsertMessageAndListByLabel(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
