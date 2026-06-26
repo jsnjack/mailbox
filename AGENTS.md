@@ -120,8 +120,9 @@ attachments are extracted on body fetch (`ReplaceAttachments`) and shown as chip
 in the reader; clicking one downloads it (content-addressed under the cache dir)
 and opens it with `xdg-open`.
 
-Inbox mail is auto-categorized by AI into action tags (Needs reply / Receipt /
-Newsletter / Notification) shown on rows — batched, cached in-memory, capped to
+Inbox mail is auto-categorized by AI into action tags (Needs reply / Calendar /
+Travel / Receipt / Finance / Security / Discount / Newsletter / Notification; no
+match = no tag) shown on rows — category definitions live in the prompt — batched, cached in-memory, capped to
 the newest threads, gated by a Preferences toggle (`ai.Categorize` /
 `categorizeInbox`).
 The list is grouped by conversation: a virtualized `gtk.ListView` over a

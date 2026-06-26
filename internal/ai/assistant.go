@@ -115,8 +115,12 @@ func (a *Assistant) SmartReplies(ctx context.Context, threadContext string) ([]s
 	return parseTranslatedSegments(b.String())
 }
 
-// EmailCategories are the fixed action buckets Categorize assigns.
-var EmailCategories = []string{"Needs reply", "Receipt", "Newsletter", "Notification", "Other"}
+// EmailCategories are the fixed action buckets Categorize assigns. A message
+// that fits none gets an empty category (no tag), so there is no "Other".
+var EmailCategories = []string{
+	"Needs reply", "Calendar", "Travel", "Receipt", "Finance", "Security",
+	"Discount", "Newsletter", "Notification",
+}
 
 // Categorize classifies each email (a short "From / Subject / Snippet" string)
 // into exactly one of EmailCategories, returning a category per input in order.
@@ -126,14 +130,20 @@ func (a *Assistant) Categorize(ctx context.Context, items []string) ([]string, e
 	if err != nil {
 		return nil, fmt.Errorf("encode items: %w", err)
 	}
-	system := "You classify emails into exactly one category each. The categories are: " +
-		"\"Needs reply\" (a person is asking you something or expects a response), " +
-		"\"Receipt\" (orders, payments, invoices, bookings, confirmations), " +
-		"\"Newsletter\" (marketing, promotions, digests, announcements), " +
-		"\"Notification\" (automated alerts or status updates from a service), and \"Other\". " +
+	system := "You classify emails into exactly one category each, using these definitions:\n" +
+		"- \"Needs reply\": a real person is asking you something or clearly expects a response.\n" +
+		"- \"Calendar\": meeting invitations, event reminders, scheduling or RSVP requests.\n" +
+		"- \"Travel\": flights, hotels, car/train bookings, itineraries, boarding passes.\n" +
+		"- \"Receipt\": confirmation of an order/payment ALREADY made — invoices paid, order/shipping/delivery updates.\n" +
+		"- \"Finance\": money you still owe or account info — bills or payments DUE, bank/card statements, taxes.\n" +
+		"- \"Security\": sign-in alerts, password resets, 2FA/verification codes, account or security changes.\n" +
+		"- \"Discount\": marketing that contains a usable promo/coupon/discount code or a specific limited-time offer.\n" +
+		"- \"Newsletter\": general marketing, promotions, or digests WITHOUT a specific redeemable code.\n" +
+		"- \"Notification\": automated alerts or status updates from a service (social, app, or system).\n" +
+		"If none of these clearly applies, use an empty string \"\" for that email. " +
 		"The user message is a JSON array of emails, each a short 'From / Subject / Snippet' string. " +
-		"Reply with ONLY a JSON array of the same length and order, each element exactly one of those five " +
-		"category strings. No commentary, no code fences."
+		"Reply with ONLY a JSON array of the same length and order; each element is exactly one of the category " +
+		"strings above or \"\". No commentary, no code fences."
 	ch, err := a.p.Stream(ctx, system, []Msg{{Role: RoleUser, Content: string(payload)}})
 	if err != nil {
 		return nil, err
