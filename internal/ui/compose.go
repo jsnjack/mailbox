@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/diamondburned/gotk4-adwaita/pkg/adw"
 	coreglib "github.com/diamondburned/gotk4/pkg/core/glib"
@@ -404,8 +405,15 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 				dispatch.Main(func() { aiBtn.SetSensitive(true) })
 			}()
 		}
-		// The button (and auto-draft) first ask what the message should say.
-		startAIDraft = func() { w.askAIIntent(win, isReply, runDraft) }
+		// The button (and auto-draft) open the AI dialog: quick replies + presets.
+		// A quick reply is used as-is (above the signature/quote); a preset/free
+		// text generates a full draft.
+		startAIDraft = func() {
+			w.askAIIntent(win, isReply, aiContext, runDraft, func(text string) {
+				buf.SetText(text + init.Body)
+				bodyView.GrabFocus()
+			})
+		}
 		aiBtn.ConnectClicked(func() { startAIDraft() })
 		hb.PackEnd(aiBtn)
 	}
@@ -456,12 +464,13 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 	}
 }
 
-// askAIIntent presents quick presets and a free-text field, then calls onChosen
-// with the instruction to guide the AI draft (empty = neutral). The presets and
-// wording differ for a reply (tones) versus a new message (intents).
-func (w *window) askAIIntent(parent gtk.Widgetter, isReply bool, onChosen func(string)) {
+// askAIIntent presents AI reply assistance in one place: ready-to-send quick
+// replies (for a reply, loaded from the thread), tone presets, and a free-text
+// field. Picking a quick reply calls onQuickReply with its text (used directly);
+// a preset or free text calls onInstruction to generate a full draft.
+func (w *window) askAIIntent(parent gtk.Widgetter, isReply bool, threadContext string, onInstruction, onQuickReply func(string)) {
 	dialog := adw.NewDialog()
-	dialog.SetContentWidth(420)
+	dialog.SetContentWidth(440)
 	dialog.SetFollowsContentSize(true)
 
 	presets := []struct{ label, instruction string }{
@@ -497,7 +506,51 @@ func (w *window) askAIIntent(parent gtk.Widgetter, isReply bool, onChosen func(s
 
 	choose := func(instruction string) {
 		dialog.Close()
-		onChosen(instruction)
+		onInstruction(instruction)
+	}
+
+	// Ready-to-send quick replies (for a reply), loaded from the thread.
+	if isReply && strings.TrimSpace(threadContext) != "" && onQuickReply != nil && w.deps.Assistant != nil {
+		quick := gtk.NewBox(gtk.OrientationVertical, 4)
+		loading := gtk.NewLabel("Loading quick replies…")
+		loading.SetXAlign(0)
+		loading.AddCSSClass("dim-label")
+		loading.AddCSSClass("caption")
+		quick.Append(loading)
+		box.Append(quick)
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			replies, err := w.deps.Assistant.SmartReplies(ctx, threadContext)
+			dispatch.Main(func() {
+				for c := quick.FirstChild(); c != nil; c = quick.FirstChild() {
+					quick.Remove(c)
+				}
+				if err != nil || len(replies) == 0 {
+					quick.SetVisible(false) // hide the whole section, separator included
+					return
+				}
+				for _, r := range replies {
+					text := strings.TrimSpace(r)
+					if text == "" {
+						continue
+					}
+					l := gtk.NewLabel(text)
+					l.SetXAlign(0)
+					l.SetWrap(true)
+					l.SetHExpand(true)
+					b := gtk.NewButton()
+					b.SetChild(l)
+					b.AddCSSClass("flat")
+					b.ConnectClicked(func() {
+						dialog.Close()
+						onQuickReply(text)
+					})
+					quick.Append(b)
+				}
+				quick.Append(gtk.NewSeparator(gtk.OrientationHorizontal))
+			})
+		}()
 	}
 
 	for _, q := range presets {

@@ -129,7 +129,6 @@ type window struct {
 	cardTitle       *gtk.Label // card title (set per action)
 	summaryCancel   context.CancelFunc
 	summaryCache    map[string]string
-	smartReplyBox   *gtk.Box // AI smart-reply chips, pinned at the bottom of the reader
 
 	// in-place translation: a banner offers reverting to the original; the cancel
 	// func aborts an in-flight translation when the user reverts or switches mail;
@@ -1215,12 +1214,6 @@ func (w *window) buildReader() *adw.NavigationPage {
 	box.Append(w.trackerLabel)
 	box.Append(w.webview)
 
-	// AI smart-reply chips, pinned below the message.
-	w.smartReplyBox = gtk.NewBox(gtk.OrientationHorizontal, 6)
-	setMargins(w.smartReplyBox, 12, 12, 6, 8)
-	w.smartReplyBox.SetVisible(false)
-	box.Append(w.smartReplyBox)
-
 	empty := adw.NewStatusPage()
 	empty.SetIconName("mail-unread-symbolic")
 	empty.SetTitle("No message selected")
@@ -1550,9 +1543,6 @@ func (w *window) clearReader() {
 	w.openMsg = model.Message{}
 	w.resetTranslation()
 	w.hideSummary()
-	if w.smartReplyBox != nil {
-		w.smartReplyBox.SetVisible(false)
-	}
 	w.setActionsSensitive(false)
 	w.readerStack.SetVisibleChildName("empty")
 }
@@ -1793,7 +1783,6 @@ func (w *window) renderConversation(msgs []model.Message) {
 			w.setCaution(warnings)
 			w.webview.LoadHtml(wrapHTML(out), "about:blank")
 			w.populateThreadAttachments(msgs)
-			w.showSmartReplyPrompt()
 		})
 	}()
 }
@@ -2649,93 +2638,6 @@ func (w *window) reallySend(accountID int64, msg model.OutgoingMessage) {
 			}
 		})
 	}()
-}
-
-// clearChildren removes every child from a box.
-func clearChildren(b *gtk.Box) {
-	for c := b.FirstChild(); c != nil; c = b.FirstChild() {
-		b.Remove(c)
-	}
-}
-
-// showSmartReplyPrompt resets the smart-reply row to a single "Suggest replies"
-// chip. Generation is on demand, so opening a message costs no AI tokens.
-func (w *window) showSmartReplyPrompt() {
-	if w.deps.Assistant == nil || w.deps.Send == nil || w.openMsg.GmailID == "" {
-		w.smartReplyBox.SetVisible(false)
-		return
-	}
-	clearChildren(w.smartReplyBox)
-	chip := gtk.NewButtonWithLabel("💬 Suggest replies")
-	chip.AddCSSClass("pill")
-	chip.ConnectClicked(w.onSuggestReplies)
-	w.smartReplyBox.Append(chip)
-	w.smartReplyBox.SetVisible(true)
-}
-
-// onSuggestReplies asks the AI for short replies to the open message and shows
-// them as one-tap chips.
-func (w *window) onSuggestReplies() {
-	m := w.openMsg
-	if m.GmailID == "" || w.deps.Assistant == nil {
-		return
-	}
-	clearChildren(w.smartReplyBox)
-	busy := gtk.NewLabel("Suggesting…")
-	busy.AddCSSClass("dim-label")
-	w.smartReplyBox.Append(busy)
-
-	threadID := w.openThreadID
-	tctx := w.threadContextFor(m)
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		replies, err := w.deps.Assistant.SmartReplies(ctx, tctx)
-		dispatch.Main(func() {
-			if w.openThreadID != threadID {
-				return // user switched conversations
-			}
-			clearChildren(w.smartReplyBox)
-			if err != nil || len(replies) == 0 {
-				if err != nil {
-					slog.Warn("ui: smart replies", "err", err)
-				}
-				w.showSmartReplyPrompt() // let the user retry
-				return
-			}
-			for _, r := range replies {
-				text := strings.TrimSpace(r)
-				if text == "" {
-					continue
-				}
-				lbl := gtk.NewLabel(text)
-				lbl.SetEllipsize(pango.EllipsizeEnd)
-				lbl.SetMaxWidthChars(26)
-				chip := gtk.NewButton()
-				chip.SetChild(lbl)
-				chip.AddCSSClass("pill")
-				chip.SetTooltipText(text) // full text on hover
-				chip.ConnectClicked(func() { w.replyWithText(text) })
-				w.smartReplyBox.Append(chip)
-			}
-		})
-	}()
-}
-
-// replyWithText opens a reply to the open message prefilled with text (above the
-// signature and the quoted original).
-func (w *window) replyWithText(text string) {
-	m := w.openMsg
-	if m.GmailID == "" {
-		return
-	}
-	init := w.replyInit(m) // Body = quoted original
-	sig := ""
-	if w.signature != "" {
-		sig = "\n\n-- \n" + w.signature
-	}
-	init.Body = text + sig + init.Body
-	w.openComposeOpts(init, w.threadContextFor(m), "Reply", false, false)
 }
 
 // showUndoToast presents an undo toast that reverses the add/remove applied to
