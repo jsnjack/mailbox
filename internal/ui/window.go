@@ -896,6 +896,41 @@ func (w *window) onRefresh() {
 	}()
 }
 
+// onDecidePolicy keeps the reader a viewer: our own injected content
+// (about:/data:/blob:) loads in place, but a link the user clicks opens in their
+// default handler (browser, mail client) instead of navigating inside the
+// WebView. Unsupported schemes (file:, javascript:, …) are blocked outright.
+func (w *window) onDecidePolicy(decision webkit.PolicyDecisioner, dtype webkit.PolicyDecisionType) bool {
+	if dtype != webkit.PolicyDecisionTypeNavigationAction && dtype != webkit.PolicyDecisionTypeNewWindowAction {
+		return false // resource loads (images/css) use default handling
+	}
+	nav, ok := decision.(*webkit.NavigationPolicyDecision)
+	if !ok {
+		return false
+	}
+	uri := nav.NavigationAction().Request().URI()
+	if uri == "" || strings.HasPrefix(uri, "about:") || strings.HasPrefix(uri, "data:") || strings.HasPrefix(uri, "blob:") {
+		return false // our own rendered content — show it in place
+	}
+	switch {
+	case strings.HasPrefix(uri, "http://"), strings.HasPrefix(uri, "https://"),
+		strings.HasPrefix(uri, "mailto:"), strings.HasPrefix(uri, "ftp://"), strings.HasPrefix(uri, "ftps://"):
+		openExternal(uri)
+	default:
+		slog.Debug("ui: blocked navigation to unsupported scheme", "uri", uri)
+	}
+	nav.Ignore()
+	return true
+}
+
+// openExternal hands a URI or path to the user's default handler via xdg-open,
+// never loading it inside the app.
+func openExternal(target string) {
+	if err := exec.Command("xdg-open", target).Start(); err != nil {
+		slog.Warn("ui: open external", "target", target, "err", err)
+	}
+}
+
 // setSyncing swaps the refresh button for a running spinner while a manual sync
 // is in flight (and back when it finishes), giving the user visible feedback.
 func (w *window) setSyncing(on bool) {
@@ -940,6 +975,9 @@ func (w *window) buildReader() *adw.NavigationPage {
 	settings.SetAutoLoadImages(w.imagesEnabled)
 	w.webview.SetVExpand(true)
 	w.webview.SetHExpand(true)
+	// Keep the reader a viewer: clicked links open in the default browser, never
+	// inside the WebView.
+	w.webview.ConnectDecidePolicy(w.onDecidePolicy)
 
 	w.header = gtk.NewLabel("")
 	w.header.SetXAlign(0)
@@ -1566,10 +1604,7 @@ func (w *window) openAttachment(accountID int64, gmailID string, attID int64) {
 			dispatch.Main(func() { w.toast("Couldn't download attachment") })
 			return
 		}
-		if err := exec.Command("xdg-open", path).Start(); err != nil {
-			slog.Warn("ui: xdg-open", "path", path, "err", err)
-			dispatch.Main(func() { w.toast("Couldn't open attachment") })
-		}
+		openExternal(path)
 	}()
 }
 
