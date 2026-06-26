@@ -47,6 +47,29 @@ func TestTranslateHTMLTextPreservesMarkup(t *testing.T) {
 	}
 }
 
+func TestStripTrackers(t *testing.T) {
+	in := `<p>Hi</p>` +
+		`<img src="https://cdn.example.com/logo.png" width="200" height="50">` + // legit
+		`<img src="https://t.example.com/o.gif" width="1" height="1">` + // 1x1 pixel
+		`<img src="https://esp.example.com/wf/open?u=123">` + // tracker pattern
+		`<img src="https://x.example.com/p.gif" style="width:1px;height:1px">` // styled pixel
+	out := stripTrackers(in)
+
+	if !strings.Contains(out, "logo.png") {
+		t.Fatalf("legit image was removed: %s", out)
+	}
+	for _, bad := range []string{"o.gif", "/wf/open", "p.gif"} {
+		if strings.Contains(out, bad) {
+			t.Fatalf("tracker %q survived: %s", bad, out)
+		}
+	}
+	// No trackers → returned unchanged.
+	clean := `<p>Just text and a <img src="a.png" width="100" height="100"></p>`
+	if got := stripTrackers(clean); got != clean {
+		t.Fatalf("clean HTML changed: %q", got)
+	}
+}
+
 func TestTranslateHTMLTextLengthMismatchKeepsOriginal(t *testing.T) {
 	in := `<p>One</p><p>Two</p>`
 	out, err := translateHTMLText(in, func(segs []string) ([]string, error) {

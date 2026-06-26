@@ -742,7 +742,11 @@ func (w *window) buildReader() *adw.NavigationPage {
 	// per-render nonce and default-src 'none' blocks all network (no fetch/XHR
 	// exfiltration, no iframes), so only our own script ever executes.
 	settings.SetEnableJavascript(true)
-	settings.SetAutoLoadImages(false)
+	// Images load by default; tracking pixels are stripped from the HTML before
+	// rendering (stripTrackers), so opens aren't leaked. The overflow toggle can
+	// still block all remote images for a given message.
+	w.imagesEnabled = true
+	settings.SetAutoLoadImages(true)
 	w.webview.SetVExpand(true)
 	w.webview.SetHExpand(true)
 
@@ -1157,7 +1161,7 @@ func (w *window) renderConversation(msgs []model.Message) {
 		var b strings.Builder
 		for _, m := range msgs {
 			body, _ := w.deps.Store.GetBody(ctx, m.RowID)
-			b.WriteString(conversationSection(m, body, w.sanitizer.Sanitize))
+			b.WriteString(conversationSection(m, body, w.cleanHTML))
 		}
 		out := b.String()
 		slog.Debug("ui: renderConversation", "msgs", len(msgs), "fetched", fetched,
@@ -1363,6 +1367,11 @@ func (w *window) readerMenuItem(label string, fn func()) *gtk.Button {
 	return menuItemButton(w.readerMenuPop, label, fn)
 }
 
+// cleanHTML sanitizes email body HTML and strips tracking pixels for rendering.
+func (w *window) cleanHTML(h string) string {
+	return stripTrackers(w.sanitizer.Sanitize(h))
+}
+
 // setImagesEnabled toggles remote-image loading and re-renders the open thread.
 func (w *window) setImagesEnabled(on bool) {
 	w.imagesEnabled = on
@@ -1389,7 +1398,7 @@ func (w *window) onTranslate() {
 	show := func(translatedHTML string) {
 		w.translationBanner.SetTitle("Showing translation")
 		w.translationBanner.SetRevealed(true)
-		w.webview.LoadHtml(wrapHTML(w.sanitizer.Sanitize(stripCodeFence(translatedHTML))), "about:blank")
+		w.webview.LoadHtml(wrapHTML(w.cleanHTML(stripCodeFence(translatedHTML))), "about:blank")
 	}
 
 	if cached, ok := w.translationCache[gmailID]; ok {
