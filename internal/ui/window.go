@@ -497,16 +497,15 @@ func (w *window) buildSidebar() *adw.NavigationPage {
 	return adw.NewNavigationPage(tv, "Mailbox")
 }
 
-// accountSwitcherRow builds a sidebar account entry: a colour avatar, the
-// display name (custom name if set, else the email) with the email as a caption
-// when a custom name replaces it, and an unread-inbox count pill. The badge is
-// recorded in accountBadges so refreshAccountBadges can update it in place.
+// accountSwitcherRow builds a sidebar account entry: the display name (custom
+// name if set, else the email) with the email as a caption when a custom name
+// replaces it, and an unread-inbox count pill. The badge is recorded in
+// accountBadges so refreshAccountBadges can update it in place.
 func (w *window) accountSwitcherRow(a AccountInfo) *gtk.Box {
 	name := w.accountDisplayName(a)
 
 	row := gtk.NewBox(gtk.OrientationHorizontal, 10)
-	setMargins(row, 10, 10, 6, 6)
-	row.Append(adw.NewAvatar(28, name, true))
+	setMargins(row, 12, 12, 6, 6)
 
 	primary := gtk.NewLabel(name)
 	primary.SetXAlign(0)

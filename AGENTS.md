@@ -45,8 +45,9 @@ internal/
 Multi-account: the launcher builds one Gmail client per connected account and
 syncs each; the UI tracks an active account (a switcher appears in the sidebar
 when more than one is connected) and routes every operation by account id. New
-accounts are added via `mailbox sync --account`. Each switcher row shows a
-colour `adw.Avatar`, the account's display name, and an unread-INBOX count pill;
+accounts are added via `mailbox sync --account`. Each switcher row shows the
+account's display name (email as a caption when named) and an unread-INBOX
+count pill;
 names are user-assigned in Preferences → Accounts (`config.{Load,Save}AccountName`,
 stored in `<data>/accounts.json` keyed by email — when set, the name is primary
 and the email becomes a caption). Per-account badges refresh on any sidebar
@@ -57,8 +58,8 @@ state): a small application stylesheet (`internal/ui/theme.go`, registered on
 the default display in `build`) tints only three things, all from the system
 `@accent_color` family so they track the accent and light/dark — count pills
 (`countBadge`/`.badge-pill`), the small unread dot on a conversation, and the
-soft accent-tinted AI summary card. Folder icons stay the theme foreground;
-account avatars keep their generated `adw.Avatar` colours.
+soft accent-tinted AI summary card. Folder icons stay the theme foreground and
+the account switcher is plain text (no avatars).
 
 UI state (implemented): 3-pane shell renders the cached account live; clicking a
 message lazily fetches + sanitizes + renders its body (WebKit; remote images off
