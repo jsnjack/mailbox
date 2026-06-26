@@ -48,8 +48,14 @@ when more than one is connected) and routes every operation by account id. New
 accounts are added via `mailbox sync --account`.
 
 UI state (implemented): 3-pane shell renders the cached account live; clicking a
-message lazily fetches + sanitizes + renders its body (WebKit, JS off, remote
-images off behind a toggle); reader actions archive / mark-unread / star via
+message lazily fetches + sanitizes + renders its body (WebKit; remote images off
+behind a toggle). The reader sanitizes with an email-tuned bluemonday policy
+(`emailPolicy`, keeps inline styles + tables so HTML mail isn't broken) and
+`wrapHTML` injects a fit-to-width script that scales over-wide email to the pane
+(no horizontal scrollbar, no cropping). JavaScript is enabled **only** for that
+script: a strict per-render CSP (`script-src` pinned to a nonce, `default-src
+'none'`) plus the sanitizer mean no email-supplied script can run or reach the
+network. Reader actions archive / mark-unread / star via
 optimistic `ModifyLabels` + Gmail mirror; opening an unread message marks it read;
 a 60s background incremental sync updates label counts through `dispatch`→`Hub`,
 and new inbox mail (arriving after launch) raises a desktop notification via
@@ -134,7 +140,7 @@ afterward. The `sync` command and the headless packages build without GTK.
 - Gmail REST API, not IMAP — native labels/threads, `history.list` incremental sync, server-side search.
 - Local SQLite + FTS5 as source of truth; metadata separate from bodies; bodies lazy-loaded.
 - Desktop polls `history.list` (no public endpoint for Pub/Sub push).
-- HTML email rendered in a locked-down WebKitGTK view (JS off, remote images blocked, links open externally).
+- HTML email rendered in a locked-down WebKitGTK view: email-tuned sanitizer (keeps styling), remote images blocked by default, links open externally. JavaScript is enabled only to run a trusted fit-to-width script, fenced off by a per-render nonce CSP with `default-src 'none'` so no email script can run or phone home. AI translate renders in place (markup-preserving) with a revert toggle.
 - AI provider is user-configurable behind one `Provider` interface (OpenAI-compatible covers the LiteLLM proxy + OpenAI; Anthropic direct).
 - Distribution is RPM (GTK4/WebKit cannot be statically linked into a single binary).
 
