@@ -95,20 +95,23 @@ type window struct {
 	imagesEnabled  bool            // whether remote images are loaded in the reader
 
 	// in-place translation: a banner offers reverting to the original; the cancel
-	// func aborts an in-flight translation when the user reverts or switches mail.
+	// func aborts an in-flight translation when the user reverts or switches mail;
+	// translationCache memoizes results per message id so re-showing is instant.
 	translationBanner *adw.Banner
 	translateCancel   context.CancelFunc
+	translationCache  map[string]string
 
 	updatingStar bool // guards programmatic star-toggle from firing the handler
 }
 
 func newWindow(app *adw.Application, deps Deps) *window {
 	w := &window{
-		app:       app,
-		deps:      deps,
-		current:   model.LabelInbox,
-		startTime: time.Now(),
-		sanitizer: emailPolicy(),
+		app:              app,
+		deps:             deps,
+		current:          model.LabelInbox,
+		startTime:        time.Now(),
+		sanitizer:        emailPolicy(),
+		translationCache: map[string]string{},
 	}
 	if len(deps.Accounts) > 0 {
 		w.activeID = deps.Accounts[0].ID
@@ -1382,9 +1385,9 @@ func (w *window) setImagesEnabled(on bool) {
 	}
 }
 
-// onTranslate translates the open message into English in place, preserving the
-// email's markup (so styling is kept), and streams the result as it arrives. A
-// banner reverts to the original.
+// onTranslate shows an English translation of the open message in place,
+// preserving the email's markup (so styling is kept). The result is cached per
+// message, so toggling back to it (or re-translating) is instant.
 func (w *window) onTranslate() {
 	m := w.openMsg
 	if m.GmailID == "" || w.deps.Assistant == nil {
@@ -1392,7 +1395,21 @@ func (w *window) onTranslate() {
 	}
 	if w.translateCancel != nil {
 		w.translateCancel()
+		w.translateCancel = nil
 	}
+	gmailID := m.GmailID
+
+	show := func(translatedHTML string) {
+		w.translationBanner.SetTitle("Showing translation")
+		w.translationBanner.SetRevealed(true)
+		w.webview.LoadHtml(wrapHTML(w.sanitizer.Sanitize(stripCodeFence(translatedHTML))), "about:blank")
+	}
+
+	if cached, ok := w.translationCache[gmailID]; ok {
+		show(cached)
+		return
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	w.translateCancel = cancel
 	threadID := w.openThreadID
@@ -1402,37 +1419,24 @@ func (w *window) onTranslate() {
 	w.translationBanner.SetRevealed(true)
 	w.webview.LoadHtml(wrapHTML("<p><i>Translating…</i></p>"), "about:blank")
 
-	render := func(htmlBody string, final bool) {
-		safe := w.sanitizer.Sanitize(stripCodeFence(htmlBody))
-		dispatch.Main(func() {
-			// Skip if the user switched conversations or reverted to the original
-			// (which cancels ctx) while this render was queued.
-			if w.openThreadID != threadID || ctx.Err() != nil {
-				return
-			}
-			if final {
-				w.translationBanner.SetTitle("Showing translation")
-			}
-			w.webview.LoadHtml(wrapHTML(safe), "about:blank")
-		})
-	}
-
 	go func() {
 		// Translate only the text segments (cheap) and reinsert them into the
 		// original markup locally, so the model never regenerates the HTML.
 		out, err := translateHTMLText(source, func(segs []string) ([]string, error) {
 			return w.deps.Assistant.TranslateSegments(ctx, segs, "English")
 		})
-		if err != nil {
-			msg := err.Error()
-			dispatch.Main(func() {
-				if w.openThreadID == threadID && ctx.Err() == nil {
-					w.webview.LoadHtml(wrapHTML("<p>Translation failed: "+html.EscapeString(msg)+"</p>"), "about:blank")
-				}
-			})
-			return
-		}
-		render(out, true)
+		dispatch.Main(func() {
+			// Skip if the user switched conversations or reverted (cancels ctx).
+			if w.openThreadID != threadID || ctx.Err() != nil {
+				return
+			}
+			if err != nil {
+				w.webview.LoadHtml(wrapHTML("<p>Translation failed: "+html.EscapeString(err.Error())+"</p>"), "about:blank")
+				return
+			}
+			w.translationCache[gmailID] = out
+			show(out)
+		})
 	}()
 }
 
