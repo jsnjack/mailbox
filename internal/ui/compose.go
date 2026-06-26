@@ -284,14 +284,16 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 		})
 	}
 
+	var startAIDraft func()
 	if w.deps.Assistant != nil && aiContext != "" {
 		aiBtn := gtk.NewButtonWithLabel("AI draft")
 		aiBtn.SetTooltipText("Draft this reply with AI")
-		runDraft := func() {
+		// runDraft streams a reply guided by instruction (may be empty) into the body.
+		runDraft := func(instruction string) {
 			aiBtn.SetSensitive(false)
 			buf.SetText("")
 			go func() {
-				ch, err := w.deps.Assistant.DraftReply(aiCtx, aiContext, "")
+				ch, err := w.deps.Assistant.DraftReply(aiCtx, aiContext, instruction)
 				if err != nil {
 					msg := err.Error()
 					dispatch.Main(func() {
@@ -313,11 +315,10 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 				dispatch.Main(func() { aiBtn.SetSensitive(true) })
 			}()
 		}
-		aiBtn.ConnectClicked(runDraft)
+		// The button (and auto-draft) first ask what the reply should say.
+		startAIDraft = func() { w.askAIIntent(win, runDraft) }
+		aiBtn.ConnectClicked(func() { startAIDraft() })
 		hb.PackEnd(aiBtn)
-		if autoDraft {
-			runDraft()
-		}
 	}
 
 	// Ctrl+Enter sends, from anywhere in the window. Capture phase so it fires
@@ -335,6 +336,69 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 	win.AddController(keyCtl)
 
 	win.SetVisible(true)
+
+	// For an AI-initiated reply, ask for intent once the window is up.
+	if autoDraft && startAIDraft != nil {
+		startAIDraft()
+	}
+}
+
+// askAIIntent presents quick tone presets and a free-text field, then calls
+// onChosen with the instruction to guide the AI reply (empty = neutral).
+func (w *window) askAIIntent(parent gtk.Widgetter, onChosen func(string)) {
+	dialog := adw.NewDialog()
+	dialog.SetTitle("Draft reply with AI")
+	dialog.SetContentWidth(420)
+	dialog.SetFollowsContentSize(true)
+
+	box := gtk.NewBox(gtk.OrientationVertical, 8)
+	setMargins(box, 16, 16, 16, 16)
+
+	hint := gtk.NewLabel("Pick a tone or describe what to say; the AI drafts the reply.")
+	hint.SetXAlign(0)
+	hint.SetWrap(true)
+	hint.AddCSSClass("dim-label")
+	box.Append(hint)
+
+	choose := func(instruction string) {
+		dialog.Close()
+		onChosen(instruction)
+	}
+
+	for _, q := range []struct{ label, instruction string }{
+		{"Accept / agree", "Accept and agree."},
+		{"Politely decline", "Politely decline."},
+		{"Thank them", "Thank the sender."},
+		{"Ask for more details", "Ask for more details or clarification."},
+		{"I'll follow up later", "Say I will follow up later."},
+		{"Confirm availability", "Confirm that I'm available."},
+	} {
+		instr := q.instruction
+		b := gtk.NewButton()
+		l := gtk.NewLabel(q.label)
+		l.SetXAlign(0)
+		l.SetHExpand(true)
+		b.SetChild(l)
+		b.AddCSSClass("flat")
+		b.ConnectClicked(func() { choose(instr) })
+		box.Append(b)
+	}
+
+	box.Append(gtk.NewSeparator(gtk.OrientationHorizontal))
+
+	entry := gtk.NewEntry()
+	entry.SetPlaceholderText("Or describe what to say…")
+	entry.SetHExpand(true)
+	box.Append(entry)
+
+	gen := gtk.NewButtonWithLabel("Generate")
+	gen.AddCSSClass("suggested-action")
+	gen.SetHAlign(gtk.AlignEnd)
+	gen.ConnectClicked(func() { choose(strings.TrimSpace(entry.Text())) })
+	box.Append(gen)
+
+	dialog.SetChild(box)
+	dialog.Present(parent)
 }
 
 // bodyText returns the full text content of a text buffer.
