@@ -72,7 +72,10 @@ script: a strict per-render CSP (`script-src` pinned to a nonce, `default-src
 network. Remote images load by default, but tracking pixels are stripped before
 render (`stripTrackers`: 1x1/tiny imgs, 1px-styled imgs, and known open-tracker
 URL patterns) and the count is surfaced as a "🛡 N trackers blocked" indicator.
-A thread is rendered newest-message-first. An AI-summary button reveals a card
+A sender-authentication badge shows Gmail's SPF/DKIM/DMARC verdict
+(`ToBody` captures `Authentication-Results` into `raw_headers`; `parseAuthResults`
+→ green verified / amber partial / red possible-spoof). A thread is rendered
+newest-message-first. An AI-summary button reveals a card
 pinned above the conversation that streams a bullet summary (`SummarizeThread`),
 cached by the thread's message-id fingerprint (`summaryKey`) so reopening is
 instant and a new reply auto-invalidates it. Reader actions archive /
@@ -86,7 +89,9 @@ and new inbox mail (arriving after launch) raises a desktop notification via
 installed `com.surfly.mailbox.desktop`, which GNOME requires for notifications.)
 Reply / reply-all / forward / new compose in a separate window (text/plain via
 `gmailapi.BuildMIME` + `messages.send`, threading headers + threadId on replies);
-the compose window has an AI-draft button (streams a drafted reply via
+To/Cc/Bcc autocomplete from past correspondents (`store.Contacts` ranks
+addresses seen in cached mail by frequency+recency; a `GtkEntryCompletion`
+completes the last comma-separated token). The compose window has an AI-draft button (streams a drafted reply via
 `DraftReply` for a reply/forward, or a from-scratch body via `DraftNew` for a
 new message — both prompted by `askAIIntent`) and a Save-draft button
 (`users.drafts.create`). Send runs pre-send guards (`preSendWarning`: empty
