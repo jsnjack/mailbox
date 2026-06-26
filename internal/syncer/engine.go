@@ -78,6 +78,13 @@ func (e *Engine) Backfill(ctx context.Context, c *gmailapi.Client, accountID int
 	// network work and hands the converted message to a single collector that
 	// commits ~backfillBatch rows per transaction. This keeps the network
 	// parallelism while turning N transactions/fsyncs into N/batch.
+	//
+	// A derived context lets the collector stop the pipeline on a write error:
+	// cancel() unblocks the feeder (select on ctx.Done) and aborts in-flight
+	// fetches, and the collector keeps draining resCh so no worker blocks on a
+	// full buffer — guaranteeing every goroutine unwinds.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	var (
 		wg    sync.WaitGroup
 		idCh  = make(chan string)
@@ -126,13 +133,20 @@ func (e *Engine) Backfill(ctx context.Context, c *gmailapi.Client, accountID int
 		batch = batch[:0]
 		return nil
 	}
+	var flushErr error
 	for m := range resCh {
+		if flushErr != nil {
+			continue // keep draining so workers and the feeder can finish
+		}
 		batch = append(batch, m)
 		if len(batch) >= backfillBatch {
-			if err := flush(); err != nil {
-				return stored, err
+			if flushErr = flush(); flushErr != nil {
+				cancel() // stop feeding; let the pipeline wind down
 			}
 		}
+	}
+	if flushErr != nil {
+		return stored, flushErr
 	}
 	if err := flush(); err != nil {
 		return stored, err
