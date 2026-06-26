@@ -25,15 +25,19 @@ import (
 // streams a drafted reply into the body; autoDraft starts that draft
 // immediately on open. title labels the window.
 func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string, autoDraft bool) {
+	// Fresh composes/replies/forwards get the default signature; an existing
+	// draft or a reopened (undone) message already contains its body verbatim.
+	w.openComposeOpts(init, aiContext, title, autoDraft, init.DraftID == "")
+}
+
+func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title string, autoDraft, addSignature bool) {
 	if w.deps.Send == nil {
 		return
 	}
 
 	// Append the configured default signature: below the cursor area for a new
 	// message, between the reply area and the quoted history for a reply/forward.
-	// A draft already contains whatever the user saved (signature included), so
-	// it is left untouched.
-	if init.DraftID == "" {
+	if addSignature {
 		init.Body = composeBodyWithSignature(init.Body, w.signature)
 	}
 
@@ -87,6 +91,18 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 	var attachments []model.OutgoingAttachment
 	attachRow := gtk.NewBox(gtk.OrientationHorizontal, 6)
 	attachRow.SetVisible(false)
+	addChip := func(name string) {
+		chip := gtk.NewBox(gtk.OrientationHorizontal, 4)
+		chip.Append(gtk.NewImageFromIconName("mail-attachment-symbolic"))
+		chip.Append(gtk.NewLabel(name))
+		attachRow.Append(chip)
+		attachRow.SetVisible(true)
+	}
+	// Carry over any attachments from init (e.g. a reopened/undone message).
+	attachments = append(attachments, init.Attachments...)
+	for _, a := range init.Attachments {
+		addChip(a.Filename)
+	}
 
 	// Cc/Bcc are hidden until needed (revealed by the toggle, or automatically
 	// when a reply/forward prefilled them).
@@ -273,11 +289,7 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 				}
 				dispatch.Main(func() {
 					attachments = append(attachments, model.OutgoingAttachment{Filename: name, MimeType: mtype, Data: data})
-					chip := gtk.NewBox(gtk.OrientationHorizontal, 4)
-					chip.Append(gtk.NewImageFromIconName("mail-attachment-symbolic"))
-					chip.Append(gtk.NewLabel(name))
-					attachRow.Append(chip)
-					attachRow.SetVisible(true)
+					addChip(name)
 				})
 			}()
 		})
@@ -286,22 +298,11 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 	doSend := func() {
 		msg := gather() // reads the selected account on the main thread
 		acctID := selectedAccount().ID
-		send.SetSensitive(false)
-		status.SetVisible(true)
-		status.SetText("Sending…")
-		go func() {
-			err := w.deps.Send(context.Background(), acctID, msg)
-			dispatch.Main(func() {
-				if err != nil {
-					slog.Warn("ui: send", "err", err)
-					status.SetText("Send failed: " + err.Error())
-					send.SetSensitive(true)
-					return
-				}
-				sent = true
-				win.Close()
-			})
-		}()
+		// Close immediately and hand off to the delayed-send queue, which shows an
+		// "Undo" toast for a few seconds before the message actually goes out.
+		sent = true
+		w.deferSend(acctID, msg)
+		win.Close()
 	}
 	// preSendWarning returns the first reason to double-check before sending, or
 	// "" when the message looks ready.

@@ -2357,6 +2357,54 @@ func (w *window) toast(msg string) {
 	w.toastOverlay.AddToast(adw.NewToast(msg))
 }
 
+// sendUndoDelay is how long a sent message is held (with an Undo toast) before
+// it actually goes out.
+const sendUndoDelay = 5 * time.Second
+
+// deferSend holds an outgoing message for sendUndoDelay, showing an "Undo" toast;
+// if the user doesn't undo, it sends. Undo reopens the message in compose. The
+// compose window has already closed, so this runs at the main-window level.
+// (Caveat: quitting within the window drops the unsent message.)
+func (w *window) deferSend(accountID int64, msg model.OutgoingMessage) {
+	cancelled := false
+	toast := adw.NewToast("Sending…")
+	toast.SetButtonLabel("Undo")
+	toast.SetTimeout(0) // we control the lifetime via the timer below
+	toast.ConnectButtonClicked(func() {
+		cancelled = true
+		toast.Dismiss()
+		// Reopen the message exactly as it was (no second signature).
+		w.openComposeOpts(msg, "", "Message", false, false)
+	})
+	w.toastOverlay.AddToast(toast)
+
+	go func() {
+		time.Sleep(sendUndoDelay)
+		dispatch.Main(func() {
+			if cancelled {
+				return
+			}
+			toast.Dismiss()
+			w.reallySend(accountID, msg)
+		})
+	}()
+}
+
+// reallySend performs the actual send (after the undo window elapsed). On
+// failure engine.Send queues it to the outbox, surfaced via the outbox banner.
+func (w *window) reallySend(accountID int64, msg model.OutgoingMessage) {
+	go func() {
+		err := w.deps.Send(context.Background(), accountID, msg)
+		dispatch.Main(func() {
+			if err != nil {
+				slog.Warn("ui: send", "err", err)
+				w.toast("Send failed — kept in Outbox")
+				w.refreshOutbox()
+			}
+		})
+	}()
+}
+
 // showUndoToast presents an undo toast that reverses the add/remove applied to
 // msgs (re-adding what was removed and vice versa).
 func (w *window) showUndoToast(title string, msgs []model.Message, add, remove []string) {
