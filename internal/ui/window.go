@@ -1265,8 +1265,7 @@ func (w *window) showThread(threadID string) {
 	w.readerStack.SetVisibleChildName("message")
 	w.innerSplit.SetShowContent(true)
 
-	// Conversations (more than one message) are summarized automatically.
-	w.renderConversation(msgs, len(msgs) > 1)
+	w.renderConversation(msgs)
 
 	// Mark unread messages in the thread read — in one batch call.
 	if w.deps.ModifyLabels != nil {
@@ -1289,10 +1288,8 @@ func (w *window) showThread(threadID string) {
 }
 
 // renderConversation fetches each message's body (lazily) and renders the whole
-// thread as stacked sections in the reader. When autoSummarize is set (a
-// multi-message conversation), it kicks off the AI summary once the bodies are
-// in, so the summary sees real content rather than just snippets.
-func (w *window) renderConversation(msgs []model.Message, autoSummarize bool) {
+// thread as stacked sections in the reader.
+func (w *window) renderConversation(msgs []model.Message) {
 	latest := msgs[len(msgs)-1]
 	w.header.SetMarkup(fmt.Sprintf("<b>%s</b>\n%d message(s)",
 		html.EscapeString(latest.Subject), len(msgs)))
@@ -1347,9 +1344,6 @@ func (w *window) renderConversation(msgs []model.Message, autoSummarize bool) {
 			w.setTrackerCount(blocked)
 			w.webview.LoadHtml(wrapHTML(out), "about:blank")
 			w.populateThreadAttachments(msgs)
-			if autoSummarize && w.deps.Assistant != nil {
-				w.onSummarize() // bodies are now in; summary sees real content
-			}
 		})
 	}()
 }
@@ -1573,7 +1567,7 @@ func (w *window) setImagesEnabled(on bool) {
 	w.imagesEnabled = on
 	w.webview.Settings().SetAutoLoadImages(on)
 	if len(w.openThreadMsgs) > 0 {
-		w.renderConversation(w.openThreadMsgs, false) // re-render only; keep summary as-is
+		w.renderConversation(w.openThreadMsgs) // re-render only; keep summary as-is
 	}
 }
 
@@ -1666,7 +1660,7 @@ func stripCodeFence(s string) string {
 func (w *window) showOriginal() {
 	w.resetTranslation()
 	if len(w.openThreadMsgs) > 0 {
-		w.renderConversation(w.openThreadMsgs, false) // re-render only; keep summary as-is
+		w.renderConversation(w.openThreadMsgs) // re-render only; keep summary as-is
 	}
 }
 
