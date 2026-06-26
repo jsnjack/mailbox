@@ -77,9 +77,30 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 	attachRow := gtk.NewBox(gtk.OrientationHorizontal, 6)
 	attachRow.SetVisible(false)
 
+	// Cc/Bcc are hidden until needed (revealed by the toggle, or automatically
+	// when a reply/forward prefilled them).
+	ccBccBtn := gtk.NewButtonWithLabel("Cc/Bcc")
+	ccBccBtn.AddCSSClass("flat")
+	ccBccBtn.SetVAlign(gtk.AlignCenter)
+	toRow := gtk.NewBox(gtk.OrientationHorizontal, 6)
+	toRow.Append(toEntry)
+	toRow.Append(ccBccBtn)
+
+	ccEntry.SetVisible(false)
+	bccEntry.SetVisible(false)
+	showCcBcc := func() {
+		ccEntry.SetVisible(true)
+		bccEntry.SetVisible(true)
+		ccBccBtn.SetVisible(false)
+	}
+	ccBccBtn.ConnectClicked(func() { showCcBcc() })
+	if strings.TrimSpace(init.Cc) != "" || strings.TrimSpace(init.Bcc) != "" {
+		showCcBcc()
+	}
+
 	box := gtk.NewBox(gtk.OrientationVertical, 6)
 	setMargins(box, 12, 12, 12, 12)
-	box.Append(toEntry)
+	box.Append(toRow)
 	box.Append(ccEntry)
 	box.Append(bccEntry)
 	box.Append(subjEntry)
