@@ -1,9 +1,44 @@
 package ui
 
 import (
+	_ "embed"
+	"log/slog"
+	"os"
+	"path/filepath"
+
 	"github.com/diamondburned/gotk4/pkg/gdk/v4"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 )
+
+// palmTreeSVG is a bundled symbolic icon (no palm tree exists in Adwaita); it is
+// written to a cache icon theme dir and registered at startup.
+//
+//go:embed icons/palm-tree-symbolic.svg
+var palmTreeSVG []byte
+
+// registerCustomIcons installs bundled symbolic icons (the palm tree) into a
+// cache icon theme that GTK searches, so they can be used by name. Best-effort.
+func registerCustomIcons() {
+	display := gdk.DisplayGetDefault()
+	if display == nil {
+		return
+	}
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		return
+	}
+	base := filepath.Join(cache, "mailbox", "icons")
+	dir := filepath.Join(base, "hicolor", "scalable", "actions")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		slog.Warn("ui: icon dir", "err", err)
+		return
+	}
+	if err := os.WriteFile(filepath.Join(dir, "palm-tree-symbolic.svg"), palmTreeSVG, 0o644); err != nil {
+		slog.Warn("ui: write icon", "err", err)
+		return
+	}
+	gtk.IconThemeGetForDisplay(display).AddSearchPath(base)
+}
 
 // appCSS adds a single accent colour on top of stock Adwaita, following GNOME's
 // HIG (which also matches Material's one-seed-accent approach): symbolic icons
@@ -62,4 +97,5 @@ func loadAppCSS() {
 	provider := gtk.NewCSSProvider()
 	provider.LoadFromString(appCSS)
 	gtk.StyleContextAddProviderForDisplay(display, provider, gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+	registerCustomIcons()
 }

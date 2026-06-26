@@ -1105,9 +1105,9 @@ func (w *window) showThreads(sums []model.ThreadSummary) {
 			w.emptyPage.SetTitle("All caught up")
 			w.emptyPage.SetDescription("No unread messages here — nice.")
 		case w.current == model.LabelInbox:
-			w.emptyPage.SetIconName("face-smile-symbolic")
-			w.emptyPage.SetTitle("Inbox Zero 🎉")
-			w.emptyPage.SetDescription("Your inbox is empty. Enjoy the calm!")
+			w.emptyPage.SetIconName("palm-tree-symbolic")
+			w.emptyPage.SetTitle("All clear")
+			w.emptyPage.SetDescription("Your inbox is empty — go enjoy the sunshine.")
 		default:
 			w.emptyPage.SetIconName("mail-unread-symbolic")
 			w.emptyPage.SetTitle("No messages")
@@ -2865,7 +2865,9 @@ func (w *window) reallySend(accountID int64, msg model.OutgoingMessage) {
 				slog.Warn("ui: send", "err", err)
 				w.toast("Send failed — kept in Outbox")
 				w.refreshOutbox()
+				return
 			}
+			w.toast("Message sent")
 		})
 	}()
 }
