@@ -125,8 +125,6 @@ type window struct {
 	categories      map[string]string
 	categorizing    bool
 	inboxCategories bool
-	categoryFilter  string   // active inbox category filter ("" = all)
-	categoryBar     *gtk.Box // category filter chips (inbox only)
 
 	// AI thread summary: a button reveals a card that streams a summary in.
 	// summaryCache memoizes by the thread's message fingerprint, so reopening is
@@ -758,16 +756,11 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 	w.emptyFolderBanner.SetRevealed(false)
 	w.emptyFolderBanner.ConnectButtonClicked(w.onEmptyFolder)
 
-	w.categoryBar = gtk.NewBox(gtk.OrientationHorizontal, 6)
-	setMargins(w.categoryBar, 8, 8, 4, 4)
-	w.categoryBar.SetVisible(false)
-
 	content := gtk.NewBox(gtk.OrientationVertical, 0)
 	content.Append(w.readOnlyBanner)
 	content.Append(w.outboxBanner)
 	content.Append(w.emptyFolderBanner)
 	content.Append(w.searchEntry)
-	content.Append(w.categoryBar)
 	content.Append(w.selectionBar)
 	content.Append(w.threadStack)
 
@@ -1059,31 +1052,14 @@ func (w *window) showThreads(sums []model.ThreadSummary) {
 		sums = filtered
 	}
 
-	// threadByID holds the full (unread-filtered) set so categorization and the
-	// category chips see every thread, even when a category filter narrows the view.
 	w.threadByID = make(map[string]model.ThreadSummary, len(sums))
-	for _, s := range sums {
+	ids := make([]string, len(sums))
+	for i, s := range sums {
+		ids[i] = s.ThreadID
 		w.threadByID[s.ThreadID] = s
 	}
-	w.rebuildCategoryBar(sums)
-
-	// The category chips narrow which threads are shown (inbox only).
-	display := sums
-	if w.categoryFilter != "" {
-		var f []model.ThreadSummary
-		for _, s := range sums {
-			if w.categories[s.ThreadID] == w.categoryFilter {
-				f = append(f, s)
-			}
-		}
-		display = f
-	}
-	ids := make([]string, len(display))
-	for i, s := range display {
-		ids[i] = s.ThreadID
-	}
 	w.threadModel.Splice(0, w.threadModel.NItems(), ids)
-	if len(display) == 0 {
+	if len(sums) == 0 {
 		w.emptyPage.SetChild(nil)
 		switch {
 		case strings.TrimSpace(w.searchEntry.Text()) != "":
@@ -1187,56 +1163,6 @@ func normalizeCategory(s string) string {
 		}
 	}
 	return ""
-}
-
-// rebuildCategoryBar rebuilds the category filter chips from the categories
-// present in the inbox (full set, before the filter is applied). Shown only in
-// the Inbox when categorization is on and at least one category is present.
-func (w *window) rebuildCategoryBar(sums []model.ThreadSummary) {
-	for c := w.categoryBar.FirstChild(); c != nil; c = w.categoryBar.FirstChild() {
-		w.categoryBar.Remove(c)
-	}
-	if w.current != model.LabelInbox || !w.inboxCategories {
-		w.categoryFilter = ""
-		w.categoryBar.SetVisible(false)
-		return
-	}
-	present := make(map[string]bool)
-	for _, s := range sums {
-		if c := w.categories[s.ThreadID]; c != "" {
-			present[c] = true
-		}
-	}
-	if len(present) == 0 {
-		w.categoryBar.SetVisible(false)
-		return
-	}
-	if w.categoryFilter != "" && !present[w.categoryFilter] {
-		w.categoryFilter = "" // the filtered category is no longer present
-	}
-	chip := func(label, cat string) {
-		b := gtk.NewButtonWithLabel(label)
-		b.AddCSSClass("pill")
-		if w.categoryFilter == cat {
-			b.AddCSSClass("suggested-action")
-		}
-		b.ConnectClicked(func() {
-			if w.categoryFilter == cat {
-				w.categoryFilter = ""
-			} else {
-				w.categoryFilter = cat
-			}
-			w.refreshList(w.searchEntry.Text())
-		})
-		w.categoryBar.Append(b)
-	}
-	chip("All", "")
-	for _, c := range ai.EmailCategories {
-		if present[c] {
-			chip(c, c)
-		}
-	}
-	w.categoryBar.SetVisible(true)
 }
 
 func (w *window) onRefresh() {
