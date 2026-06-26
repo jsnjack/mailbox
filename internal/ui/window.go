@@ -1731,6 +1731,9 @@ func threadRow(t model.ThreadSummary) *gtk.Box {
 		clip.AddCSSClass("dim-label")
 		top.Append(clip)
 	}
+	if m.IsStarred {
+		top.Append(gtk.NewImageFromIconName("starred-symbolic"))
+	}
 	if d := relativeDate(m.InternalDate, time.Now()); d != "" {
 		date := gtk.NewLabel(d)
 		date.AddCSSClass("dim-label")
