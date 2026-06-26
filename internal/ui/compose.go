@@ -250,7 +250,7 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 		})
 	})
 
-	send.ConnectClicked(func() {
+	doSend := func() {
 		msg := gather() // reads the selected account on the main thread
 		acctID := selectedAccount().ID
 		send.SetSensitive(false)
@@ -269,6 +269,32 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 				win.Close()
 			})
 		}()
+	}
+	// preSendWarning returns the first reason to double-check before sending, or
+	// "" when the message looks ready.
+	preSendWarning := func() string {
+		if strings.TrimSpace(subjEntry.Text()) == "" {
+			return "This message has no subject line."
+		}
+		return ""
+	}
+	send.ConnectClicked(func() {
+		if warn := preSendWarning(); warn != "" {
+			confirm := adw.NewAlertDialog("Send anyway?", warn)
+			confirm.AddResponse("cancel", "Cancel")
+			confirm.AddResponse("send", "Send anyway")
+			confirm.SetResponseAppearance("send", adw.ResponseSuggested)
+			confirm.SetDefaultResponse("cancel")
+			confirm.SetCloseResponse("cancel")
+			confirm.ConnectResponse(func(r string) {
+				if r == "send" {
+					doSend()
+				}
+			})
+			confirm.Present(win)
+			return
+		}
+		doSend()
 	})
 
 	if draftBtn != nil {
