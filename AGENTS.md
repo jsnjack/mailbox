@@ -76,8 +76,10 @@ A thread is rendered newest-message-first. An AI-summary button reveals a card
 pinned above the conversation that streams a bullet summary (`SummarizeThread`),
 cached by the thread's message-id fingerprint (`summaryKey`) so reopening is
 instant and a new reply auto-invalidates it. Reader actions archive /
-mark-unread / star / move-to-inbox via
+mark-unread / star / move-to-inbox / report-spam (or not-spam in the Spam
+folder) via
 optimistic `ModifyLabels` + Gmail mirror; opening an unread message marks it read;
+Ctrl +/-/0 zoom the message view (`WebView.SetZoomLevel`, persisted);
 a 60s background incremental sync updates label counts through `dispatch`→`Hub`,
 and new inbox mail (arriving after launch) raises a desktop notification via
 `gio.Notification`. (The GApplication app-id `com.surfly.mailbox` matches the
@@ -87,7 +89,10 @@ Reply / reply-all / forward / new compose in a separate window (text/plain via
 the compose window has an AI-draft button (streams a drafted reply via
 `DraftReply` for a reply/forward, or a from-scratch body via `DraftNew` for a
 new message — both prompted by `askAIIntent`) and a Save-draft button
-(`users.drafts.create`). A configurable default signature
+(`users.drafts.create`). Send runs pre-send guards (`preSendWarning`: empty
+subject, "attachment" mentioned but none attached → confirm), and closing an
+unsent message offers Save-as-draft alongside Discard. A configurable default
+signature
 (`config.{Load,Save}Signature`, `<config>/signature.txt`, edited in
 Preferences) is appended to every composed body below the cursor area and above
 any quote (`composeBodyWithSignature`, RFC 3676 "-- " delimiter); it is not
@@ -163,6 +168,8 @@ afterward. The `sync` command and the headless packages build without GTK.
 - Persistent state (SQLite DB): `~/.local/share/mailbox/mailbox.db`.
 - Account display names: `~/.local/share/mailbox/accounts.json` (email → name).
 - Default signature: `~/.config/mailbox/signature.txt` (plain text, may be empty).
+- View state (last folder, unread filter, reader zoom): `~/.local/share/mailbox/view.json`.
+- General prefs (e.g. block remote images by default): `~/.config/mailbox/prefs.json`.
 - Attachment cache: `~/.cache/mailbox/attachments/` (content-addressed by sha256).
 - Secrets (OAuth refresh tokens, AI API keys): OS keyring via Secret Service.
 - Trace log: `/tmp/mailbox.log` (truncated each start; enabled with `--trace`).
