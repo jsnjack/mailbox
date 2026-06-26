@@ -115,6 +115,24 @@ errors through the UI itself.
 
 ---
 
+## Commits
+
+Every commit message starts with a single-letter prefix that drives automatic
+versioning ([jsnjack/monova](https://github.com/jsnjack/monova)):
+
+- `M` — major change (breaking).
+- `m` — minor change (backward-compatible feature).
+- `p` — patch (backward-compatible fix).
+
+The prefix is the first character of the subject line, followed by a space:
+
+```
+m Add --trace flag to the server command
+p Fix panic when the config file is empty
+```
+
+---
+
 ## Testing
 
 Tests exist to catch regressions — a test that doesn't fail when behaviour
@@ -142,3 +160,4 @@ breaks has no value.
 - Never add a dependency without explicit justification and agreement.
 - Never change existing behaviour silently — always flag it first.
 - Never commit on behalf of the user.
+- Never write a commit message without an `M`/`m`/`p` version prefix.
