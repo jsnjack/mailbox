@@ -545,48 +545,71 @@ func (w *window) askAIIntent(parent gtk.Widgetter, isReply bool, threadContext s
 		onInstruction(instruction)
 	}
 
-	// Ready-to-send quick replies (for a reply), loaded from the thread.
+	// Ready-to-send quick replies (for a reply) — gated behind a button so they
+	// are only generated (and tokens spent) when the user asks.
 	if isReply && strings.TrimSpace(threadContext) != "" && onQuickReply != nil && w.deps.Assistant != nil {
 		quick := gtk.NewBox(gtk.OrientationVertical, 4)
-		loading := gtk.NewLabel("Loading quick replies…")
-		loading.SetXAlign(0)
-		loading.AddCSSClass("dim-label")
-		loading.AddCSSClass("caption")
-		quick.Append(loading)
 		box.Append(quick)
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			replies, err := w.deps.Assistant.SmartReplies(ctx, threadContext)
-			dispatch.Main(func() {
-				for c := quick.FirstChild(); c != nil; c = quick.FirstChild() {
-					quick.Remove(c)
-				}
-				if err != nil || len(replies) == 0 {
-					quick.SetVisible(false) // hide the whole section, separator included
-					return
-				}
-				for _, r := range replies {
-					text := strings.TrimSpace(r)
-					if text == "" {
-						continue
-					}
-					l := gtk.NewLabel(text)
-					l.SetXAlign(0)
-					l.SetWrap(true)
-					l.SetHExpand(true)
-					b := gtk.NewButton()
-					b.SetChild(l)
-					b.AddCSSClass("flat")
-					b.ConnectClicked(func() {
-						dialog.Close()
-						onQuickReply(text)
+		clearQuick := func() {
+			for c := quick.FirstChild(); c != nil; c = quick.FirstChild() {
+				quick.Remove(c)
+			}
+		}
+		var showSuggestButton func()
+		showSuggestButton = func() {
+			clearQuick()
+			bl := gtk.NewLabel("Suggest quick replies")
+			bl.SetXAlign(0)
+			bl.SetHExpand(true)
+			btn := gtk.NewButton()
+			btn.SetChild(bl)
+			btn.AddCSSClass("flat")
+			btn.ConnectClicked(func() {
+				clearQuick()
+				busy := gtk.NewLabel("Loading quick replies…")
+				busy.SetXAlign(0)
+				busy.AddCSSClass("dim-label")
+				busy.AddCSSClass("caption")
+				quick.Append(busy)
+				go func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+					defer cancel()
+					replies, err := w.deps.Assistant.SmartReplies(ctx, threadContext)
+					dispatch.Main(func() {
+						clearQuick()
+						if err != nil || len(replies) == 0 {
+							if err != nil {
+								slog.Warn("ui: smart replies", "err", err)
+							}
+							showSuggestButton() // restore so the user can retry
+							return
+						}
+						for _, r := range replies {
+							text := strings.TrimSpace(r)
+							if text == "" {
+								continue
+							}
+							rl := gtk.NewLabel(text)
+							rl.SetXAlign(0)
+							rl.SetWrap(true)
+							rl.SetHExpand(true)
+							rb := gtk.NewButton()
+							rb.SetChild(rl)
+							rb.AddCSSClass("flat")
+							rb.ConnectClicked(func() {
+								dialog.Close()
+								onQuickReply(text)
+							})
+							quick.Append(rb)
+						}
+						quick.Append(gtk.NewSeparator(gtk.OrientationHorizontal))
 					})
-					quick.Append(b)
-				}
-				quick.Append(gtk.NewSeparator(gtk.OrientationHorizontal))
+				}()
 			})
-		}()
+			quick.Append(btn)
+			quick.Append(gtk.NewSeparator(gtk.OrientationHorizontal))
+		}
+		showSuggestButton()
 	}
 
 	for _, q := range presets {
