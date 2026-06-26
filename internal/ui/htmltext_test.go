@@ -53,7 +53,7 @@ func TestStripTrackers(t *testing.T) {
 		`<img src="https://t.example.com/o.gif" width="1" height="1">` + // 1x1 pixel
 		`<img src="https://esp.example.com/wf/open?u=123">` + // tracker pattern
 		`<img src="https://x.example.com/p.gif" style="width:1px;height:1px">` // styled pixel
-	out := stripTrackers(in)
+	out, blocked := stripTrackers(in)
 
 	if !strings.Contains(out, "logo.png") {
 		t.Fatalf("legit image was removed: %s", out)
@@ -63,10 +63,13 @@ func TestStripTrackers(t *testing.T) {
 			t.Fatalf("tracker %q survived: %s", bad, out)
 		}
 	}
-	// No trackers → returned unchanged.
+	if blocked != 3 {
+		t.Fatalf("blocked count = %d, want 3", blocked)
+	}
+	// No trackers → returned unchanged, zero count.
 	clean := `<p>Just text and a <img src="a.png" width="100" height="100"></p>`
-	if got := stripTrackers(clean); got != clean {
-		t.Fatalf("clean HTML changed: %q", got)
+	if got, n := stripTrackers(clean); got != clean || n != 0 {
+		t.Fatalf("clean HTML changed: %q (n=%d)", got, n)
 	}
 }
 

@@ -77,10 +77,11 @@ type window struct {
 	refreshPending     bool
 	refreshListPending bool
 
-	header    *gtk.Label
-	attachBox *gtk.Box // chips for the open message's attachments
-	webview   *webkit.WebView
-	sanitizer *bluemonday.Policy
+	header       *gtk.Label
+	attachBox    *gtk.Box   // chips for the open message's attachments
+	trackerLabel *gtk.Label // "N trackers blocked" indicator
+	webview      *webkit.WebView
+	sanitizer    *bluemonday.Policy
 
 	// reader: the open conversation. openMsg is its newest message (used for
 	// reply/forward/star/unread); openThreadMsgs is all of them (oldest first).
@@ -759,6 +760,13 @@ func (w *window) buildReader() *adw.NavigationPage {
 	setMargins(w.attachBox, 12, 12, 0, 8)
 	w.attachBox.SetVisible(false)
 
+	w.trackerLabel = gtk.NewLabel("")
+	w.trackerLabel.SetXAlign(0)
+	w.trackerLabel.AddCSSClass("dim-label")
+	w.trackerLabel.AddCSSClass("caption")
+	setMargins(w.trackerLabel, 12, 12, 0, 6)
+	w.trackerLabel.SetVisible(false)
+
 	// Revealed while an in-place translation is shown; reverts to the original.
 	w.translationBanner = adw.NewBanner("Showing translation")
 	w.translationBanner.SetButtonLabel("Show original")
@@ -769,6 +777,7 @@ func (w *window) buildReader() *adw.NavigationPage {
 	box.Append(w.translationBanner)
 	box.Append(w.header)
 	box.Append(w.attachBox)
+	box.Append(w.trackerLabel)
 	box.Append(w.webview)
 
 	empty := adw.NewStatusPage()
@@ -1159,24 +1168,30 @@ func (w *window) renderConversation(msgs []model.Message) {
 		fetchDur := time.Since(start)
 		sanitizeStart := time.Now()
 		var b strings.Builder
+		blocked := 0
 		for _, m := range msgs {
 			body, _ := w.deps.Store.GetBody(ctx, m.RowID)
-			b.WriteString(conversationSection(m, body, w.cleanHTML))
+			sec, n := conversationSection(m, body, w.cleanHTML)
+			b.WriteString(sec)
+			blocked += n
 		}
 		out := b.String()
 		slog.Debug("ui: renderConversation", "msgs", len(msgs), "fetched", fetched,
-			"fetch", fetchDur, "sanitize", time.Since(sanitizeStart))
+			"trackers", blocked, "fetch", fetchDur, "sanitize", time.Since(sanitizeStart))
 		dispatch.Main(func() {
 			if w.openThreadID != threadID {
 				return // user switched to another conversation while this rendered
 			}
+			w.setTrackerCount(blocked)
 			w.webview.LoadHtml(wrapHTML(out), "about:blank")
 			w.populateThreadAttachments(msgs)
 		})
 	}()
 }
 
-func conversationSection(m model.Message, body model.MessageBody, sanitize func(string) string) string {
+// conversationSection renders one message's header + body and returns the HTML
+// plus how many trackers were stripped from it. clean sanitizes+de-tracks HTML.
+func conversationSection(m model.Message, body model.MessageBody, clean func(string) (string, int)) (string, int) {
 	var hb strings.Builder
 	hb.WriteString(`<div style="border-top:1px solid #ddd;margin-top:18px;padding-top:8px;color:#555;font-size:90%">`)
 	fmt.Fprintf(&hb, `<b>%s</b> · %s`,
@@ -1191,11 +1206,12 @@ func conversationSection(m model.Message, body model.MessageBody, sanitize func(
 	header := hb.String()
 	switch {
 	case body.HTML != "":
-		return header + sanitize(body.HTML)
+		cleaned, blocked := clean(body.HTML)
+		return header + cleaned, blocked
 	case body.Text != "":
-		return header + "<pre style=\"white-space:pre-wrap\">" + html.EscapeString(body.Text) + "</pre>"
+		return header + "<pre style=\"white-space:pre-wrap\">" + html.EscapeString(body.Text) + "</pre>", 0
 	default:
-		return header + "<p>" + html.EscapeString(m.Snippet) + "</p>"
+		return header + "<p>" + html.EscapeString(m.Snippet) + "</p>", 0
 	}
 }
 
@@ -1367,9 +1383,24 @@ func (w *window) readerMenuItem(label string, fn func()) *gtk.Button {
 	return menuItemButton(w.readerMenuPop, label, fn)
 }
 
-// cleanHTML sanitizes email body HTML and strips tracking pixels for rendering.
-func (w *window) cleanHTML(h string) string {
+// cleanHTML sanitizes email body HTML and strips tracking pixels for rendering,
+// returning the cleaned HTML and how many trackers were removed.
+func (w *window) cleanHTML(h string) (string, int) {
 	return stripTrackers(w.sanitizer.Sanitize(h))
+}
+
+// setTrackerCount shows "N trackers blocked" in the reader (hidden when none).
+func (w *window) setTrackerCount(n int) {
+	if n <= 0 {
+		w.trackerLabel.SetVisible(false)
+		return
+	}
+	noun := "tracker"
+	if n != 1 {
+		noun = "trackers"
+	}
+	w.trackerLabel.SetText(fmt.Sprintf("🛡 %d %s blocked", n, noun))
+	w.trackerLabel.SetVisible(true)
 }
 
 // setImagesEnabled toggles remote-image loading and re-renders the open thread.
@@ -1398,7 +1429,9 @@ func (w *window) onTranslate() {
 	show := func(translatedHTML string) {
 		w.translationBanner.SetTitle("Showing translation")
 		w.translationBanner.SetRevealed(true)
-		w.webview.LoadHtml(wrapHTML(w.cleanHTML(stripCodeFence(translatedHTML))), "about:blank")
+		cleaned, blocked := w.cleanHTML(stripCodeFence(translatedHTML))
+		w.setTrackerCount(blocked)
+		w.webview.LoadHtml(wrapHTML(cleaned), "about:blank")
 	}
 
 	if cached, ok := w.translationCache[gmailID]; ok {

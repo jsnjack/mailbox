@@ -23,11 +23,12 @@ var trackerSrcPatterns = []string{
 // stripTrackers removes likely tracking pixels from (already-sanitized) email
 // HTML: <img> elements that are 1x1/tiny or whose src matches a known tracker
 // pattern. Real, visible images are kept, so images can load by default without
-// leaking that the message was opened. Returns the body's inner HTML.
-func stripTrackers(htmlStr string) string {
+// leaking that the message was opened. Returns the body's inner HTML and the
+// number of trackers removed.
+func stripTrackers(htmlStr string) (string, int) {
 	doc, err := html.Parse(strings.NewReader(htmlStr))
 	if err != nil {
-		return htmlStr
+		return htmlStr, 0
 	}
 	removed := 0
 	var walk func(n *html.Node)
@@ -45,19 +46,19 @@ func stripTrackers(htmlStr string) string {
 	}
 	walk(doc)
 	if removed == 0 {
-		return htmlStr // unchanged; avoid re-serializing
+		return htmlStr, 0 // unchanged; avoid re-serializing
 	}
 	body := findBody(doc)
 	if body == nil {
-		return htmlStr
+		return htmlStr, removed
 	}
 	var b strings.Builder
 	for c := body.FirstChild; c != nil; c = c.NextSibling {
 		if err := html.Render(&b, c); err != nil {
-			return htmlStr
+			return htmlStr, removed
 		}
 	}
-	return b.String()
+	return b.String(), removed
 }
 
 // isTrackerImg reports whether an <img> node looks like a tracking pixel.
