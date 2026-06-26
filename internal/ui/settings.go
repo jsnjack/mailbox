@@ -2,9 +2,12 @@ package ui
 
 import (
 	"log/slog"
+	"strings"
 
 	"github.com/diamondburned/gotk4-adwaita/pkg/adw"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
+
+	"github.com/jsnjack/mailbox/internal/config"
 )
 
 // shortcutList is the single source of truth for the keyboard shortcuts, shown
@@ -52,6 +55,19 @@ func (w *window) openSettings() {
 	group.Add(endpointRow)
 	group.Add(modelRow)
 
+	// One naming field per connected account ("Home", "Work", …).
+	nameRows := map[string]*adw.EntryRow{}
+	acctGroup := adw.NewPreferencesGroup()
+	acctGroup.SetTitle("Accounts")
+	acctGroup.SetDescription("Give each account a name (e.g. Home, Work) — shown in the sidebar. Leave blank to use the email.")
+	for _, a := range w.deps.Accounts {
+		r := adw.NewEntryRow()
+		r.SetTitle(a.Email)
+		r.SetText(w.accountNames[a.Email])
+		acctGroup.Add(r)
+		nameRows[a.Email] = r
+	}
+
 	scGroup := adw.NewPreferencesGroup()
 	scGroup.SetTitle("Keyboard Shortcuts")
 	scGroup.SetDescription("Single keys work while reading; they're ignored while typing in a field.")
@@ -67,6 +83,9 @@ func (w *window) openSettings() {
 
 	page := adw.NewPreferencesPage()
 	page.Add(group)
+	if len(w.deps.Accounts) > 0 {
+		page.Add(acctGroup)
+	}
 	page.Add(scGroup)
 
 	dialog := adw.NewPreferencesDialog()
@@ -79,6 +98,33 @@ func (w *window) openSettings() {
 				slog.Warn("ui: save settings", "err", err)
 			}
 		}
+		w.applyAccountNames(nameRows)
 	})
 	dialog.Present(w.win)
+}
+
+// applyAccountNames persists any changed account display names and, when
+// something changed, re-renders the switcher so the new names/avatars show
+// without a restart.
+func (w *window) applyAccountNames(rows map[string]*adw.EntryRow) {
+	changed := false
+	for email, r := range rows {
+		newName := strings.TrimSpace(r.Text())
+		if newName == strings.TrimSpace(w.accountNames[email]) {
+			continue
+		}
+		if err := config.SaveAccountName(email, newName); err != nil {
+			slog.Warn("ui: save account name", "email", email, "err", err)
+			continue
+		}
+		if newName == "" {
+			delete(w.accountNames, email)
+		} else {
+			w.accountNames[email] = newName
+		}
+		changed = true
+	}
+	if changed {
+		w.rebuildAccountSwitcher()
+	}
 }

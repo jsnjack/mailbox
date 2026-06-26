@@ -45,13 +45,18 @@ type window struct {
 	outerSplit   *adw.NavigationSplitView
 	innerSplit   *adw.NavigationSplitView
 	accountBox   *gtk.ListBox
-	labelBox     *gtk.ListBox
-	refreshBtn   *gtk.Button
-	syncSpinner  *gtk.Spinner  // shown in place of refreshBtn during a manual sync
-	sidebar      []sidebarItem // one entry per row in labelBox (incl. headings)
-	current      string
-	activeID     int64 // the account currently shown
-	activeEmail  string
+	// accountNames maps account email → user-assigned display name ("Home",
+	// "Work"); accountBadges maps account id → its unread-inbox count pill in the
+	// switcher, so badges can refresh in place when any account syncs.
+	accountNames  map[string]string
+	accountBadges map[int64]*gtk.Label
+	labelBox      *gtk.ListBox
+	refreshBtn    *gtk.Button
+	syncSpinner   *gtk.Spinner  // shown in place of refreshBtn during a manual sync
+	sidebar       []sidebarItem // one entry per row in labelBox (incl. headings)
+	current       string
+	activeID      int64 // the account currently shown
+	activeEmail   string
 	// suppressLabelSelect guards the row-selected handler while loadLabels
 	// restores the visual highlight, so a background refresh doesn't reset the
 	// list or clear an active search.
@@ -123,7 +128,9 @@ func newWindow(app *adw.Application, deps Deps) *window {
 		sanitizer:        emailPolicy(),
 		translationCache: map[string]string{},
 		summaryCache:     map[string]string{},
+		accountBadges:    map[int64]*gtk.Label{},
 	}
+	w.accountNames, _ = config.LoadAccountNames()
 	if len(deps.Accounts) > 0 {
 		w.activeID = deps.Accounts[0].ID
 		w.activeEmail = deps.Accounts[0].Email
@@ -434,10 +441,7 @@ func (w *window) buildSidebar() *adw.NavigationPage {
 		w.accountBox = gtk.NewListBox()
 		w.accountBox.AddCSSClass("navigation-sidebar")
 		for _, a := range w.deps.Accounts {
-			row := gtk.NewLabel(a.Email)
-			row.SetXAlign(0)
-			setMargins(row, 12, 12, 4, 4)
-			w.accountBox.Append(row)
+			w.accountBox.Append(w.accountSwitcherRow(a))
 		}
 		w.accountBox.ConnectRowSelected(func(row *gtk.ListBoxRow) {
 			if row == nil {
@@ -452,12 +456,12 @@ func (w *window) buildSidebar() *adw.NavigationPage {
 		}
 		box.Append(w.accountBox)
 		box.Append(gtk.NewSeparator(gtk.OrientationHorizontal))
-	} else {
-		acct := gtk.NewLabel(w.activeEmail)
-		acct.AddCSSClass("heading")
-		acct.SetXAlign(0)
-		setMargins(acct, 12, 12, 12, 6)
-		box.Append(acct)
+	} else if len(w.deps.Accounts) == 1 {
+		a := w.deps.Accounts[0]
+		row := w.accountSwitcherRow(a)
+		row.SetMarginTop(6)
+		box.Append(row)
+		box.Append(gtk.NewSeparator(gtk.OrientationHorizontal))
 	}
 	box.Append(scroller)
 
@@ -491,6 +495,103 @@ func (w *window) buildSidebar() *adw.NavigationPage {
 	tv.AddTopBar(hb)
 	tv.SetContent(box)
 	return adw.NewNavigationPage(tv, "Mailbox")
+}
+
+// accountSwitcherRow builds a sidebar account entry: a colour avatar, the
+// display name (custom name if set, else the email) with the email as a caption
+// when a custom name replaces it, and an unread-inbox count pill. The badge is
+// recorded in accountBadges so refreshAccountBadges can update it in place.
+func (w *window) accountSwitcherRow(a AccountInfo) *gtk.Box {
+	name := w.accountDisplayName(a)
+
+	row := gtk.NewBox(gtk.OrientationHorizontal, 10)
+	setMargins(row, 10, 10, 6, 6)
+	row.Append(adw.NewAvatar(28, name, true))
+
+	primary := gtk.NewLabel(name)
+	primary.SetXAlign(0)
+	primary.AddCSSClass("heading")
+	primary.SetEllipsize(pango.EllipsizeEnd)
+
+	textCol := gtk.NewBox(gtk.OrientationVertical, 0)
+	textCol.SetHExpand(true)
+	textCol.SetVAlign(gtk.AlignCenter)
+	textCol.Append(primary)
+	if w.hasCustomName(a.Email) {
+		email := gtk.NewLabel(a.Email)
+		email.SetXAlign(0)
+		email.AddCSSClass("caption")
+		email.AddCSSClass("dim-label")
+		email.SetEllipsize(pango.EllipsizeEnd)
+		textCol.Append(email)
+	}
+	row.Append(textCol)
+
+	badge := countBadge(0)
+	badge.SetVisible(false)
+	w.accountBadges[a.ID] = badge
+	row.Append(badge)
+	return row
+}
+
+// accountDisplayName returns the account's user-assigned name, or its email when
+// none is set.
+func (w *window) accountDisplayName(a AccountInfo) string {
+	if n := strings.TrimSpace(w.accountNames[a.Email]); n != "" {
+		return n
+	}
+	return a.Email
+}
+
+// hasCustomName reports whether the user assigned a display name to email.
+func (w *window) hasCustomName(email string) bool {
+	return strings.TrimSpace(w.accountNames[email]) != ""
+}
+
+// refreshAccountBadges recomputes each account's unread-inbox count and updates
+// its switcher pill (hidden at zero). Cheap — one indexed COUNT per account.
+func (w *window) refreshAccountBadges() {
+	if len(w.accountBadges) == 0 {
+		return
+	}
+	ctx := context.Background()
+	for _, a := range w.deps.Accounts {
+		badge := w.accountBadges[a.ID]
+		if badge == nil {
+			continue
+		}
+		n, _ := w.deps.Store.CountUnreadByLabel(ctx, a.ID, model.LabelInbox)
+		if n > 0 {
+			badge.SetText(fmt.Sprintf("%d", n))
+			badge.SetVisible(true)
+		} else {
+			badge.SetVisible(false)
+		}
+	}
+}
+
+// rebuildAccountSwitcher re-renders the multi-account switcher rows (after a
+// rename), preserving the current selection. Single-account naming applies on
+// next launch.
+func (w *window) rebuildAccountSwitcher() {
+	if w.accountBox == nil {
+		return
+	}
+	selIdx := -1
+	if r := w.accountBox.SelectedRow(); r != nil {
+		selIdx = r.Index()
+	}
+	w.accountBox.RemoveAll()
+	w.accountBadges = map[int64]*gtk.Label{}
+	for _, a := range w.deps.Accounts {
+		w.accountBox.Append(w.accountSwitcherRow(a))
+	}
+	if selIdx >= 0 {
+		if r := w.accountBox.RowAtIndex(selIdx); r != nil {
+			w.accountBox.SelectRow(r)
+		}
+	}
+	w.refreshAccountBadges()
 }
 
 func (w *window) buildThreadList() *adw.NavigationPage {
@@ -1029,6 +1130,7 @@ func (w *window) loadLabels() {
 	}
 
 	w.restoreSidebarSelection()
+	w.refreshAccountBadges() // keep the per-account unread pills current
 }
 
 // appendFolder adds a selectable folder/label row mapped to id. iconCSS tints
@@ -1858,11 +1960,15 @@ func (w *window) onChange(c syncer.Change) {
 	switch c.Kind {
 	case syncer.MessageUpserted, syncer.MessageDeleted:
 		if c.AccountID == w.activeID {
-			w.scheduleRefresh(true)
+			w.scheduleRefresh(true) // loadLabels (inside) refreshes badges too
+		} else {
+			w.refreshAccountBadges() // a sibling account's unread count changed
 		}
 	case syncer.LabelsSynced:
 		if c.AccountID == w.activeID {
 			w.scheduleRefresh(false)
+		} else {
+			w.refreshAccountBadges()
 		}
 	case syncer.SendStateChanged:
 		if c.AccountID == w.activeID {
