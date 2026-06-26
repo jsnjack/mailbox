@@ -57,6 +57,20 @@ func TestSummarizeThread(t *testing.T) {
 	}
 }
 
+func TestSmartReplies(t *testing.T) {
+	fp := &fakeProvider{chunks: []Chunk{{Text: `["Sounds good!", `}, {Text: `"Can we reschedule?", "I'll take a look."]`}}}
+	got, err := NewAssistant(fp).SmartReplies(context.Background(), "From: a@x.com\nSubject: lunch?\n\nLunch tomorrow?")
+	if err != nil {
+		t.Fatalf("SmartReplies: %v", err)
+	}
+	if len(got) != 3 || got[0] != "Sounds good!" || got[2] != "I'll take a look." {
+		t.Fatalf("replies = %#v", got)
+	}
+	if !strings.Contains(fp.gotMsgs[0].Content, "Lunch tomorrow?") {
+		t.Fatalf("thread context not passed: %+v", fp.gotMsgs)
+	}
+}
+
 func TestAnalyzeEmail(t *testing.T) {
 	fp := &fakeProvider{chunks: []Chunk{{Text: "Verdict: Be cautious\n"}, {Text: "- urgent tone"}}}
 	a := NewAssistant(fp)

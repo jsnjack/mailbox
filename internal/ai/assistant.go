@@ -62,6 +62,26 @@ func parseTranslatedSegments(raw string) ([]string, error) {
 	return out, nil
 }
 
+// SmartReplies suggests up to 3 short, ready-to-send replies to the latest
+// message in a thread. It returns plain strings (parsed from a JSON array).
+func (a *Assistant) SmartReplies(ctx context.Context, threadContext string) ([]string, error) {
+	system := "You are an email assistant. Suggest 3 short, distinct, ready-to-send replies to the latest " +
+		"message in this thread — each a single natural sentence (under about 12 words), in the thread's " +
+		"language. Reply with ONLY a JSON array of exactly 3 strings: no commentary, no code fences."
+	ch, err := a.p.Stream(ctx, system, []Msg{{Role: RoleUser, Content: threadContext}})
+	if err != nil {
+		return nil, err
+	}
+	var b strings.Builder
+	for c := range ch {
+		if c.Err != nil {
+			return nil, c.Err
+		}
+		b.WriteString(c.Text)
+	}
+	return parseTranslatedSegments(b.String())
+}
+
 // AnalyzeEmail streams a phishing/scam risk assessment of an email. emailContext
 // is the sender, subject, body, and any automated signals (auth result,
 // heuristic warnings). The reply leads with a one-line verdict, then reasons.
