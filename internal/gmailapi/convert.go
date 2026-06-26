@@ -42,7 +42,14 @@ func ToMessage(accountID int64, m *gmail.Message) model.Message {
 // ToBody extracts the text and HTML body parts from a full-format Gmail message.
 func ToBody(m *gmail.Message) model.MessageBody {
 	text, html := extractBody(m.Payload)
-	return model.MessageBody{Text: text, HTML: html}
+	// Capture Gmail's SPF/DKIM/DMARC verdict (added on receipt) so the reader can
+	// show a sender-authenticity badge. Stored in the otherwise-unused
+	// raw_headers column.
+	var auth string
+	if m.Payload != nil {
+		auth = headerValue(m.Payload.Headers, "Authentication-Results")
+	}
+	return model.MessageBody{Text: text, HTML: html, RawHeaders: auth}
 }
 
 // AttachmentsFromMessage extracts attachment metadata (named parts with an

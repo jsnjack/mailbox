@@ -90,6 +90,7 @@ type window struct {
 	header       *gtk.Label
 	attachBox    *gtk.Box   // chips for the open message's attachments
 	trackerLabel *gtk.Label // "N trackers blocked" indicator
+	authLabel    *gtk.Label // sender authentication (SPF/DKIM/DMARC) badge
 	webview      *webkit.WebView
 	readerZoom   float64 // reader message zoom (Ctrl +/-/0), persisted
 	sanitizer    *bluemonday.Policy
@@ -995,6 +996,13 @@ func (w *window) buildReader() *adw.NavigationPage {
 	setMargins(w.trackerLabel, 12, 12, 0, 6)
 	w.trackerLabel.SetVisible(false)
 
+	w.authLabel = gtk.NewLabel("")
+	w.authLabel.SetXAlign(0)
+	w.authLabel.SetWrap(true)
+	w.authLabel.AddCSSClass("caption")
+	setMargins(w.authLabel, 12, 12, 0, 6)
+	w.authLabel.SetVisible(false)
+
 	// Revealed while an in-place translation is shown; reverts to the original.
 	w.translationBanner = adw.NewBanner("Showing translation")
 	w.translationBanner.SetButtonLabel("Show original")
@@ -1006,6 +1014,7 @@ func (w *window) buildReader() *adw.NavigationPage {
 	box.Append(w.header)
 	box.Append(w.buildSummaryCard())
 	box.Append(w.attachBox)
+	box.Append(w.authLabel)
 	box.Append(w.trackerLabel)
 	box.Append(w.webview)
 
@@ -1539,22 +1548,28 @@ func (w *window) renderConversation(msgs []model.Message) {
 		sanitizeStart := time.Now()
 		var b strings.Builder
 		blocked := 0
+		latestAuth := ""
 		// Newest message first (msgs is oldest-first from the store).
 		for i := len(msgs) - 1; i >= 0; i-- {
 			m := msgs[i]
 			body, _ := w.deps.Store.GetBody(ctx, m.RowID)
+			if m.RowID == latest.RowID {
+				latestAuth = body.RawHeaders // Authentication-Results of the newest message
+			}
 			sec, n := conversationSection(m, body, w.cleanHTML)
 			b.WriteString(sec)
 			blocked += n
 		}
 		out := b.String()
+		verdict := parseAuthResults(latestAuth)
 		slog.Debug("ui: renderConversation", "msgs", len(msgs), "fetched", fetched,
-			"trackers", blocked, "fetch", fetchDur, "sanitize", time.Since(sanitizeStart))
+			"trackers", blocked, "auth", verdict.level, "fetch", fetchDur, "sanitize", time.Since(sanitizeStart))
 		dispatch.Main(func() {
 			if w.openThreadID != threadID {
 				return // user switched to another conversation while this rendered
 			}
 			w.setTrackerCount(blocked)
+			w.setAuthBadge(verdict)
 			w.webview.LoadHtml(wrapHTML(out), "about:blank")
 			w.populateThreadAttachments(msgs)
 		})
@@ -1785,6 +1800,30 @@ func (w *window) setTrackerCount(n int) {
 	}
 	w.trackerLabel.SetText(fmt.Sprintf("🛡 %d %s blocked", n, noun))
 	w.trackerLabel.SetVisible(true)
+}
+
+// setAuthBadge shows the sender-authentication verdict (SPF/DKIM/DMARC, as
+// computed by Gmail) with semantic colour; an inconclusive verdict hides it.
+func (w *window) setAuthBadge(v authVerdict) {
+	w.authLabel.RemoveCSSClass("success")
+	w.authLabel.RemoveCSSClass("warning")
+	w.authLabel.RemoveCSSClass("error")
+	switch v.level {
+	case authPass:
+		w.authLabel.SetText("✓ Verified sender · " + v.detail)
+		w.authLabel.AddCSSClass("success")
+		w.authLabel.SetVisible(true)
+	case authPartial:
+		w.authLabel.SetText("Partially verified · " + v.detail)
+		w.authLabel.AddCSSClass("warning")
+		w.authLabel.SetVisible(true)
+	case authFail:
+		w.authLabel.SetText("⚠ Authentication failed — sender may be spoofed (" + v.detail + ")")
+		w.authLabel.AddCSSClass("error")
+		w.authLabel.SetVisible(true)
+	default:
+		w.authLabel.SetVisible(false)
+	}
 }
 
 // setImagesEnabled toggles remote-image loading and re-renders the open thread.
