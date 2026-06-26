@@ -339,9 +339,14 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 
 	win.SetVisible(true)
 
-	// For an AI-initiated reply, ask for intent once the window is up.
-	if autoDraft && startAIDraft != nil {
+	switch {
+	case autoDraft && startAIDraft != nil:
+		// For an AI-initiated reply, ask for intent once the window is up.
 		startAIDraft()
+	case strings.TrimSpace(init.To) != "":
+		bodyView.GrabFocus() // reply: cursor in the body, above the quote
+	default:
+		toEntry.GrabFocus() // new message / forward: pick the recipient first
 	}
 }
 
