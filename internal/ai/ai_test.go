@@ -71,6 +71,24 @@ func TestSmartReplies(t *testing.T) {
 	}
 }
 
+func TestProofread(t *testing.T) {
+	fp := &fakeProvider{chunks: []Chunk{{Text: "Hi there,\n"}, {Text: "Thanks for your help."}}}
+	ch, err := NewAssistant(fp).Proofread(context.Background(), "hi their, thanks for you're help")
+	if err != nil {
+		t.Fatalf("Proofread: %v", err)
+	}
+	var b strings.Builder
+	for c := range ch {
+		b.WriteString(c.Text)
+	}
+	if b.String() != "Hi there,\nThanks for your help." {
+		t.Fatalf("got %q", b.String())
+	}
+	if !strings.Contains(fp.gotMsgs[0].Content, "you're help") || !strings.Contains(fp.gotSystem, "grammar") {
+		t.Fatalf("text/system not passed: %+v / %q", fp.gotMsgs, fp.gotSystem)
+	}
+}
+
 func TestAnalyzeEmail(t *testing.T) {
 	fp := &fakeProvider{chunks: []Chunk{{Text: "Verdict: Be cautious\n"}, {Text: "- urgent tone"}}}
 	a := NewAssistant(fp)

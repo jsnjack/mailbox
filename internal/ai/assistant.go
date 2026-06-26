@@ -115,6 +115,17 @@ func (a *Assistant) SmartReplies(ctx context.Context, threadContext string) ([]s
 	return parseTranslatedSegments(b.String())
 }
 
+// Proofread streams a grammar- and spelling-corrected version of the user's
+// email text, preserving meaning, language, line breaks, quoted lines (starting
+// with '>'), and any signature.
+func (a *Assistant) Proofread(ctx context.Context, text string) (<-chan Chunk, error) {
+	system := "You are a proofreader for email. Correct only spelling, grammar, and punctuation in the user's " +
+		"text. Preserve the meaning, tone, language, line breaks, any quoted lines (those starting with '>'), " +
+		"and any signature, exactly. Return only the corrected text — no commentary, no surrounding quotes, no " +
+		"code fences."
+	return a.p.Stream(ctx, system, []Msg{{Role: RoleUser, Content: text}})
+}
+
 // AnalyzeEmail streams a phishing/scam risk assessment of an email. emailContext
 // is the sender, subject, body, and any automated signals (auth result,
 // heuristic warnings). The reply leads with a one-line verdict, then reasons.

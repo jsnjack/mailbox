@@ -416,6 +416,42 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 		}
 		aiBtn.ConnectClicked(func() { startAIDraft() })
 		hb.PackEnd(aiBtn)
+
+		// AI grammar/spell check: rewrite the body with spelling and grammar fixed
+		// (preserving quotes and signature).
+		grammarBtn := gtk.NewButtonFromIconName("tools-check-spelling-symbolic")
+		grammarBtn.SetTooltipText("Check spelling & grammar with AI")
+		grammarBtn.ConnectClicked(func() {
+			original := bodyText(buf)
+			if strings.TrimSpace(original) == "" {
+				return
+			}
+			grammarBtn.SetSensitive(false)
+			status.SetVisible(true)
+			status.SetText("Checking grammar…")
+			go func() {
+				ch, err := w.deps.Assistant.Proofread(aiCtx, original)
+				var acc strings.Builder
+				if err == nil {
+					for c := range ch {
+						if c.Err == nil {
+							acc.WriteString(c.Text)
+						}
+					}
+				}
+				corrected := strings.TrimRight(acc.String(), " \t\r\n")
+				dispatch.Main(func() {
+					grammarBtn.SetSensitive(true)
+					if err != nil || strings.TrimSpace(corrected) == "" {
+						status.SetText("Grammar check failed")
+						return
+					}
+					buf.SetText(corrected)
+					status.SetVisible(false)
+				})
+			}()
+		})
+		hb.PackEnd(grammarBtn)
 	}
 
 	// Ctrl+Enter sends, from anywhere in the window. Capture phase so it fires

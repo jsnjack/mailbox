@@ -99,7 +99,9 @@ To/Cc/Bcc autocomplete from past correspondents (`store.Contacts` ranks
 addresses seen in cached mail by frequency+recency; a `GtkEntryCompletion`
 completes the last comma-separated token). The compose window has an AI-draft button (streams a drafted reply via
 `DraftReply` for a reply/forward, or a from-scratch body via `DraftNew` for a
-new message — both prompted by `askAIIntent`) and a Save-draft button
+new message — both prompted by `askAIIntent`, which also offers ready-to-send
+quick replies for a reply via `SmartReplies`), an AI grammar-check button
+(`Proofread`), and a Save-draft button
 (`users.drafts.create`). Send runs pre-send guards (`preSendWarning`: empty
 subject, "attachment" mentioned but none attached → confirm), and closing an
 unsent message offers Save-as-draft alongside Discard. A configurable default
