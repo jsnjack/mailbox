@@ -50,16 +50,49 @@ func (a *Assistant) TranslateSegments(ctx context.Context, segments []string, ta
 // parseTranslatedSegments extracts a JSON array of strings from a model reply,
 // tolerating code fences or surrounding prose by salvaging the outermost array.
 func parseTranslatedSegments(raw string) ([]string, error) {
-	start := strings.IndexByte(raw, '[')
-	end := strings.LastIndexByte(raw, ']')
-	if start < 0 || end <= start {
-		return nil, fmt.Errorf("no JSON array in translation reply")
+	arr := firstJSONArray(raw)
+	if arr == "" {
+		return nil, fmt.Errorf("no JSON array in reply")
 	}
 	var out []string
-	if err := json.Unmarshal([]byte(raw[start:end+1]), &out); err != nil {
-		return nil, fmt.Errorf("parse translation array: %w", err)
+	if err := json.Unmarshal([]byte(arr), &out); err != nil {
+		return nil, fmt.Errorf("parse array: %w", err)
 	}
 	return out, nil
+}
+
+// firstJSONArray returns the first balanced [...] substring of s, tracking
+// string literals so brackets inside strings don't confuse the match. This is
+// robust to models that wrap the array in prose or emit more than one array
+// (e.g. `["a","b"], ["c"]` — only the first is taken).
+func firstJSONArray(s string) string {
+	start := strings.IndexByte(s, '[')
+	if start < 0 {
+		return ""
+	}
+	depth, inStr, esc := 0, false, false
+	for i := start; i < len(s); i++ {
+		switch c := s[i]; {
+		case inStr:
+			switch {
+			case esc:
+				esc = false
+			case c == '\\':
+				esc = true
+			case c == '"':
+				inStr = false
+			}
+		case c == '"':
+			inStr = true
+		case c == '[':
+			depth++
+		case c == ']':
+			if depth--; depth == 0 {
+				return s[start : i+1]
+			}
+		}
+	}
+	return ""
 }
 
 // SmartReplies suggests up to 3 short, ready-to-send replies to the latest

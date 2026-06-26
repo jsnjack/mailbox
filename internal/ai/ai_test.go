@@ -244,6 +244,8 @@ func TestParseTranslatedSegments(t *testing.T) {
 		{"plain array", `["Hallo","Welt"]`, []string{"Hallo", "Welt"}, true},
 		{"code fence", "```json\n[\"a\",\"b\"]\n```", []string{"a", "b"}, true},
 		{"prose around", `Sure! ["x"] done`, []string{"x"}, true},
+		{"multiple arrays", `["a","b"], ["c"]`, []string{"a", "b"}, true}, // regression: only the first
+		{"bracket inside string", `["a [1]","b"]`, []string{"a [1]", "b"}, true},
 		{"no array", `not json`, nil, false},
 	}
 	for _, c := range cases {
