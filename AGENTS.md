@@ -82,9 +82,8 @@ phishing analysis (`AnalyzeEmail` — verdict + reasons, fed the auth/heuristic
 signals, shown in the shared AI card). A thread is rendered newest-message-first. An AI-summary button reveals a card
 pinned above the conversation that streams a bullet summary (`SummarizeThread`),
 cached by the thread's message-id fingerprint (`summaryKey`) so reopening is
-instant and a new reply auto-invalidates it. An ⓘ button opens a "Message
-details" popover (full addresses, date, auth verdict, Message-ID, labels, size).
-Reader actions archive /
+instant and a new reply auto-invalidates it. Message headers show the sender's
+full address ("Name <addr>"), not just the display name. Reader actions archive /
 mark-unread / star / move-to-inbox / report-spam (or not-spam in the Spam
 folder), plus "Delete forever" in Trash/Spam (`DeletePermanently` →
 `messages.batchDelete`), via
