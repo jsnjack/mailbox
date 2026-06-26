@@ -136,7 +136,10 @@ to its newest message. A search entry runs instant local FTS5 search
 into threads; clearing it returns to the current label. When a search has no
 local matches, "Search all mail" runs a Gmail server-side search
 (`SearchServer` → `ListMessageIDs` with `q=`), caching matches beyond the local
-cache. A selection-mode toggle
+cache; a reader action "Find emails from sender" runs the same server search
+with a `from:` query. Server-search results persist a `serverSearch`/`serverQuery`
+mode so the debounced search-changed signal and 60s background refreshes don't
+clobber them with an empty local FTS pass. A selection-mode toggle
 turns rows into checkboxes with a bulk-action bar (Archive / Trash / Mark read),
 applying the change to every selected conversation in one batched `ModifyLabels`
 call (`bulkApply`). The AI-draft dialog offers on-demand quick replies

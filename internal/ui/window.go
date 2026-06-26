@@ -89,7 +89,9 @@ type window struct {
 	outboxBanner      *adw.Banner // revealed when sends are queued/failed
 	emptyFolderBanner *adw.Banner // revealed in Trash/Spam to empty them permanently
 	searchEntry       *gtk.SearchEntry
-	suppressSearch    bool // guards SetText from firing a search during label switch
+	suppressSearch    bool   // guards SetText from firing a search during label switch
+	serverSearch      bool   // current search is a Gmail server-side search, not local FTS
+	serverQuery       string // the active server-search query (guards the debounced change signal)
 	threadByID        map[string]model.ThreadSummary
 
 	// coalesce refreshes triggered by bursts of sync change events.
@@ -911,10 +913,17 @@ func (w *window) bulkApply(verb string, add, remove []string) {
 // onSearchAllMail runs a Gmail server-side search for the current query, caches
 // the matches, and shows them — finding mail beyond the local cache.
 func (w *window) onSearchAllMail() {
-	q := strings.TrimSpace(w.searchEntry.Text())
+	w.serverSearch = true // stay in server-search mode across refreshes
+	w.runServerSearch(strings.TrimSpace(w.searchEntry.Text()))
+}
+
+// runServerSearch executes the Gmail server-side search for q and shows the
+// results. refreshList calls this (instead of local FTS) while serverSearch is on.
+func (w *window) runServerSearch(q string) {
 	if q == "" || w.deps.SearchServer == nil {
 		return
 	}
+	w.serverQuery = q
 	w.emptyPage.SetChild(nil)
 	w.emptyPage.SetIconName("edit-find-symbolic")
 	w.emptyPage.SetTitle("Searching all mail…")
@@ -923,8 +932,8 @@ func (w *window) onSearchAllMail() {
 	go func() {
 		ids, err := w.deps.SearchServer(context.Background(), acctID, q, 50)
 		dispatch.Main(func() {
-			if strings.TrimSpace(w.searchEntry.Text()) != q || w.activeID != acctID {
-				return // the query changed while searching
+			if !w.serverSearch || strings.TrimSpace(w.searchEntry.Text()) != q || w.activeID != acctID {
+				return // mode/query changed while searching
 			}
 			if err != nil {
 				slog.Warn("ui: search all mail", "err", err)
@@ -960,6 +969,12 @@ func (w *window) onSearchChanged() {
 	if w.suppressSearch {
 		return
 	}
+	// The search-changed signal is debounced, so a programmatic SetText (e.g.
+	// "Find emails from sender") arrives here after suppressSearch was cleared.
+	// Only a genuinely different query exits server-search mode back to local.
+	if strings.TrimSpace(w.searchEntry.Text()) != w.serverQuery {
+		w.serverSearch = false
+	}
 	w.refreshList(w.searchEntry.Text())
 }
 
@@ -971,12 +986,20 @@ func (w *window) refreshList(query string) {
 	}(time.Now())
 	ctx := context.Background()
 	if strings.TrimSpace(query) == "" {
+		w.serverSearch, w.serverQuery = false, "" // no query → not server-searching
 		sums, err := w.threadsForCurrent(ctx)
 		if err != nil {
 			slog.Error("ui: list threads", "label", w.current, "err", err)
 			return
 		}
 		w.showThreads(sums)
+		return
+	}
+
+	// A server-side search stays a server search across refreshes (e.g. a
+	// background sync) instead of reverting to local FTS of the same query.
+	if w.serverSearch && w.deps.SearchServer != nil {
+		w.runServerSearch(strings.TrimSpace(query))
 		return
 	}
 
@@ -2179,6 +2202,14 @@ func (w *window) buildReaderMenu() gtk.Widgetter {
 		box.Append(gtk.NewSeparator(gtk.OrientationHorizontal))
 	}
 
+	// Find all mail from this sender (Gmail server-side search understands from:).
+	if w.deps.SearchServer != nil && strings.TrimSpace(w.openMsg.FromAddr) != "" {
+		box.Append(w.readerMenuItem("Find emails from sender", func() {
+			w.searchFrom(w.openMsg.FromAddr)
+		}))
+		box.Append(gtk.NewSeparator(gtk.OrientationHorizontal))
+	}
+
 	img := gtk.NewCheckButtonWithLabel("Show remote images")
 	img.SetActive(w.imagesEnabled)
 	setMargins(img, 8, 8, 6, 6)
@@ -2188,6 +2219,20 @@ func (w *window) buildReaderMenu() gtk.Widgetter {
 	})
 	box.Append(img)
 	return box
+}
+
+// searchFrom shows all mail from an address using a Gmail server-side search
+// ("from:addr"), so it finds messages beyond the local cache too.
+func (w *window) searchFrom(addr string) {
+	q := "from:" + strings.TrimSpace(addr)
+	w.suppressSearch = true
+	w.searchEntry.SetText(q)
+	w.suppressSearch = false
+	if w.deps.SearchServer != nil {
+		w.onSearchAllMail()
+	} else {
+		w.refreshList(q)
+	}
 }
 
 // readerMenuItem returns a flat menu-style row that closes the overflow popover
