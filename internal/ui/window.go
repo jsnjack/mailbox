@@ -1497,8 +1497,12 @@ func (w *window) openDraftForEdit(threadID string) {
 // thread as stacked sections in the reader.
 func (w *window) renderConversation(msgs []model.Message) {
 	latest := msgs[len(msgs)-1]
-	w.header.SetMarkup(fmt.Sprintf("<b>%s</b>\n%d message(s)",
-		html.EscapeString(latest.Subject), len(msgs)))
+	meta := html.EscapeString(displayFrom(latest)) + " · " + latest.InternalDate.Format("Jan 2, 2006 15:04")
+	if len(msgs) > 1 {
+		meta += fmt.Sprintf(" · %d messages", len(msgs))
+	}
+	w.header.SetMarkup(fmt.Sprintf("<b>%s</b>\n<span size=\"small\">%s</span>",
+		html.EscapeString(latest.Subject), meta))
 	w.webview.LoadHtml(wrapHTML("<p><i>Loading…</i></p>"), "about:blank")
 
 	threadID := w.openThreadID // guard against a newer thread being opened mid-render
