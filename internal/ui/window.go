@@ -68,15 +68,22 @@ type window struct {
 
 	// virtualized list grouped by conversation: a StringList of thread ids drives
 	// a ListView; the factory builds visible rows from threadByID.
-	threadModel    *gtk.StringList
-	threadSel      *gtk.SingleSelection
-	threadView     *gtk.ListView
-	threadStack    *gtk.Stack      // "list" vs "empty" placeholder
-	emptyPage      *adw.StatusPage // the "empty" placeholder (text set per context)
-	readerStack    *gtk.Stack      // "message" vs "empty" placeholder
-	markReadBtn    *gtk.Button
-	unreadToggle   *gtk.ToggleButton // "show unread only" filter for the current view
-	unreadOnly     bool
+	threadModel  *gtk.StringList
+	threadSel    *gtk.SingleSelection
+	threadView   *gtk.ListView
+	threadStack  *gtk.Stack      // "list" vs "empty" placeholder
+	emptyPage    *adw.StatusPage // the "empty" placeholder (text set per context)
+	readerStack  *gtk.Stack      // "message" vs "empty" placeholder
+	markReadBtn  *gtk.Button
+	unreadToggle *gtk.ToggleButton // "show unread only" filter for the current view
+	unreadOnly   bool
+	// multi-select triage: a selection mode with per-row checkboxes and a bulk
+	// action bar.
+	selectBtn      *gtk.ToggleButton
+	selectMode     bool
+	selected       map[string]bool // selected thread ids
+	selectionBar   *gtk.Box
+	selectionLabel *gtk.Label
 	readOnlyBanner *adw.Banner // revealed when no Gmail client (live features off)
 	outboxBanner   *adw.Banner // revealed when sends are queued/failed
 	searchEntry    *gtk.SearchEntry
@@ -143,6 +150,7 @@ func newWindow(app *adw.Application, deps Deps) *window {
 		summaryCache:     map[string]string{},
 		accountBadges:    map[int64]*gtk.Label{},
 		readerZoom:       1.0,
+		selected:         map[string]bool{},
 	}
 	w.accountNames, _ = config.LoadAccountNames()
 	w.signature, _ = config.LoadSignature()
@@ -668,8 +676,31 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 		if !ok {
 			return
 		}
+		id := so.String()
 		outgoing := w.current == model.LabelSent || w.current == model.LabelDraft
-		li.SetChild(threadRow(w.threadByID[so.String()], outgoing))
+		row := threadRow(w.threadByID[id], outgoing)
+		if !w.selectMode {
+			li.SetChild(row)
+			return
+		}
+		// Selection mode: prepend a checkbox; the row body still shows.
+		check := gtk.NewCheckButton()
+		check.SetVAlign(gtk.AlignCenter)
+		check.SetActive(w.selected[id]) // set before connecting, so this doesn't fire
+		check.ConnectToggled(func() {
+			if check.Active() {
+				w.selected[id] = true
+			} else {
+				delete(w.selected, id)
+			}
+			w.updateSelectionBar()
+		})
+		row.SetHExpand(true)
+		wrap := gtk.NewBox(gtk.OrientationHorizontal, 6)
+		setMargins(wrap, 6, 0, 0, 0)
+		wrap.Append(check)
+		wrap.Append(row)
+		li.SetChild(wrap)
 	})
 
 	w.threadView = gtk.NewListView(w.threadSel, &factory.ListItemFactory)
@@ -709,10 +740,13 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 	w.readOnlyBanner.ConnectButtonClicked(w.showConnectHelp)
 	w.readOnlyBanner.SetRevealed(w.deps.ModifyLabels == nil)
 
+	w.buildSelectionBar()
+
 	content := gtk.NewBox(gtk.OrientationVertical, 0)
 	content.Append(w.readOnlyBanner)
 	content.Append(w.outboxBanner)
 	content.Append(w.searchEntry)
+	content.Append(w.selectionBar)
 	content.Append(w.threadStack)
 
 	hb := adw.NewHeaderBar()
@@ -732,6 +766,15 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 	w.markReadBtn.SetSensitive(w.deps.MarkAllRead != nil)
 	w.markReadBtn.ConnectClicked(w.onMarkAllRead)
 	hb.PackEnd(w.markReadBtn)
+
+	// Multi-select triage (only when label changes are possible).
+	if w.deps.ModifyLabels != nil {
+		w.selectBtn = gtk.NewToggleButton()
+		w.selectBtn.SetIconName("selection-mode-symbolic")
+		w.selectBtn.SetTooltipText("Select multiple")
+		w.selectBtn.ConnectToggled(func() { w.setSelectMode(w.selectBtn.Active()) })
+		hb.PackEnd(w.selectBtn)
+	}
 
 	tv := adw.NewToolbarView()
 	tv.AddTopBar(hb)
@@ -754,6 +797,85 @@ func (w *window) onMarkAllRead() {
 			w.refreshList(w.searchEntry.Text())
 		})
 	}()
+}
+
+// buildSelectionBar constructs the (hidden) bulk-action bar shown in selection
+// mode: a count plus archive / trash / mark-read / cancel.
+func (w *window) buildSelectionBar() {
+	w.selectionLabel = gtk.NewLabel("0 selected")
+	w.selectionLabel.SetXAlign(0)
+	w.selectionLabel.SetHExpand(true)
+	setMargins(w.selectionLabel, 10, 6, 0, 0)
+
+	archive := gtk.NewButtonFromIconName("folder-download-symbolic")
+	archive.SetTooltipText("Archive selected")
+	archive.ConnectClicked(func() { w.bulkApply("Archived", nil, []string{model.LabelInbox}) })
+
+	trash := gtk.NewButtonFromIconName("user-trash-symbolic")
+	trash.SetTooltipText("Move selected to Trash")
+	trash.ConnectClicked(func() { w.bulkApply("Trashed", []string{model.LabelTrash}, []string{model.LabelInbox}) })
+
+	read := gtk.NewButtonFromIconName("mail-read-symbolic")
+	read.SetTooltipText("Mark selected as read")
+	read.ConnectClicked(func() { w.bulkApply("Marked read", nil, []string{model.LabelUnread}) })
+
+	cancel := gtk.NewButtonFromIconName("window-close-symbolic")
+	cancel.AddCSSClass("flat")
+	cancel.SetTooltipText("Cancel")
+	cancel.ConnectClicked(func() { w.selectBtn.SetActive(false) })
+
+	w.selectionBar = gtk.NewBox(gtk.OrientationHorizontal, 6)
+	w.selectionBar.AddCSSClass("toolbar")
+	setMargins(w.selectionBar, 6, 6, 4, 4)
+	w.selectionBar.Append(w.selectionLabel)
+	w.selectionBar.Append(archive)
+	w.selectionBar.Append(trash)
+	w.selectionBar.Append(read)
+	w.selectionBar.Append(cancel)
+	w.selectionBar.SetVisible(false)
+}
+
+// setSelectMode enters/leaves multi-select triage, re-binding the list so rows
+// show or hide their checkboxes.
+func (w *window) setSelectMode(on bool) {
+	if w.selectMode == on {
+		return
+	}
+	w.selectMode = on
+	if !on {
+		w.selected = map[string]bool{}
+	}
+	w.selectionBar.SetVisible(on)
+	w.updateSelectionBar()
+	w.refreshList(w.searchEntry.Text())
+}
+
+// updateSelectionBar refreshes the "N selected" count.
+func (w *window) updateSelectionBar() {
+	w.selectionLabel.SetText(fmt.Sprintf("%d selected", len(w.selected)))
+}
+
+// bulkApply applies a label change to every selected conversation in one batch,
+// then leaves selection mode.
+func (w *window) bulkApply(verb string, add, remove []string) {
+	if len(w.selected) == 0 {
+		return
+	}
+	ctx := context.Background()
+	var msgs []model.Message
+	n := 0
+	for id := range w.selected {
+		if tm, err := w.deps.Store.ListThreadMessages(ctx, w.activeID, id); err == nil {
+			msgs = append(msgs, tm...)
+			n++
+		}
+	}
+	w.selectBtn.SetActive(false) // exits select mode (clears selection, refreshes)
+	if len(msgs) == 0 {
+		return
+	}
+	w.applyLabels(msgs, add, remove, nil)
+	w.toast(fmt.Sprintf("%s %d conversations", verb, n))
 }
 
 func (w *window) onSearchChanged() {
@@ -950,6 +1072,9 @@ func (w *window) setSyncing(on bool) {
 }
 
 func (w *window) onThreadSelected() {
+	if w.selectMode {
+		return // in selection mode, rows are picked via their checkboxes
+	}
 	item := w.threadSel.SelectedItem()
 	if item == nil {
 		return
