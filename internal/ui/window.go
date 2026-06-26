@@ -293,6 +293,8 @@ func (w *window) addShortcuts() {
 			}
 		case 's':
 			w.toggleStar()
+		case 'u':
+			w.onMarkUnread()
 		case 't':
 			w.onTranslate()
 		case 'c':

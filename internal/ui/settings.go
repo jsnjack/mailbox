@@ -24,6 +24,7 @@ func shortcutList() [][2]string {
 		{"# / Delete", "Move to Trash"},
 		{"!", "Report spam / not spam"},
 		{"s", "Star / unstar"},
+		{"u", "Mark as unread"},
 		{"t", "Translate to English"},
 		{"c", "Compose"},
 		{"/", "Search"},
