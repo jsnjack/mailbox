@@ -381,6 +381,16 @@ func (w *window) present() {
 	w.win.SetVisible(true)
 	w.loadLabels()
 	w.subscribe()
+	// Reopen where the user left off (folder + unread filter).
+	if vs, err := config.LoadViewState(); err == nil {
+		if vs.Folder != "" {
+			w.current = vs.Folder
+		}
+		if vs.UnreadOnly {
+			w.unreadOnly = true
+			w.unreadToggle.SetActive(true)
+		}
+	}
 	w.selectLabel(w.current)
 	w.refreshOutbox()
 
@@ -680,6 +690,7 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 	w.unreadToggle.ConnectToggled(func() {
 		w.unreadOnly = w.unreadToggle.Active()
 		w.refreshList(w.searchEntry.Text())
+		w.saveViewState()
 	})
 	hb.PackStart(w.unreadToggle)
 
@@ -1251,6 +1262,15 @@ func (w *window) selectLabel(labelID string) {
 	w.refreshList("")
 	// When collapsed, reveal the thread list for the chosen label.
 	w.outerSplit.SetShowContent(true)
+	w.saveViewState()
+}
+
+// saveViewState persists the current folder and unread filter so the next
+// launch reopens here.
+func (w *window) saveViewState() {
+	if err := config.SaveViewState(config.ViewState{Folder: w.current, UnreadOnly: w.unreadOnly}); err != nil {
+		slog.Warn("ui: save view state", "err", err)
+	}
 }
 
 // showThread opens a conversation: it loads all its messages, renders them
