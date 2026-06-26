@@ -1260,6 +1260,16 @@ func (w *window) onTrash() {
 	w.removeFromList("Moved to Trash", []string{model.LabelTrash}, []string{model.LabelInbox})
 }
 
+// onMoveToInbox restores the open conversation to the inbox (adding INBOX and
+// clearing TRASH) — for un-archiving or recovering from Trash.
+func (w *window) onMoveToInbox() {
+	if len(w.openThreadMsgs) == 0 {
+		return
+	}
+	w.applyLabels(w.openThreadMsgs, []string{model.LabelInbox}, []string{model.LabelTrash}, nil)
+	w.toast("Moved to Inbox")
+}
+
 func (w *window) onMarkUnread() {
 	if w.openMsg.GmailID != "" {
 		w.applyLabels([]model.Message{w.openMsg}, []string{model.LabelUnread}, nil, nil)
@@ -1331,6 +1341,7 @@ func (w *window) buildReaderMenu() gtk.Widgetter {
 		})
 		box.Append(star)
 		box.Append(w.readerMenuItem("Mark as unread", w.onMarkUnread))
+		box.Append(w.readerMenuItem("Move to Inbox", w.onMoveToInbox))
 		box.Append(w.readerMenuItem("Move to Trash", w.onTrash))
 		box.Append(gtk.NewSeparator(gtk.OrientationHorizontal))
 	}
