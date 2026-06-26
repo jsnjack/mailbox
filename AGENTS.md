@@ -120,6 +120,10 @@ attachments are extracted on body fetch (`ReplaceAttachments`) and shown as chip
 in the reader; clicking one downloads it (content-addressed under the cache dir)
 and opens it with `xdg-open`.
 
+Inbox mail is auto-categorized by AI into action tags (Needs reply / Receipt /
+Newsletter / Notification) shown on rows — batched, cached in-memory, capped to
+the newest threads, gated by a Preferences toggle (`ai.Categorize` /
+`categorizeInbox`).
 The list is grouped by conversation: a virtualized `gtk.ListView` over a
 `gtk.StringList` of thread ids (looked up in a `threadByID` map of
 `model.ThreadSummary`); rows show the newest message + a count. `store`

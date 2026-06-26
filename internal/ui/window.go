@@ -24,6 +24,7 @@ import (
 	glib "github.com/diamondburned/gotk4/pkg/glib/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 	"github.com/diamondburned/gotk4/pkg/pango"
+	"github.com/jsnjack/mailbox/internal/ai"
 	"github.com/jsnjack/mailbox/internal/config"
 	"github.com/jsnjack/mailbox/internal/dispatch"
 	"github.com/jsnjack/mailbox/internal/model"
@@ -119,6 +120,12 @@ type window struct {
 	imagesEnabled  bool            // whether remote images are loaded in the reader
 	blockImages    bool            // global default: block remote images (Preferences)
 
+	// AI inbox categorization: per-thread category cache (thread id → category),
+	// computed in the background for the inbox. inboxCategories gates it.
+	categories      map[string]string
+	categorizing    bool
+	inboxCategories bool
+
 	// AI thread summary: a button reveals a card that streams a summary in.
 	// summaryCache memoizes by the thread's message fingerprint, so reopening is
 	// instant and a new reply (different fingerprint) re-generates automatically.
@@ -151,11 +158,13 @@ func newWindow(app *adw.Application, deps Deps) *window {
 		accountBadges:    map[int64]*gtk.Label{},
 		readerZoom:       1.0,
 		selected:         map[string]bool{},
+		categories:       map[string]string{},
 	}
 	w.accountNames, _ = config.LoadAccountNames()
 	w.signature, _ = config.LoadSignature()
 	if p, err := config.LoadPrefs(); err == nil {
 		w.blockImages = p.BlockRemoteImages
+		w.inboxCategories = !p.DisableInboxCategories
 	}
 	if len(deps.Accounts) > 0 {
 		w.activeID = deps.Accounts[0].ID
@@ -678,7 +687,7 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 		}
 		id := so.String()
 		outgoing := w.current == model.LabelSent || w.current == model.LabelDraft
-		row := threadRow(w.threadByID[id], outgoing)
+		row := threadRow(w.threadByID[id], outgoing, w.categories[id])
 		if !w.selectMode {
 			li.SetChild(row)
 			return
@@ -1084,6 +1093,80 @@ func (w *window) showThreads(sums []model.ThreadSummary) {
 	} else {
 		w.threadStack.SetVisibleChildName("list")
 	}
+	w.categorizeInbox()
+}
+
+// maxCategorize bounds how many of the newest inbox threads are auto-categorized,
+// so a huge inbox can't trigger a flood of AI calls.
+const maxCategorize = 40
+
+// categorizeInbox classifies the newest uncategorized inbox threads in the
+// background (batched), caching each thread's category and refreshing the list
+// to show the tags. Gated by the inboxCategories preference + an assistant.
+func (w *window) categorizeInbox() {
+	if !w.inboxCategories || w.deps.Assistant == nil || w.categorizing || w.current != model.LabelInbox {
+		return
+	}
+	n := int(w.threadModel.NItems())
+	if n > maxCategorize {
+		n = maxCategorize
+	}
+	var ids, ctxs []string
+	for i := 0; i < n; i++ {
+		id := w.threadModel.String(uint(i))
+		if _, done := w.categories[id]; done {
+			continue
+		}
+		t, ok := w.threadByID[id]
+		if !ok {
+			continue
+		}
+		m := t.Latest
+		ids = append(ids, id)
+		ctxs = append(ctxs, fmt.Sprintf("From: %s / Subject: %s / %s", displayFrom(m), m.Subject, m.Snippet))
+	}
+	if len(ids) == 0 {
+		return
+	}
+	w.categorizing = true
+	go func() {
+		ctx := context.Background()
+		for start := 0; start < len(ids); start += 20 {
+			end := start + 20
+			if end > len(ids) {
+				end = len(ids)
+			}
+			chunkIDs := ids[start:end]
+			cats, err := w.deps.Assistant.Categorize(ctx, ctxs[start:end])
+			if err != nil {
+				slog.Warn("ui: categorize inbox", "err", err)
+				break
+			}
+			dispatch.Main(func() {
+				for i, id := range chunkIDs {
+					if i < len(cats) {
+						w.categories[id] = normalizeCategory(cats[i])
+					}
+				}
+			})
+		}
+		dispatch.Main(func() {
+			w.categorizing = false
+			w.refreshList(w.searchEntry.Text()) // re-bind rows to show the tags
+		})
+	}()
+}
+
+// normalizeCategory maps a model's reply to one of the known categories,
+// defaulting unknown values to "Other".
+func normalizeCategory(s string) string {
+	s = strings.TrimSpace(s)
+	for _, c := range ai.EmailCategories {
+		if strings.EqualFold(c, s) {
+			return c
+		}
+	}
+	return "Other"
 }
 
 func (w *window) onRefresh() {
@@ -2858,7 +2941,7 @@ func countBadge(n int) *gtk.Label {
 	return c
 }
 
-func threadRow(t model.ThreadSummary, outgoing bool) *gtk.Box {
+func threadRow(t model.ThreadSummary, outgoing bool, category string) *gtk.Box {
 	m := t.Latest
 	unread := t.UnreadCount > 0
 
@@ -2911,11 +2994,27 @@ func threadRow(t model.ThreadSummary, outgoing bool) *gtk.Box {
 	}
 	subj := gtk.NewLabel(subjText)
 	subj.SetXAlign(0)
+	subj.SetHExpand(true)
 	subj.SetEllipsize(pango.EllipsizeEnd)
 	if !unread {
 		subj.AddCSSClass("dim-label")
 	}
-	box.Append(subj)
+	// An AI category tag (e.g. "Needs reply") sits before the subject; "Other"
+	// and uncategorized show nothing.
+	if category != "" && category != "Other" {
+		tag := gtk.NewLabel(category)
+		tag.AddCSSClass("cat-tag")
+		if category == "Needs reply" {
+			tag.AddCSSClass("cat-needsreply")
+		}
+		tag.SetVAlign(gtk.AlignCenter)
+		subjRow := gtk.NewBox(gtk.OrientationHorizontal, 6)
+		subjRow.Append(tag)
+		subjRow.Append(subj)
+		box.Append(subjRow)
+	} else {
+		box.Append(subj)
+	}
 
 	if m.Snippet != "" {
 		// Decode any HTML entities in older cached snippets (new ones arrive

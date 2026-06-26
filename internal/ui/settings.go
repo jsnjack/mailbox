@@ -139,6 +139,15 @@ func (w *window) openSettings() {
 	sigGroup.SetDescription("Appended to new messages and replies (below your text, above any quote). Leave blank for none.")
 	sigGroup.Add(sigScroll)
 
+	// Load-modify-save so the two prefs toggles don't clobber each other's field.
+	savePref := func(mut func(*config.Prefs)) {
+		p, _ := config.LoadPrefs()
+		mut(&p)
+		if err := config.SavePrefs(p); err != nil {
+			slog.Warn("ui: save prefs", "err", err)
+		}
+	}
+
 	// Privacy: a global default for loading remote images (tracking pixels are
 	// always stripped regardless).
 	imgRow := adw.NewSwitchRow()
@@ -148,14 +157,29 @@ func (w *window) openSettings() {
 	imgRow.Connect("notify::active", func() {
 		load := imgRow.Active()
 		w.blockImages = !load
-		if err := config.SavePrefs(config.Prefs{BlockRemoteImages: !load}); err != nil {
-			slog.Warn("ui: save prefs", "err", err)
-		}
+		savePref(func(p *config.Prefs) { p.BlockRemoteImages = !load })
 		w.setImagesEnabled(load)
 	})
 	privacyGroup := adw.NewPreferencesGroup()
 	privacyGroup.SetTitle("Privacy")
 	privacyGroup.Add(imgRow)
+
+	// AI categorization of the inbox (sends mail to the AI provider).
+	if w.deps.Assistant != nil {
+		catRow := adw.NewSwitchRow()
+		catRow.SetTitle("Categorize inbox with AI")
+		catRow.SetSubtitle("Tags inbox mail (Needs reply, Receipt, …). Sends message details to the AI provider.")
+		catRow.SetActive(w.inboxCategories)
+		catRow.Connect("notify::active", func() {
+			on := catRow.Active()
+			w.inboxCategories = on
+			savePref(func(p *config.Prefs) { p.DisableInboxCategories = !on })
+			if on {
+				w.categorizeInbox()
+			}
+		})
+		privacyGroup.Add(catRow)
+	}
 
 	// Storage: clear the (re-downloadable) attachment cache.
 	clearRow := adw.NewActionRow()

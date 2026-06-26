@@ -29,6 +29,19 @@ const appCSS = `
 	font-size: 10px;
 }
 
+/* AI inbox-category tag on a list row: a small neutral pill; "Needs reply"
+   (the actionable one) picks up the accent. */
+.cat-tag {
+	font-size: 0.76em;
+	padding: 0 6px;
+	border-radius: 6px;
+	background-color: alpha(@card_fg_color, 0.10);
+}
+.cat-needsreply {
+	background-color: alpha(@accent_color, 0.15);
+	color: @accent_color;
+}
+
 /* AI thread-summary card: a soft accent-tinted panel pinned above the thread. */
 .summary-card {
 	background-color: alpha(@accent_color, 0.08);

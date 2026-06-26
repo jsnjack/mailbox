@@ -15,6 +15,10 @@ type Prefs struct {
 	// BlockRemoteImages, when true, stops the reader loading remote images by
 	// default (the per-message toggle can still override). Default false.
 	BlockRemoteImages bool `json:"block_remote_images"`
+	// DisableInboxCategories, when true, turns off the automatic AI categorization
+	// of inbox mail. Default false (categorization on), stored inverted so the
+	// out-of-the-box behaviour is the zero value's opposite.
+	DisableInboxCategories bool `json:"disable_inbox_categories"`
 }
 
 func prefsPath() (string, error) {

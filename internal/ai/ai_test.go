@@ -71,6 +71,20 @@ func TestSmartReplies(t *testing.T) {
 	}
 }
 
+func TestCategorize(t *testing.T) {
+	fp := &fakeProvider{chunks: []Chunk{{Text: `["Needs reply", "Receipt", `}, {Text: `"Newsletter"]`}}}
+	got, err := NewAssistant(fp).Categorize(context.Background(), []string{"a", "b", "c"})
+	if err != nil {
+		t.Fatalf("Categorize: %v", err)
+	}
+	if len(got) != 3 || got[0] != "Needs reply" || got[2] != "Newsletter" {
+		t.Fatalf("categories = %#v", got)
+	}
+	if !strings.Contains(fp.gotSystem, "Needs reply") {
+		t.Fatalf("system prompt missing categories: %q", fp.gotSystem)
+	}
+}
+
 func TestProofread(t *testing.T) {
 	fp := &fakeProvider{chunks: []Chunk{{Text: "Hi there,\n"}, {Text: "Thanks for your help."}}}
 	ch, err := NewAssistant(fp).Proofread(context.Background(), "hi their, thanks for you're help")

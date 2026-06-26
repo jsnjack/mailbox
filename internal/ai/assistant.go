@@ -115,6 +115,39 @@ func (a *Assistant) SmartReplies(ctx context.Context, threadContext string) ([]s
 	return parseTranslatedSegments(b.String())
 }
 
+// EmailCategories are the fixed action buckets Categorize assigns.
+var EmailCategories = []string{"Needs reply", "Receipt", "Newsletter", "Notification", "Other"}
+
+// Categorize classifies each email (a short "From / Subject / Snippet" string)
+// into exactly one of EmailCategories, returning a category per input in order.
+// Inputs and outputs are JSON arrays so many messages classify in one call.
+func (a *Assistant) Categorize(ctx context.Context, items []string) ([]string, error) {
+	payload, err := json.Marshal(items)
+	if err != nil {
+		return nil, fmt.Errorf("encode items: %w", err)
+	}
+	system := "You classify emails into exactly one category each. The categories are: " +
+		"\"Needs reply\" (a person is asking you something or expects a response), " +
+		"\"Receipt\" (orders, payments, invoices, bookings, confirmations), " +
+		"\"Newsletter\" (marketing, promotions, digests, announcements), " +
+		"\"Notification\" (automated alerts or status updates from a service), and \"Other\". " +
+		"The user message is a JSON array of emails, each a short 'From / Subject / Snippet' string. " +
+		"Reply with ONLY a JSON array of the same length and order, each element exactly one of those five " +
+		"category strings. No commentary, no code fences."
+	ch, err := a.p.Stream(ctx, system, []Msg{{Role: RoleUser, Content: string(payload)}})
+	if err != nil {
+		return nil, err
+	}
+	var b strings.Builder
+	for c := range ch {
+		if c.Err != nil {
+			return nil, c.Err
+		}
+		b.WriteString(c.Text)
+	}
+	return parseTranslatedSegments(b.String())
+}
+
 // Proofread streams a grammar- and spelling-corrected version of the user's
 // email text, preserving meaning, language, line breaks, quoted lines (starting
 // with '>'), and any signature.
