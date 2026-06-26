@@ -1329,8 +1329,9 @@ func (w *window) setImagesEnabled(on bool) {
 	}
 }
 
-// onTranslate translates the open message's plain text to English and shows the
-// result in place of the email, with a banner to revert to the original.
+// onTranslate translates the open message into English in place, preserving the
+// email's markup (so styling is kept), and streams the result as it arrives. A
+// banner reverts to the original.
 func (w *window) onTranslate() {
 	m := w.openMsg
 	if m.GmailID == "" || w.deps.Assistant == nil {
@@ -1342,40 +1343,79 @@ func (w *window) onTranslate() {
 	ctx, cancel := context.WithCancel(context.Background())
 	w.translateCancel = cancel
 	threadID := w.openThreadID
-	body := w.bodyTextFor(m)
+	source := w.bodyHTMLFor(m)
 
 	w.translationBanner.SetTitle("Translating…")
 	w.translationBanner.SetRevealed(true)
 	w.webview.LoadHtml(wrapHTML("<p><i>Translating…</i></p>"), "about:blank")
 
-	go func() {
-		ch, err := w.deps.Assistant.Translate(ctx, body, "English")
-		if err != nil {
-			msg := err.Error()
-			dispatch.Main(func() {
-				if w.openThreadID != threadID {
-					return
-				}
-				w.webview.LoadHtml(wrapHTML("<p>Translation failed: "+html.EscapeString(msg)+"</p>"), "about:blank")
-			})
-			return
-		}
-		var acc strings.Builder
-		for c := range ch {
-			if c.Err == nil {
-				acc.WriteString(c.Text)
-			}
-		}
-		out := acc.String()
+	render := func(htmlBody string, final bool) {
+		safe := w.sanitizer.Sanitize(stripCodeFence(htmlBody))
 		dispatch.Main(func() {
 			if w.openThreadID != threadID {
 				return // user switched conversations while translating
 			}
-			w.translationBanner.SetTitle("Showing translation")
-			w.translationBanner.SetRevealed(true)
-			w.webview.LoadHtml(wrapHTML(`<div style="white-space:pre-wrap">`+html.EscapeString(out)+`</div>`), "about:blank")
+			if final {
+				w.translationBanner.SetTitle("Showing translation")
+			}
+			w.webview.LoadHtml(wrapHTML(safe), "about:blank")
 		})
+	}
+
+	go func() {
+		ch, err := w.deps.Assistant.TranslateHTML(ctx, source, "English")
+		if err != nil {
+			msg := err.Error()
+			dispatch.Main(func() {
+				if w.openThreadID == threadID {
+					w.webview.LoadHtml(wrapHTML("<p>Translation failed: "+html.EscapeString(msg)+"</p>"), "about:blank")
+				}
+			})
+			return
+		}
+		var acc strings.Builder
+		var last time.Time
+		for c := range ch {
+			if c.Err != nil {
+				continue
+			}
+			acc.WriteString(c.Text)
+			// Throttle live re-renders so streaming stays smooth, not flickery.
+			if time.Since(last) > 350*time.Millisecond {
+				last = time.Now()
+				render(acc.String(), false)
+			}
+		}
+		render(acc.String(), true)
 	}()
+}
+
+// bodyHTMLFor returns the open message's HTML body for translation (sanitized),
+// falling back to its text or snippet wrapped as HTML.
+func (w *window) bodyHTMLFor(m model.Message) string {
+	if b, err := w.deps.Store.GetBody(context.Background(), m.RowID); err == nil {
+		if strings.TrimSpace(b.HTML) != "" {
+			return w.sanitizer.Sanitize(b.HTML)
+		}
+		if strings.TrimSpace(b.Text) != "" {
+			return "<pre style=\"white-space:pre-wrap\">" + html.EscapeString(b.Text) + "</pre>"
+		}
+	}
+	return "<p>" + html.EscapeString(m.Snippet) + "</p>"
+}
+
+// stripCodeFence removes a leading/trailing Markdown code fence the model may
+// wrap HTML output in despite instructions.
+func stripCodeFence(s string) string {
+	t := strings.TrimSpace(s)
+	if !strings.HasPrefix(t, "```") {
+		return s
+	}
+	if i := strings.IndexByte(t, '\n'); i >= 0 {
+		t = t[i+1:]
+	}
+	t = strings.TrimSuffix(strings.TrimRight(t, " \n\r\t"), "```")
+	return t
 }
 
 // showOriginal cancels any translation and restores the original message view.

@@ -67,6 +67,19 @@ func TestHTMLToText(t *testing.T) {
 	}
 }
 
+func TestStripCodeFence(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"```html\n<p>Hi</p>\n```", "<p>Hi</p>"},
+		{"```\n<b>x</b>\n```", "<b>x</b>"},
+		{"<p>plain</p>", "<p>plain</p>"},
+	}
+	for _, c := range cases {
+		if got := strings.TrimSpace(stripCodeFence(c.in)); got != c.want {
+			t.Fatalf("stripCodeFence(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 func TestOutboxHeaders(t *testing.T) {
 	raw := []byte("From: me@x.com\r\nTo: Bob <bob@x.com>\r\nSubject: Lunch?\r\n\r\nbody here\r\n")
 	to, subject := outboxHeaders(raw)

@@ -13,11 +13,21 @@ func NewAssistant(p Provider) *Assistant { return &Assistant{p: p} }
 // ProviderName returns the underlying provider's name.
 func (a *Assistant) ProviderName() string { return a.p.Name() }
 
-// Translate streams a translation of body into targetLang.
+// Translate streams a translation of plain-text body into targetLang.
 func (a *Assistant) Translate(ctx context.Context, body, targetLang string) (<-chan Chunk, error) {
 	system := "You are a translation engine. Translate the user's email into " + targetLang +
 		". Preserve meaning, tone, and formatting. Output only the translation, with no preamble or explanation."
 	return a.p.Stream(ctx, system, []Msg{{Role: RoleUser, Content: body}})
+}
+
+// TranslateHTML streams a translation of an HTML email into targetLang while
+// preserving the markup, so the rendered translation keeps the email's styling.
+func (a *Assistant) TranslateHTML(ctx context.Context, htmlBody, targetLang string) (<-chan Chunk, error) {
+	system := "You are a translation engine for HTML email. Translate all human-readable text into " +
+		targetLang + ". Keep every HTML tag, attribute, inline style, and URL exactly as-is — translate " +
+		"only the visible text between tags plus alt and title text. Do not add, remove, or reformat any " +
+		"markup. Output only the translated HTML, with no code fences and no commentary."
+	return a.p.Stream(ctx, system, []Msg{{Role: RoleUser, Content: htmlBody}})
 }
 
 // DraftReply streams a reply drafted from the thread context. instruction is an
