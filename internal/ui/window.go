@@ -2488,28 +2488,21 @@ func (w *window) onSummarize() {
 			})
 			return
 		}
-		// acc is only ever touched inside dispatch.Main (the main thread), so the
-		// builder is never accessed concurrently with the streaming goroutine.
-		var acc strings.Builder
-		for c := range ch {
-			cc := c
-			dispatch.Main(func() {
-				if w.openThreadID != threadID || ctx.Err() != nil {
-					return
-				}
-				if cc.Err != nil {
-					w.summaryLabel.SetText("Summary failed: " + cc.Err.Error())
-					return
-				}
-				acc.WriteString(cc.Text)
-				w.summaryLabel.SetText(bulletize(acc.String()))
-			})
-		}
+		text, serr := streamCoalesced(ch, func(text string) {
+			if w.openThreadID != threadID || ctx.Err() != nil {
+				return
+			}
+			w.summaryLabel.SetText(bulletize(text))
+		})
 		dispatch.Main(func() {
 			if w.openThreadID != threadID || ctx.Err() != nil {
 				return
 			}
-			final := bulletize(strings.TrimSpace(acc.String()))
+			if serr != nil {
+				w.summaryLabel.SetText("Summary failed: " + serr.Error())
+				return
+			}
+			final := bulletize(strings.TrimSpace(text))
 			if final != "" {
 				w.summaryCache[key] = final
 				w.summaryLabel.SetText(final)
@@ -2568,26 +2561,21 @@ func (w *window) onAnalyze() {
 			})
 			return
 		}
-		var acc strings.Builder
-		for c := range ch {
-			cc := c
-			dispatch.Main(func() {
-				if w.openThreadID != threadID || ctx.Err() != nil {
-					return
-				}
-				if cc.Err != nil {
-					w.summaryLabel.SetText("Analysis failed: " + cc.Err.Error())
-					return
-				}
-				acc.WriteString(cc.Text)
-				w.summaryLabel.SetText(bulletize(acc.String()))
-			})
-		}
+		text, serr := streamCoalesced(ch, func(text string) {
+			if w.openThreadID != threadID || ctx.Err() != nil {
+				return
+			}
+			w.summaryLabel.SetText(bulletize(text))
+		})
 		dispatch.Main(func() {
 			if w.openThreadID != threadID || ctx.Err() != nil {
 				return
 			}
-			final := bulletize(strings.TrimSpace(acc.String()))
+			if serr != nil {
+				w.summaryLabel.SetText("Analysis failed: " + serr.Error())
+				return
+			}
+			final := bulletize(strings.TrimSpace(text))
 			if final != "" {
 				w.summaryCache[key] = final
 				w.summaryLabel.SetText(final)

@@ -392,17 +392,13 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 					})
 					return
 				}
-				var acc strings.Builder
-				for c := range ch {
-					cc := c
-					dispatch.Main(func() {
-						if cc.Err == nil {
-							acc.WriteString(cc.Text)
-							buf.SetText(acc.String() + quote)
-						}
-					})
-				}
-				dispatch.Main(func() { aiBtn.SetSensitive(true) })
+				final, _ := streamCoalesced(ch, func(text string) {
+					buf.SetText(text + quote)
+				})
+				dispatch.Main(func() {
+					buf.SetText(final + quote)
+					aiBtn.SetSensitive(true)
+				})
 			}()
 		}
 		// The button (and auto-draft) open the AI dialog: quick replies + presets.
