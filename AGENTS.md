@@ -52,11 +52,13 @@ stored in `<data>/accounts.json` keyed by email — when set, the name is primar
 and the email becomes a caption). Per-account badges refresh on any sidebar
 reload and whenever a non-active account syncs (`refreshAccountBadges`).
 
-Colour: a small application stylesheet (`internal/ui/theme.go`, registered on
-the default display in `build`) adds colour without any non-symbolic chrome —
-per-mailbox folder-icon hues, accent count pills (`countBadge`/`.badge-pill`),
-an accent dot + accent sender on unread conversations, and the summary-card /
-tracker-shield tints. It references `@accent_color` so it tracks light/dark.
+Colour follows GNOME's HIG (monochrome symbolic icons, one accent reserved for
+state): a small application stylesheet (`internal/ui/theme.go`, registered on
+the default display in `build`) tints only three things, all from the system
+`@accent_color` family so they track the accent and light/dark — count pills
+(`countBadge`/`.badge-pill`), the small unread dot on a conversation, and the
+soft accent-tinted AI summary card. Folder icons stay the theme foreground;
+account avatars keep their generated `adw.Avatar` colours.
 
 UI state (implemented): 3-pane shell renders the cached account live; clicking a
 message lazily fetches + sanitizes + renders its body (WebKit; remote images off

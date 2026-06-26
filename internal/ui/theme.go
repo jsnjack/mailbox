@@ -5,26 +5,15 @@ import (
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 )
 
-// appCSS adds colour on top of the stock Adwaita theme without fighting it:
-// symbolic folder icons get a recognisable hue each, unread mail picks up the
-// accent colour, count badges become accent pills, and the AI summary card and
-// tracker indicator get their own tints. Buttons stay symbolic and flat — only
-// colour is added, never chrome. Colours reference libadwaita's named theme
-// variables (@accent_color etc.) where possible so they track light/dark.
+// appCSS adds a single accent colour on top of stock Adwaita, following GNOME's
+// HIG (which also matches Material's one-seed-accent approach): symbolic icons
+// stay monochrome — the theme foreground — and colour is reserved for state.
+// Only three things are tinted, all from libadwaita's @accent_color family so
+// they track the system accent and light/dark automatically: count-badge pills,
+// the small unread dot, and the soft accent-tinted summary card. Buttons stay
+// symbolic and flat; no chrome and no per-element hues are added.
 const appCSS = `
-/* Sidebar folder icons — a recognisable colour per mailbox. The class sits on
-   the GtkImage; recolouring its "color" recolours the symbolic icon. */
-.folder-inbox     { color: #3584e4; } /* blue   */
-.folder-starred   { color: #e5a50a; } /* gold   */
-.folder-important { color: #e5a50a; }
-.folder-sent      { color: #2ec27e; } /* green  */
-.folder-draft     { color: #9141ac; } /* purple */
-.folder-spam      { color: #e66100; } /* orange */
-.folder-trash     { color: #c01c28; } /* red    */
-.folder-all       { color: #9a9996; } /* grey   */
-.folder-label     { color: #62a0ea; }
-
-/* Count badge: an accent pill (label unread counts and per-account unread). */
+/* Count badge: an accent pill (folder unread counts and per-account unread). */
 .badge-pill {
 	background-color: @accent_bg_color;
 	color: @accent_fg_color;
@@ -33,8 +22,7 @@ const appCSS = `
 	font-weight: bold;
 }
 
-/* Unread conversations pick up the accent colour, alongside their bold weight. */
-.unread-accent { color: @accent_color; }
+/* Unread conversations get a small accent dot, alongside their bold weight. */
 .unread-dot {
 	color: @accent_color;
 	font-size: 13px;
@@ -47,9 +35,6 @@ const appCSS = `
 	border-radius: 12px;
 }
 .summary-title { color: @accent_color; }
-
-/* "N trackers blocked" reads as a positive, secure state — tint it green. */
-.tracker-shield { color: #2ec27e; }
 `
 
 // loadAppCSS registers the application stylesheet on the default display, above
