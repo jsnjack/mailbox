@@ -1216,9 +1216,13 @@ func (w *window) loadLabels() {
 	w.labelBox.RemoveAll()
 	w.sidebar = w.sidebar[:0]
 
-	// Badges show unread counts (like a standard mail client). All Mail spans
-	// every label, so it carries no badge — matching Gmail.
+	// Only the Inbox carries an unread-count badge — that's where new mail
+	// matters; badges on every folder/label read as noise.
 	for _, f := range systemFolders {
+		count := 0
+		if f.id == model.LabelInbox {
+			count, _ = w.deps.Store.CountUnreadByLabel(ctx, w.activeID, f.id)
+		}
 		if f.id == allMailID {
 			w.appendFolder(f.id, f.icon, f.name, 0)
 			continue
@@ -1226,7 +1230,6 @@ func (w *window) loadLabels() {
 		if !have[f.id] {
 			continue
 		}
-		count, _ := w.deps.Store.CountUnreadByLabel(ctx, w.activeID, f.id)
 		w.appendFolder(f.id, f.icon, f.name, count)
 	}
 
@@ -1240,8 +1243,7 @@ func (w *window) loadLabels() {
 			w.appendHeading("Labels")
 			firstUser = false
 		}
-		n, _ := w.deps.Store.CountUnreadByLabel(ctx, w.activeID, l.GmailID)
-		w.appendFolder(l.GmailID, "user-bookmarks-symbolic", l.Name, n)
+		w.appendFolder(l.GmailID, "user-bookmarks-symbolic", l.Name, 0)
 	}
 
 	w.restoreSidebarSelection()
