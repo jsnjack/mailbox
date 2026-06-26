@@ -73,6 +73,10 @@ type window struct {
 	suppressSearch bool // guards SetText from firing a search during label switch
 	threadByID     map[string]model.ThreadSummary
 
+	// coalesce refreshes triggered by bursts of sync change events.
+	refreshPending     bool
+	refreshListPending bool
+
 	header    *gtk.Label
 	attachBox *gtk.Box // chips for the open message's attachments
 	webview   *webkit.WebView
@@ -1603,17 +1607,17 @@ func (w *window) subscribe() {
 
 // onChange reacts to a background sync change: it refreshes the active account's
 // label counts and thread list (keeping the open conversation in place) and
-// notifies for genuinely new inbox mail on any account.
+// notifies for genuinely new inbox mail on any account. The refresh is coalesced
+// so a burst of per-message events from a sync triggers one refresh, not N.
 func (w *window) onChange(c syncer.Change) {
 	switch c.Kind {
 	case syncer.MessageUpserted, syncer.MessageDeleted:
 		if c.AccountID == w.activeID {
-			w.loadLabels()
-			w.liveRefreshList()
+			w.scheduleRefresh(true)
 		}
 	case syncer.LabelsSynced:
 		if c.AccountID == w.activeID {
-			w.loadLabels()
+			w.scheduleRefresh(false)
 		}
 	case syncer.SendStateChanged:
 		if c.AccountID == w.activeID {
@@ -1633,6 +1637,29 @@ func (w *window) onChange(c syncer.Change) {
 			return
 		}
 	}
+}
+
+// scheduleRefresh coalesces refreshes from a burst of change events: the first
+// call schedules a single loadLabels (+ thread list when withList) on the idle
+// queue; further calls before it runs are folded into that one refresh. This
+// keeps a sync that upserts many messages from rebuilding the UI N times.
+func (w *window) scheduleRefresh(withList bool) {
+	if withList {
+		w.refreshListPending = true
+	}
+	if w.refreshPending {
+		return
+	}
+	w.refreshPending = true
+	dispatch.Main(func() {
+		w.refreshPending = false
+		list := w.refreshListPending
+		w.refreshListPending = false
+		w.loadLabels()
+		if list {
+			w.liveRefreshList()
+		}
+	})
 }
 
 func (w *window) notifyNewMail(accountID int64, m model.Message) {
