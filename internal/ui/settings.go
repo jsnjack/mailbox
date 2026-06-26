@@ -124,6 +124,24 @@ func (w *window) openSettings() {
 	sigGroup.SetDescription("Appended to new messages and replies (below your text, above any quote). Leave blank for none.")
 	sigGroup.Add(sigScroll)
 
+	// Privacy: a global default for loading remote images (tracking pixels are
+	// always stripped regardless).
+	imgRow := adw.NewSwitchRow()
+	imgRow.SetTitle("Load remote images")
+	imgRow.SetSubtitle("Tracking pixels are always blocked. Turn off to block all remote images by default.")
+	imgRow.SetActive(!w.blockImages)
+	imgRow.Connect("notify::active", func() {
+		load := imgRow.Active()
+		w.blockImages = !load
+		if err := config.SavePrefs(config.Prefs{BlockRemoteImages: !load}); err != nil {
+			slog.Warn("ui: save prefs", "err", err)
+		}
+		w.setImagesEnabled(load)
+	})
+	privacyGroup := adw.NewPreferencesGroup()
+	privacyGroup.SetTitle("Privacy")
+	privacyGroup.Add(imgRow)
+
 	scGroup := adw.NewPreferencesGroup()
 	scGroup.SetTitle("Keyboard Shortcuts")
 	scGroup.SetDescription("Single keys work while reading; they're ignored while typing in a field.")
@@ -143,6 +161,7 @@ func (w *window) openSettings() {
 		page.Add(acctGroup)
 	}
 	page.Add(sigGroup)
+	page.Add(privacyGroup)
 	page.Add(scGroup)
 
 	dialog := adw.NewPreferencesDialog()

@@ -107,6 +107,7 @@ type window struct {
 	overflowBtn    *gtk.MenuButton // star/unread/trash/images live here
 	readerMenuPop  *gtk.Popover    // overflow menu content (built lazily)
 	imagesEnabled  bool            // whether remote images are loaded in the reader
+	blockImages    bool            // global default: block remote images (Preferences)
 
 	// AI thread summary: a button reveals a card that streams a summary in.
 	// summaryCache memoizes by the thread's message fingerprint, so reopening is
@@ -139,6 +140,9 @@ func newWindow(app *adw.Application, deps Deps) *window {
 	}
 	w.accountNames, _ = config.LoadAccountNames()
 	w.signature, _ = config.LoadSignature()
+	if p, err := config.LoadPrefs(); err == nil {
+		w.blockImages = p.BlockRemoteImages
+	}
 	if len(deps.Accounts) > 0 {
 		w.activeID = deps.Accounts[0].ID
 		w.activeEmail = deps.Accounts[0].Email
@@ -929,11 +933,11 @@ func (w *window) buildReader() *adw.NavigationPage {
 	// per-render nonce and default-src 'none' blocks all network (no fetch/XHR
 	// exfiltration, no iframes), so only our own script ever executes.
 	settings.SetEnableJavascript(true)
-	// Images load by default; tracking pixels are stripped from the HTML before
-	// rendering (stripTrackers), so opens aren't leaked. The overflow toggle can
-	// still block all remote images for a given message.
-	w.imagesEnabled = true
-	settings.SetAutoLoadImages(true)
+	// Images load by default (unless blocked globally in Preferences); tracking
+	// pixels are stripped from the HTML before rendering (stripTrackers), so opens
+	// aren't leaked. The overflow toggle can still block remote images per message.
+	w.imagesEnabled = !w.blockImages
+	settings.SetAutoLoadImages(w.imagesEnabled)
 	w.webview.SetVExpand(true)
 	w.webview.SetHExpand(true)
 
