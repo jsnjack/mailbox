@@ -625,7 +625,8 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 		if !ok {
 			return
 		}
-		li.SetChild(threadRow(w.threadByID[so.String()]))
+		outgoing := w.current == model.LabelSent || w.current == model.LabelDraft
+		li.SetChild(threadRow(w.threadByID[so.String()], outgoing))
 	})
 
 	w.threadView = gtk.NewListView(w.threadSel, &factory.ListItemFactory)
@@ -2192,7 +2193,7 @@ func countBadge(n int) *gtk.Label {
 	return c
 }
 
-func threadRow(t model.ThreadSummary) *gtk.Box {
+func threadRow(t model.ThreadSummary, outgoing bool) *gtk.Box {
 	m := t.Latest
 	unread := t.UnreadCount > 0
 
@@ -2207,7 +2208,11 @@ func threadRow(t model.ThreadSummary) *gtk.Box {
 		dot.SetVAlign(gtk.AlignCenter)
 		top.Append(dot)
 	}
+	// In Sent/Drafts the sender is always you, so show the recipient instead.
 	fromText := displayFrom(m)
+	if outgoing {
+		fromText = "To: " + displayTo(m)
+	}
 	if t.Count > 1 {
 		fromText += fmt.Sprintf("  (%d)", t.Count)
 	}
@@ -2287,6 +2292,26 @@ func displayFrom(m model.Message) string {
 		return m.FromName
 	}
 	return m.FromAddr
+}
+
+// displayTo returns a concise recipient label for outgoing mail: the first
+// address in the To header, with "+N" when there are more.
+func displayTo(m model.Message) string {
+	to := strings.TrimSpace(m.ToAddrs)
+	if to == "" {
+		return "(no recipient)"
+	}
+	if addrs, err := mail.ParseAddressList(to); err == nil && len(addrs) > 0 {
+		first := addrs[0].Name
+		if first == "" {
+			first = addrs[0].Address
+		}
+		if len(addrs) > 1 {
+			return fmt.Sprintf("%s +%d", first, len(addrs)-1)
+		}
+		return first
+	}
+	return to
 }
 
 func setMargins(w gtk.Widgetter, start, end, top, bottom int) {
