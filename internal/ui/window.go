@@ -10,6 +10,7 @@ import (
 	"net/mail"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -610,6 +611,11 @@ func (w *window) refreshList(query string) {
 		}
 		sums = append(sums, sum)
 	}
+	// Search hits come back ranked by relevance; show them newest-first like the
+	// folder views.
+	sort.SliceStable(sums, func(i, j int) bool {
+		return sums[i].Latest.InternalDate.After(sums[j].Latest.InternalDate)
+	})
 	w.showThreads(sums)
 }
 
