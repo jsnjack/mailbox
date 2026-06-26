@@ -242,6 +242,8 @@ func (w *window) addShortcuts() {
 			w.onTrash()
 		case 's':
 			w.toggleStar()
+		case 't':
+			w.onTranslate()
 		case 'c':
 			if w.deps.Send != nil {
 				w.openCompose(model.OutgoingMessage{}, "", "New message", false)
@@ -321,6 +323,7 @@ func (w *window) showShortcuts() {
 		{"a / e", "Archive"},
 		{"# / Delete", "Move to Trash"},
 		{"s", "Star / unstar"},
+		{"t", "Translate to English"},
 		{"c", "Compose"},
 		{"/", "Search"},
 		{"Esc", "Back to list"},
