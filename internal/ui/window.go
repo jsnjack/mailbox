@@ -1248,6 +1248,23 @@ func (w *window) loadLabels() {
 
 	w.restoreSidebarSelection()
 	w.refreshAccountBadges() // keep the per-account unread pills current
+	w.updateTitle()
+}
+
+// updateTitle reflects the total unread-inbox count (across all accounts) in the
+// window title, so it shows in the taskbar / overview.
+func (w *window) updateTitle() {
+	total := 0
+	ctx := context.Background()
+	for _, a := range w.deps.Accounts {
+		n, _ := w.deps.Store.CountUnreadByLabel(ctx, a.ID, model.LabelInbox)
+		total += n
+	}
+	if total > 0 {
+		w.win.SetTitle(fmt.Sprintf("Mailbox — %d unread", total))
+	} else {
+		w.win.SetTitle("Mailbox")
+	}
 }
 
 // appendFolder adds a selectable folder/label row mapped to id.
@@ -2192,15 +2209,17 @@ func (w *window) onChange(c syncer.Change) {
 	switch c.Kind {
 	case syncer.MessageUpserted, syncer.MessageDeleted:
 		if c.AccountID == w.activeID {
-			w.scheduleRefresh(true) // loadLabels (inside) refreshes badges too
+			w.scheduleRefresh(true) // loadLabels (inside) refreshes badges + title
 		} else {
 			w.refreshAccountBadges() // a sibling account's unread count changed
+			w.updateTitle()
 		}
 	case syncer.LabelsSynced:
 		if c.AccountID == w.activeID {
 			w.scheduleRefresh(false)
 		} else {
 			w.refreshAccountBadges()
+			w.updateTitle()
 		}
 	case syncer.SendStateChanged:
 		if c.AccountID == w.activeID {
