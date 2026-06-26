@@ -196,8 +196,21 @@ func (e *Engine) Send(ctx context.Context, c *gmailapi.Client, accountID int64, 
 		if qerr := e.Store.EnqueueOutbox(ctx, accountID, msg.ThreadID, raw); qerr != nil {
 			return fmt.Errorf("send failed (%v) and could not queue: %w", err, qerr)
 		}
+		// The message left the drafts for the outbox; drop the source draft so it
+		// doesn't linger and duplicate the queued send.
+		if msg.DraftID != "" {
+			if derr := c.DeleteDraft(ctx, msg.DraftID); derr != nil {
+				slog.Default().Warn("send: delete source draft after queue", "id", msg.DraftID, "err", derr)
+			}
+		}
 		e.publish(Change{Kind: SendStateChanged, AccountID: accountID})
 		return fmt.Errorf("send failed, queued for retry: %w", err)
+	}
+	// Sending an edited draft creates a new message; remove the original draft.
+	if msg.DraftID != "" {
+		if err := c.DeleteDraft(ctx, msg.DraftID); err != nil {
+			slog.Default().Warn("send: delete source draft", "id", msg.DraftID, "err", err)
+		}
 	}
 	return nil
 }
@@ -223,10 +236,16 @@ func (e *Engine) DiscardOutbox(ctx context.Context, accountID, id int64) error {
 	return nil
 }
 
-// SaveDraft builds an outgoing message and stores it as a Gmail draft.
+// SaveDraft builds an outgoing message and stores it as a Gmail draft. When the
+// message carries an existing DraftID it updates that draft in place rather than
+// creating a new one (so editing a draft doesn't leave a duplicate).
 func (e *Engine) SaveDraft(ctx context.Context, c *gmailapi.Client, accountID int64, msg model.OutgoingMessage) error {
 	raw, err := gmailapi.BuildMIME(msg)
 	if err != nil {
+		return err
+	}
+	if msg.DraftID != "" {
+		_, err = c.UpdateDraft(ctx, msg.DraftID, raw, msg.ThreadID)
 		return err
 	}
 	if _, err := c.SaveDraft(ctx, raw, msg.ThreadID); err != nil {

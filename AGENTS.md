@@ -90,7 +90,13 @@ new message — both prompted by `askAIIntent`) and a Save-draft button
 (`users.drafts.create`). A configurable default signature
 (`config.{Load,Save}Signature`, `<config>/signature.txt`, edited in
 Preferences) is appended to every composed body below the cursor area and above
-any quote (`composeBodyWithSignature`, RFC 3676 "-- " delimiter).
+any quote (`composeBodyWithSignature`, RFC 3676 "-- " delimiter); it is not
+re-added when editing an existing draft. Clicking a conversation in the Drafts
+folder resumes editing it in compose (`openDraftForEdit`) instead of rendering
+it read-only: the body/recipients are prefilled and the draft's Gmail resource
+id is resolved (`Client.FindDraftID`) so Save updates that draft
+(`Drafts.Update`) and Send sends then removes it (`Drafts.Delete`) — never a
+duplicate.
 Translate / draft-reply stream into a window via the `ai` provider. Incoming
 attachments are extracted on body fetch (`ReplaceAttachments`) and shown as chips
 in the reader; clicking one downloads it (content-addressed under the cache dir)

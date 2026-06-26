@@ -1249,6 +1249,12 @@ func (w *window) selectLabel(labelID string) {
 // showThread opens a conversation: it loads all its messages, renders them
 // stacked in the reader, and marks any unread ones read.
 func (w *window) showThread(threadID string) {
+	// In the Drafts folder, a click resumes editing the draft in compose rather
+	// than rendering it read-only.
+	if w.current == model.LabelDraft && w.deps.Send != nil {
+		w.openDraftForEdit(threadID)
+		return
+	}
 	msgs, err := w.deps.Store.ListThreadMessages(context.Background(), w.activeID, threadID)
 	if err != nil || len(msgs) == 0 {
 		if err != nil {
@@ -1285,6 +1291,79 @@ func (w *window) showThread(threadID string) {
 			}()
 		}
 	}
+}
+
+// hasLabel reports whether message m carries the given label id.
+func hasLabel(m model.Message, label string) bool {
+	for _, l := range m.Labels {
+		if l == label {
+			return true
+		}
+	}
+	return false
+}
+
+// openDraftForEdit resumes editing the draft in the given thread: it fetches the
+// draft body and resolves its Gmail draft id (so sending/saving replaces the
+// draft rather than duplicating it), then opens a compose window prefilled with
+// the draft's recipients, subject, and body.
+func (w *window) openDraftForEdit(threadID string) {
+	msgs, err := w.deps.Store.ListThreadMessages(context.Background(), w.activeID, threadID)
+	if err != nil || len(msgs) == 0 {
+		if err != nil {
+			slog.Warn("ui: load draft thread", "thread", threadID, "err", err)
+		}
+		return
+	}
+	// The draft is the message carrying the DRAFT label (fall back to newest).
+	dm := msgs[len(msgs)-1]
+	for _, m := range msgs {
+		if hasLabel(m, model.LabelDraft) {
+			dm = m
+			break
+		}
+	}
+	acctID := w.activeID
+	w.toast("Opening draft…")
+	go func() {
+		ctx := context.Background()
+		if !dm.BodyFetched && w.deps.FetchBody != nil {
+			if err := w.deps.FetchBody(ctx, dm.AccountID, dm.GmailID); err != nil {
+				slog.Warn("ui: fetch draft body", "id", dm.GmailID, "err", err)
+			}
+		}
+		// Our drafts are text/plain — use the text verbatim so re-editing is
+		// lossless; fall back to HTML-reduced-to-text or the snippet.
+		body := dm.Snippet
+		if b, err := w.deps.Store.GetBody(ctx, dm.RowID); err == nil {
+			switch {
+			case strings.TrimSpace(b.Text) != "":
+				body = b.Text
+			case strings.TrimSpace(b.HTML) != "":
+				body = htmlToText(b.HTML)
+			}
+		}
+		draftID := ""
+		if w.deps.FindDraftID != nil {
+			if id, err := w.deps.FindDraftID(ctx, acctID, dm.GmailID); err != nil {
+				slog.Warn("ui: find draft id", "id", dm.GmailID, "err", err)
+			} else {
+				draftID = id
+			}
+		}
+		dispatch.Main(func() {
+			w.openCompose(model.OutgoingMessage{
+				To:         strings.TrimSpace(dm.ToAddrs),
+				Cc:         strings.TrimSpace(dm.CcAddrs),
+				Subject:    dm.Subject,
+				Body:       body,
+				InReplyTo:  dm.InReplyTo,
+				References: dm.References,
+				ThreadID:   dm.ThreadID,
+				DraftID:    draftID,
+			}, "", "Edit draft", false)
+		})
+	}()
 }
 
 // renderConversation fetches each message's body (lazily) and renders the whole

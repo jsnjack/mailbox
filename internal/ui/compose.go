@@ -29,7 +29,11 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 
 	// Append the configured default signature: below the cursor area for a new
 	// message, between the reply area and the quoted history for a reply/forward.
-	init.Body = composeBodyWithSignature(init.Body, w.signature)
+	// A draft already contains whatever the user saved (signature included), so
+	// it is left untouched.
+	if init.DraftID == "" {
+		init.Body = composeBodyWithSignature(init.Body, w.signature)
+	}
 
 	// With more than one account connected, the user picks which to send from;
 	// otherwise the message goes from the active account.
@@ -172,6 +176,7 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 			InReplyTo:   init.InReplyTo,
 			References:  init.References,
 			ThreadID:    init.ThreadID,
+			DraftID:     init.DraftID,
 			Attachments: attachments,
 		}
 	}

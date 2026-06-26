@@ -211,6 +211,70 @@ func (c *Client) SaveDraft(ctx context.Context, raw []byte, threadID string) (st
 	return draft.Id, nil
 }
 
+// UpdateDraft replaces the contents of an existing draft, returning its id.
+func (c *Client) UpdateDraft(ctx context.Context, draftID string, raw []byte, threadID string) (string, error) {
+	var draft *gmail.Draft
+	err := c.do(ctx, costMessageGet, func() error {
+		msg := &gmail.Message{Raw: base64.URLEncoding.EncodeToString(raw)}
+		if threadID != "" {
+			msg.ThreadId = threadID
+		}
+		r, e := c.srv.Users.Drafts.Update("me", draftID, &gmail.Draft{Message: msg}).Context(ctx).Do()
+		draft = r
+		return e
+	})
+	if err != nil {
+		return "", fmt.Errorf("update draft: %w", err)
+	}
+	return draft.Id, nil
+}
+
+// DeleteDraft permanently removes a draft (used after its edited contents have
+// been sent as a normal message).
+func (c *Client) DeleteDraft(ctx context.Context, draftID string) error {
+	err := c.do(ctx, costMessageGet, func() error {
+		return c.srv.Users.Drafts.Delete("me", draftID).Context(ctx).Do()
+	})
+	if err != nil {
+		return fmt.Errorf("delete draft %s: %w", draftID, err)
+	}
+	return nil
+}
+
+// FindDraftID returns the draft resource id whose underlying message has the
+// given message id, or "" if no draft matches. Gmail tracks drafts by a separate
+// id from the message id, so editing/sending a synced draft requires this lookup.
+func (c *Client) FindDraftID(ctx context.Context, messageID string) (string, error) {
+	var found string
+	err := c.do(ctx, costMessageList, func() error {
+		pageToken := ""
+		for {
+			call := c.srv.Users.Drafts.List("me").MaxResults(100).Context(ctx)
+			if pageToken != "" {
+				call = call.PageToken(pageToken)
+			}
+			r, e := call.Do()
+			if e != nil {
+				return e
+			}
+			for _, d := range r.Drafts {
+				if d.Message != nil && d.Message.Id == messageID {
+					found = d.Id
+					return nil
+				}
+			}
+			if r.NextPageToken == "" {
+				return nil
+			}
+			pageToken = r.NextPageToken
+		}
+	})
+	if err != nil {
+		return "", fmt.Errorf("find draft id: %w", err)
+	}
+	return found, nil
+}
+
 // GetAttachment downloads and decodes an attachment's bytes.
 func (c *Client) GetAttachment(ctx context.Context, messageID, attachmentID string) ([]byte, error) {
 	var body *gmail.MessagePartBody

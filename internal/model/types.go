@@ -120,6 +120,7 @@ type OutgoingMessage struct {
 	InReplyTo   string // original Message-ID header
 	References  string // existing References plus the original Message-ID
 	ThreadID    string // Gmail threadId, so Gmail files it in the conversation
+	DraftID     string // when set, this edits/sends an existing Gmail draft
 	Attachments []OutgoingAttachment
 }
 

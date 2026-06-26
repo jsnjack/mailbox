@@ -124,6 +124,13 @@ func launchUI() error {
 			}
 			return engine.SaveDraft(ctx, c, accountID, msg)
 		}
+		deps.FindDraftID = func(ctx context.Context, accountID int64, gmailID string) (string, error) {
+			c, err := clientFor(accountID)
+			if err != nil {
+				return "", err
+			}
+			return c.FindDraftID(ctx, gmailID)
+		}
 		deps.OpenAttach = func(ctx context.Context, accountID int64, gmailID string, attID int64) (string, error) {
 			c, err := clientFor(accountID)
 			if err != nil {

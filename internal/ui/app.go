@@ -41,6 +41,10 @@ type Sender func(ctx context.Context, accountID int64, msg model.OutgoingMessage
 // AttachmentOpener ensures an attachment is cached locally and returns its path.
 type AttachmentOpener func(ctx context.Context, accountID int64, gmailID string, attID int64) (string, error)
 
+// DraftFinder resolves the Gmail draft resource id backing a stored draft
+// message (Gmail tracks drafts by an id separate from the message id).
+type DraftFinder func(ctx context.Context, accountID int64, gmailID string) (string, error)
+
 // SyncNow runs an immediate incremental sync for an account.
 type SyncNow func(ctx context.Context, accountID int64) error
 
@@ -64,6 +68,7 @@ type Deps struct {
 	ModifyLabels  LabelModifier // batch: applies to a slice of message ids
 	Send          Sender
 	SaveDraft     Sender
+	FindDraftID   DraftFinder
 	OpenAttach    AttachmentOpener
 	Sync          SyncNow
 	MarkAllRead   LabelReader
