@@ -1068,9 +1068,13 @@ func (w *window) showThreads(sums []model.ThreadSummary) {
 				w.emptyPage.SetChild(btn)
 			}
 		case w.unreadOnly:
-			w.emptyPage.SetIconName("mail-read-symbolic")
-			w.emptyPage.SetTitle("No unread messages")
-			w.emptyPage.SetDescription("You're all caught up in this view.")
+			w.emptyPage.SetIconName("face-smile-symbolic")
+			w.emptyPage.SetTitle("All caught up")
+			w.emptyPage.SetDescription("No unread messages here — nice.")
+		case w.current == model.LabelInbox:
+			w.emptyPage.SetIconName("face-smile-symbolic")
+			w.emptyPage.SetTitle("Inbox Zero 🎉")
+			w.emptyPage.SetDescription("Your inbox is empty. Enjoy the calm!")
 		default:
 			w.emptyPage.SetIconName("mail-unread-symbolic")
 			w.emptyPage.SetTitle("No messages")
