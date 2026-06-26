@@ -200,14 +200,30 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 		}
 		confirm := adw.NewAlertDialog("Discard message?", "This message has not been sent.")
 		confirm.AddResponse("cancel", "Cancel")
+		if w.deps.SaveDraft != nil {
+			confirm.AddResponse("save", "Save as draft")
+			confirm.SetResponseAppearance("save", adw.ResponseSuggested)
+		}
 		confirm.AddResponse("discard", "Discard")
 		confirm.SetResponseAppearance("discard", adw.ResponseDestructive)
 		confirm.SetDefaultResponse("cancel")
 		confirm.SetCloseResponse("cancel")
 		confirm.ConnectResponse(func(response string) {
-			if response == "discard" {
+			switch response {
+			case "discard":
 				sent = true // bypass the guard on the programmatic close below
 				cancelAI()
+				win.Close()
+			case "save":
+				msg := gather()
+				acctID := selectedAccount().ID
+				sent = true
+				cancelAI()
+				go func() {
+					if err := w.deps.SaveDraft(context.Background(), acctID, msg); err != nil {
+						slog.Warn("ui: save draft on close", "err", err)
+					}
+				}()
 				win.Close()
 			}
 		})
