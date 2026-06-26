@@ -113,6 +113,7 @@ type window struct {
 	labelsBtn      *gtk.MenuButton
 	translateBtn   *gtk.Button
 	draftBtn       *gtk.Button
+	infoBtn        *gtk.MenuButton // "message details" technical info popover
 	overflowBtn    *gtk.MenuButton // star/unread/trash/images live here
 	readerMenuPop  *gtk.Popover    // overflow menu content (built lazily)
 	imagesEnabled  bool            // whether remote images are loaded in the reader
@@ -1252,6 +1253,16 @@ func (w *window) buildReader() *adw.NavigationPage {
 	w.archiveBtn.SetTooltipText("Archive (a)")
 	w.archiveBtn.ConnectClicked(w.onArchive)
 
+	// Technical "message details" popover (full addresses, auth, Message-ID, …).
+	w.infoBtn = gtk.NewMenuButton()
+	w.infoBtn.SetIconName("dialog-information-symbolic")
+	w.infoBtn.SetTooltipText("Message details")
+	infoPop := gtk.NewPopover()
+	w.infoBtn.SetPopover(infoPop)
+	w.infoBtn.SetCreatePopupFunc(func(*gtk.MenuButton) {
+		infoPop.SetChild(w.buildMessageDetails())
+	})
+
 	w.labelsBtn = gtk.NewMenuButton()
 	w.labelsBtn.SetIconName("user-bookmarks-symbolic")
 	w.labelsBtn.SetTooltipText("Labels")
@@ -1290,6 +1301,7 @@ func (w *window) buildReader() *adw.NavigationPage {
 
 	hb.PackStart(w.replyAllBtn)
 	hb.PackStart(w.archiveBtn)
+	hb.PackStart(w.infoBtn)
 	hb.PackEnd(w.overflowBtn)
 	hb.PackEnd(w.labelsBtn)
 	if w.deps.Assistant != nil {
@@ -1339,6 +1351,7 @@ func (w *window) setActionsSensitive(on bool) {
 	// The overflow menu builds its own items conditionally; enable it whenever a
 	// message is open.
 	w.overflowBtn.SetSensitive(on)
+	w.infoBtn.SetSensitive(on)
 }
 
 // replyInit builds the prefilled compose for a reply to m (To, Re: subject,
@@ -1799,8 +1812,12 @@ func (w *window) renderConversation(msgs []model.Message) {
 func conversationSection(m model.Message, body model.MessageBody, clean func(string) (string, int)) (string, int) {
 	var hb strings.Builder
 	hb.WriteString(`<div style="border-top:1px solid #ddd;margin-top:18px;padding-top:8px;color:#555;font-size:90%">`)
-	fmt.Fprintf(&hb, `<b>%s</b> · %s`,
-		html.EscapeString(displayFrom(m)), m.InternalDate.Format("Jan 2, 2006 15:04"))
+	fmt.Fprintf(&hb, `<b>%s</b>`, html.EscapeString(displayFrom(m)))
+	// Always show the actual address, not just the display name.
+	if addr := strings.TrimSpace(m.FromAddr); addr != "" && !strings.EqualFold(addr, displayFrom(m)) {
+		fmt.Fprintf(&hb, ` <span style="color:#888">&lt;%s&gt;</span>`, html.EscapeString(addr))
+	}
+	fmt.Fprintf(&hb, ` · %s`, m.InternalDate.Format("Jan 2, 2006 15:04"))
 	if to := strings.TrimSpace(m.ToAddrs); to != "" {
 		fmt.Fprintf(&hb, `<br><span style="color:#888">to %s</span>`, html.EscapeString(to))
 	}
@@ -2042,6 +2059,60 @@ func (w *window) buildReaderMenu() gtk.Widgetter {
 // and runs fn when clicked.
 func (w *window) readerMenuItem(label string, fn func()) *gtk.Button {
 	return menuItemButton(w.readerMenuPop, label, fn)
+}
+
+// buildMessageDetails builds the technical "message details" popover for the
+// open message: full addresses, date, subject, authentication verdict,
+// Message-ID, labels, and size — all selectable so they can be copied.
+func (w *window) buildMessageDetails() gtk.Widgetter {
+	m := w.openMsg
+	box := gtk.NewBox(gtk.OrientationVertical, 8)
+	setMargins(box, 12, 12, 12, 12)
+	box.SetSizeRequest(360, -1)
+
+	add := func(key, value string) {
+		if strings.TrimSpace(value) == "" {
+			return
+		}
+		k := gtk.NewLabel(key)
+		k.SetXAlign(0)
+		k.AddCSSClass("caption")
+		k.AddCSSClass("dim-label")
+		v := gtk.NewLabel(value)
+		v.SetXAlign(0)
+		v.SetWrap(true)
+		v.SetSelectable(true)
+		v.SetMaxWidthChars(48)
+		row := gtk.NewBox(gtk.OrientationVertical, 0)
+		row.Append(k)
+		row.Append(v)
+		box.Append(row)
+	}
+
+	from := m.FromAddr
+	if m.FromName != "" && !strings.EqualFold(m.FromName, m.FromAddr) {
+		from = m.FromName + " <" + m.FromAddr + ">"
+	}
+	add("From", from)
+	add("To", m.ToAddrs)
+	add("Cc", m.CcAddrs)
+	add("Date", m.InternalDate.Format("Mon, 2 Jan 2006 15:04:05 MST"))
+	add("Subject", m.Subject)
+	if b, err := w.deps.Store.GetBody(context.Background(), m.RowID); err == nil {
+		if v := parseAuthResults(b.RawHeaders); v.level != authUnknown {
+			add("Authentication", authLevelWord(v.level)+" — "+v.detail)
+		} else if strings.TrimSpace(b.RawHeaders) != "" {
+			add("Authentication", b.RawHeaders)
+		}
+	}
+	add("Message-ID", m.RFC822MsgID)
+	if len(m.Labels) > 0 {
+		add("Labels", strings.Join(m.Labels, ", "))
+	}
+	if m.SizeEstimate > 0 {
+		add("Size", humanBytes(m.SizeEstimate))
+	}
+	return box
 }
 
 // cleanHTML sanitizes email body HTML and strips tracking pixels for rendering,
