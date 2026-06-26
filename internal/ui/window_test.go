@@ -51,6 +51,22 @@ func TestReplyAllRecipients(t *testing.T) {
 	}
 }
 
+func TestHTMLToText(t *testing.T) {
+	got := htmlToText(`<p>Hello <b>Bob</b>,</p><div>It&#39;s &amp; done</div>`)
+	if strings.ContainsAny(got, "<>") {
+		t.Fatalf("HTML tags remain: %q", got)
+	}
+	for _, want := range []string{"Hello", "Bob", "It's", "& done"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("content lost: missing %q in %q", want, got)
+		}
+	}
+	// Already-plain text is returned cleanly.
+	if got := htmlToText("just text"); got != "just text" {
+		t.Fatalf("plain text mangled: %q", got)
+	}
+}
+
 func TestOutboxHeaders(t *testing.T) {
 	raw := []byte("From: me@x.com\r\nTo: Bob <bob@x.com>\r\nSubject: Lunch?\r\n\r\nbody here\r\n")
 	to, subject := outboxHeaders(raw)

@@ -81,15 +81,24 @@ type window struct {
 	openThreadMsgs []model.Message
 	openMsg        model.Message
 	replyBtn       *gtk.Button
+	replyAllBtn    *gtk.Button
 	forwardBtn     *gtk.Button
 	archiveBtn     *gtk.Button
 	trashBtn       *gtk.Button
 	labelsBtn      *gtk.MenuButton
 	starBtn        *gtk.ToggleButton
+	translateBtn   *gtk.Button
+	draftBtn       *gtk.Button
 	overflowBtn    *gtk.MenuButton // "more actions" menu in the reader header
 	readerMenuPop  *gtk.Popover    // overflow menu content (built lazily)
 	imagesEnabled  bool            // whether remote images are loaded in the reader
-	updatingStar   bool            // guards programmatic star-toggle from firing the handler
+
+	// in-place translation: a banner offers reverting to the original; the cancel
+	// func aborts an in-flight translation when the user reverts or switches mail.
+	translationBanner *adw.Banner
+	translateCancel   context.CancelFunc
+
+	updatingStar bool // guards programmatic star-toggle from firing the handler
 }
 
 func newWindow(app *adw.Application, deps Deps) *window {
@@ -712,7 +721,14 @@ func (w *window) buildReader() *adw.NavigationPage {
 	setMargins(w.attachBox, 12, 12, 0, 8)
 	w.attachBox.SetVisible(false)
 
+	// Revealed while an in-place translation is shown; reverts to the original.
+	w.translationBanner = adw.NewBanner("Showing translation")
+	w.translationBanner.SetButtonLabel("Show original")
+	w.translationBanner.SetRevealed(false)
+	w.translationBanner.ConnectButtonClicked(w.showOriginal)
+
 	box := gtk.NewBox(gtk.OrientationVertical, 0)
+	box.Append(w.translationBanner)
 	box.Append(w.header)
 	box.Append(w.attachBox)
 	box.Append(w.webview)
@@ -731,11 +747,15 @@ func (w *window) buildReader() *adw.NavigationPage {
 
 	// Primary triage actions, icon-only.
 	w.replyBtn = gtk.NewButtonFromIconName("mail-reply-sender-symbolic")
-	w.replyBtn.SetTooltipText("Reply")
+	w.replyBtn.SetTooltipText("Reply (r)")
 	w.replyBtn.ConnectClicked(w.onReply)
 
+	w.replyAllBtn = gtk.NewButtonFromIconName("mail-reply-all-symbolic")
+	w.replyAllBtn.SetTooltipText("Reply all")
+	w.replyAllBtn.ConnectClicked(w.onReplyAll)
+
 	w.forwardBtn = gtk.NewButtonFromIconName("mail-forward-symbolic")
-	w.forwardBtn.SetTooltipText("Forward")
+	w.forwardBtn.SetTooltipText("Forward (f)")
 	w.forwardBtn.ConnectClicked(w.onForward)
 
 	w.archiveBtn = gtk.NewButtonFromIconName("folder-download-symbolic")
@@ -760,6 +780,15 @@ func (w *window) buildReader() *adw.NavigationPage {
 		labelsPop.SetChild(w.buildLabelsMenu())
 	})
 
+	// AI actions (only useful when an assistant is configured).
+	w.translateBtn = gtk.NewButtonFromIconName("accessories-dictionary-symbolic")
+	w.translateBtn.SetTooltipText("Translate to English")
+	w.translateBtn.ConnectClicked(w.onTranslate)
+
+	w.draftBtn = gtk.NewButtonFromIconName("document-edit-symbolic")
+	w.draftBtn.SetTooltipText("Draft a reply with AI")
+	w.draftBtn.ConnectClicked(w.onDraftReply)
+
 	// Secondary actions live in an overflow menu so the bar stays uncluttered.
 	w.overflowBtn = gtk.NewMenuButton()
 	w.overflowBtn.SetIconName("view-more-symbolic")
@@ -771,12 +800,17 @@ func (w *window) buildReader() *adw.NavigationPage {
 	})
 
 	hb.PackStart(w.replyBtn)
+	hb.PackStart(w.replyAllBtn)
 	hb.PackStart(w.forwardBtn)
 	hb.PackStart(w.archiveBtn)
 	hb.PackStart(w.trashBtn)
 	hb.PackEnd(w.overflowBtn)
 	hb.PackEnd(w.labelsBtn)
 	hb.PackEnd(w.starBtn)
+	if w.deps.Assistant != nil {
+		hb.PackEnd(w.draftBtn)
+		hb.PackEnd(w.translateBtn)
+	}
 	w.setActionsSensitive(false)
 
 	tv := adw.NewToolbarView()
@@ -793,7 +827,11 @@ func (w *window) setActionsSensitive(on bool) {
 	w.starBtn.SetSensitive(canModify)
 	canSend := on && w.deps.Send != nil
 	w.replyBtn.SetSensitive(canSend)
+	w.replyAllBtn.SetSensitive(canSend)
 	w.forwardBtn.SetSensitive(canSend)
+	canAI := on && w.deps.Assistant != nil
+	w.translateBtn.SetSensitive(canAI)
+	w.draftBtn.SetSensitive(canAI)
 	// The overflow menu builds its own items conditionally; enable it whenever a
 	// message is open.
 	w.overflowBtn.SetSensitive(on)
@@ -980,6 +1018,7 @@ func (w *window) clearReader() {
 	w.openThreadID = ""
 	w.openThreadMsgs = nil
 	w.openMsg = model.Message{}
+	w.resetTranslation()
 	w.setActionsSensitive(false)
 	w.readerStack.SetVisibleChildName("empty")
 }
@@ -1011,6 +1050,7 @@ func (w *window) showThread(threadID string) {
 	w.openThreadID = threadID
 	w.openThreadMsgs = msgs
 	w.openMsg = msgs[len(msgs)-1] // newest, for reply/forward/star/unread
+	w.resetTranslation()          // a freshly opened thread shows the original
 	w.setActionsSensitive(true)
 	w.readerStack.SetVisibleChildName("message")
 	w.innerSplit.SetShowContent(true)
@@ -1243,14 +1283,12 @@ func (w *window) buildLabelsMenu() gtk.Widgetter {
 }
 
 // buildReaderMenu is the overflow popover for less-common reader actions.
+// (Reply all, Translate and Draft reply are dedicated header buttons.)
 func (w *window) buildReaderMenu() gtk.Widgetter {
 	box := gtk.NewBox(gtk.OrientationVertical, 2)
 	setMargins(box, 6, 6, 6, 6)
 	box.SetSizeRequest(200, -1)
 
-	if w.deps.Send != nil {
-		box.Append(w.readerMenuItem("Reply all", w.onReplyAll))
-	}
 	if w.deps.ModifyLabels != nil {
 		box.Append(w.readerMenuItem("Mark as unread", w.onMarkUnread))
 	}
@@ -1263,12 +1301,6 @@ func (w *window) buildReaderMenu() gtk.Widgetter {
 		w.setImagesEnabled(img.Active())
 	})
 	box.Append(img)
-
-	if w.deps.Assistant != nil {
-		box.Append(gtk.NewSeparator(gtk.OrientationHorizontal))
-		box.Append(w.readerMenuItem("Translate to English", w.onTranslate))
-		box.Append(w.readerMenuItem("Draft reply with AI", w.onDraftReply))
-	}
 	return box
 }
 
@@ -1297,15 +1329,71 @@ func (w *window) setImagesEnabled(on bool) {
 	}
 }
 
+// onTranslate translates the open message's plain text to English and shows the
+// result in place of the email, with a banner to revert to the original.
 func (w *window) onTranslate() {
 	m := w.openMsg
 	if m.GmailID == "" || w.deps.Assistant == nil {
 		return
 	}
+	if w.translateCancel != nil {
+		w.translateCancel()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	w.translateCancel = cancel
+	threadID := w.openThreadID
 	body := w.bodyTextFor(m)
-	w.showAIStream("Translate to English", func(ctx context.Context) (<-chan ai.Chunk, error) {
-		return w.deps.Assistant.Translate(ctx, body, "English")
-	})
+
+	w.translationBanner.SetTitle("Translating…")
+	w.translationBanner.SetRevealed(true)
+	w.webview.LoadHtml(wrapHTML("<p><i>Translating…</i></p>"), "about:blank")
+
+	go func() {
+		ch, err := w.deps.Assistant.Translate(ctx, body, "English")
+		if err != nil {
+			msg := err.Error()
+			dispatch.Main(func() {
+				if w.openThreadID != threadID {
+					return
+				}
+				w.webview.LoadHtml(wrapHTML("<p>Translation failed: "+html.EscapeString(msg)+"</p>"), "about:blank")
+			})
+			return
+		}
+		var acc strings.Builder
+		for c := range ch {
+			if c.Err == nil {
+				acc.WriteString(c.Text)
+			}
+		}
+		out := acc.String()
+		dispatch.Main(func() {
+			if w.openThreadID != threadID {
+				return // user switched conversations while translating
+			}
+			w.translationBanner.SetTitle("Showing translation")
+			w.translationBanner.SetRevealed(true)
+			w.webview.LoadHtml(wrapHTML(`<div style="white-space:pre-wrap">`+html.EscapeString(out)+`</div>`), "about:blank")
+		})
+	}()
+}
+
+// showOriginal cancels any translation and restores the original message view.
+func (w *window) showOriginal() {
+	w.resetTranslation()
+	if len(w.openThreadMsgs) > 0 {
+		w.renderConversation(w.openThreadMsgs)
+	}
+}
+
+// resetTranslation hides the translation banner and aborts any in-flight
+// translation — used when reverting or when a different conversation is opened.
+func (w *window) resetTranslation() {
+	if w.translateCancel != nil {
+		w.translateCancel()
+		w.translateCancel = nil
+	}
+	w.translationBanner.SetRevealed(false)
 }
 
 func (w *window) onDraftReply() {
@@ -1319,12 +1407,33 @@ func (w *window) onDraftReply() {
 	})
 }
 
-// bodyTextFor returns the best plain-text representation of a message for AI input.
+// bodyTextFor returns the best plain-text representation of a message for AI
+// input: the text/plain part when present, otherwise the HTML reduced to text,
+// otherwise the snippet. HTML tags and entities are always stripped so the AI
+// never sees raw markup.
 func (w *window) bodyTextFor(m model.Message) string {
-	if b, err := w.deps.Store.GetBody(context.Background(), m.RowID); err == nil && b.Text != "" {
-		return b.Text
+	raw := m.Snippet
+	if b, err := w.deps.Store.GetBody(context.Background(), m.RowID); err == nil {
+		switch {
+		case strings.TrimSpace(b.Text) != "":
+			raw = b.Text
+		case strings.TrimSpace(b.HTML) != "":
+			raw = b.HTML
+		}
 	}
-	return m.Snippet
+	return htmlToText(raw)
+}
+
+// htmlToText strips any HTML tags and decodes entities, yielding readable plain
+// text. Safe on input that is already plain text.
+func htmlToText(s string) string {
+	stripped := bluemonday.StrictPolicy().Sanitize(s)
+	text := html.UnescapeString(stripped)
+	// Collapse the runs of blank lines that tag removal tends to leave behind.
+	for strings.Contains(text, "\n\n\n") {
+		text = strings.ReplaceAll(text, "\n\n\n", "\n\n")
+	}
+	return strings.TrimSpace(text)
 }
 
 func (w *window) threadContextFor(m model.Message) string {
