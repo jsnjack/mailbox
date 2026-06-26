@@ -75,6 +75,8 @@ type window struct {
 	emptyPage      *adw.StatusPage // the "empty" placeholder (text set per context)
 	readerStack    *gtk.Stack      // "message" vs "empty" placeholder
 	markReadBtn    *gtk.Button
+	unreadToggle   *gtk.ToggleButton // "show unread only" filter for the current view
+	unreadOnly     bool
 	readOnlyBanner *adw.Banner // revealed when no Gmail client (live features off)
 	outboxBanner   *adw.Banner // revealed when sends are queued/failed
 	searchEntry    *gtk.SearchEntry
@@ -664,6 +666,16 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 	content.Append(w.threadStack)
 
 	hb := adw.NewHeaderBar()
+
+	w.unreadToggle = gtk.NewToggleButton()
+	w.unreadToggle.SetIconName("mail-unread-symbolic")
+	w.unreadToggle.SetTooltipText("Show unread only")
+	w.unreadToggle.ConnectToggled(func() {
+		w.unreadOnly = w.unreadToggle.Active()
+		w.refreshList(w.searchEntry.Text())
+	})
+	hb.PackStart(w.unreadToggle)
+
 	w.markReadBtn = gtk.NewButtonFromIconName("mail-read-symbolic")
 	w.markReadBtn.SetTooltipText("Mark all as read")
 	w.markReadBtn.SetSensitive(w.deps.MarkAllRead != nil)
@@ -778,6 +790,17 @@ func (w *window) reselectOpenThread() {
 
 // showThreads replaces the thread list contents.
 func (w *window) showThreads(sums []model.ThreadSummary) {
+	// The "unread only" toggle filters whatever the current view produced.
+	if w.unreadOnly {
+		var filtered []model.ThreadSummary
+		for _, s := range sums {
+			if s.UnreadCount > 0 {
+				filtered = append(filtered, s)
+			}
+		}
+		sums = filtered
+	}
+
 	w.threadByID = make(map[string]model.ThreadSummary, len(sums))
 	ids := make([]string, len(sums))
 	for i, s := range sums {
@@ -786,11 +809,17 @@ func (w *window) showThreads(sums []model.ThreadSummary) {
 	}
 	w.threadModel.Splice(0, w.threadModel.NItems(), ids)
 	if len(sums) == 0 {
-		if q := strings.TrimSpace(w.searchEntry.Text()); q != "" {
+		switch {
+		case strings.TrimSpace(w.searchEntry.Text()) != "":
+			q := strings.TrimSpace(w.searchEntry.Text())
 			w.emptyPage.SetIconName("edit-find-symbolic")
 			w.emptyPage.SetTitle("No matches")
 			w.emptyPage.SetDescription(fmt.Sprintf("No cached messages match %q.", q))
-		} else {
+		case w.unreadOnly:
+			w.emptyPage.SetIconName("mail-read-symbolic")
+			w.emptyPage.SetTitle("No unread messages")
+			w.emptyPage.SetDescription("You're all caught up in this view.")
+		default:
 			w.emptyPage.SetIconName("mail-unread-symbolic")
 			w.emptyPage.SetTitle("No messages")
 			w.emptyPage.SetDescription("This folder has no messages in the local cache.")
