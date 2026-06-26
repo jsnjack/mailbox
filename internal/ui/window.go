@@ -1405,8 +1405,10 @@ func (w *window) onTranslate() {
 	render := func(htmlBody string, final bool) {
 		safe := w.sanitizer.Sanitize(stripCodeFence(htmlBody))
 		dispatch.Main(func() {
-			if w.openThreadID != threadID {
-				return // user switched conversations while translating
+			// Skip if the user switched conversations or reverted to the original
+			// (which cancels ctx) while this render was queued.
+			if w.openThreadID != threadID || ctx.Err() != nil {
+				return
 			}
 			if final {
 				w.translationBanner.SetTitle("Showing translation")
@@ -1420,7 +1422,7 @@ func (w *window) onTranslate() {
 		if err != nil {
 			msg := err.Error()
 			dispatch.Main(func() {
-				if w.openThreadID == threadID {
+				if w.openThreadID == threadID && ctx.Err() == nil {
 					w.webview.LoadHtml(wrapHTML("<p>Translation failed: "+html.EscapeString(msg)+"</p>"), "about:blank")
 				}
 			})
