@@ -57,6 +57,16 @@ func TestSummarizeThread(t *testing.T) {
 	}
 }
 
+func TestPing(t *testing.T) {
+	if err := NewAssistant(&fakeProvider{chunks: []Chunk{{Text: "OK"}}}).Ping(context.Background()); err != nil {
+		t.Fatalf("Ping ok: %v", err)
+	}
+	wantErr := &fakeProvider{chunks: []Chunk{{Err: context.DeadlineExceeded}}}
+	if err := NewAssistant(wantErr).Ping(context.Background()); err == nil {
+		t.Fatal("Ping should surface a stream error")
+	}
+}
+
 func TestDraftNew(t *testing.T) {
 	fp := &fakeProvider{chunks: []Chunk{{Text: "Hello,\n"}, {Text: "Let's meet Tuesday."}}}
 	a := NewAssistant(fp)

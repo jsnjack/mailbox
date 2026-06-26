@@ -1,13 +1,16 @@
 package ui
 
 import (
+	"context"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/diamondburned/gotk4-adwaita/pkg/adw"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 
 	"github.com/jsnjack/mailbox/internal/config"
+	"github.com/jsnjack/mailbox/internal/dispatch"
 )
 
 // shortcutList is the single source of truth for the keyboard shortcuts, shown
@@ -56,6 +59,39 @@ func (w *window) openSettings() {
 	group.Add(providerRow)
 	group.Add(endpointRow)
 	group.Add(modelRow)
+
+	// A "Test connection" button validates the entered settings with a tiny live
+	// request; the result shows on the button itself (success/error styling, full
+	// error in the tooltip).
+	if w.deps.TestAISettings != nil {
+		testBtn := gtk.NewButtonWithLabel("Test connection")
+		testBtn.SetVAlign(gtk.AlignCenter)
+		testBtn.ConnectClicked(func() {
+			provider, endpoint, model := providerRow.Text(), endpointRow.Text(), modelRow.Text()
+			testBtn.SetSensitive(false)
+			testBtn.SetLabel("Testing…")
+			testBtn.RemoveCSSClass("success")
+			testBtn.RemoveCSSClass("error")
+			testBtn.SetTooltipText("")
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+				defer cancel()
+				err := w.deps.TestAISettings(ctx, provider, endpoint, model)
+				dispatch.Main(func() {
+					testBtn.SetSensitive(true)
+					if err != nil {
+						testBtn.SetLabel("Test failed")
+						testBtn.AddCSSClass("error")
+						testBtn.SetTooltipText(err.Error())
+					} else {
+						testBtn.SetLabel("Connected ✓")
+						testBtn.AddCSSClass("success")
+					}
+				})
+			}()
+		})
+		group.SetHeaderSuffix(testBtn)
+	}
 
 	// One naming field per connected account ("Home", "Work", …).
 	nameRows := map[string]*adw.EntryRow{}

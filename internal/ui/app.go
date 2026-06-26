@@ -81,6 +81,9 @@ type Deps struct {
 	// endpoint, model). Always wired, independent of whether an account exists.
 	AISettings     func() (provider, endpoint, model string)
 	SaveAISettings func(provider, endpoint, model string) error
+	// TestAISettings validates the given AI settings (plus the stored key) with a
+	// tiny live request; nil result means the connection works.
+	TestAISettings func(ctx context.Context, provider, endpoint, model string) error
 }
 
 // Run launches the GTK application and blocks until the window is closed.

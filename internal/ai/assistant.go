@@ -62,6 +62,21 @@ func parseTranslatedSegments(raw string) ([]string, error) {
 	return out, nil
 }
 
+// Ping issues a tiny request to verify the provider, endpoint, and key actually
+// work. It returns the first error from the stream, or nil on success.
+func (a *Assistant) Ping(ctx context.Context) error {
+	ch, err := a.p.Stream(ctx, "Reply with the single word OK.", []Msg{{Role: RoleUser, Content: "ping"}})
+	if err != nil {
+		return err
+	}
+	for c := range ch {
+		if c.Err != nil {
+			return c.Err
+		}
+	}
+	return nil
+}
+
 // SummarizeThread streams a short bullet-point summary of an email thread, for
 // someone catching up quickly. threadContext is the thread rendered as plain
 // text (oldest message first). The reply is plain text — a few "- " bullets.

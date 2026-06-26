@@ -70,6 +70,21 @@ func launchUI() error {
 		deps.SaveAISettings = func(provider, endpoint, model string) error {
 			return ai.SaveConfig(cfgPath, ai.Config{Provider: provider, Endpoint: endpoint, Model: model})
 		}
+		deps.TestAISettings = func(ctx context.Context, provider, endpoint, model string) error {
+			cfg := ai.Config{Provider: provider, Endpoint: endpoint, Model: model}
+			if !cfg.Configured() {
+				return fmt.Errorf("provider, endpoint, and model are required")
+			}
+			key := os.Getenv("MAILBOX_AI_KEY")
+			if key == "" {
+				key, _ = keyring.Get(aiKeyringService, provider)
+			}
+			p, err := ai.NewProvider(cfg, key)
+			if err != nil {
+				return err
+			}
+			return ai.NewAssistant(p).Ping(ctx)
+		}
 	}
 
 	// Build a Gmail client per account (those without a usable token are
