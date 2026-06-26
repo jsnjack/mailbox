@@ -30,9 +30,10 @@ type AccountInfo struct {
 // BodyFetcher lazily downloads and caches a message body when it is opened.
 type BodyFetcher func(ctx context.Context, accountID int64, gmailID string) error
 
-// LabelModifier applies a label delta to a message (optimistic local update plus
-// the mirrored Gmail call).
-type LabelModifier func(ctx context.Context, accountID int64, gmailID string, add, remove []string) error
+// LabelModifier applies a label delta to many messages at once (optimistic local
+// update plus a single mirrored Gmail BatchModify) — so acting on a whole
+// conversation is one round-trip, not one per message.
+type LabelModifier func(ctx context.Context, accountID int64, gmailIDs []string, add, remove []string) error
 
 // Sender transmits an outgoing message from the given account.
 type Sender func(ctx context.Context, accountID int64, msg model.OutgoingMessage) error
@@ -60,7 +61,7 @@ type Deps struct {
 	Hub           *syncer.Hub
 	Accounts      []AccountInfo
 	FetchBody     BodyFetcher
-	ModifyLabels  LabelModifier
+	ModifyLabels  LabelModifier // batch: applies to a slice of message ids
 	Send          Sender
 	SaveDraft     Sender
 	OpenAttach    AttachmentOpener

@@ -103,12 +103,12 @@ func launchUI() error {
 			}
 			return engine.FetchBody(ctx, c, accountID, gmailID)
 		}
-		deps.ModifyLabels = func(ctx context.Context, accountID int64, gmailID string, add, remove []string) error {
+		deps.ModifyLabels = func(ctx context.Context, accountID int64, gmailIDs []string, add, remove []string) error {
 			c, err := clientFor(accountID)
 			if err != nil {
 				return err
 			}
-			return engine.ModifyLabels(ctx, c, accountID, gmailID, add, remove)
+			return engine.ModifyLabelsBatch(ctx, c, accountID, gmailIDs, add, remove)
 		}
 		deps.Send = func(ctx context.Context, accountID int64, msg model.OutgoingMessage) error {
 			c, err := clientFor(accountID)

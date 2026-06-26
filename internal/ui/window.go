@@ -582,6 +582,9 @@ func (w *window) onSearchChanged() {
 // refreshList populates the thread list from either the current label (blank
 // query) or a full-text search (whose message hits are grouped into threads).
 func (w *window) refreshList(query string) {
+	defer func(start time.Time) {
+		slog.Debug("ui: refreshList", "label", w.current, "search", query != "", "dur", time.Since(start))
+	}(time.Now())
 	ctx := context.Background()
 	if strings.TrimSpace(query) == "" {
 		sums, err := w.threadsForCurrent(ctx)
@@ -944,6 +947,7 @@ func (w *window) onForward() {
 // the account actually has), then the user's own labels under a heading. Raw
 // Gmail system labels that aren't folders are omitted.
 func (w *window) loadLabels() {
+	defer func(start time.Time) { slog.Debug("ui: loadLabels", "dur", time.Since(start)) }(time.Now())
 	ctx := context.Background()
 	labels, err := w.deps.Store.ListLabels(ctx, w.activeID)
 	if err != nil {
@@ -1089,20 +1093,19 @@ func (w *window) showThread(threadID string) {
 
 	w.renderConversation(msgs)
 
-	// Mark unread messages in the thread read.
+	// Mark unread messages in the thread read — in one batch call.
 	if w.deps.ModifyLabels != nil {
-		var unread []model.Message
+		var ids []string
 		for _, m := range msgs {
 			if m.IsUnread {
-				unread = append(unread, m)
+				ids = append(ids, m.GmailID)
 			}
 		}
-		if len(unread) > 0 {
+		if len(ids) > 0 {
+			acctID := w.activeID
 			go func() {
-				for _, m := range unread {
-					if err := w.deps.ModifyLabels(context.Background(), m.AccountID, m.GmailID, nil, []string{model.LabelUnread}); err != nil {
-						slog.Warn("ui: mark read", "id", m.GmailID, "err", err)
-					}
+				if err := w.deps.ModifyLabels(context.Background(), acctID, ids, nil, []string{model.LabelUnread}); err != nil {
+					slog.Warn("ui: mark read", "n", len(ids), "err", err)
 				}
 				dispatch.Main(w.loadLabels)
 			}()
@@ -1120,9 +1123,11 @@ func (w *window) renderConversation(msgs []model.Message) {
 
 	threadID := w.openThreadID // guard against a newer thread being opened mid-render
 	go func() {
+		start := time.Now()
 		ctx := context.Background()
 		// Fetch missing bodies concurrently (bounded); the Gmail client also caps
 		// in-flight requests and quota use.
+		fetched := 0
 		if w.deps.FetchBody != nil {
 			sem := make(chan struct{}, 6)
 			var wg sync.WaitGroup
@@ -1130,6 +1135,7 @@ func (w *window) renderConversation(msgs []model.Message) {
 				if m.BodyFetched {
 					continue
 				}
+				fetched++
 				wg.Add(1)
 				sem <- struct{}{}
 				go func(m model.Message) {
@@ -1142,12 +1148,16 @@ func (w *window) renderConversation(msgs []model.Message) {
 			}
 			wg.Wait()
 		}
+		fetchDur := time.Since(start)
+		sanitizeStart := time.Now()
 		var b strings.Builder
 		for _, m := range msgs {
 			body, _ := w.deps.Store.GetBody(ctx, m.RowID)
 			b.WriteString(conversationSection(m, body, w.sanitizer.Sanitize))
 		}
 		out := b.String()
+		slog.Debug("ui: renderConversation", "msgs", len(msgs), "fetched", fetched,
+			"fetch", fetchDur, "sanitize", time.Since(sanitizeStart))
 		dispatch.Main(func() {
 			if w.openThreadID != threadID {
 				return // user switched to another conversation while this rendered
@@ -1491,25 +1501,33 @@ func (w *window) threadContextFor(m model.Message) string {
 	return fmt.Sprintf("From: %s\nSubject: %s\n\n%s", displayFrom(m), m.Subject, w.bodyTextFor(m))
 }
 
-// applyLabels applies a label change to the given messages in the background,
-// then refreshes the label counts and the current list (preserving any search).
-// If after is non-nil it runs on the main thread once the list has refreshed.
+// applyLabels applies a label change to the given messages in one batch (one
+// Gmail round-trip, one UI refresh), then refreshes the label counts and the
+// current list (preserving any search). If after is non-nil it runs on the main
+// thread once the list has refreshed.
 func (w *window) applyLabels(msgs []model.Message, add, remove []string, after func()) {
 	if w.deps.ModifyLabels == nil || len(msgs) == 0 {
 		return
 	}
+	accountID := msgs[0].AccountID
+	ids := make([]string, len(msgs))
+	for i, m := range msgs {
+		ids[i] = m.GmailID
+	}
 	go func() {
-		for _, m := range msgs {
-			if err := w.deps.ModifyLabels(context.Background(), m.AccountID, m.GmailID, add, remove); err != nil {
-				slog.Warn("ui: apply labels", "id", m.GmailID, "err", err)
-			}
+		start := time.Now()
+		if err := w.deps.ModifyLabels(context.Background(), accountID, ids, add, remove); err != nil {
+			slog.Warn("ui: apply labels", "n", len(ids), "err", err)
 		}
+		slog.Debug("ui: applyLabels", "n", len(ids), "dur", time.Since(start))
 		dispatch.Main(func() {
+			t := time.Now()
 			w.loadLabels()
 			w.refreshList(w.searchEntry.Text())
 			if after != nil {
 				after()
 			}
+			slog.Debug("ui: applyLabels refresh", "dur", time.Since(t))
 		})
 	}()
 }

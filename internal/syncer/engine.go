@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/jsnjack/mailbox/internal/config"
 	"github.com/jsnjack/mailbox/internal/gmailapi"
@@ -113,14 +114,20 @@ feed:
 
 // FetchBody downloads a message's full body and caches it, marking it fetched.
 func (e *Engine) FetchBody(ctx context.Context, c *gmailapi.Client, accountID int64, gmailID string) error {
+	start := time.Now()
 	m, err := e.Store.GetMessage(ctx, accountID, gmailID)
 	if err != nil {
 		return err
 	}
+	netStart := time.Now()
 	full, err := c.GetMessageFull(ctx, gmailID)
 	if err != nil {
 		return err
 	}
+	netDur := time.Since(netStart)
+	defer func() {
+		slog.Default().Debug("engine: FetchBody", "id", gmailID, "network", netDur, "total", time.Since(start))
+	}()
 	body := gmailapi.ToBody(full)
 	body.MessageRowID = m.RowID
 	if err := e.Store.UpsertBody(ctx, body); err != nil {
@@ -253,25 +260,45 @@ func (e *Engine) SweepOutbox(ctx context.Context, c *gmailapi.Client, accountID 
 	return sent, nil
 }
 
-// ModifyLabels applies a label change locally first (instant, optimistic) and
-// then mirrors it to Gmail. On the next incremental sync the server state
-// reconciles any divergence if the API call failed.
-func (e *Engine) ModifyLabels(ctx context.Context, c *gmailapi.Client, accountID int64, gmailID string, add, remove []string) error {
-	if err := e.Store.ModifyLabels(ctx, accountID, gmailID, add, remove); err != nil {
-		return err
+// ModifyLabelsBatch applies the same label change to many messages: it updates
+// every message locally first (instant, optimistic), publishes a single change,
+// then mirrors the change to Gmail in one BatchModify call. This keeps archiving
+// or marking a whole conversation to O(1) network round-trips and one UI refresh
+// instead of one per message. Next incremental sync reconciles any divergence.
+func (e *Engine) ModifyLabelsBatch(ctx context.Context, c *gmailapi.Client, accountID int64, gmailIDs []string, add, remove []string) error {
+	if len(gmailIDs) == 0 {
+		return nil
 	}
-	e.publish(Change{Kind: MessageUpserted, AccountID: accountID, GmailID: gmailID})
-	if c != nil {
-		if err := c.ModifyLabels(ctx, gmailID, add, remove); err != nil {
-			return fmt.Errorf("modify labels on server: %w", err)
+	start := time.Now()
+	for _, id := range gmailIDs {
+		if err := e.Store.ModifyLabels(ctx, accountID, id, add, remove); err != nil {
+			return fmt.Errorf("modify labels (local): %w", err)
 		}
 	}
+	localDur := time.Since(start)
+	// One coarse event (no GmailID) so the UI refreshes once, not per message.
+	e.publish(Change{Kind: MessageUpserted, AccountID: accountID})
+
+	var netDur time.Duration
+	if c != nil {
+		netStart := time.Now()
+		if err := c.BatchModify(ctx, gmailIDs, add, remove); err != nil {
+			return fmt.Errorf("modify labels on server: %w", err)
+		}
+		netDur = time.Since(netStart)
+	}
+	slog.Default().Debug("engine: ModifyLabelsBatch",
+		"n", len(gmailIDs), "add", add, "remove", remove,
+		"local", localDur, "network", netDur, "total", time.Since(start))
 	return nil
 }
 
 // MarkLabelRead marks every unread message in a label as read: optimistically
 // in the store, then mirrored to Gmail with a single batch call.
 func (e *Engine) MarkLabelRead(ctx context.Context, c *gmailapi.Client, accountID int64, labelID string) error {
+	defer func(start time.Time) {
+		slog.Default().Debug("engine: MarkLabelRead", "label", labelID, "dur", time.Since(start))
+	}(time.Now())
 	ids, err := e.Store.UnreadIDsByLabel(ctx, accountID, labelID)
 	if err != nil {
 		return fmt.Errorf("mark label read: %w", err)
@@ -295,6 +322,9 @@ func (e *Engine) MarkLabelRead(ctx context.Context, c *gmailapi.Client, accountI
 // additions and label changes are re-fetched and upserted, deletions removed.
 // It returns ErrHistoryExpired if the watermark is too old to use.
 func (e *Engine) Incremental(ctx context.Context, c *gmailapi.Client, accountID int64) (int, error) {
+	defer func(start time.Time) {
+		slog.Default().Debug("engine: Incremental", "account", accountID, "dur", time.Since(start))
+	}(time.Now())
 	acc, err := e.Store.GetAccountByID(ctx, accountID)
 	if err != nil {
 		return 0, err
