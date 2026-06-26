@@ -14,6 +14,7 @@ import (
 	"github.com/diamondburned/gotk4/pkg/gio/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 	"github.com/jsnjack/mailbox/internal/ai"
+	"github.com/jsnjack/mailbox/internal/config"
 	"github.com/jsnjack/mailbox/internal/dispatch"
 	"github.com/jsnjack/mailbox/internal/model"
 )
@@ -157,7 +158,21 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 
 	win := adw.NewWindow()
 	win.SetTitle(title)
-	win.SetDefaultSize(640, 560)
+	cw, ch := 640, 560
+	if vs, err := config.LoadViewState(); err == nil && vs.ComposeWidth >= 400 && vs.ComposeHeight >= 300 {
+		cw, ch = vs.ComposeWidth, vs.ComposeHeight
+	}
+	win.SetDefaultSize(cw, ch)
+	saveComposeSize := func() {
+		if win.IsMaximized() {
+			return
+		}
+		vs, _ := config.LoadViewState()
+		vs.ComposeWidth, vs.ComposeHeight = win.Width(), win.Height()
+		if err := config.SaveViewState(vs); err != nil {
+			slog.Warn("ui: save compose size", "err", err)
+		}
+	}
 	win.SetContent(tv)
 
 	aiCtx, cancelAI := context.WithCancel(context.Background())
@@ -196,6 +211,7 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 	win.ConnectCloseRequest(func() bool {
 		if sent || !dirty() {
 			cancelAI()
+			saveComposeSize()
 			return false // allow the close
 		}
 		confirm := adw.NewAlertDialog("Discard message?", "This message has not been sent.")

@@ -1352,7 +1352,10 @@ func (w *window) selectLabel(labelID string) {
 // saveViewState persists the current folder and unread filter so the next
 // launch reopens here.
 func (w *window) saveViewState() {
-	if err := config.SaveViewState(config.ViewState{Folder: w.current, UnreadOnly: w.unreadOnly, Zoom: w.readerZoom}); err != nil {
+	// Load-modify-save so we preserve fields written elsewhere (compose size).
+	vs, _ := config.LoadViewState()
+	vs.Folder, vs.UnreadOnly, vs.Zoom = w.current, w.unreadOnly, w.readerZoom
+	if err := config.SaveViewState(vs); err != nil {
 		slog.Warn("ui: save view state", "err", err)
 	}
 }
