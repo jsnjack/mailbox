@@ -1902,6 +1902,47 @@ func (w *window) onNotSpam() {
 	w.removeFromList("Marked not spam", []string{model.LabelInbox}, []string{model.LabelSpam})
 }
 
+// onDeleteForever permanently deletes the open conversation (Trash/Spam only),
+// after a confirmation, since it cannot be undone.
+func (w *window) onDeleteForever() {
+	if w.deps.DeleteForever == nil || len(w.openThreadMsgs) == 0 {
+		return
+	}
+	msgs := w.openThreadMsgs
+	pos := w.threadSel.Selected()
+	confirm := adw.NewAlertDialog("Delete forever?", "This permanently deletes the conversation. This can't be undone.")
+	confirm.AddResponse("cancel", "Cancel")
+	confirm.AddResponse("delete", "Delete forever")
+	confirm.SetResponseAppearance("delete", adw.ResponseDestructive)
+	confirm.SetDefaultResponse("cancel")
+	confirm.SetCloseResponse("cancel")
+	confirm.ConnectResponse(func(response string) {
+		if response != "delete" {
+			return
+		}
+		ids := make([]string, len(msgs))
+		for i, m := range msgs {
+			ids[i] = m.GmailID
+		}
+		acctID := w.activeID
+		go func() {
+			err := w.deps.DeleteForever(context.Background(), acctID, ids)
+			dispatch.Main(func() {
+				if err != nil {
+					slog.Warn("ui: delete forever", "err", err)
+					w.toast("Couldn't delete the conversation")
+					return
+				}
+				w.loadLabels()
+				w.refreshList(w.searchEntry.Text())
+				w.advanceSelection(pos)
+				w.toast("Deleted forever")
+			})
+		}()
+	})
+	confirm.Present(w.win)
+}
+
 func (w *window) onMarkUnread() {
 	if w.openMsg.GmailID != "" {
 		w.applyLabels([]model.Message{w.openMsg}, []string{model.LabelUnread}, nil, nil)
@@ -1980,6 +2021,9 @@ func (w *window) buildReaderMenu() gtk.Widgetter {
 			box.Append(w.readerMenuItem("Report spam", w.onReportSpam))
 		}
 		box.Append(w.readerMenuItem("Move to Trash", w.onTrash))
+		if w.deps.DeleteForever != nil && (w.current == model.LabelTrash || w.current == model.LabelSpam) {
+			box.Append(w.readerMenuItem("Delete forever", w.onDeleteForever))
+		}
 		box.Append(gtk.NewSeparator(gtk.OrientationHorizontal))
 	}
 

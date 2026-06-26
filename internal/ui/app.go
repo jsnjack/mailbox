@@ -61,6 +61,9 @@ type OutboxSweeper func(ctx context.Context, accountID int64) error
 // OutboxAction acts on a single outbox item (retry or discard) by id.
 type OutboxAction func(ctx context.Context, accountID, id int64) error
 
+// PermanentDeleter permanently deletes messages (bypassing Trash).
+type PermanentDeleter func(ctx context.Context, accountID int64, gmailIDs []string) error
+
 // Deps are the dependencies the UI needs. FetchBody, ModifyLabels and Hub may be
 // nil (the UI then renders the cache read-only without live updates, on-demand
 // bodies, or message actions).
@@ -80,6 +83,7 @@ type Deps struct {
 	SweepOutbox   OutboxSweeper
 	RetryOutbox   OutboxAction
 	DiscardOutbox OutboxAction
+	DeleteForever PermanentDeleter
 	Assistant     *ai.Assistant
 
 	// AISettings/SaveAISettings read and persist the [ai] config (provider,

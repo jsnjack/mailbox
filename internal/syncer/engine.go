@@ -143,6 +143,24 @@ func (e *Engine) SearchServer(ctx context.Context, c *gmailapi.Client, accountID
 	return ids, nil
 }
 
+// DeletePermanently removes messages for good (server batchDelete + local
+// delete). Used for "Delete forever" from Trash/Spam; cannot be undone.
+func (e *Engine) DeletePermanently(ctx context.Context, c *gmailapi.Client, accountID int64, gmailIDs []string) error {
+	if len(gmailIDs) == 0 {
+		return nil
+	}
+	if err := c.BatchDelete(ctx, gmailIDs); err != nil {
+		return fmt.Errorf("delete permanently: %w", err)
+	}
+	for _, id := range gmailIDs {
+		if err := e.Store.DeleteMessage(ctx, accountID, id); err != nil {
+			slog.Default().Warn("delete permanently: local", "id", id, "err", err)
+		}
+	}
+	e.publish(Change{Kind: MessageDeleted, AccountID: accountID})
+	return nil
+}
+
 // FetchBody downloads a message's full body and caches it, marking it fetched.
 func (e *Engine) FetchBody(ctx context.Context, c *gmailapi.Client, accountID int64, gmailID string) error {
 	start := time.Now()

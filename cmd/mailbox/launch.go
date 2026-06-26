@@ -195,6 +195,13 @@ func launchUI() error {
 		deps.DiscardOutbox = func(ctx context.Context, accountID, id int64) error {
 			return engine.DiscardOutbox(ctx, accountID, id)
 		}
+		deps.DeleteForever = func(ctx context.Context, accountID int64, gmailIDs []string) error {
+			c, err := clientFor(accountID)
+			if err != nil {
+				return err
+			}
+			return engine.DeletePermanently(ctx, c, accountID, gmailIDs)
+		}
 	}
 
 	if asst, err := buildAssistant(); err != nil {
