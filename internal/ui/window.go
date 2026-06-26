@@ -93,6 +93,8 @@ type window struct {
 	serverSearch      bool   // current search is a Gmail server-side search, not local FTS
 	serverQuery       string // the active server-search query (guards the debounced change signal)
 	threadByID        map[string]model.ThreadSummary
+	threadIDs         []string          // displayed thread ids, in order (for incremental diffing)
+	rowSig            map[string]string // last-rendered signature per row, to detect in-place changes
 
 	// coalesce refreshes triggered by bursts of sync change events.
 	refreshPending     bool
@@ -680,6 +682,7 @@ func (w *window) rebuildAccountSwitcher() {
 
 func (w *window) buildThreadList() *adw.NavigationPage {
 	w.threadByID = make(map[string]model.ThreadSummary)
+	w.rowSig = make(map[string]string)
 	w.threadModel = gtk.NewStringList(nil)
 	w.threadSel = gtk.NewSingleSelection(w.threadModel)
 	w.threadSel.SetAutoselect(false)
@@ -700,6 +703,9 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 		}
 		id := so.String()
 		outgoing := w.current == model.LabelSent || w.current == model.LabelDraft
+		// Keep the signature cache in step with what is actually on screen, so a
+		// scroll-recycled row never looks "unchanged" to the next diff.
+		w.rowSig[id] = w.renderSig(id)
 		row := threadRow(w.threadByID[id], outgoing, w.categories[id])
 		if !w.selectMode {
 			li.SetChild(row)
@@ -1013,18 +1019,16 @@ func (w *window) onSearchChanged() {
 // query) or a full-text search (whose message hits are grouped into threads).
 // The query runs off the main thread so typing in the search box and the 60s
 // background sync never stall the UI.
-func (w *window) refreshList(query string) { w.loadThreadsFor(query, false) }
+func (w *window) refreshList(query string) { w.loadThreadsFor(query) }
 
 // loadThreadsFor decides what to list — current folder (blank query) or a
-// search — and runs it asynchronously. reselect restores the open conversation's
-// selection afterwards (used by live refreshes so a sync doesn't disturb the
-// reader).
-func (w *window) loadThreadsFor(query string, reselect bool) {
+// search — and runs it asynchronously.
+func (w *window) loadThreadsFor(query string) {
 	trimmed := strings.TrimSpace(query)
 	if trimmed == "" {
 		w.serverSearch, w.serverQuery = false, "" // no query → not server-searching
 		label, acct := w.current, w.activeID
-		w.loadThreads(reselect, func(ctx context.Context) ([]model.ThreadSummary, error) {
+		w.loadThreads(func(ctx context.Context) ([]model.ThreadSummary, error) {
 			if label == allMailID {
 				return w.deps.Store.ListAllThreads(ctx, acct, threadListCap, 0)
 			}
@@ -1041,7 +1045,7 @@ func (w *window) loadThreadsFor(query string, reselect bool) {
 	}
 
 	acct := w.activeID
-	w.loadThreads(reselect, func(ctx context.Context) ([]model.ThreadSummary, error) {
+	w.loadThreads(func(ctx context.Context) ([]model.ThreadSummary, error) {
 		return w.searchThreads(ctx, acct, query)
 	})
 }
@@ -1049,7 +1053,7 @@ func (w *window) loadThreadsFor(query string, reselect bool) {
 // loadThreads runs query off the main thread and renders the result, discarding
 // it when a newer refresh has since been issued (last request wins) so a slow
 // query can't overwrite fresher results.
-func (w *window) loadThreads(reselect bool, query func(context.Context) ([]model.ThreadSummary, error)) {
+func (w *window) loadThreads(query func(context.Context) ([]model.ThreadSummary, error)) {
 	w.refreshGen++
 	gen := w.refreshGen
 	go func() {
@@ -1065,9 +1069,6 @@ func (w *window) loadThreads(reselect bool, query func(context.Context) ([]model
 				return
 			}
 			w.showThreads(sums)
-			if reselect {
-				w.reselectOpenThread()
-			}
 		})
 	}()
 }
@@ -1109,7 +1110,7 @@ func uniqueThreadIDs(msgs []model.Message) []string {
 // (new mail, label edits) while keeping the open conversation selected, so the
 // reader is not disturbed.
 func (w *window) liveRefreshList() {
-	w.loadThreadsFor(w.searchEntry.Text(), true)
+	w.loadThreadsFor(w.searchEntry.Text())
 }
 
 // reselectOpenThread restores the list selection to the open conversation after
@@ -1128,7 +1129,11 @@ func (w *window) reselectOpenThread() {
 	}
 }
 
-// showThreads replaces the thread list contents.
+// showThreads updates the thread list to sums, applying the minimal set of
+// changes to the model so an unchanged refresh (the common 60s-sync case) does
+// no work at all and an in-place change (mark-read, a new category tag) re-binds
+// only the affected rows — preserving scroll position instead of rebuilding the
+// whole list on every event.
 func (w *window) showThreads(sums []model.ThreadSummary) {
 	// The "unread only" toggle filters whatever the current view produced.
 	if w.unreadOnly {
@@ -1141,13 +1146,18 @@ func (w *window) showThreads(sums []model.ThreadSummary) {
 		sums = filtered
 	}
 
-	w.threadByID = make(map[string]model.ThreadSummary, len(sums))
+	newByID := make(map[string]model.ThreadSummary, len(sums))
 	ids := make([]string, len(sums))
 	for i, s := range sums {
 		ids[i] = s.ThreadID
-		w.threadByID[s.ThreadID] = s
+		newByID[s.ThreadID] = s
 	}
-	w.threadModel.Splice(0, w.threadModel.NItems(), ids)
+	// Publish the new data before touching the model so any (re)bind reads it.
+	oldIDs := w.threadIDs
+	w.threadByID = newByID
+	w.diffThreadModel(oldIDs, ids)
+	w.threadIDs = ids
+
 	if len(sums) == 0 {
 		w.emptyPage.SetChild(nil)
 		switch {
@@ -1182,11 +1192,76 @@ func (w *window) showThreads(sums []model.ThreadSummary) {
 	} else {
 		w.threadStack.SetVisibleChildName("list")
 	}
+	// Restore the open conversation's selection after any in-place splice (no-op
+	// when it isn't in the list, e.g. after a label switch). onThreadSelected
+	// short-circuits when the id is already open, so this never re-renders.
+	if !w.selectMode {
+		w.reselectOpenThread()
+	}
 	if fn := w.afterPopulate; fn != nil {
 		w.afterPopulate = nil
 		fn()
 	}
 	w.categorizeInbox()
+}
+
+// diffThreadModel mutates the StringList from oldIDs to newIDs with the fewest
+// changes: nothing when identical, a 1-for-1 re-splice of only the rows whose
+// rendered content changed when the order is unchanged, and a full replace when
+// the set/order differs. rowSig caches each row's last rendered signature so an
+// in-place content change (read/unread, star, count, category tag, snippet) is
+// detected without rebuilding the list.
+func (w *window) diffThreadModel(oldIDs, newIDs []string) {
+	sameOrder := len(oldIDs) == len(newIDs)
+	if sameOrder {
+		for i := range newIDs {
+			if oldIDs[i] != newIDs[i] {
+				sameOrder = false
+				break
+			}
+		}
+	}
+
+	if sameOrder {
+		for i, id := range newIDs {
+			sig := w.renderSig(id)
+			if w.rowSig[id] != sig {
+				w.rowSig[id] = sig
+				w.threadModel.Splice(uint(i), 1, []string{id}) // remove+add same id → re-bind row i
+			}
+		}
+		return
+	}
+
+	// Structural change: replace the whole model and rebuild the signature cache.
+	w.threadModel.Splice(0, w.threadModel.NItems(), newIDs)
+	w.rowSig = make(map[string]string, len(newIDs))
+	for _, id := range newIDs {
+		w.rowSig[id] = w.renderSig(id)
+	}
+}
+
+// renderSig captures everything threadRow renders for id (summary fields, AI
+// category, and the select-mode checkbox state), so a change in any of them
+// triggers a re-bind of just that row and nothing else does.
+func (w *window) renderSig(id string) string {
+	t := w.threadByID[id]
+	m := t.Latest
+	who := m.FromName + "\x1f" + m.FromAddr
+	if w.current == model.LabelSent || w.current == model.LabelDraft {
+		who = "to:" + m.ToAddrs
+	}
+	sel := "" // not in selection mode
+	if w.selectMode {
+		if w.selected[id] {
+			sel = "S"
+		} else {
+			sel = "s"
+		}
+	}
+	return fmt.Sprintf("%s\x1f%d\x1f%d\x1f%s\x1f%s\x1f%s\x1f%d\x1f%t\x1f%t\x1f%s",
+		sel, t.UnreadCount, t.Count, w.categories[id], who, m.Subject,
+		m.InternalDate.Unix(), m.HasAttachments, m.IsStarred, m.Snippet)
 }
 
 // maxCategorize bounds how many of the newest inbox threads are auto-categorized,

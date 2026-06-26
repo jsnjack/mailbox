@@ -132,8 +132,13 @@ the newest threads, gated by a Preferences toggle (`ai.Categorize` /
 `categorizeInbox`).
 The list is grouped by conversation: a virtualized `gtk.ListView` over a
 `gtk.StringList` of thread ids (looked up in a `threadByID` map of
-`model.ThreadSummary`); rows show the newest message + a count. `store`
-provides `ListThreadsByLabel`/`ListThreadMessages`/`GetThreadSummary`. Opening a
+`model.ThreadSummary`); rows show the newest message + a count. Refreshes are
+incremental (`diffThreadModel`): an unchanged list (the common idle-sync case)
+does no work, an in-place change (mark-read, star, a new AI category tag) re-
+binds only the affected rows via a per-row signature (`renderSig`), and only a
+changed set/order triggers a full splice — so the list keeps its scroll position
+instead of rebuilding on every event. `store`
+provides `ListThreadsByLabel`/`ListThreadMessages`/`GetThreadSummaries`. Opening a
 thread renders all its messages stacked in the reader (bodies fetched lazily,
 each a sanitized section); archive/trash apply to the whole thread, reply/star
 to its newest message. A search entry runs instant local FTS5 search
