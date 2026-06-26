@@ -2,6 +2,8 @@ package ui
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"html"
 	"log/slog"
@@ -322,7 +324,12 @@ func (w *window) present() {
 
 	// Test hooks (off by default).
 	if q := os.Getenv("MAILBOX_SEARCH"); q != "" {
-		w.searchEntry.SetText(q) // fires the search-changed handler
+		// Apply synchronously (the live handler is debounced) so a paired
+		// MAILBOX_OPEN_FIRST selects from the search results, not the inbox.
+		w.suppressSearch = true
+		w.searchEntry.SetText(q)
+		w.suppressSearch = false
+		w.refreshList(q)
 	}
 	if os.Getenv("MAILBOX_OPEN_FIRST") == "1" && w.threadModel.NItems() > 0 {
 		w.threadSel.SetSelected(0)
@@ -686,7 +693,12 @@ func (w *window) onThreadSelected() {
 func (w *window) buildReader() *adw.NavigationPage {
 	w.webview = webkit.NewWebView()
 	settings := w.webview.Settings()
-	settings.SetEnableJavascript(false)
+	// JavaScript is enabled only so the injected fit-to-width script can run.
+	// Defense in depth keeps it safe: bodies are sanitized (no email scripts
+	// survive), and wrapHTML sets a strict CSP — script-src is locked to our
+	// per-render nonce and default-src 'none' blocks all network (no fetch/XHR
+	// exfiltration, no iframes), so only our own script ever executes.
+	settings.SetEnableJavascript(true)
 	settings.SetAutoLoadImages(false)
 	w.webview.SetVExpand(true)
 	w.webview.SetHExpand(true)
@@ -1642,18 +1654,42 @@ func setMargins(w gtk.Widgetter, start, end, top, bottom int) {
 }
 
 func wrapHTML(inner string) string {
-	// The CSS makes email fit the reader's width instead of overflowing into a
-	// horizontal scrollbar: cap every element (and especially images and fixed-
-	// width tables) at 100% of the viewport, wrap long unbreakable strings, and
-	// clip any residual overflow as a final backstop.
+	// CSS keeps the common overflow culprits in check (images capped to the
+	// width, long URLs wrapped); the script then scales down anything still too
+	// wide — chiefly fixed-width newsletter tables that CSS cannot shrink below
+	// their min-content — so email fits the reader with neither a horizontal
+	// scrollbar nor cropping.
 	const style = `
-html{overflow-x:hidden;width:100%}
 body{font-family:sans-serif;margin:16px;color:#222;line-height:1.4;overflow-wrap:anywhere}
-*{max-width:100%!important}
-img,video{height:auto!important}
-table{table-layout:auto!important}
+img,video{max-width:100%!important;height:auto!important}
 pre{font-family:monospace;white-space:pre-wrap}`
+
+	// Scale wide content down to fit the reader. WebKitGTK ignores CSS `zoom`, so
+	// we wrap the body in a div and apply transform:scale (origin top-left).
+	// Because transform doesn't shrink the layout box, the wrapper is pinned to
+	// its natural width, the body height is collapsed to the scaled height (no
+	// trailing gap), and overflow-x is clipped. Measured before scaling so it
+	// never feeds back on itself; re-runs on load and resize.
+	nonce := randNonce()
+	script := `<script nonce="` + nonce + `">(function(){var wrap;function fit(){var b=document.body;if(!b||!wrap)return;` +
+		`wrap.style.transform='none';wrap.style.width='auto';var avail=b.clientWidth,natural=wrap.scrollWidth;` +
+		`if(natural>avail+1&&natural>0){var s=avail/natural;wrap.style.width=natural+'px';wrap.style.transformOrigin='top left';wrap.style.transform='scale('+s+')';b.style.height=(wrap.offsetHeight*s)+'px';}else{b.style.height='';}}` +
+		`function setup(){var b=document.body;if(!b)return;wrap=document.createElement('div');while(b.firstChild){wrap.appendChild(b.firstChild);}b.appendChild(wrap);b.style.overflowX='hidden';fit();window.addEventListener('resize',fit);}` +
+		`if(document.readyState!=='loading'){setup();}else{document.addEventListener('DOMContentLoaded',setup);}window.addEventListener('load',fit);})();</script>`
+
+	csp := "default-src 'none'; img-src http: https: data: cid:; media-src http: https: data:; " +
+		"style-src 'unsafe-inline'; script-src 'nonce-" + nonce + "'; font-src http: https: data:"
+
 	return `<!doctype html><html><head><meta charset="utf-8">` +
-		`<meta name="viewport" content="width=device-width, initial-scale=1">` +
-		`<style>` + style + `</style></head><body>` + inner + `</body></html>`
+		`<meta http-equiv="Content-Security-Policy" content="` + csp + `">` +
+		`<style>` + style + `</style></head><body>` + inner + script + `</body></html>`
+}
+
+// randNonce returns a random CSP nonce so only our injected script may run.
+func randNonce() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "mailboxfit" // non-secret fallback; CSP still restricts to this value
+	}
+	return hex.EncodeToString(b[:])
 }
