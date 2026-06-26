@@ -64,6 +64,10 @@ type OutboxAction func(ctx context.Context, accountID, id int64) error
 // PermanentDeleter permanently deletes messages (bypassing Trash).
 type PermanentDeleter func(ctx context.Context, accountID int64, gmailIDs []string) error
 
+// FolderEmptier permanently deletes every message in a folder (Trash/Spam),
+// returning the count removed.
+type FolderEmptier func(ctx context.Context, accountID int64, labelID string) (int, error)
+
 // Deps are the dependencies the UI needs. FetchBody, ModifyLabels and Hub may be
 // nil (the UI then renders the cache read-only without live updates, on-demand
 // bodies, or message actions).
@@ -84,6 +88,7 @@ type Deps struct {
 	RetryOutbox   OutboxAction
 	DiscardOutbox OutboxAction
 	DeleteForever PermanentDeleter
+	EmptyFolder   FolderEmptier
 	Assistant     *ai.Assistant
 
 	// AISettings/SaveAISettings read and persist the [ai] config (provider,

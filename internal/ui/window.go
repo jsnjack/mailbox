@@ -79,16 +79,17 @@ type window struct {
 	unreadOnly   bool
 	// multi-select triage: a selection mode with per-row checkboxes and a bulk
 	// action bar.
-	selectBtn      *gtk.ToggleButton
-	selectMode     bool
-	selected       map[string]bool // selected thread ids
-	selectionBar   *gtk.Box
-	selectionLabel *gtk.Label
-	readOnlyBanner *adw.Banner // revealed when no Gmail client (live features off)
-	outboxBanner   *adw.Banner // revealed when sends are queued/failed
-	searchEntry    *gtk.SearchEntry
-	suppressSearch bool // guards SetText from firing a search during label switch
-	threadByID     map[string]model.ThreadSummary
+	selectBtn         *gtk.ToggleButton
+	selectMode        bool
+	selected          map[string]bool // selected thread ids
+	selectionBar      *gtk.Box
+	selectionLabel    *gtk.Label
+	readOnlyBanner    *adw.Banner // revealed when no Gmail client (live features off)
+	outboxBanner      *adw.Banner // revealed when sends are queued/failed
+	emptyFolderBanner *adw.Banner // revealed in Trash/Spam to empty them permanently
+	searchEntry       *gtk.SearchEntry
+	suppressSearch    bool // guards SetText from firing a search during label switch
+	threadByID        map[string]model.ThreadSummary
 
 	// coalesce refreshes triggered by bursts of sync change events.
 	refreshPending     bool
@@ -741,9 +742,15 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 
 	w.buildSelectionBar()
 
+	w.emptyFolderBanner = adw.NewBanner("")
+	w.emptyFolderBanner.SetButtonLabel("Empty now")
+	w.emptyFolderBanner.SetRevealed(false)
+	w.emptyFolderBanner.ConnectButtonClicked(w.onEmptyFolder)
+
 	content := gtk.NewBox(gtk.OrientationVertical, 0)
 	content.Append(w.readOnlyBanner)
 	content.Append(w.outboxBanner)
+	content.Append(w.emptyFolderBanner)
 	content.Append(w.searchEntry)
 	content.Append(w.selectionBar)
 	content.Append(w.threadStack)
@@ -1552,6 +1559,17 @@ func (w *window) selectLabel(labelID string) {
 	// "Mark all read" is meaningful per folder, but not for the All Mail view
 	// (it spans every label and Gmail offers no such bulk op there).
 	w.markReadBtn.SetSensitive(w.deps.MarkAllRead != nil && labelID != allMailID)
+	// The "empty folder" banner appears only in Trash/Spam.
+	if w.deps.EmptyFolder != nil && (labelID == model.LabelTrash || labelID == model.LabelSpam) {
+		name := "Trash"
+		if labelID == model.LabelSpam {
+			name = "Spam"
+		}
+		w.emptyFolderBanner.SetTitle(name + " — messages here can be permanently deleted")
+		w.emptyFolderBanner.SetRevealed(true)
+	} else {
+		w.emptyFolderBanner.SetRevealed(false)
+	}
 	// Switching label clears any active search without re-triggering it.
 	w.suppressSearch = true
 	w.searchEntry.SetText("")
@@ -1897,6 +1915,45 @@ func (w *window) onReportSpam() {
 // onNotSpam takes the open conversation out of Spam and back to the inbox.
 func (w *window) onNotSpam() {
 	w.removeFromList("Marked not spam", []string{model.LabelInbox}, []string{model.LabelSpam})
+}
+
+// onEmptyFolder permanently deletes every message in the current folder
+// (Trash/Spam) after a destructive confirmation.
+func (w *window) onEmptyFolder() {
+	label := w.current
+	if w.deps.EmptyFolder == nil || (label != model.LabelTrash && label != model.LabelSpam) {
+		return
+	}
+	name := "Trash"
+	if label == model.LabelSpam {
+		name = "Spam"
+	}
+	confirm := adw.NewAlertDialog("Empty "+name+"?", "This permanently deletes every message in "+name+". This can't be undone.")
+	confirm.AddResponse("cancel", "Cancel")
+	confirm.AddResponse("empty", "Empty "+name)
+	confirm.SetResponseAppearance("empty", adw.ResponseDestructive)
+	confirm.SetDefaultResponse("cancel")
+	confirm.SetCloseResponse("cancel")
+	acctID := w.activeID
+	confirm.ConnectResponse(func(response string) {
+		if response != "empty" {
+			return
+		}
+		go func() {
+			n, err := w.deps.EmptyFolder(context.Background(), acctID, label)
+			dispatch.Main(func() {
+				if err != nil {
+					slog.Warn("ui: empty folder", "label", label, "err", err)
+					w.toast("Couldn't empty " + name)
+					return
+				}
+				w.loadLabels()
+				w.refreshList(w.searchEntry.Text())
+				w.toast(fmt.Sprintf("Permanently deleted %d messages", n))
+			})
+		}()
+	})
+	confirm.Present(w.win)
 }
 
 // onDeleteForever permanently deletes the open conversation (Trash/Spam only),

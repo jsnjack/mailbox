@@ -161,6 +161,38 @@ func (e *Engine) DeletePermanently(ctx context.Context, c *gmailapi.Client, acco
 	return nil
 }
 
+// EmptyLabel permanently deletes every message in Trash or Spam (server-side
+// list + batchDelete + local delete), returning how many were removed. Used by
+// "Empty Trash/Spam"; cannot be undone.
+func (e *Engine) EmptyLabel(ctx context.Context, c *gmailapi.Client, accountID int64, labelID string) (int, error) {
+	var query string
+	switch labelID {
+	case model.LabelTrash:
+		query = "in:trash"
+	case model.LabelSpam:
+		query = "in:spam"
+	default:
+		return 0, fmt.Errorf("can only empty Trash or Spam")
+	}
+	ids, err := c.ListMessageIDs(ctx, query, 0)
+	if err != nil {
+		return 0, fmt.Errorf("empty %s: list: %w", labelID, err)
+	}
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	if err := c.BatchDelete(ctx, ids); err != nil {
+		return 0, fmt.Errorf("empty %s: delete: %w", labelID, err)
+	}
+	for _, id := range ids {
+		if err := e.Store.DeleteMessage(ctx, accountID, id); err != nil {
+			slog.Default().Warn("empty label: local delete", "id", id, "err", err)
+		}
+	}
+	e.publish(Change{Kind: MessageDeleted, AccountID: accountID})
+	return len(ids), nil
+}
+
 // FetchBody downloads a message's full body and caches it, marking it fetched.
 func (e *Engine) FetchBody(ctx context.Context, c *gmailapi.Client, accountID int64, gmailID string) error {
 	start := time.Now()

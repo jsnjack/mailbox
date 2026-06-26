@@ -202,6 +202,13 @@ func launchUI() error {
 			}
 			return engine.DeletePermanently(ctx, c, accountID, gmailIDs)
 		}
+		deps.EmptyFolder = func(ctx context.Context, accountID int64, labelID string) (int, error) {
+			c, err := clientFor(accountID)
+			if err != nil {
+				return 0, err
+			}
+			return engine.EmptyLabel(ctx, c, accountID, labelID)
+		}
 	}
 
 	if asst, err := buildAssistant(); err != nil {
