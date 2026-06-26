@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -12,6 +13,20 @@ import (
 	"github.com/jsnjack/mailbox/internal/config"
 	"github.com/jsnjack/mailbox/internal/dispatch"
 )
+
+// humanBytes formats a byte count as B/KB/MB/GB.
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGT"[exp])
+}
 
 // shortcutList is the single source of truth for the keyboard shortcuts, shown
 // in the Preferences dialog.
@@ -142,6 +157,27 @@ func (w *window) openSettings() {
 	privacyGroup.SetTitle("Privacy")
 	privacyGroup.Add(imgRow)
 
+	// Storage: clear the (re-downloadable) attachment cache.
+	clearRow := adw.NewActionRow()
+	clearRow.SetTitle("Cached attachments")
+	clearRow.SetSubtitle("Downloaded attachments are kept on disk for quick reopening.")
+	clearBtn := gtk.NewButtonWithLabel("Clear")
+	clearBtn.SetVAlign(gtk.AlignCenter)
+	clearBtn.ConnectClicked(func() {
+		freed, err := config.ClearAttachmentsCache()
+		if err != nil {
+			slog.Warn("ui: clear attachments cache", "err", err)
+			clearRow.SetSubtitle("Couldn't clear the cache.")
+			return
+		}
+		clearRow.SetSubtitle(fmt.Sprintf("Cleared — freed %s.", humanBytes(freed)))
+		clearBtn.SetSensitive(false)
+	})
+	clearRow.AddSuffix(clearBtn)
+	storageGroup := adw.NewPreferencesGroup()
+	storageGroup.SetTitle("Storage")
+	storageGroup.Add(clearRow)
+
 	scGroup := adw.NewPreferencesGroup()
 	scGroup.SetTitle("Keyboard Shortcuts")
 	scGroup.SetDescription("Single keys work while reading; they're ignored while typing in a field.")
@@ -162,6 +198,7 @@ func (w *window) openSettings() {
 	}
 	page.Add(sigGroup)
 	page.Add(privacyGroup)
+	page.Add(storageGroup)
 	page.Add(scGroup)
 
 	dialog := adw.NewPreferencesDialog()
