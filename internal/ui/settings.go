@@ -4,7 +4,26 @@ import (
 	"log/slog"
 
 	"github.com/diamondburned/gotk4-adwaita/pkg/adw"
+	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 )
+
+// shortcutList is the single source of truth for the keyboard shortcuts, shown
+// in the Preferences dialog.
+func shortcutList() [][2]string {
+	return [][2]string{
+		{"j / k", "Next / previous conversation"},
+		{"r", "Reply"},
+		{"f", "Forward"},
+		{"a / e", "Archive"},
+		{"# / Delete", "Move to Trash"},
+		{"s", "Star / unstar"},
+		{"t", "Translate to English"},
+		{"c", "Compose"},
+		{"/", "Search"},
+		{"Esc", "Back to list"},
+		{"?", "Open preferences"},
+	}
+}
 
 // openSettings shows a preferences window for the AI provider config. Values are
 // saved to config.toml when the window is closed; they take effect on next launch.
@@ -33,8 +52,22 @@ func (w *window) openSettings() {
 	group.Add(endpointRow)
 	group.Add(modelRow)
 
+	scGroup := adw.NewPreferencesGroup()
+	scGroup.SetTitle("Keyboard Shortcuts")
+	scGroup.SetDescription("Single keys work while reading; they're ignored while typing in a field.")
+	for _, s := range shortcutList() {
+		row := adw.NewActionRow()
+		row.SetTitle(s[1])
+		key := gtk.NewLabel(s[0])
+		key.AddCSSClass("dim-label")
+		key.AddCSSClass("numeric")
+		row.AddSuffix(key)
+		scGroup.Add(row)
+	}
+
 	page := adw.NewPreferencesPage()
 	page.Add(group)
+	page.Add(scGroup)
 
 	dialog := adw.NewPreferencesDialog()
 	dialog.SetContentWidth(520)

@@ -82,16 +82,12 @@ type window struct {
 	openThreadID   string
 	openThreadMsgs []model.Message
 	openMsg        model.Message
-	replyBtn       *gtk.Button
-	replyAllBtn    *gtk.Button
-	forwardBtn     *gtk.Button
+	replyAllBtn    *adw.SplitButton // primary action; dropdown has Reply/Forward
 	archiveBtn     *gtk.Button
-	trashBtn       *gtk.Button
 	labelsBtn      *gtk.MenuButton
-	starBtn        *gtk.ToggleButton
 	translateBtn   *gtk.Button
 	draftBtn       *gtk.Button
-	overflowBtn    *gtk.MenuButton // "more actions" menu in the reader header
+	overflowBtn    *gtk.MenuButton // star/unread/trash/images live here
 	readerMenuPop  *gtk.Popover    // overflow menu content (built lazily)
 	imagesEnabled  bool            // whether remote images are loaded in the reader
 
@@ -101,8 +97,6 @@ type window struct {
 	translationBanner *adw.Banner
 	translateCancel   context.CancelFunc
 	translationCache  map[string]string
-
-	updatingStar bool // guards programmatic star-toggle from firing the handler
 }
 
 func newWindow(app *adw.Application, deps Deps) *window {
@@ -257,7 +251,7 @@ func (w *window) addShortcuts() {
 		case gdk.KEY_Escape:
 			w.goBack()
 		case '?':
-			w.showShortcuts()
+			w.openSettings()
 		default:
 			return false
 		}
@@ -286,13 +280,26 @@ func (w *window) selectAdjacent(delta int) {
 	w.threadSel.SetSelected(uint(next))
 }
 
-// toggleStar flips the star on the open message via the toolbar button (which
-// runs the optimistic label change). No-op when nothing is open.
+// toggleStar flips the star on the open message. No-op when nothing is open.
 func (w *window) toggleStar() {
 	if w.openMsg.GmailID == "" {
 		return
 	}
-	w.starBtn.SetActive(!w.starBtn.Active())
+	w.setStarred(!w.openMsg.IsStarred)
+}
+
+// setStarred adds or removes the star on the open message (optimistic), keeping
+// openMsg's flag in sync so the overflow checkbox and the 's' shortcut agree.
+func (w *window) setStarred(star bool) {
+	if w.openMsg.GmailID == "" {
+		return
+	}
+	w.openMsg.IsStarred = star
+	if star {
+		w.applyLabels([]model.Message{w.openMsg}, []string{model.LabelStarred}, nil, nil)
+	} else {
+		w.applyLabels([]model.Message{w.openMsg}, nil, []string{model.LabelStarred}, nil)
+	}
 }
 
 // goBack collapses the reader back to the thread list — meaningful when the
@@ -315,48 +322,6 @@ func (w *window) showConnectHelp() {
 	dialog.AddResponse("ok", "Got it")
 	dialog.SetDefaultResponse("ok")
 	dialog.SetCloseResponse("ok")
-	dialog.Present(w.win)
-}
-
-// showShortcuts presents a dialog listing the keyboard shortcuts.
-func (w *window) showShortcuts() {
-	rows := [][2]string{
-		{"j / k", "Next / previous conversation"},
-		{"r", "Reply"},
-		{"f", "Forward"},
-		{"a / e", "Archive"},
-		{"# / Delete", "Move to Trash"},
-		{"s", "Star / unstar"},
-		{"t", "Translate to English"},
-		{"c", "Compose"},
-		{"/", "Search"},
-		{"Esc", "Back to list"},
-		{"?", "Keyboard shortcuts"},
-	}
-	grid := gtk.NewGrid()
-	grid.SetRowSpacing(10)
-	grid.SetColumnSpacing(24)
-	setMargins(grid, 18, 18, 18, 18)
-	for i, r := range rows {
-		key := gtk.NewLabel(r[0])
-		key.SetXAlign(1)
-		key.AddCSSClass("heading")
-		desc := gtk.NewLabel(r[1])
-		desc.SetXAlign(0)
-		desc.SetHExpand(true)
-		grid.Attach(key, 0, i, 1, 1)
-		grid.Attach(desc, 1, i, 1, 1)
-	}
-
-	tv := adw.NewToolbarView()
-	tv.AddTopBar(adw.NewHeaderBar())
-	tv.SetContent(grid)
-
-	dialog := adw.NewDialog()
-	dialog.SetTitle("Keyboard Shortcuts")
-	dialog.SetChild(tv)
-	dialog.SetContentWidth(380)
-	dialog.SetFollowsContentSize(true)
 	dialog.Present(w.win)
 }
 
@@ -504,11 +469,6 @@ func (w *window) buildSidebar() *adw.NavigationPage {
 	prefsBtn.ConnectClicked(w.openSettings)
 	hb.PackEnd(prefsBtn)
 
-	shortcutsBtn := gtk.NewButtonFromIconName("preferences-desktop-keyboard-shortcuts-symbolic")
-	shortcutsBtn.SetTooltipText("Keyboard shortcuts (?)")
-	shortcutsBtn.ConnectClicked(w.showShortcuts)
-	hb.PackEnd(shortcutsBtn)
-
 	tv := adw.NewToolbarView()
 	tv.AddTopBar(hb)
 	tv.SetContent(box)
@@ -582,7 +542,7 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 	content.Append(w.threadStack)
 
 	hb := adw.NewHeaderBar()
-	w.markReadBtn = gtk.NewButtonFromIconName("mail-mark-read-symbolic")
+	w.markReadBtn = gtk.NewButtonFromIconName("mail-read-symbolic")
 	w.markReadBtn.SetTooltipText("Mark all as read")
 	w.markReadBtn.SetSensitive(w.deps.MarkAllRead != nil)
 	w.markReadBtn.ConnectClicked(w.onMarkAllRead)
@@ -806,31 +766,24 @@ func (w *window) buildReader() *adw.NavigationPage {
 
 	hb := adw.NewHeaderBar()
 
-	// Primary triage actions, icon-only.
-	w.replyBtn = gtk.NewButtonFromIconName("mail-reply-sender-symbolic")
-	w.replyBtn.SetTooltipText("Reply (r)")
-	w.replyBtn.ConnectClicked(w.onReply)
+	// Reply-all is the primary action; its dropdown offers Reply and Forward.
+	replyPop := gtk.NewPopover()
+	replyMenu := gtk.NewBox(gtk.OrientationVertical, 2)
+	setMargins(replyMenu, 6, 6, 6, 6)
+	replyMenu.SetSizeRequest(160, -1)
+	replyMenu.Append(menuItemButton(replyPop, "Reply", w.onReply))
+	replyMenu.Append(menuItemButton(replyPop, "Forward", w.onForward))
+	replyPop.SetChild(replyMenu)
 
-	w.replyAllBtn = gtk.NewButtonFromIconName("mail-reply-all-symbolic")
-	w.replyAllBtn.SetTooltipText("Reply all")
+	w.replyAllBtn = adw.NewSplitButton()
+	w.replyAllBtn.SetIconName("mail-reply-all-symbolic")
+	w.replyAllBtn.SetTooltipText("Reply all (dropdown: Reply, Forward)")
 	w.replyAllBtn.ConnectClicked(w.onReplyAll)
-
-	w.forwardBtn = gtk.NewButtonFromIconName("mail-forward-symbolic")
-	w.forwardBtn.SetTooltipText("Forward (f)")
-	w.forwardBtn.ConnectClicked(w.onForward)
+	w.replyAllBtn.SetPopover(replyPop)
 
 	w.archiveBtn = gtk.NewButtonFromIconName("folder-download-symbolic")
 	w.archiveBtn.SetTooltipText("Archive (a)")
 	w.archiveBtn.ConnectClicked(w.onArchive)
-
-	w.trashBtn = gtk.NewButtonFromIconName("user-trash-symbolic")
-	w.trashBtn.SetTooltipText("Move to Trash")
-	w.trashBtn.ConnectClicked(w.onTrash)
-
-	w.starBtn = gtk.NewToggleButton()
-	w.starBtn.SetIconName("starred-symbolic")
-	w.starBtn.SetTooltipText("Star")
-	w.starBtn.ConnectToggled(w.onToggleStar)
 
 	w.labelsBtn = gtk.NewMenuButton()
 	w.labelsBtn.SetIconName("user-bookmarks-symbolic")
@@ -843,14 +796,14 @@ func (w *window) buildReader() *adw.NavigationPage {
 
 	// AI actions (only useful when an assistant is configured).
 	w.translateBtn = gtk.NewButtonFromIconName("accessories-dictionary-symbolic")
-	w.translateBtn.SetTooltipText("Translate to English")
+	w.translateBtn.SetTooltipText("Translate to English (t)")
 	w.translateBtn.ConnectClicked(w.onTranslate)
 
 	w.draftBtn = gtk.NewButtonFromIconName("document-edit-symbolic")
 	w.draftBtn.SetTooltipText("Draft a reply with AI")
 	w.draftBtn.ConnectClicked(w.onDraftReply)
 
-	// Secondary actions live in an overflow menu so the bar stays uncluttered.
+	// Secondary actions (star, mark-unread, trash, images) live in the overflow.
 	w.overflowBtn = gtk.NewMenuButton()
 	w.overflowBtn.SetIconName("view-more-symbolic")
 	w.overflowBtn.SetTooltipText("More actions")
@@ -860,14 +813,10 @@ func (w *window) buildReader() *adw.NavigationPage {
 		w.readerMenuPop.SetChild(w.buildReaderMenu())
 	})
 
-	hb.PackStart(w.replyBtn)
 	hb.PackStart(w.replyAllBtn)
-	hb.PackStart(w.forwardBtn)
 	hb.PackStart(w.archiveBtn)
-	hb.PackStart(w.trashBtn)
 	hb.PackEnd(w.overflowBtn)
 	hb.PackEnd(w.labelsBtn)
-	hb.PackEnd(w.starBtn)
 	if w.deps.Assistant != nil {
 		hb.PackEnd(w.draftBtn)
 		hb.PackEnd(w.translateBtn)
@@ -880,16 +829,27 @@ func (w *window) buildReader() *adw.NavigationPage {
 	return adw.NewNavigationPage(tv, "Reader")
 }
 
+// menuItemButton returns a flat, full-width, left-aligned button styled like a
+// menu row; clicking it closes pop and runs fn.
+func menuItemButton(pop *gtk.Popover, label string, fn func()) *gtk.Button {
+	b := gtk.NewButton()
+	l := gtk.NewLabel(label)
+	l.SetXAlign(0)
+	l.SetHExpand(true)
+	b.SetChild(l)
+	b.AddCSSClass("flat")
+	b.ConnectClicked(func() {
+		pop.Popdown()
+		fn()
+	})
+	return b
+}
+
 func (w *window) setActionsSensitive(on bool) {
 	canModify := on && w.deps.ModifyLabels != nil
 	w.archiveBtn.SetSensitive(canModify)
-	w.trashBtn.SetSensitive(canModify)
 	w.labelsBtn.SetSensitive(canModify)
-	w.starBtn.SetSensitive(canModify)
-	canSend := on && w.deps.Send != nil
-	w.replyBtn.SetSensitive(canSend)
-	w.replyAllBtn.SetSensitive(canSend)
-	w.forwardBtn.SetSensitive(canSend)
+	w.replyAllBtn.SetSensitive(on && w.deps.Send != nil)
 	canAI := on && w.deps.Assistant != nil
 	w.translateBtn.SetSensitive(canAI)
 	w.draftBtn.SetSensitive(canAI)
@@ -1121,10 +1081,6 @@ func (w *window) showThread(threadID string) {
 	w.readerStack.SetVisibleChildName("message")
 	w.innerSplit.SetShowContent(true)
 
-	w.updatingStar = true
-	w.starBtn.SetActive(w.openMsg.IsStarred)
-	w.updatingStar = false
-
 	w.renderConversation(msgs)
 
 	// Mark unread messages in the thread read.
@@ -1290,17 +1246,6 @@ func (w *window) onMarkUnread() {
 	}
 }
 
-func (w *window) onToggleStar() {
-	if w.updatingStar || w.openMsg.GmailID == "" {
-		return
-	}
-	if w.starBtn.Active() {
-		w.applyLabels([]model.Message{w.openMsg}, []string{model.LabelStarred}, nil, nil)
-	} else {
-		w.applyLabels([]model.Message{w.openMsg}, nil, []string{model.LabelStarred}, nil)
-	}
-}
-
 // buildLabelsMenu builds the popover content for the labels button: a checkbox
 // per user label, ticked when the open thread already carries it. Toggling
 // applies or removes that label across the whole conversation.
@@ -1348,15 +1293,26 @@ func (w *window) buildLabelsMenu() gtk.Widgetter {
 	return box
 }
 
-// buildReaderMenu is the overflow popover for less-common reader actions.
-// (Reply all, Translate and Draft reply are dedicated header buttons.)
+// buildReaderMenu is the overflow popover for auxiliary reader actions: star,
+// mark-unread, trash, and the remote-images toggle. (Reply all, Reply, Forward,
+// Archive, Labels, Translate and Draft reply are dedicated header controls.)
 func (w *window) buildReaderMenu() gtk.Widgetter {
 	box := gtk.NewBox(gtk.OrientationVertical, 2)
 	setMargins(box, 6, 6, 6, 6)
 	box.SetSizeRequest(200, -1)
 
 	if w.deps.ModifyLabels != nil {
+		star := gtk.NewCheckButtonWithLabel("Starred")
+		star.SetActive(w.openMsg.IsStarred)
+		setMargins(star, 8, 8, 6, 6)
+		star.ConnectToggled(func() {
+			w.readerMenuPop.Popdown()
+			w.setStarred(star.Active())
+		})
+		box.Append(star)
 		box.Append(w.readerMenuItem("Mark as unread", w.onMarkUnread))
+		box.Append(w.readerMenuItem("Move to Trash", w.onTrash))
+		box.Append(gtk.NewSeparator(gtk.OrientationHorizontal))
 	}
 
 	img := gtk.NewCheckButtonWithLabel("Show remote images")
@@ -1370,20 +1326,10 @@ func (w *window) buildReaderMenu() gtk.Widgetter {
 	return box
 }
 
-// readerMenuItem returns a flat, full-width, left-aligned button styled like a
-// menu row; clicking it closes the overflow popover and runs fn.
+// readerMenuItem returns a flat menu-style row that closes the overflow popover
+// and runs fn when clicked.
 func (w *window) readerMenuItem(label string, fn func()) *gtk.Button {
-	b := gtk.NewButton()
-	l := gtk.NewLabel(label)
-	l.SetXAlign(0)
-	l.SetHExpand(true)
-	b.SetChild(l)
-	b.AddCSSClass("flat")
-	b.ConnectClicked(func() {
-		w.readerMenuPop.Popdown()
-		fn()
-	})
-	return b
+	return menuItemButton(w.readerMenuPop, label, fn)
 }
 
 // setImagesEnabled toggles remote-image loading and re-renders the open thread.
