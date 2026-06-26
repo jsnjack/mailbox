@@ -62,8 +62,9 @@ type window struct {
 	threadModel    *gtk.StringList
 	threadSel      *gtk.SingleSelection
 	threadView     *gtk.ListView
-	threadStack    *gtk.Stack // "list" vs "empty" placeholder
-	readerStack    *gtk.Stack // "message" vs "empty" placeholder
+	threadStack    *gtk.Stack      // "list" vs "empty" placeholder
+	emptyPage      *adw.StatusPage // the "empty" placeholder (text set per context)
+	readerStack    *gtk.Stack      // "message" vs "empty" placeholder
 	markReadBtn    *gtk.Button
 	readOnlyBanner *adw.Banner // revealed when no Gmail client (live features off)
 	outboxBanner   *adw.Banner // revealed when sends are queued/failed
@@ -546,15 +547,15 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 	scroller.SetHExpand(true)
 	scroller.SetChild(w.threadView)
 
-	empty := adw.NewStatusPage()
-	empty.SetIconName("mail-archive-symbolic")
-	empty.SetTitle("No messages")
-	empty.SetDescription("This label has no messages in the local cache.")
+	w.emptyPage = adw.NewStatusPage()
+	w.emptyPage.SetIconName("mail-unread-symbolic")
+	w.emptyPage.SetTitle("No messages")
+	w.emptyPage.SetDescription("This folder has no messages in the local cache.")
 
 	w.threadStack = gtk.NewStack()
 	w.threadStack.SetVExpand(true)
 	w.threadStack.AddNamed(scroller, "list")
-	w.threadStack.AddNamed(empty, "empty")
+	w.threadStack.AddNamed(w.emptyPage, "empty")
 	w.threadStack.SetVisibleChildName("list")
 
 	w.searchEntry = gtk.NewSearchEntry()
@@ -695,6 +696,15 @@ func (w *window) showThreads(sums []model.ThreadSummary) {
 	}
 	w.threadModel.Splice(0, w.threadModel.NItems(), ids)
 	if len(sums) == 0 {
+		if q := strings.TrimSpace(w.searchEntry.Text()); q != "" {
+			w.emptyPage.SetIconName("edit-find-symbolic")
+			w.emptyPage.SetTitle("No matches")
+			w.emptyPage.SetDescription(fmt.Sprintf("No cached messages match %q.", q))
+		} else {
+			w.emptyPage.SetIconName("mail-unread-symbolic")
+			w.emptyPage.SetTitle("No messages")
+			w.emptyPage.SetDescription("This folder has no messages in the local cache.")
+		}
 		w.threadStack.SetVisibleChildName("empty")
 	} else {
 		w.threadStack.SetVisibleChildName("list")
