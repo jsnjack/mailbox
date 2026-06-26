@@ -288,16 +288,18 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 	if w.deps.Assistant != nil && aiContext != "" {
 		aiBtn := gtk.NewButtonWithLabel("AI draft")
 		aiBtn.SetTooltipText("Draft this reply with AI")
-		// runDraft streams a reply guided by instruction (may be empty) into the body.
+		// runDraft streams a reply guided by instruction (may be empty) into the
+		// body, above the quoted history (init.Body), which is preserved below.
 		runDraft := func(instruction string) {
 			aiBtn.SetSensitive(false)
-			buf.SetText("")
+			quote := init.Body
+			buf.SetText(quote)
 			go func() {
 				ch, err := w.deps.Assistant.DraftReply(aiCtx, aiContext, instruction)
 				if err != nil {
 					msg := err.Error()
 					dispatch.Main(func() {
-						buf.SetText("AI error: " + msg)
+						buf.SetText("AI error: " + msg + "\n" + quote)
 						aiBtn.SetSensitive(true)
 					})
 					return
@@ -308,7 +310,7 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 					dispatch.Main(func() {
 						if cc.Err == nil {
 							acc.WriteString(cc.Text)
-							buf.SetText(acc.String())
+							buf.SetText(acc.String() + quote)
 						}
 					})
 				}
