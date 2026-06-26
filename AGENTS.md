@@ -138,7 +138,12 @@ thread renders all its messages stacked in the reader (bodies fetched lazily,
 each a sanitized section); archive/trash apply to the whole thread, reply/star
 to its newest message. A search entry runs instant local FTS5 search
 (`store.Search`, sanitized into a quoted prefix MATCH) whose hits are grouped
-into threads; clearing it returns to the current label. When a search has no
+into threads; clearing it returns to the current label. Every list populate (a
+label switch, a search, the 60s sync refresh) runs its store query off the main
+thread via `loadThreads`, guarded by a `refreshGen` counter so a slow query
+can't overwrite fresher results (last request wins); search hits are turned into
+thread summaries with one batched `store.GetThreadSummaries` (and server-search
+ids mapped via `store.ThreadIDsForMessages`) rather than a query per hit. When a search has no
 local matches, "Search all mail" runs a Gmail server-side search
 (`SearchServer` → `ListMessageIDs` with `q=`), caching matches beyond the local
 cache; a reader action "Find emails from sender" runs the same server search

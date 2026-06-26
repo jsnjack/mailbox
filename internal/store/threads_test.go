@@ -59,6 +59,46 @@ func TestListThreadsByLabel(t *testing.T) {
 	}
 }
 
+func TestGetThreadSummaries(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	acc := seedAccount(t, s)
+
+	msgs := []model.Message{
+		{AccountID: acc, GmailID: "a1", ThreadID: "A", InternalDate: time.Unix(100, 0), Subject: "A first", Labels: []string{"INBOX"}},
+		{AccountID: acc, GmailID: "a2", ThreadID: "A", InternalDate: time.Unix(300, 0), Subject: "A latest", IsUnread: true, Labels: []string{"INBOX", "UNREAD"}},
+		{AccountID: acc, GmailID: "b1", ThreadID: "B", InternalDate: time.Unix(200, 0), Subject: "B only", Labels: []string{"INBOX"}},
+	}
+	for _, m := range msgs {
+		if _, err := s.UpsertMessage(ctx, m); err != nil {
+			t.Fatalf("upsert %s: %v", m.GmailID, err)
+		}
+	}
+
+	// Order is preserved, an unknown id is skipped, and a duplicate id collapses.
+	got, err := s.GetThreadSummaries(ctx, acc, []string{"B", "A", "Z", "B"})
+	if err != nil {
+		t.Fatalf("GetThreadSummaries: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d summaries, want 2 (B, A): %+v", len(got), got)
+	}
+	if got[0].ThreadID != "B" || got[1].ThreadID != "A" {
+		t.Fatalf("order not preserved: %s, %s", got[0].ThreadID, got[1].ThreadID)
+	}
+	// Latest message and counts match the per-thread GetThreadSummary.
+	if got[1].Latest.GmailID != "a2" || got[1].Count != 2 || got[1].UnreadCount != 1 {
+		t.Fatalf("thread A summary wrong: %+v", got[1])
+	}
+	if got[0].Latest.GmailID != "b1" || got[0].Count != 1 || got[0].UnreadCount != 0 {
+		t.Fatalf("thread B summary wrong: %+v", got[0])
+	}
+
+	if empty, err := s.GetThreadSummaries(ctx, acc, nil); err != nil || empty != nil {
+		t.Fatalf("empty input: got %v, %v", empty, err)
+	}
+}
+
 func TestThreadLabels(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()

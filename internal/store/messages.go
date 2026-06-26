@@ -254,6 +254,47 @@ func (s *Store) Search(ctx context.Context, accountID int64, query string, limit
 	return scanMessages(rows)
 }
 
+// ThreadIDsForMessages maps each given Gmail message id to its thread id,
+// omitting ids with no cached message. It does this in one query per chunk
+// rather than a GetMessage per id (which would also needlessly load labels).
+func (s *Store) ThreadIDsForMessages(ctx context.Context, accountID int64, gmailIDs []string) (map[string]string, error) {
+	out := make(map[string]string, len(gmailIDs))
+	const chunk = 500
+	for start := 0; start < len(gmailIDs); start += chunk {
+		end := start + chunk
+		if end > len(gmailIDs) {
+			end = len(gmailIDs)
+		}
+		ids := gmailIDs[start:end]
+		args := make([]any, 0, len(ids)+1)
+		args = append(args, accountID)
+		for _, id := range ids {
+			args = append(args, id)
+		}
+		rows, err := s.reader.QueryContext(ctx,
+			`SELECT gmail_id, thread_id FROM messages WHERE account_id = ? AND gmail_id IN (`+placeholders(len(ids))+`)`,
+			args...)
+		if err != nil {
+			return nil, fmt.Errorf("thread ids for messages: %w", err)
+		}
+		err = func() error {
+			defer func() { _ = rows.Close() }()
+			for rows.Next() {
+				var g, t string
+				if err := rows.Scan(&g, &t); err != nil {
+					return fmt.Errorf("scan thread id: %w", err)
+				}
+				out[g] = t
+			}
+			return rows.Err()
+		}()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
 // ftsQuery converts free-text input into an FTS5 MATCH expression: each token is
 // double-quoted (escaping embedded quotes) and given a trailing prefix wildcard,
 // joined by implicit AND. Returns "" for blank input.

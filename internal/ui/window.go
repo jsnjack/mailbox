@@ -97,6 +97,12 @@ type window struct {
 	// coalesce refreshes triggered by bursts of sync change events.
 	refreshPending     bool
 	refreshListPending bool
+	// refreshGen increments on every list query; an async query whose result
+	// arrives after a newer one was issued is discarded (last request wins).
+	refreshGen uint64
+	// afterPopulate runs once after the next list populate, then clears. Used by
+	// launch hooks that must act on the loaded list (now that loads are async).
+	afterPopulate func()
 
 	header       *gtk.Label
 	attachBox    *gtk.Box   // chips for the open message's attachments
@@ -448,15 +454,20 @@ func (w *window) present() {
 
 	// Test hooks (off by default).
 	if q := os.Getenv("MAILBOX_SEARCH"); q != "" {
-		// Apply synchronously (the live handler is debounced) so a paired
+		// The live handler is debounced; apply directly so a paired
 		// MAILBOX_OPEN_FIRST selects from the search results, not the inbox.
 		w.suppressSearch = true
 		w.searchEntry.SetText(q)
 		w.suppressSearch = false
 		w.refreshList(q)
 	}
-	if os.Getenv("MAILBOX_OPEN_FIRST") == "1" && w.threadModel.NItems() > 0 {
-		w.threadSel.SetSelected(0)
+	if os.Getenv("MAILBOX_OPEN_FIRST") == "1" {
+		// List loads are async; select the newest thread once it has populated.
+		w.afterPopulate = func() {
+			if w.threadModel.NItems() > 0 {
+				w.threadSel.SetSelected(0)
+			}
+		}
 	}
 }
 
@@ -929,11 +940,15 @@ func (w *window) runServerSearch(q string) {
 	w.emptyPage.SetTitle("Searching all mail…")
 	w.emptyPage.SetDescription("")
 	acctID := w.activeID
+	w.refreshGen++
+	gen := w.refreshGen
 	go func() {
-		ids, err := w.deps.SearchServer(context.Background(), acctID, q, 50)
+		ctx := context.Background()
+		sums, err := w.serverSearchThreads(ctx, acctID, q)
 		dispatch.Main(func() {
-			if !w.serverSearch || strings.TrimSpace(w.searchEntry.Text()) != q || w.activeID != acctID {
-				return // mode/query changed while searching
+			if gen != w.refreshGen || !w.serverSearch ||
+				strings.TrimSpace(w.searchEntry.Text()) != q || w.activeID != acctID {
+				return // mode/query/account changed while searching
 			}
 			if err != nil {
 				slog.Warn("ui: search all mail", "err", err)
@@ -941,28 +956,44 @@ func (w *window) runServerSearch(q string) {
 				w.showThreads(nil)
 				return
 			}
-			ctx := context.Background()
-			seen := make(map[string]bool)
-			var sums []model.ThreadSummary
-			for _, id := range ids {
-				m, err := w.deps.Store.GetMessage(ctx, acctID, id)
-				if err != nil || seen[m.ThreadID] {
-					continue
-				}
-				seen[m.ThreadID] = true
-				if sum, err := w.deps.Store.GetThreadSummary(ctx, acctID, m.ThreadID); err == nil {
-					sums = append(sums, sum)
-				}
-			}
-			sort.SliceStable(sums, func(i, j int) bool {
-				return sums[i].Latest.InternalDate.After(sums[j].Latest.InternalDate)
-			})
 			w.showThreads(sums)
 			if len(sums) == 0 {
 				w.toast("No messages found")
 			}
 		})
 	}()
+}
+
+// serverSearchThreads runs the Gmail server-side search and groups the matched
+// message ids into thread summaries, newest-first. The id→thread mapping and the
+// summaries are each fetched in one batched query rather than per matched id.
+func (w *window) serverSearchThreads(ctx context.Context, acctID int64, q string) ([]model.ThreadSummary, error) {
+	ids, err := w.deps.SearchServer(ctx, acctID, q, 50)
+	if err != nil {
+		return nil, err
+	}
+	idToThread, err := w.deps.Store.ThreadIDsForMessages(ctx, acctID, ids)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool, len(ids))
+	tids := make([]string, 0, len(ids))
+	for _, id := range ids { // preserve the server's relevance order
+		t, ok := idToThread[id]
+		if !ok || seen[t] {
+			continue
+		}
+		seen[t] = true
+		tids = append(tids, t)
+	}
+	sums, err := w.deps.Store.GetThreadSummaries(ctx, acctID, tids)
+	if err != nil {
+		return nil, err
+	}
+	sort.SliceStable(sums, func(i, j int) bool {
+		return sums[i].Latest.InternalDate.After(sums[j].Latest.InternalDate)
+	})
+	return sums, nil
 }
 
 func (w *window) onSearchChanged() {
@@ -980,70 +1011,105 @@ func (w *window) onSearchChanged() {
 
 // refreshList populates the thread list from either the current label (blank
 // query) or a full-text search (whose message hits are grouped into threads).
-func (w *window) refreshList(query string) {
-	defer func(start time.Time) {
-		slog.Debug("ui: refreshList", "label", w.current, "search", query != "", "dur", time.Since(start))
-	}(time.Now())
-	ctx := context.Background()
-	if strings.TrimSpace(query) == "" {
+// The query runs off the main thread so typing in the search box and the 60s
+// background sync never stall the UI.
+func (w *window) refreshList(query string) { w.loadThreadsFor(query, false) }
+
+// loadThreadsFor decides what to list — current folder (blank query) or a
+// search — and runs it asynchronously. reselect restores the open conversation's
+// selection afterwards (used by live refreshes so a sync doesn't disturb the
+// reader).
+func (w *window) loadThreadsFor(query string, reselect bool) {
+	trimmed := strings.TrimSpace(query)
+	if trimmed == "" {
 		w.serverSearch, w.serverQuery = false, "" // no query → not server-searching
-		sums, err := w.threadsForCurrent(ctx)
-		if err != nil {
-			slog.Error("ui: list threads", "label", w.current, "err", err)
-			return
-		}
-		w.showThreads(sums)
+		label, acct := w.current, w.activeID
+		w.loadThreads(reselect, func(ctx context.Context) ([]model.ThreadSummary, error) {
+			if label == allMailID {
+				return w.deps.Store.ListAllThreads(ctx, acct, threadListCap, 0)
+			}
+			return w.deps.Store.ListThreadsByLabel(ctx, acct, label, threadListCap, 0)
+		})
 		return
 	}
 
 	// A server-side search stays a server search across refreshes (e.g. a
 	// background sync) instead of reverting to local FTS of the same query.
 	if w.serverSearch && w.deps.SearchServer != nil {
-		w.runServerSearch(strings.TrimSpace(query))
+		w.runServerSearch(trimmed)
 		return
 	}
 
-	msgs, err := w.deps.Store.Search(ctx, w.activeID, query, threadListCap)
+	acct := w.activeID
+	w.loadThreads(reselect, func(ctx context.Context) ([]model.ThreadSummary, error) {
+		return w.searchThreads(ctx, acct, query)
+	})
+}
+
+// loadThreads runs query off the main thread and renders the result, discarding
+// it when a newer refresh has since been issued (last request wins) so a slow
+// query can't overwrite fresher results.
+func (w *window) loadThreads(reselect bool, query func(context.Context) ([]model.ThreadSummary, error)) {
+	w.refreshGen++
+	gen := w.refreshGen
+	go func() {
+		start := time.Now()
+		sums, err := query(context.Background())
+		slog.Debug("ui: loadThreads", "n", len(sums), "dur", time.Since(start))
+		dispatch.Main(func() {
+			if gen != w.refreshGen {
+				return // superseded by a newer refresh
+			}
+			if err != nil {
+				slog.Error("ui: load threads", "err", err)
+				return
+			}
+			w.showThreads(sums)
+			if reselect {
+				w.reselectOpenThread()
+			}
+		})
+	}()
+}
+
+// searchThreads runs a local FTS search and groups the hits into thread
+// summaries (newest-first, like the folder views), fetching all summaries in one
+// batched query rather than one per hit thread.
+func (w *window) searchThreads(ctx context.Context, acct int64, query string) ([]model.ThreadSummary, error) {
+	msgs, err := w.deps.Store.Search(ctx, acct, query, threadListCap)
 	if err != nil {
-		slog.Error("ui: search", "query", query, "err", err)
-		return
+		return nil, err
 	}
-	seen := make(map[string]bool)
-	var sums []model.ThreadSummary
+	sums, err := w.deps.Store.GetThreadSummaries(ctx, acct, uniqueThreadIDs(msgs))
+	if err != nil {
+		return nil, err
+	}
+	sort.SliceStable(sums, func(i, j int) bool {
+		return sums[i].Latest.InternalDate.After(sums[j].Latest.InternalDate)
+	})
+	return sums, nil
+}
+
+// uniqueThreadIDs returns the thread ids of msgs, de-duplicated, in first-seen
+// order.
+func uniqueThreadIDs(msgs []model.Message) []string {
+	seen := make(map[string]bool, len(msgs))
+	ids := make([]string, 0, len(msgs))
 	for _, m := range msgs {
 		if seen[m.ThreadID] {
 			continue
 		}
 		seen[m.ThreadID] = true
-		sum, err := w.deps.Store.GetThreadSummary(ctx, w.activeID, m.ThreadID)
-		if err != nil {
-			continue
-		}
-		sums = append(sums, sum)
+		ids = append(ids, m.ThreadID)
 	}
-	// Search hits come back ranked by relevance; show them newest-first like the
-	// folder views.
-	sort.SliceStable(sums, func(i, j int) bool {
-		return sums[i].Latest.InternalDate.After(sums[j].Latest.InternalDate)
-	})
-	w.showThreads(sums)
-}
-
-// threadsForCurrent lists the threads for the selected folder: the All Mail
-// pseudo-folder spans every label, others are label-scoped.
-func (w *window) threadsForCurrent(ctx context.Context) ([]model.ThreadSummary, error) {
-	if w.current == allMailID {
-		return w.deps.Store.ListAllThreads(ctx, w.activeID, threadListCap, 0)
-	}
-	return w.deps.Store.ListThreadsByLabel(ctx, w.activeID, w.current, threadListCap, 0)
+	return ids
 }
 
 // liveRefreshList updates the thread list in response to a background change
 // (new mail, label edits) while keeping the open conversation selected, so the
 // reader is not disturbed.
 func (w *window) liveRefreshList() {
-	w.refreshList(w.searchEntry.Text())
-	w.reselectOpenThread()
+	w.loadThreadsFor(w.searchEntry.Text(), true)
 }
 
 // reselectOpenThread restores the list selection to the open conversation after
@@ -1115,6 +1181,10 @@ func (w *window) showThreads(sums []model.ThreadSummary) {
 		w.threadStack.SetVisibleChildName("empty")
 	} else {
 		w.threadStack.SetVisibleChildName("list")
+	}
+	if fn := w.afterPopulate; fn != nil {
+		w.afterPopulate = nil
+		fn()
 	}
 	w.categorizeInbox()
 }
