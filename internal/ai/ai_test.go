@@ -57,6 +57,23 @@ func TestSummarizeThread(t *testing.T) {
 	}
 }
 
+func TestAnalyzeEmail(t *testing.T) {
+	fp := &fakeProvider{chunks: []Chunk{{Text: "Verdict: Be cautious\n"}, {Text: "- urgent tone"}}}
+	a := NewAssistant(fp)
+	ch, err := a.AnalyzeEmail(context.Background(), "From: x@evil.example\nSubject: Verify now\n\nClick here")
+	if err != nil {
+		t.Fatalf("AnalyzeEmail: %v", err)
+	}
+	for range ch {
+	}
+	if len(fp.gotMsgs) != 1 || !strings.Contains(fp.gotMsgs[0].Content, "evil.example") {
+		t.Fatalf("email context not passed: %+v", fp.gotMsgs)
+	}
+	if !strings.Contains(fp.gotSystem, "phishing") || !strings.Contains(fp.gotSystem, "Verdict:") {
+		t.Fatalf("system prompt missing phishing/verdict instruction: %q", fp.gotSystem)
+	}
+}
+
 func TestPing(t *testing.T) {
 	if err := NewAssistant(&fakeProvider{chunks: []Chunk{{Text: "OK"}}}).Ping(context.Background()); err != nil {
 		t.Fatalf("Ping ok: %v", err)

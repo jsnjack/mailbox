@@ -62,6 +62,20 @@ func parseTranslatedSegments(raw string) ([]string, error) {
 	return out, nil
 }
 
+// AnalyzeEmail streams a phishing/scam risk assessment of an email. emailContext
+// is the sender, subject, body, and any automated signals (auth result,
+// heuristic warnings). The reply leads with a one-line verdict, then reasons.
+func (a *Assistant) AnalyzeEmail(ctx context.Context, emailContext string) (<-chan Chunk, error) {
+	system := "You are a security assistant helping a user judge whether an email is a phishing, scam, or " +
+		"social-engineering attempt. Weigh signals like a false sense of urgency or threats, requests for " +
+		"passwords, payment, or personal information, mismatched or lookalike sender addresses, suspicious or " +
+		"mismatched links, and unusual requests. You are given the email plus any automated authentication " +
+		"result and warnings. Reply with a first line that is exactly one of: 'Verdict: Looks legitimate', " +
+		"'Verdict: Be cautious', or 'Verdict: Likely phishing'. Then give 2-4 short bullet points (each " +
+		"starting with '- ') explaining why. Be concise and factual; do not invent details."
+	return a.p.Stream(ctx, system, []Msg{{Role: RoleUser, Content: emailContext}})
+}
+
 // Ping issues a tiny request to verify the provider, endpoint, and key actually
 // work. It returns the first error from the stream, or nil on success.
 func (a *Assistant) Ping(ctx context.Context) error {

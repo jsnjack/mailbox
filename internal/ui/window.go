@@ -115,8 +115,11 @@ type window struct {
 	// summaryCache memoizes by the thread's message fingerprint, so reopening is
 	// instant and a new reply (different fingerprint) re-generates automatically.
 	summaryBtn      *gtk.Button
+	analyzeBtn      *gtk.Button // on-demand AI phishing/scam analysis
 	summaryRevealer *gtk.Revealer
 	summaryLabel    *gtk.Label
+	cardIcon        *gtk.Image // card icon (set per action: summary vs analysis)
+	cardTitle       *gtk.Label // card title (set per action)
 	summaryCancel   context.CancelFunc
 	summaryCache    map[string]string
 
@@ -1081,6 +1084,10 @@ func (w *window) buildReader() *adw.NavigationPage {
 	w.summaryBtn.SetTooltipText("Summarize thread with AI")
 	w.summaryBtn.ConnectClicked(w.onSummarize)
 
+	w.analyzeBtn = gtk.NewButtonFromIconName("security-high-symbolic")
+	w.analyzeBtn.SetTooltipText("Analyze this email for phishing (AI)")
+	w.analyzeBtn.ConnectClicked(w.onAnalyze)
+
 	// Secondary actions (star, mark-unread, trash, images) live in the overflow.
 	w.overflowBtn = gtk.NewMenuButton()
 	w.overflowBtn.SetIconName("view-more-symbolic")
@@ -1099,6 +1106,7 @@ func (w *window) buildReader() *adw.NavigationPage {
 		hb.PackEnd(w.draftBtn)
 		hb.PackEnd(w.translateBtn)
 		hb.PackEnd(w.summaryBtn)
+		hb.PackEnd(w.analyzeBtn)
 	}
 	w.setActionsSensitive(false)
 
@@ -1134,6 +1142,9 @@ func (w *window) setActionsSensitive(on bool) {
 	w.draftBtn.SetSensitive(canAI)
 	if w.summaryBtn != nil {
 		w.summaryBtn.SetSensitive(canAI)
+	}
+	if w.analyzeBtn != nil {
+		w.analyzeBtn.SetSensitive(canAI)
 	}
 	// The overflow menu builds its own items conditionally; enable it whenever a
 	// message is open.
@@ -1965,24 +1976,24 @@ func (w *window) resetTranslation() {
 // at the top of the reader: a title row with a close button and the streamed
 // summary below. Returns the revealer wrapping it.
 func (w *window) buildSummaryCard() *gtk.Revealer {
-	icon := gtk.NewImageFromIconName("view-list-bullet-symbolic")
-	icon.AddCSSClass("summary-title")
+	w.cardIcon = gtk.NewImageFromIconName("view-list-bullet-symbolic")
+	w.cardIcon.AddCSSClass("summary-title")
 
-	title := gtk.NewLabel("Summary")
-	title.AddCSSClass("summary-title")
-	title.AddCSSClass("heading")
-	title.SetXAlign(0)
-	title.SetHExpand(true)
+	w.cardTitle = gtk.NewLabel("Summary")
+	w.cardTitle.AddCSSClass("summary-title")
+	w.cardTitle.AddCSSClass("heading")
+	w.cardTitle.SetXAlign(0)
+	w.cardTitle.SetHExpand(true)
 
 	closeBtn := gtk.NewButtonFromIconName("window-close-symbolic")
 	closeBtn.AddCSSClass("flat")
 	closeBtn.AddCSSClass("circular")
-	closeBtn.SetTooltipText("Hide summary")
+	closeBtn.SetTooltipText("Hide")
 	closeBtn.ConnectClicked(w.hideSummary)
 
 	titleRow := gtk.NewBox(gtk.OrientationHorizontal, 6)
-	titleRow.Append(icon)
-	titleRow.Append(title)
+	titleRow.Append(w.cardIcon)
+	titleRow.Append(w.cardTitle)
 	titleRow.Append(closeBtn)
 
 	w.summaryLabel = gtk.NewLabel("")
@@ -2015,6 +2026,8 @@ func (w *window) onSummarize() {
 		w.summaryCancel()
 		w.summaryCancel = nil
 	}
+	w.cardIcon.SetFromIconName("view-list-bullet-symbolic")
+	w.cardTitle.SetText("Summary")
 	key := w.summaryKey()
 	w.summaryRevealer.SetRevealChild(true)
 	if cached, ok := w.summaryCache[key]; ok {
@@ -2077,6 +2090,110 @@ func (w *window) hideSummary() {
 	}
 	if w.summaryRevealer != nil {
 		w.summaryRevealer.SetRevealChild(false)
+	}
+}
+
+// onAnalyze runs an on-demand AI phishing/scam analysis of the open message and
+// streams the verdict + reasons into the shared card. It feeds the AI the
+// deterministic signals (auth result, heuristic warnings) alongside the content,
+// and caches by message id so re-running is instant.
+func (w *window) onAnalyze() {
+	m := w.openMsg
+	if m.GmailID == "" || w.deps.Assistant == nil {
+		return
+	}
+	if w.summaryCancel != nil {
+		w.summaryCancel()
+		w.summaryCancel = nil
+	}
+	w.cardIcon.SetFromIconName("security-high-symbolic")
+	w.cardTitle.SetText("Security analysis")
+	w.summaryRevealer.SetRevealChild(true)
+	key := "analyze:" + m.GmailID
+	if cached, ok := w.summaryCache[key]; ok {
+		w.summaryLabel.SetText(cached)
+		return
+	}
+
+	w.summaryLabel.SetText("Analyzing…")
+	ctx, cancel := context.WithCancel(context.Background())
+	w.summaryCancel = cancel
+	threadID := w.openThreadID
+	emailCtx := w.analysisContextFor(m)
+
+	go func() {
+		ch, err := w.deps.Assistant.AnalyzeEmail(ctx, emailCtx)
+		if err != nil {
+			msg := err.Error()
+			dispatch.Main(func() {
+				if w.openThreadID == threadID && ctx.Err() == nil {
+					w.summaryLabel.SetText("Analysis failed: " + msg)
+				}
+			})
+			return
+		}
+		var acc strings.Builder
+		for c := range ch {
+			cc := c
+			dispatch.Main(func() {
+				if w.openThreadID != threadID || ctx.Err() != nil {
+					return
+				}
+				if cc.Err != nil {
+					w.summaryLabel.SetText("Analysis failed: " + cc.Err.Error())
+					return
+				}
+				acc.WriteString(cc.Text)
+				w.summaryLabel.SetText(bulletize(acc.String()))
+			})
+		}
+		dispatch.Main(func() {
+			if w.openThreadID != threadID || ctx.Err() != nil {
+				return
+			}
+			final := bulletize(strings.TrimSpace(acc.String()))
+			if final != "" {
+				w.summaryCache[key] = final
+				w.summaryLabel.SetText(final)
+			}
+		})
+	}()
+}
+
+// analysisContextFor assembles the email plus deterministic signals (auth
+// verdict, heuristic warnings) as plain text for the AI analyzer.
+func (w *window) analysisContextFor(m model.Message) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "From name: %s\nFrom address: %s\nSubject: %s\n", m.FromName, m.FromAddr, m.Subject)
+	body, err := w.deps.Store.GetBody(context.Background(), m.RowID)
+	if err == nil {
+		if v := parseAuthResults(body.RawHeaders); v.level != authUnknown {
+			fmt.Fprintf(&b, "Mail-server authentication check: %s (%s)\n", authLevelWord(v.level), v.detail)
+		}
+		for _, warn := range phishingWarnings(m, body.HTML) {
+			fmt.Fprintf(&b, "Automated warning: %s\n", warn)
+		}
+	}
+	text := w.bodyTextFor(m)
+	const cap = 6000
+	if len(text) > cap {
+		text = text[:cap] + "…"
+	}
+	b.WriteString("\nBody:\n" + text)
+	return b.String()
+}
+
+// authLevelWord describes an auth level in words for the analysis prompt.
+func authLevelWord(l authLevel) string {
+	switch l {
+	case authPass:
+		return "passed"
+	case authPartial:
+		return "partially passed"
+	case authFail:
+		return "FAILED"
+	default:
+		return "unknown"
 	}
 }
 
