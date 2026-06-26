@@ -19,8 +19,9 @@ import (
 
 // openCompose opens a compose window prefilled from init. aiContext, when
 // non-empty and an assistant is configured, enables an "AI draft" button that
-// streams a drafted reply into the body. title labels the window.
-func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string) {
+// streams a drafted reply into the body; autoDraft starts that draft
+// immediately on open. title labels the window.
+func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string, autoDraft bool) {
 	if w.deps.Send == nil {
 		return
 	}
@@ -265,7 +266,7 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 	if w.deps.Assistant != nil && aiContext != "" {
 		aiBtn := gtk.NewButtonWithLabel("AI draft")
 		aiBtn.SetTooltipText("Draft this reply with AI")
-		aiBtn.ConnectClicked(func() {
+		runDraft := func() {
 			aiBtn.SetSensitive(false)
 			buf.SetText("")
 			go func() {
@@ -290,8 +291,12 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 				}
 				dispatch.Main(func() { aiBtn.SetSensitive(true) })
 			}()
-		})
+		}
+		aiBtn.ConnectClicked(runDraft)
 		hb.PackEnd(aiBtn)
+		if autoDraft {
+			runDraft()
+		}
 	}
 
 	// Ctrl+Enter sends, from anywhere in the window. Capture phase so it fires

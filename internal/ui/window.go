@@ -21,7 +21,6 @@ import (
 	"github.com/diamondburned/gotk4/pkg/gio/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 	"github.com/diamondburned/gotk4/pkg/pango"
-	"github.com/jsnjack/mailbox/internal/ai"
 	"github.com/jsnjack/mailbox/internal/config"
 	"github.com/jsnjack/mailbox/internal/dispatch"
 	"github.com/jsnjack/mailbox/internal/model"
@@ -199,7 +198,7 @@ func (w *window) addShortcuts() {
 			w.toggleStar()
 		case 'c':
 			if w.deps.Send != nil {
-				w.openCompose(model.OutgoingMessage{}, "", "New message")
+				w.openCompose(model.OutgoingMessage{}, "", "New message", false)
 			}
 		case '/':
 			w.searchEntry.GrabFocus()
@@ -431,7 +430,7 @@ func (w *window) buildSidebar() *adw.NavigationPage {
 	newBtn.SetTooltipText("New message")
 	newBtn.SetSensitive(w.deps.Send != nil)
 	newBtn.ConnectClicked(func() {
-		w.openCompose(model.OutgoingMessage{}, "", "New message")
+		w.openCompose(model.OutgoingMessage{}, "", "New message", false)
 	})
 	hb.PackStart(newBtn)
 
@@ -837,12 +836,10 @@ func (w *window) setActionsSensitive(on bool) {
 	w.overflowBtn.SetSensitive(on)
 }
 
-func (w *window) onReply() {
-	m := w.openMsg
-	if m.GmailID == "" {
-		return
-	}
-	init := model.OutgoingMessage{
+// replyInit builds the prefilled compose for a reply to m (To, Re: subject,
+// quoted body, threading headers).
+func (w *window) replyInit(m model.Message) model.OutgoingMessage {
+	return model.OutgoingMessage{
 		To:         m.FromAddr,
 		Subject:    ensureRePrefix(m.Subject),
 		Body:       quoteOriginal(m, w.bodyTextFor(m)),
@@ -850,7 +847,14 @@ func (w *window) onReply() {
 		References: strings.TrimSpace(m.References + " " + m.RFC822MsgID),
 		ThreadID:   m.ThreadID,
 	}
-	w.openCompose(init, w.threadContextFor(m), "Reply")
+}
+
+func (w *window) onReply() {
+	m := w.openMsg
+	if m.GmailID == "" {
+		return
+	}
+	w.openCompose(w.replyInit(m), w.threadContextFor(m), "Reply", false)
 }
 
 func (w *window) onReplyAll() {
@@ -868,7 +872,7 @@ func (w *window) onReplyAll() {
 		References: strings.TrimSpace(m.References + " " + m.RFC822MsgID),
 		ThreadID:   m.ThreadID,
 	}
-	w.openCompose(init, w.threadContextFor(m), "Reply all")
+	w.openCompose(init, w.threadContextFor(m), "Reply all", false)
 }
 
 // replyAllRecipients computes To (original sender + original To) and Cc (original
@@ -905,7 +909,7 @@ func (w *window) onForward() {
 		Subject: ensureFwdPrefix(m.Subject),
 		Body:    quoteOriginal(m, w.bodyTextFor(m)),
 	}
-	w.openCompose(init, "", "Forward")
+	w.openCompose(init, "", "Forward", false)
 }
 
 // loadLabels rebuilds the sidebar: the curated standard folders first (only those
@@ -1436,15 +1440,14 @@ func (w *window) resetTranslation() {
 	w.translationBanner.SetRevealed(false)
 }
 
+// onDraftReply opens a reply compose window and streams an AI-drafted reply
+// straight into its body, so the user can edit and send it.
 func (w *window) onDraftReply() {
 	m := w.openMsg
 	if m.GmailID == "" || w.deps.Assistant == nil {
 		return
 	}
-	thread := w.threadContextFor(m)
-	w.showAIStream("Draft reply", func(ctx context.Context) (<-chan ai.Chunk, error) {
-		return w.deps.Assistant.DraftReply(ctx, thread, "")
-	})
+	w.openCompose(w.replyInit(m), w.threadContextFor(m), "Reply", true)
 }
 
 // bodyTextFor returns the best plain-text representation of a message for AI
@@ -1478,69 +1481,6 @@ func htmlToText(s string) string {
 
 func (w *window) threadContextFor(m model.Message) string {
 	return fmt.Sprintf("From: %s\nSubject: %s\n\n%s", displayFrom(m), m.Subject, w.bodyTextFor(m))
-}
-
-// showAIStream opens a window that streams an AI response token-by-token into an
-// editable text view. Stop or closing the window cancels the request.
-func (w *window) showAIStream(title string, start func(ctx context.Context) (<-chan ai.Chunk, error)) {
-	ctx, cancel := context.WithCancel(context.Background())
-
-	tv := gtk.NewTextView()
-	tv.SetWrapMode(gtk.WrapWord)
-	tv.SetEditable(true)
-	setMargins(tv, 12, 12, 12, 12)
-	buf := tv.Buffer()
-	buf.SetText("…")
-
-	scroller := gtk.NewScrolledWindow()
-	scroller.SetVExpand(true)
-	scroller.SetHExpand(true)
-	scroller.SetChild(tv)
-
-	hb := adw.NewHeaderBar()
-	stop := gtk.NewButtonWithLabel("Stop")
-	stop.ConnectClicked(func() { cancel() })
-	hb.PackEnd(stop)
-
-	tvw := adw.NewToolbarView()
-	tvw.AddTopBar(hb)
-	tvw.SetContent(scroller)
-
-	win := adw.NewWindow()
-	win.SetTitle(title)
-	win.SetDefaultSize(560, 480)
-	win.SetContent(tvw)
-	win.ConnectCloseRequest(func() bool {
-		cancel()
-		return false
-	})
-	win.SetVisible(true)
-
-	go func() {
-		ch, err := start(ctx)
-		if err != nil {
-			msg := err.Error()
-			dispatch.Main(func() { buf.SetText("Error: " + msg) })
-			return
-		}
-		var acc strings.Builder
-		first := true
-		for c := range ch {
-			cc := c
-			dispatch.Main(func() {
-				if first {
-					acc.Reset()
-					first = false
-				}
-				if cc.Err != nil {
-					acc.WriteString("\n[error: " + cc.Err.Error() + "]")
-				} else {
-					acc.WriteString(cc.Text)
-				}
-				buf.SetText(acc.String())
-			})
-		}
-	}()
 }
 
 // applyLabels applies a label change to the given messages in the background,
