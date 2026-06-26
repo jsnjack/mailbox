@@ -276,6 +276,9 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 		if strings.TrimSpace(subjEntry.Text()) == "" {
 			return "This message has no subject line."
 		}
+		if len(attachments) == 0 && mentionsAttachment(bodyText(buf)) {
+			return "You mention an attachment, but none is attached."
+		}
 		return ""
 	}
 	send.ConnectClicked(func() {
@@ -487,6 +490,25 @@ func composeBodyWithSignature(quote, sig string) string {
 		return block
 	}
 	return block + "\n\n" + quote
+}
+
+// mentionsAttachment reports whether the body text suggests the user meant to
+// attach a file. Quoted lines (a reply's history) are ignored so a quoted
+// "attached" from the original message doesn't trigger a false warning.
+func mentionsAttachment(body string) bool {
+	for _, line := range strings.Split(body, "\n") {
+		l := strings.TrimSpace(line)
+		if l == "" || strings.HasPrefix(l, ">") {
+			continue
+		}
+		low := strings.ToLower(l)
+		for _, kw := range []string{"attach", "enclosed", "see attached"} {
+			if strings.Contains(low, kw) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // bodyText returns the full text content of a text buffer.
