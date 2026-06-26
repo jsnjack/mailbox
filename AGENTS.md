@@ -84,8 +84,13 @@ and new inbox mail (arriving after launch) raises a desktop notification via
 installed `com.surfly.mailbox.desktop`, which GNOME requires for notifications.)
 Reply / reply-all / forward / new compose in a separate window (text/plain via
 `gmailapi.BuildMIME` + `messages.send`, threading headers + threadId on replies);
-the compose window has an AI-draft button that streams a reply into the body, and
-a Save-draft button (`users.drafts.create`).
+the compose window has an AI-draft button (streams a drafted reply via
+`DraftReply` for a reply/forward, or a from-scratch body via `DraftNew` for a
+new message — both prompted by `askAIIntent`) and a Save-draft button
+(`users.drafts.create`). A configurable default signature
+(`config.{Load,Save}Signature`, `<config>/signature.txt`, edited in
+Preferences) is appended to every composed body below the cursor area and above
+any quote (`composeBodyWithSignature`, RFC 3676 "-- " delimiter).
 Translate / draft-reply stream into a window via the `ai` provider. Incoming
 attachments are extracted on body fetch (`ReplaceAttachments`) and shown as chips
 in the reader; clicking one downloads it (content-addressed under the cache dir)
@@ -151,6 +156,7 @@ afterward. The `sync` command and the headless packages build without GTK.
 - AI API key: keyring service `mailbox-ai` (user = provider) or `MAILBOX_AI_KEY`; never in the config file. Store it with `printf '%s' "$KEY" | mailbox set-ai-key`.
 - Persistent state (SQLite DB): `~/.local/share/mailbox/mailbox.db`.
 - Account display names: `~/.local/share/mailbox/accounts.json` (email → name).
+- Default signature: `~/.config/mailbox/signature.txt` (plain text, may be empty).
 - Attachment cache: `~/.cache/mailbox/attachments/` (content-addressed by sha256).
 - Secrets (OAuth refresh tokens, AI API keys): OS keyring via Secret Service.
 - Trace log: `/tmp/mailbox.log` (truncated each start; enabled with `--trace`).

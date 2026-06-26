@@ -75,6 +75,23 @@ func (a *Assistant) SummarizeThread(ctx context.Context, threadContext string) (
 	return a.p.Stream(ctx, system, []Msg{{Role: RoleUser, Content: user}})
 }
 
+// DraftNew streams a brand-new email body from an instruction (what the user
+// wants to say); subject is an optional hint. There is no thread to reply to,
+// so this is used when composing from scratch.
+func (a *Assistant) DraftNew(ctx context.Context, subject, instruction string) (<-chan Chunk, error) {
+	system := "You are an email assistant. Write a clear, concise, professional email body from the user's " +
+		"instruction. Output only the body — no subject line and no preamble such as 'Here is'. Match the " +
+		"language of the instruction."
+	user := strings.TrimSpace(instruction)
+	if user == "" {
+		user = "Write a brief, friendly email."
+	}
+	if s := strings.TrimSpace(subject); s != "" {
+		user = "The email subject is: " + s + "\n\n" + user
+	}
+	return a.p.Stream(ctx, system, []Msg{{Role: RoleUser, Content: user}})
+}
+
 // DraftReply streams a reply drafted from the thread context. instruction is an
 // optional steer (e.g. "decline politely"); empty for a neutral reply.
 func (a *Assistant) DraftReply(ctx context.Context, threadContext, instruction string) (<-chan Chunk, error) {

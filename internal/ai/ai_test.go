@@ -53,6 +53,28 @@ func TestSummarizeThread(t *testing.T) {
 	}
 }
 
+func TestDraftNew(t *testing.T) {
+	fp := &fakeProvider{chunks: []Chunk{{Text: "Hello,\n"}, {Text: "Let's meet Tuesday."}}}
+	a := NewAssistant(fp)
+	ch, err := a.DraftNew(context.Background(), "Project sync", "Propose a meeting")
+	if err != nil {
+		t.Fatalf("DraftNew: %v", err)
+	}
+	var b strings.Builder
+	for c := range ch {
+		b.WriteString(c.Text)
+	}
+	if got := b.String(); got != "Hello,\nLet's meet Tuesday." {
+		t.Fatalf("draft = %q", got)
+	}
+	// Both the subject hint and the instruction must reach the model.
+	if len(fp.gotMsgs) != 1 ||
+		!strings.Contains(fp.gotMsgs[0].Content, "Project sync") ||
+		!strings.Contains(fp.gotMsgs[0].Content, "Propose a meeting") {
+		t.Fatalf("subject/instruction not passed: %+v", fp.gotMsgs)
+	}
+}
+
 func TestExtractOpenAIDelta(t *testing.T) {
 	tests := []struct {
 		name     string

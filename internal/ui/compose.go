@@ -13,6 +13,7 @@ import (
 	"github.com/diamondburned/gotk4/pkg/gdk/v4"
 	"github.com/diamondburned/gotk4/pkg/gio/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
+	"github.com/jsnjack/mailbox/internal/ai"
 	"github.com/jsnjack/mailbox/internal/dispatch"
 	"github.com/jsnjack/mailbox/internal/model"
 )
@@ -25,6 +26,10 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 	if w.deps.Send == nil {
 		return
 	}
+
+	// Append the configured default signature: below the cursor area for a new
+	// message, between the reply area and the quoted history for a reply/forward.
+	init.Body = composeBodyWithSignature(init.Body, w.signature)
 
 	// With more than one account connected, the user picks which to send from;
 	// otherwise the message goes from the active account.
@@ -285,17 +290,31 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 	}
 
 	var startAIDraft func()
-	if w.deps.Assistant != nil && aiContext != "" {
+	if w.deps.Assistant != nil {
+		// A reply/forward has thread context; a new message is drafted from the
+		// user's instruction (and the subject) alone.
+		isReply := aiContext != ""
 		aiBtn := gtk.NewButtonWithLabel("AI draft")
-		aiBtn.SetTooltipText("Draft this reply with AI")
-		// runDraft streams a reply guided by instruction (may be empty) into the
-		// body, above the quoted history (init.Body), which is preserved below.
+		if isReply {
+			aiBtn.SetTooltipText("Draft this reply with AI")
+		} else {
+			aiBtn.SetTooltipText("Draft this email with AI")
+		}
+		// runDraft streams a draft guided by instruction (may be empty) into the
+		// body, above whatever was already there (quote/signature), which is kept.
 		runDraft := func(instruction string) {
 			aiBtn.SetSensitive(false)
 			quote := init.Body
+			subject := strings.TrimSpace(subjEntry.Text())
 			buf.SetText(quote)
 			go func() {
-				ch, err := w.deps.Assistant.DraftReply(aiCtx, aiContext, instruction)
+				var ch <-chan ai.Chunk
+				var err error
+				if isReply {
+					ch, err = w.deps.Assistant.DraftReply(aiCtx, aiContext, instruction)
+				} else {
+					ch, err = w.deps.Assistant.DraftNew(aiCtx, subject, instruction)
+				}
 				if err != nil {
 					msg := err.Error()
 					dispatch.Main(func() {
@@ -317,8 +336,8 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 				dispatch.Main(func() { aiBtn.SetSensitive(true) })
 			}()
 		}
-		// The button (and auto-draft) first ask what the reply should say.
-		startAIDraft = func() { w.askAIIntent(win, runDraft) }
+		// The button (and auto-draft) first ask what the message should say.
+		startAIDraft = func() { w.askAIIntent(win, isReply, runDraft) }
 		aiBtn.ConnectClicked(func() { startAIDraft() })
 		hb.PackEnd(aiBtn)
 	}
@@ -350,18 +369,40 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 	}
 }
 
-// askAIIntent presents quick tone presets and a free-text field, then calls
-// onChosen with the instruction to guide the AI reply (empty = neutral).
-func (w *window) askAIIntent(parent gtk.Widgetter, onChosen func(string)) {
+// askAIIntent presents quick presets and a free-text field, then calls onChosen
+// with the instruction to guide the AI draft (empty = neutral). The presets and
+// wording differ for a reply (tones) versus a new message (intents).
+func (w *window) askAIIntent(parent gtk.Widgetter, isReply bool, onChosen func(string)) {
 	dialog := adw.NewDialog()
-	dialog.SetTitle("Draft reply with AI")
 	dialog.SetContentWidth(420)
 	dialog.SetFollowsContentSize(true)
+
+	presets := []struct{ label, instruction string }{
+		{"Accept / agree", "Accept and agree."},
+		{"Politely decline", "Politely decline."},
+		{"Thank them", "Thank the sender."},
+		{"Ask for more details", "Ask for more details or clarification."},
+		{"I'll follow up later", "Say I will follow up later."},
+		{"Confirm availability", "Confirm that I'm available."},
+	}
+	title := "Draft reply with AI"
+	hintText := "Pick a tone or describe what to say; the AI drafts the reply."
+	if !isReply {
+		presets = []struct{ label, instruction string }{
+			{"Request a meeting", "Request a meeting and propose a couple of times."},
+			{"Introduce myself", "Introduce myself and explain why I'm reaching out."},
+			{"Follow up", "Write a polite follow-up."},
+			{"Make a request", "Politely ask for something."},
+		}
+		title = "Draft email with AI"
+		hintText = "Describe what the email should say; the AI writes it."
+	}
+	dialog.SetTitle(title)
 
 	box := gtk.NewBox(gtk.OrientationVertical, 8)
 	setMargins(box, 16, 16, 16, 16)
 
-	hint := gtk.NewLabel("Pick a tone or describe what to say; the AI drafts the reply.")
+	hint := gtk.NewLabel(hintText)
 	hint.SetXAlign(0)
 	hint.SetWrap(true)
 	hint.AddCSSClass("dim-label")
@@ -372,14 +413,7 @@ func (w *window) askAIIntent(parent gtk.Widgetter, onChosen func(string)) {
 		onChosen(instruction)
 	}
 
-	for _, q := range []struct{ label, instruction string }{
-		{"Accept / agree", "Accept and agree."},
-		{"Politely decline", "Politely decline."},
-		{"Thank them", "Thank the sender."},
-		{"Ask for more details", "Ask for more details or clarification."},
-		{"I'll follow up later", "Say I will follow up later."},
-		{"Confirm availability", "Confirm that I'm available."},
-	} {
+	for _, q := range presets {
 		instr := q.instruction
 		b := gtk.NewButton()
 		l := gtk.NewLabel(q.label)
@@ -406,6 +440,22 @@ func (w *window) askAIIntent(parent gtk.Widgetter, onChosen func(string)) {
 
 	dialog.SetChild(box)
 	dialog.Present(parent)
+}
+
+// composeBodyWithSignature inserts the default signature into a compose body.
+// quote is the prefilled content (empty for a new message, the quoted history
+// for a reply/forward). The signature is placed below the cursor area and above
+// any quote, using the RFC 3676 "-- " delimiter. Empty signature → unchanged.
+func composeBodyWithSignature(quote, sig string) string {
+	sig = strings.TrimRight(sig, " \t\r\n")
+	if sig == "" {
+		return quote
+	}
+	block := "\n\n-- \n" + sig
+	if quote == "" {
+		return block
+	}
+	return block + "\n\n" + quote
 }
 
 // bodyText returns the full text content of a text buffer.

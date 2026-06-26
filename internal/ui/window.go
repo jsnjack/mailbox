@@ -50,13 +50,16 @@ type window struct {
 	// switcher, so badges can refresh in place when any account syncs.
 	accountNames  map[string]string
 	accountBadges map[int64]*gtk.Label
-	labelBox      *gtk.ListBox
-	refreshBtn    *gtk.Button
-	syncSpinner   *gtk.Spinner  // shown in place of refreshBtn during a manual sync
-	sidebar       []sidebarItem // one entry per row in labelBox (incl. headings)
-	current       string
-	activeID      int64 // the account currently shown
-	activeEmail   string
+	// signature is the default text appended to composed messages (configurable
+	// in Preferences); empty means none.
+	signature   string
+	labelBox    *gtk.ListBox
+	refreshBtn  *gtk.Button
+	syncSpinner *gtk.Spinner  // shown in place of refreshBtn during a manual sync
+	sidebar     []sidebarItem // one entry per row in labelBox (incl. headings)
+	current     string
+	activeID    int64 // the account currently shown
+	activeEmail string
 	// suppressLabelSelect guards the row-selected handler while loadLabels
 	// restores the visual highlight, so a background refresh doesn't reset the
 	// list or clear an active search.
@@ -131,6 +134,7 @@ func newWindow(app *adw.Application, deps Deps) *window {
 		accountBadges:    map[int64]*gtk.Label{},
 	}
 	w.accountNames, _ = config.LoadAccountNames()
+	w.signature, _ = config.LoadSignature()
 	if len(deps.Accounts) > 0 {
 		w.activeID = deps.Accounts[0].ID
 		w.activeEmail = deps.Accounts[0].Email
@@ -934,7 +938,7 @@ func (w *window) buildReader() *adw.NavigationPage {
 	})
 
 	// AI actions (only useful when an assistant is configured).
-	w.translateBtn = gtk.NewButtonFromIconName("accessories-dictionary-symbolic")
+	w.translateBtn = gtk.NewButtonFromIconName("accessories-character-map-symbolic")
 	w.translateBtn.SetTooltipText("Translate to English (t)")
 	w.translateBtn.ConnectClicked(w.onTranslate)
 

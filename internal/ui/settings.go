@@ -68,6 +68,23 @@ func (w *window) openSettings() {
 		nameRows[a.Email] = r
 	}
 
+	// Default signature, appended to composed messages.
+	sigView := gtk.NewTextView()
+	sigView.SetWrapMode(gtk.WrapWordChar)
+	sigView.SetTopMargin(6)
+	sigView.SetBottomMargin(6)
+	sigView.SetLeftMargin(8)
+	sigView.SetRightMargin(8)
+	sigView.Buffer().SetText(w.signature)
+	sigScroll := gtk.NewScrolledWindow()
+	sigScroll.SetMinContentHeight(90)
+	sigScroll.SetChild(sigView)
+	sigScroll.AddCSSClass("card")
+	sigGroup := adw.NewPreferencesGroup()
+	sigGroup.SetTitle("Signature")
+	sigGroup.SetDescription("Appended to new messages and replies (below your text, above any quote). Leave blank for none.")
+	sigGroup.Add(sigScroll)
+
 	scGroup := adw.NewPreferencesGroup()
 	scGroup.SetTitle("Keyboard Shortcuts")
 	scGroup.SetDescription("Single keys work while reading; they're ignored while typing in a field.")
@@ -86,6 +103,7 @@ func (w *window) openSettings() {
 	if len(w.deps.Accounts) > 0 {
 		page.Add(acctGroup)
 	}
+	page.Add(sigGroup)
 	page.Add(scGroup)
 
 	dialog := adw.NewPreferencesDialog()
@@ -99,6 +117,13 @@ func (w *window) openSettings() {
 			}
 		}
 		w.applyAccountNames(nameRows)
+		if newSig := strings.TrimSpace(bodyText(sigView.Buffer())); newSig != w.signature {
+			if err := config.SaveSignature(newSig); err != nil {
+				slog.Warn("ui: save signature", "err", err)
+			} else {
+				w.signature = newSig
+			}
+		}
 	})
 	dialog.Present(w.win)
 }
