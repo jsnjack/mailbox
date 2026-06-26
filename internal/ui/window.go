@@ -813,6 +813,20 @@ func (w *window) buildSelectionBar() {
 	w.selectionLabel.SetHExpand(true)
 	setMargins(w.selectionLabel, 10, 6, 0, 0)
 
+	selectAll := gtk.NewButtonFromIconName("edit-select-all-symbolic")
+	selectAll.SetTooltipText("Select all / none")
+	selectAll.ConnectClicked(func() {
+		allSelected := len(w.threadByID) > 0 && len(w.selected) >= len(w.threadByID)
+		w.selected = map[string]bool{}
+		if !allSelected {
+			for id := range w.threadByID {
+				w.selected[id] = true
+			}
+		}
+		w.updateSelectionBar()
+		w.refreshList(w.searchEntry.Text()) // re-bind checkboxes
+	})
+
 	archive := gtk.NewButtonFromIconName("folder-download-symbolic")
 	archive.SetTooltipText("Archive selected")
 	archive.ConnectClicked(func() { w.bulkApply("Archived", nil, []string{model.LabelInbox}) })
@@ -834,6 +848,7 @@ func (w *window) buildSelectionBar() {
 	w.selectionBar.AddCSSClass("toolbar")
 	setMargins(w.selectionBar, 6, 6, 4, 4)
 	w.selectionBar.Append(w.selectionLabel)
+	w.selectionBar.Append(selectAll)
 	w.selectionBar.Append(archive)
 	w.selectionBar.Append(trash)
 	w.selectionBar.Append(read)
