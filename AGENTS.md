@@ -82,9 +82,12 @@ phishing analysis (`AnalyzeEmail` — verdict + reasons, fed the auth/heuristic
 signals, shown in the shared AI card). A thread is rendered newest-message-first. An AI-summary button reveals a card
 pinned above the conversation that streams a bullet summary (`SummarizeThread`),
 cached by the thread's message-id fingerprint (`summaryKey`) so reopening is
-instant and a new reply auto-invalidates it. Reader actions archive /
+instant and a new reply auto-invalidates it. An ⓘ button opens a "Message
+details" popover (full addresses, date, auth verdict, Message-ID, labels, size).
+Reader actions archive /
 mark-unread / star / move-to-inbox / report-spam (or not-spam in the Spam
-folder) via
+folder), plus "Delete forever" in Trash/Spam (`DeletePermanently` →
+`messages.batchDelete`), via
 optimistic `ModifyLabels` + Gmail mirror; opening an unread message marks it read;
 Ctrl +/-/0 zoom the message view (`WebView.SetZoomLevel`, persisted);
 a 60s background incremental sync updates label counts through `dispatch`→`Hub`,
@@ -124,7 +127,10 @@ thread renders all its messages stacked in the reader (bodies fetched lazily,
 each a sanitized section); archive/trash apply to the whole thread, reply/star
 to its newest message. A search entry runs instant local FTS5 search
 (`store.Search`, sanitized into a quoted prefix MATCH) whose hits are grouped
-into threads; clearing it returns to the current label. A selection-mode toggle
+into threads; clearing it returns to the current label. When a search has no
+local matches, "Search all mail" runs a Gmail server-side search
+(`SearchServer` → `ListMessageIDs` with `q=`), caching matches beyond the local
+cache. A selection-mode toggle
 turns rows into checkboxes with a bulk-action bar (Archive / Trash / Mark read),
 applying the change to every selected conversation in one batched `ModifyLabels`
 call (`bulkApply`). Below the reader, on-demand AI Smart-Reply chips
