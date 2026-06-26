@@ -2116,7 +2116,8 @@ func (w *window) readerMenuItem(label string, fn func()) *gtk.Button {
 // cleanHTML sanitizes email body HTML and strips tracking pixels for rendering,
 // returning the cleaned HTML and how many trackers were removed.
 func (w *window) cleanHTML(h string) (string, int) {
-	return stripTrackers(w.sanitizer.Sanitize(h))
+	cleaned, blocked := stripTrackers(w.sanitizer.Sanitize(h))
+	return collapseQuotes(cleaned), blocked
 }
 
 // setTrackerCount shows "N trackers blocked" in the reader (hidden when none).

@@ -101,6 +101,60 @@ func tinyDim(v string) bool {
 	return err == nil && n <= 2
 }
 
+// collapseQuotes wraps each top-level <blockquote> (a quoted reply history) in a
+// native <details> disclosure, so long quote chains collapse behind a "Show
+// quoted text" toggle. It runs on already-sanitized HTML and adds only trusted
+// markup. If there are no blockquotes the input is returned unchanged — so a
+// miss never alters rendering. Nested blockquotes are left inside their parent.
+func collapseQuotes(htmlStr string) string {
+	doc, err := html.Parse(strings.NewReader(htmlStr))
+	if err != nil {
+		return htmlStr
+	}
+	var quotes []*html.Node
+	var walk func(n *html.Node, inQuote bool)
+	walk = func(n *html.Node, inQuote bool) {
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			isBlockquote := c.Type == html.ElementNode && c.Data == "blockquote"
+			if isBlockquote && !inQuote {
+				quotes = append(quotes, c)
+			}
+			walk(c, inQuote || isBlockquote)
+		}
+	}
+	walk(doc, false)
+	if len(quotes) == 0 {
+		return htmlStr // unchanged; avoid re-serializing
+	}
+
+	for _, bq := range quotes {
+		parent := bq.Parent
+		if parent == nil {
+			continue
+		}
+		details := &html.Node{Type: html.ElementNode, Data: "details"}
+		summary := &html.Node{Type: html.ElementNode, Data: "summary",
+			Attr: []html.Attribute{{Key: "style", Val: "cursor:pointer;color:#888;font-size:90%;margin:4px 0"}}}
+		summary.AppendChild(&html.Node{Type: html.TextNode, Data: "Show quoted text"})
+		parent.InsertBefore(details, bq)
+		parent.RemoveChild(bq)
+		details.AppendChild(summary)
+		details.AppendChild(bq)
+	}
+
+	body := findBody(doc)
+	if body == nil {
+		return htmlStr
+	}
+	var b strings.Builder
+	for c := body.FirstChild; c != nil; c = c.NextSibling {
+		if err := html.Render(&b, c); err != nil {
+			return htmlStr
+		}
+	}
+	return b.String()
+}
+
 // findBody returns the <body> element of a parsed document.
 func findBody(n *html.Node) *html.Node {
 	if n.Type == html.ElementNode && n.Data == "body" {

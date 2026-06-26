@@ -73,6 +73,29 @@ func TestStripTrackers(t *testing.T) {
 	}
 }
 
+func TestCollapseQuotes(t *testing.T) {
+	// A blockquote is wrapped in a <details> with a summary; its content survives.
+	in := `<p>My reply.</p><blockquote>On Mon, X wrote: original text</blockquote>`
+	out := collapseQuotes(in)
+	for _, frag := range []string{"<details>", "<summary", "Show quoted text", "original text", "My reply."} {
+		if !strings.Contains(out, frag) {
+			t.Fatalf("output missing %q:\n%s", frag, out)
+		}
+	}
+
+	// No blockquote → unchanged.
+	plain := `<p>Just a note, no quote.</p>`
+	if got := collapseQuotes(plain); got != plain {
+		t.Fatalf("plain HTML changed: %q", got)
+	}
+
+	// A nested blockquote is not double-wrapped (only one <details>).
+	nested := `<blockquote>outer <blockquote>inner</blockquote></blockquote>`
+	if n := strings.Count(collapseQuotes(nested), "<details>"); n != 1 {
+		t.Fatalf("nested blockquote produced %d <details>, want 1", n)
+	}
+}
+
 func TestTranslateHTMLTextLengthMismatchKeepsOriginal(t *testing.T) {
 	in := `<p>One</p><p>Two</p>`
 	out, err := translateHTMLText(in, func(segs []string) ([]string, error) {

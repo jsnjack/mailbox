@@ -79,14 +79,15 @@ anti-phishing heuristics (`phishing.go`: display-name spoofing and deceptive
 link text, compared at the registrable-domain level — no AI/network) surfaced as
 an amber caution line; a shield button additionally runs an on-demand AI
 phishing analysis (`AnalyzeEmail` — verdict + reasons, fed the auth/heuristic
-signals, shown in the shared AI card). A thread is rendered newest-message-first. An AI-summary button reveals a card
+signals, shown in the shared AI card). A thread is rendered newest-message-first, with quoted reply history collapsed
+behind a native <details> "Show quoted text" toggle (`collapseQuotes`, no JS). An AI-summary button reveals a card
 pinned above the conversation that streams a bullet summary (`SummarizeThread`),
 cached by the thread's message-id fingerprint (`summaryKey`) so reopening is
 instant and a new reply auto-invalidates it. Message headers show the sender's
 full address ("Name <addr>"), not just the display name. Reader actions archive /
 mark-unread / star / move-to-inbox / report-spam (or not-spam in the Spam
-folder), plus "Delete forever" in Trash/Spam (`DeletePermanently` →
-`messages.batchDelete`), via
+folder), plus "Delete forever" in Trash/Spam and an "Empty now" banner that empties
+the whole folder (`DeletePermanently`/`EmptyLabel` → `messages.batchDelete`), via
 optimistic `ModifyLabels` + Gmail mirror; opening an unread message marks it read;
 Ctrl +/-/0 zoom the message view (`WebView.SetZoomLevel`, persisted);
 a 60s background incremental sync updates label counts through `dispatch`→`Hub`,
