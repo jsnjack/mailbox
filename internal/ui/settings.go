@@ -19,6 +19,7 @@ func shortcutList() [][2]string {
 		{"f", "Forward"},
 		{"a / e", "Archive"},
 		{"# / Delete", "Move to Trash"},
+		{"!", "Report spam / not spam"},
 		{"s", "Star / unstar"},
 		{"t", "Translate to English"},
 		{"c", "Compose"},

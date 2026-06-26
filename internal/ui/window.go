@@ -268,6 +268,12 @@ func (w *window) addShortcuts() {
 			w.onArchive()
 		case '#', gdk.KEY_Delete:
 			w.onTrash()
+		case '!':
+			if w.current == model.LabelSpam {
+				w.onNotSpam()
+			} else {
+				w.onReportSpam()
+			}
 		case 's':
 			w.toggleStar()
 		case 't':
@@ -1528,6 +1534,16 @@ func (w *window) onMoveToInbox() {
 	w.toast("Moved to Inbox")
 }
 
+// onReportSpam moves the open conversation to Spam (and out of the inbox).
+func (w *window) onReportSpam() {
+	w.removeFromList("Reported spam", []string{model.LabelSpam}, []string{model.LabelInbox})
+}
+
+// onNotSpam takes the open conversation out of Spam and back to the inbox.
+func (w *window) onNotSpam() {
+	w.removeFromList("Marked not spam", []string{model.LabelInbox}, []string{model.LabelSpam})
+}
+
 func (w *window) onMarkUnread() {
 	if w.openMsg.GmailID != "" {
 		w.applyLabels([]model.Message{w.openMsg}, []string{model.LabelUnread}, nil, nil)
@@ -1600,6 +1616,11 @@ func (w *window) buildReaderMenu() gtk.Widgetter {
 		box.Append(star)
 		box.Append(w.readerMenuItem("Mark as unread", w.onMarkUnread))
 		box.Append(w.readerMenuItem("Move to Inbox", w.onMoveToInbox))
+		if w.current == model.LabelSpam {
+			box.Append(w.readerMenuItem("Not spam", w.onNotSpam))
+		} else {
+			box.Append(w.readerMenuItem("Report spam", w.onReportSpam))
+		}
 		box.Append(w.readerMenuItem("Move to Trash", w.onTrash))
 		box.Append(gtk.NewSeparator(gtk.OrientationHorizontal))
 	}
