@@ -10,6 +10,7 @@ import (
 	"net/mail"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +20,7 @@ import (
 	coreglib "github.com/diamondburned/gotk4/pkg/core/glib"
 	"github.com/diamondburned/gotk4/pkg/gdk/v4"
 	"github.com/diamondburned/gotk4/pkg/gio/v2"
+	glib "github.com/diamondburned/gotk4/pkg/glib/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 	"github.com/diamondburned/gotk4/pkg/pango"
 	"github.com/jsnjack/mailbox/internal/config"
@@ -113,7 +115,51 @@ func newWindow(app *adw.Application, deps Deps) *window {
 		w.activeEmail = deps.Accounts[0].Email
 	}
 	w.build()
+	w.registerActions()
 	return w
+}
+
+// registerActions wires GApplication actions invoked from outside the widget
+// tree — currently "open-message", fired when a new-mail notification is
+// clicked, carrying "<accountID>|<gmailID>" as its string target.
+func (w *window) registerActions() {
+	act := gio.NewSimpleAction("open-message", glib.NewVariantType("s"))
+	act.ConnectActivate(func(parameter *glib.Variant) {
+		if parameter != nil {
+			w.openFromNotification(parameter.String())
+		}
+	})
+	w.app.AddAction(act)
+}
+
+// openFromNotification focuses the window and opens the conversation containing
+// the message identified by target ("<accountID>|<gmailID>").
+func (w *window) openFromNotification(target string) {
+	parts := strings.SplitN(target, "|", 2)
+	if len(parts) != 2 {
+		return
+	}
+	acctID, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		return
+	}
+	gmailID := parts[1]
+	if acctID != w.activeID {
+		for _, a := range w.deps.Accounts {
+			if a.ID == acctID {
+				w.setActiveAccount(a)
+				break
+			}
+		}
+	}
+	w.win.Present()
+	m, err := w.deps.Store.GetMessage(context.Background(), acctID, gmailID)
+	if err != nil {
+		slog.Warn("ui: open from notification", "id", gmailID, "err", err)
+		return
+	}
+	w.selectLabel(model.LabelInbox)
+	w.showThread(m.ThreadID)
 }
 
 func (w *window) build() {
@@ -1616,6 +1662,9 @@ func (w *window) notifyNewMail(accountID int64, m model.Message) {
 		body += " — " + m.Subject
 	}
 	n.SetBody(body)
+	// Clicking the notification opens this message (see registerActions).
+	target := glib.NewVariantString(fmt.Sprintf("%d|%s", accountID, m.GmailID))
+	n.SetDefaultAction(gio.ActionPrintDetailedName("app.open-message", target))
 	// Unique id per message so concurrent accounts' notifications don't replace
 	// one another.
 	w.app.SendNotification(fmt.Sprintf("mailbox-mail-%d-%s", accountID, m.GmailID), n)
