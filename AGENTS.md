@@ -139,8 +139,8 @@ local matches, "Search all mail" runs a Gmail server-side search
 cache. A selection-mode toggle
 turns rows into checkboxes with a bulk-action bar (Archive / Trash / Mark read),
 applying the change to every selected conversation in one batched `ModifyLabels`
-call (`bulkApply`). Below the reader, on-demand AI Smart-Reply chips
-(`SmartReplies`) suggest short one-tap replies.
+call (`bulkApply`). The AI-draft dialog offers on-demand quick replies
+(`SmartReplies`, behind a "Suggest quick replies" button).
 Compose supports attachments (a file picker adds them; `BuildMIME` emits
 multipart/mixed with base64 parts). Sending uses Undo Send: the compose closes
 and the message is held ~5s behind an "Undo" toast (`deferSend`) before it goes
