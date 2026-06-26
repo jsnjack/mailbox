@@ -13,19 +13,20 @@ import (
 // the small unread dot, and the soft accent-tinted summary card. Buttons stay
 // symbolic and flat; no chrome and no per-element hues are added.
 const appCSS = `
-/* Count badge: an accent pill (folder unread counts and per-account unread). */
+/* Count badge: a quiet outline pill — no fill, just accent text and a faint
+   accent border (folder unread counts and per-account unread). */
 .badge-pill {
-	background-color: @accent_bg_color;
-	color: @accent_fg_color;
 	border-radius: 999px;
-	padding: 0 7px;
-	font-weight: bold;
+	padding: 0 6px;
+	color: @accent_color;
+	border: 1px solid alpha(@accent_color, 0.40);
 }
 
-/* Unread conversations get a small accent dot, alongside their bold weight. */
+/* Unread conversations get a small, subtle accent dot alongside their bold
+   weight — quiet enough not to compete with the text. */
 .unread-dot {
-	color: @accent_color;
-	font-size: 13px;
+	color: alpha(@accent_color, 0.55);
+	font-size: 10px;
 }
 
 /* AI thread-summary card: a soft accent-tinted panel pinned above the thread. */
