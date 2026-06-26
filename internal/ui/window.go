@@ -91,6 +91,7 @@ type window struct {
 	attachBox    *gtk.Box   // chips for the open message's attachments
 	trackerLabel *gtk.Label // "N trackers blocked" indicator
 	authLabel    *gtk.Label // sender authentication (SPF/DKIM/DMARC) badge
+	cautionLabel *gtk.Label // anti-phishing heuristic warnings
 	webview      *webkit.WebView
 	readerZoom   float64 // reader message zoom (Ctrl +/-/0), persisted
 	sanitizer    *bluemonday.Policy
@@ -1003,6 +1004,14 @@ func (w *window) buildReader() *adw.NavigationPage {
 	setMargins(w.authLabel, 12, 12, 0, 6)
 	w.authLabel.SetVisible(false)
 
+	w.cautionLabel = gtk.NewLabel("")
+	w.cautionLabel.SetXAlign(0)
+	w.cautionLabel.SetWrap(true)
+	w.cautionLabel.AddCSSClass("caption")
+	w.cautionLabel.AddCSSClass("warning")
+	setMargins(w.cautionLabel, 12, 12, 0, 6)
+	w.cautionLabel.SetVisible(false)
+
 	// Revealed while an in-place translation is shown; reverts to the original.
 	w.translationBanner = adw.NewBanner("Showing translation")
 	w.translationBanner.SetButtonLabel("Show original")
@@ -1015,6 +1024,7 @@ func (w *window) buildReader() *adw.NavigationPage {
 	box.Append(w.buildSummaryCard())
 	box.Append(w.attachBox)
 	box.Append(w.authLabel)
+	box.Append(w.cautionLabel)
 	box.Append(w.trackerLabel)
 	box.Append(w.webview)
 
@@ -1548,13 +1558,14 @@ func (w *window) renderConversation(msgs []model.Message) {
 		sanitizeStart := time.Now()
 		var b strings.Builder
 		blocked := 0
-		latestAuth := ""
+		latestAuth, latestHTML := "", ""
 		// Newest message first (msgs is oldest-first from the store).
 		for i := len(msgs) - 1; i >= 0; i-- {
 			m := msgs[i]
 			body, _ := w.deps.Store.GetBody(ctx, m.RowID)
 			if m.RowID == latest.RowID {
 				latestAuth = body.RawHeaders // Authentication-Results of the newest message
+				latestHTML = body.HTML
 			}
 			sec, n := conversationSection(m, body, w.cleanHTML)
 			b.WriteString(sec)
@@ -1562,6 +1573,7 @@ func (w *window) renderConversation(msgs []model.Message) {
 		}
 		out := b.String()
 		verdict := parseAuthResults(latestAuth)
+		warnings := phishingWarnings(latest, latestHTML)
 		slog.Debug("ui: renderConversation", "msgs", len(msgs), "fetched", fetched,
 			"trackers", blocked, "auth", verdict.level, "fetch", fetchDur, "sanitize", time.Since(sanitizeStart))
 		dispatch.Main(func() {
@@ -1570,6 +1582,7 @@ func (w *window) renderConversation(msgs []model.Message) {
 			}
 			w.setTrackerCount(blocked)
 			w.setAuthBadge(verdict)
+			w.setCaution(warnings)
 			w.webview.LoadHtml(wrapHTML(out), "about:blank")
 			w.populateThreadAttachments(msgs)
 		})
@@ -1824,6 +1837,16 @@ func (w *window) setAuthBadge(v authVerdict) {
 	default:
 		w.authLabel.SetVisible(false)
 	}
+}
+
+// setCaution shows anti-phishing heuristic warnings (hidden when there are none).
+func (w *window) setCaution(warnings []string) {
+	if len(warnings) == 0 {
+		w.cautionLabel.SetVisible(false)
+		return
+	}
+	w.cautionLabel.SetText("⚠ " + strings.Join(warnings, " "))
+	w.cautionLabel.SetVisible(true)
 }
 
 // setImagesEnabled toggles remote-image loading and re-renders the open thread.
