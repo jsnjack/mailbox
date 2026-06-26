@@ -1169,7 +1169,9 @@ func (w *window) renderConversation(msgs []model.Message) {
 		sanitizeStart := time.Now()
 		var b strings.Builder
 		blocked := 0
-		for _, m := range msgs {
+		// Newest message first (msgs is oldest-first from the store).
+		for i := len(msgs) - 1; i >= 0; i-- {
+			m := msgs[i]
 			body, _ := w.deps.Store.GetBody(ctx, m.RowID)
 			sec, n := conversationSection(m, body, w.cleanHTML)
 			b.WriteString(sec)
