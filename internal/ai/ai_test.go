@@ -1,10 +1,57 @@
 package ai
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+// fakeProvider records the prompt it was given and replays canned chunks.
+type fakeProvider struct {
+	gotSystem string
+	gotMsgs   []Msg
+	chunks    []Chunk
+}
+
+func (f *fakeProvider) Name() string { return "fake" }
+func (f *fakeProvider) Stream(_ context.Context, system string, msgs []Msg) (<-chan Chunk, error) {
+	f.gotSystem, f.gotMsgs = system, msgs
+	ch := make(chan Chunk, len(f.chunks))
+	for _, c := range f.chunks {
+		ch <- c
+	}
+	close(ch)
+	return ch, nil
+}
+
+func TestSummarizeThread(t *testing.T) {
+	fp := &fakeProvider{chunks: []Chunk{{Text: "- A asked B\n"}, {Text: "- B agreed"}}}
+	a := NewAssistant(fp)
+	ch, err := a.SummarizeThread(context.Background(), "From: A\nSubject: Hi\n\nPlease confirm.")
+	if err != nil {
+		t.Fatalf("SummarizeThread: %v", err)
+	}
+	var b strings.Builder
+	for c := range ch {
+		if c.Err != nil {
+			t.Fatalf("chunk err: %v", c.Err)
+		}
+		b.WriteString(c.Text)
+	}
+	if got := b.String(); got != "- A asked B\n- B agreed" {
+		t.Fatalf("summary = %q", got)
+	}
+	// The thread text must reach the model as the user turn; the system prompt
+	// must instruct a bullet summary.
+	if len(fp.gotMsgs) != 1 || !strings.Contains(fp.gotMsgs[0].Content, "Please confirm.") {
+		t.Fatalf("thread context not passed as user message: %+v", fp.gotMsgs)
+	}
+	if !strings.Contains(fp.gotSystem, "bullet") {
+		t.Fatalf("system prompt missing bullet instruction: %q", fp.gotSystem)
+	}
+}
 
 func TestExtractOpenAIDelta(t *testing.T) {
 	tests := []struct {

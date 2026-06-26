@@ -97,6 +97,15 @@ type window struct {
 	readerMenuPop  *gtk.Popover    // overflow menu content (built lazily)
 	imagesEnabled  bool            // whether remote images are loaded in the reader
 
+	// AI thread summary: a button reveals a card that streams a summary in.
+	// summaryCache memoizes by the thread's message fingerprint, so reopening is
+	// instant and a new reply (different fingerprint) re-generates automatically.
+	summaryBtn      *gtk.Button
+	summaryRevealer *gtk.Revealer
+	summaryLabel    *gtk.Label
+	summaryCancel   context.CancelFunc
+	summaryCache    map[string]string
+
 	// in-place translation: a banner offers reverting to the original; the cancel
 	// func aborts an in-flight translation when the user reverts or switches mail;
 	// translationCache memoizes results per message id so re-showing is instant.
@@ -113,6 +122,7 @@ func newWindow(app *adw.Application, deps Deps) *window {
 		startTime:        time.Now(),
 		sanitizer:        emailPolicy(),
 		translationCache: map[string]string{},
+		summaryCache:     map[string]string{},
 	}
 	if len(deps.Accounts) > 0 {
 		w.activeID = deps.Accounts[0].ID
@@ -778,6 +788,7 @@ func (w *window) buildReader() *adw.NavigationPage {
 	box := gtk.NewBox(gtk.OrientationVertical, 0)
 	box.Append(w.translationBanner)
 	box.Append(w.header)
+	box.Append(w.buildSummaryCard())
 	box.Append(w.attachBox)
 	box.Append(w.trackerLabel)
 	box.Append(w.webview)
@@ -831,6 +842,10 @@ func (w *window) buildReader() *adw.NavigationPage {
 	w.draftBtn.SetTooltipText("Draft a reply with AI")
 	w.draftBtn.ConnectClicked(w.onDraftReply)
 
+	w.summaryBtn = gtk.NewButtonFromIconName("view-list-bullet-symbolic")
+	w.summaryBtn.SetTooltipText("Summarize thread with AI")
+	w.summaryBtn.ConnectClicked(w.onSummarize)
+
 	// Secondary actions (star, mark-unread, trash, images) live in the overflow.
 	w.overflowBtn = gtk.NewMenuButton()
 	w.overflowBtn.SetIconName("view-more-symbolic")
@@ -848,6 +863,7 @@ func (w *window) buildReader() *adw.NavigationPage {
 	if w.deps.Assistant != nil {
 		hb.PackEnd(w.draftBtn)
 		hb.PackEnd(w.translateBtn)
+		hb.PackEnd(w.summaryBtn)
 	}
 	w.setActionsSensitive(false)
 
@@ -881,6 +897,9 @@ func (w *window) setActionsSensitive(on bool) {
 	canAI := on && w.deps.Assistant != nil
 	w.translateBtn.SetSensitive(canAI)
 	w.draftBtn.SetSensitive(canAI)
+	if w.summaryBtn != nil {
+		w.summaryBtn.SetSensitive(canAI)
+	}
 	// The overflow menu builds its own items conditionally; enable it whenever a
 	// message is open.
 	w.overflowBtn.SetSensitive(on)
@@ -1075,6 +1094,7 @@ func (w *window) clearReader() {
 	w.openThreadMsgs = nil
 	w.openMsg = model.Message{}
 	w.resetTranslation()
+	w.hideSummary()
 	w.setActionsSensitive(false)
 	w.readerStack.SetVisibleChildName("empty")
 }
@@ -1107,6 +1127,7 @@ func (w *window) showThread(threadID string) {
 	w.openThreadMsgs = msgs
 	w.openMsg = msgs[len(msgs)-1] // newest, for reply/forward/star/unread
 	w.resetTranslation()          // a freshly opened thread shows the original
+	w.hideSummary()               // collapse any summary from the previous thread
 	w.setActionsSensitive(true)
 	w.readerStack.SetVisibleChildName("message")
 	w.innerSplit.SetShowContent(true)
@@ -1518,6 +1539,172 @@ func (w *window) resetTranslation() {
 		w.translateCancel = nil
 	}
 	w.translationBanner.SetRevealed(false)
+}
+
+// buildSummaryCard creates the (initially hidden) AI thread-summary card shown
+// at the top of the reader: a title row with a close button and the streamed
+// summary below. Returns the revealer wrapping it.
+func (w *window) buildSummaryCard() *gtk.Revealer {
+	icon := gtk.NewImageFromIconName("view-list-bullet-symbolic")
+	icon.AddCSSClass("summary-title")
+
+	title := gtk.NewLabel("Summary")
+	title.AddCSSClass("summary-title")
+	title.AddCSSClass("heading")
+	title.SetXAlign(0)
+	title.SetHExpand(true)
+
+	closeBtn := gtk.NewButtonFromIconName("window-close-symbolic")
+	closeBtn.AddCSSClass("flat")
+	closeBtn.AddCSSClass("circular")
+	closeBtn.SetTooltipText("Hide summary")
+	closeBtn.ConnectClicked(w.hideSummary)
+
+	titleRow := gtk.NewBox(gtk.OrientationHorizontal, 6)
+	titleRow.Append(icon)
+	titleRow.Append(title)
+	titleRow.Append(closeBtn)
+
+	w.summaryLabel = gtk.NewLabel("")
+	w.summaryLabel.SetXAlign(0)
+	w.summaryLabel.SetWrap(true)
+	w.summaryLabel.SetSelectable(true)
+
+	card := gtk.NewBox(gtk.OrientationVertical, 6)
+	card.AddCSSClass("summary-card")
+	setMargins(card, 12, 12, 6, 6)
+	card.Append(titleRow)
+	card.Append(w.summaryLabel)
+
+	w.summaryRevealer = gtk.NewRevealer()
+	w.summaryRevealer.SetTransitionType(gtk.RevealerTransitionTypeSlideDown)
+	w.summaryRevealer.SetChild(card)
+	w.summaryRevealer.SetRevealChild(false)
+	return w.summaryRevealer
+}
+
+// onSummarize reveals the summary card and streams an AI summary of the open
+// thread into it. A summary cached for this exact set of messages shows
+// instantly; once the thread gains a reply its fingerprint changes, so the
+// cache misses and a fresh summary is generated.
+func (w *window) onSummarize() {
+	if len(w.openThreadMsgs) == 0 || w.deps.Assistant == nil {
+		return
+	}
+	if w.summaryCancel != nil { // cancel a summary still streaming
+		w.summaryCancel()
+		w.summaryCancel = nil
+	}
+	key := w.summaryKey()
+	w.summaryRevealer.SetRevealChild(true)
+	if cached, ok := w.summaryCache[key]; ok {
+		w.summaryLabel.SetText(cached)
+		return
+	}
+
+	w.summaryLabel.SetText("Summarizing…")
+	ctx, cancel := context.WithCancel(context.Background())
+	w.summaryCancel = cancel
+	threadID := w.openThreadID
+	contextText := w.threadContextAll()
+
+	go func() {
+		ch, err := w.deps.Assistant.SummarizeThread(ctx, contextText)
+		if err != nil {
+			msg := err.Error()
+			dispatch.Main(func() {
+				if w.openThreadID == threadID && ctx.Err() == nil {
+					w.summaryLabel.SetText("Summary failed: " + msg)
+				}
+			})
+			return
+		}
+		// acc is only ever touched inside dispatch.Main (the main thread), so the
+		// builder is never accessed concurrently with the streaming goroutine.
+		var acc strings.Builder
+		for c := range ch {
+			cc := c
+			dispatch.Main(func() {
+				if w.openThreadID != threadID || ctx.Err() != nil {
+					return
+				}
+				if cc.Err != nil {
+					w.summaryLabel.SetText("Summary failed: " + cc.Err.Error())
+					return
+				}
+				acc.WriteString(cc.Text)
+				w.summaryLabel.SetText(bulletize(acc.String()))
+			})
+		}
+		dispatch.Main(func() {
+			if w.openThreadID != threadID || ctx.Err() != nil {
+				return
+			}
+			final := bulletize(strings.TrimSpace(acc.String()))
+			if final != "" {
+				w.summaryCache[key] = final
+				w.summaryLabel.SetText(final)
+			}
+		})
+	}()
+}
+
+// hideSummary collapses the summary card and aborts any in-flight summary.
+func (w *window) hideSummary() {
+	if w.summaryCancel != nil {
+		w.summaryCancel()
+		w.summaryCancel = nil
+	}
+	if w.summaryRevealer != nil {
+		w.summaryRevealer.SetRevealChild(false)
+	}
+}
+
+// summaryKey fingerprints the open thread by its message ids, so the cached
+// summary is reused only while the conversation is unchanged.
+func (w *window) summaryKey() string {
+	var b strings.Builder
+	b.WriteString(w.openThreadID)
+	for _, m := range w.openThreadMsgs {
+		b.WriteByte('|')
+		b.WriteString(m.GmailID)
+	}
+	return b.String()
+}
+
+// threadContextAll renders the whole open thread as plain text (oldest first)
+// for summarization, capping each body so very long threads stay within a
+// reasonable token budget.
+func (w *window) threadContextAll() string {
+	const maxPerMsg = 4000
+	var b strings.Builder
+	for _, m := range w.openThreadMsgs {
+		fmt.Fprintf(&b, "From: %s\nDate: %s\nSubject: %s\n\n",
+			displayFrom(m), m.InternalDate.Format("Jan 2, 2006 15:04"), m.Subject)
+		body := w.bodyTextFor(m)
+		if len(body) > maxPerMsg {
+			body = body[:maxPerMsg] + "…"
+		}
+		b.WriteString(body)
+		b.WriteString("\n\n---\n\n")
+	}
+	return b.String()
+}
+
+// bulletize rewrites Markdown-style "- "/"* " line prefixes as "•  " bullets so
+// the model's plain-text summary reads cleanly in the card.
+func bulletize(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, ln := range lines {
+		t := strings.TrimLeft(ln, " \t")
+		switch {
+		case strings.HasPrefix(t, "- "):
+			lines[i] = "•  " + t[2:]
+		case strings.HasPrefix(t, "* "):
+			lines[i] = "•  " + t[2:]
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // onDraftReply opens a reply compose window and streams an AI-drafted reply

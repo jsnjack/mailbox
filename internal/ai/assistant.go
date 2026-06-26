@@ -62,6 +62,19 @@ func parseTranslatedSegments(raw string) ([]string, error) {
 	return out, nil
 }
 
+// SummarizeThread streams a short bullet-point summary of an email thread, for
+// someone catching up quickly. threadContext is the thread rendered as plain
+// text (oldest message first). The reply is plain text — a few "- " bullets.
+func (a *Assistant) SummarizeThread(ctx context.Context, threadContext string) (<-chan Chunk, error) {
+	system := "You are an email assistant. Summarize the following email thread for someone catching up " +
+		"quickly. Reply with 2-5 short bullet points, one per line, each starting with '- ', covering the key " +
+		"points, decisions, and any open questions or action items awaiting a response. Be concise and " +
+		"factual. Write the summary in the same language as the thread. Output only the bullet points — no " +
+		"heading, no preamble such as 'Here is', and no code fences."
+	user := "Email thread to summarize:\n\n" + threadContext
+	return a.p.Stream(ctx, system, []Msg{{Role: RoleUser, Content: user}})
+}
+
 // DraftReply streams a reply drafted from the thread context. instruction is an
 // optional steer (e.g. "decline politely"); empty for a neutral reply.
 func (a *Assistant) DraftReply(ctx context.Context, threadContext, instruction string) (<-chan Chunk, error) {
