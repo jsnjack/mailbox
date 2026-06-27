@@ -122,22 +122,23 @@ func (w *window) openSettings() {
 		nameRows[a.Email] = r
 	}
 
-	// Per-account signatures, appended to composed messages. Each editor is seeded
-	// with that account's effective signature (its own, or the global default when
-	// it has none); on close, changed editors are saved per account.
+	// Signatures: always an editable global default (key ""), plus a per-account
+	// override editor (key = email) for each account when there's more than one.
+	// A blank override falls back to the default. With a single account the
+	// default is all you need, so no override editors are shown.
+	multiAcct := len(w.deps.Accounts) > 1
 	sigGroup := adw.NewPreferencesGroup()
 	sigGroup.SetTitle("Signature")
-	sigGroup.SetDescription("Appended to new messages and replies (below your text, above any quote). Leave blank for none.")
-	sigAccounts := w.deps.Accounts
-	if len(sigAccounts) == 0 { // no connected account: edit the global default
-		sigAccounts = []AccountInfo{{Email: ""}}
+	if multiAcct {
+		sigGroup.SetDescription("A default for all accounts, plus optional per-account overrides. Leave an override blank to use the default.")
+	} else {
+		sigGroup.SetDescription("Appended to new messages and replies (below your text, above any quote). Leave blank for none.")
 	}
 	sigViews := map[string]*gtk.TextView{}
 	sigSeeded := map[string]string{}
-	for _, a := range sigAccounts {
-		seeded, _ := config.SignatureFor(a.Email)
-		if len(sigAccounts) > 1 {
-			lbl := gtk.NewLabel(a.Email)
+	addSigEditor := func(key, heading, seeded string) {
+		if heading != "" {
+			lbl := gtk.NewLabel(heading)
 			lbl.SetXAlign(0)
 			lbl.AddCSSClass("heading")
 			lbl.SetMarginTop(6)
@@ -155,8 +156,21 @@ func (w *window) openSettings() {
 		sigScroll.SetChild(sigView)
 		sigScroll.AddCSSClass("card")
 		sigGroup.Add(sigScroll)
-		sigViews[a.Email] = sigView
-		sigSeeded[a.Email] = strings.TrimSpace(seeded)
+		sigViews[key] = sigView
+		sigSeeded[key] = strings.TrimSpace(seeded)
+	}
+
+	globalSig, _ := config.LoadSignature()
+	defaultHeading := ""
+	if multiAcct {
+		defaultHeading = "Default (all accounts)"
+	}
+	addSigEditor("", defaultHeading, globalSig)
+	if multiAcct {
+		overrides, _ := config.LoadAccountSignatures()
+		for _, a := range w.deps.Accounts {
+			addSigEditor(a.Email, a.Email, overrides[a.Email])
+		}
 	}
 
 	// Load-modify-save so the two prefs toggles don't clobber each other's field.
@@ -256,25 +270,25 @@ func (w *window) openSettings() {
 			}
 		}
 		w.applyAccountNames(nameRows)
-		for email, view := range sigViews {
+		for key, view := range sigViews { // key "" = global default; else account email
 			newSig := strings.TrimSpace(bodyText(view.Buffer()))
-			if newSig == sigSeeded[email] {
-				continue // unchanged → keep its override / global fallback
+			if newSig == sigSeeded[key] {
+				continue // unchanged → keep its override / global default
 			}
 			var err error
-			if email == "" {
-				err = config.SaveSignature(newSig) // no-account mode: global default
+			if key == "" {
+				err = config.SaveSignature(newSig) // global default
 			} else {
-				// Blank removes the per-account override (falls back to global).
-				err = config.SaveAccountSignature(email, newSig)
+				// Blank removes the per-account override (falls back to default).
+				err = config.SaveAccountSignature(key, newSig)
 			}
 			if err != nil {
-				slog.Warn("ui: save signature", "err", err, "account", email)
+				slog.Warn("ui: save signature", "err", err, "account", key)
 			}
 		}
-		// Re-resolve the active account's effective signature (it may now fall back
-		// to the global default after a cleared override).
-		w.signature, _ = config.SignatureFor(w.activeEmail)
+		// Re-resolve the active account's effective signature (default and/or its
+		// override may have changed).
+		w.signature = w.signatureForActive()
 	})
 	dialog.Present(w.win)
 }

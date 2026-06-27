@@ -196,8 +196,8 @@ func newWindow(app *adw.Application, deps Deps) *window {
 		w.activeID = deps.Accounts[0].ID
 		w.activeEmail = deps.Accounts[0].Email
 	}
-	// Signature is per active account (falls back to the global default).
-	w.signature, _ = config.SignatureFor(w.activeEmail)
+	// Signature the compose window appends for the active account.
+	w.signature = w.signatureForActive()
 	w.build()
 	w.registerActions()
 	return w
@@ -2068,6 +2068,19 @@ func (w *window) restoreSidebarSelection() {
 // windowed model (paging on scroll) is a further optimization.
 const threadListCap = 5000
 
+// signatureForActive returns the signature composes should append for the active
+// account: the global default when only one account is connected (per-account
+// overrides only matter with several), otherwise the active account's signature
+// (its own override, or the global default as fallback).
+func (w *window) signatureForActive() string {
+	if len(w.deps.Accounts) <= 1 {
+		sig, _ := config.LoadSignature()
+		return sig
+	}
+	sig, _ := config.SignatureFor(w.activeEmail)
+	return sig
+}
+
 // setActiveAccount switches the displayed account, reloading its labels and inbox.
 func (w *window) setActiveAccount(a AccountInfo) {
 	if a.ID == w.activeID {
@@ -2075,7 +2088,7 @@ func (w *window) setActiveAccount(a AccountInfo) {
 	}
 	w.activeID = a.ID
 	w.activeEmail = a.Email
-	w.signature, _ = config.SignatureFor(a.Email) // per-account signature for compose
+	w.signature = w.signatureForActive() // signature the next compose appends
 	w.current = model.LabelInbox
 	w.clearReader()
 	w.loadLabels()

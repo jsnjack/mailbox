@@ -128,11 +128,16 @@ subject, "attachment" mentioned but none attached → confirm), and closing an
 unsent message offers Save-as-draft alongside Discard. A configurable signature
 is appended to every composed body below the cursor area and above any quote
 (`composeBodyWithSignature`, RFC 3676 "-- " delimiter); it is not re-added when
-editing an existing draft. Signatures are **per account**: `config.SignatureFor`
-returns the active account's own signature (`signatures.json`, keyed by email,
-`config.{Load,Save}AccountSignature`) or falls back to the global default
-(`config.{Load,Save}Signature`, `<config>/signature.txt`); Preferences shows one
-editor per connected account, and `w.signature` is refreshed on account switch. Clicking a conversation in the Drafts
+editing an existing draft. Signatures have a **global default**
+(`config.{Load,Save}Signature`, `<config>/signature.txt`) plus optional
+**per-account overrides** (`signatures.json` keyed by email,
+`config.{Load,Save}AccountSignature`; a blank override is removed so the account
+falls back to the default — "blank means use the default"). `signatureForActive`
+resolves which a compose appends: the global default for a single account, else
+`config.SignatureFor(activeEmail)` (override-or-default); `w.signature` is
+refreshed on account switch. Preferences always shows an editable Default
+signature, plus one override editor per account when more than one is connected.
+Clicking a conversation in the Drafts
 folder resumes editing it in compose (`openDraftForEdit`) instead of rendering
 it read-only: the body/recipients are prefilled and the draft's Gmail resource
 id is resolved (`Client.FindDraftID`) so Save updates that draft
