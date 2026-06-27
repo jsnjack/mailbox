@@ -524,12 +524,12 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 		contacts, err := w.deps.Store.Contacts(context.Background(), w.activeID, w.activeEmail, 1500)
 		if err != nil {
 			slog.Warn("ui: load contacts", "err", err)
-			return
-		}
-		if len(contacts) == 0 {
-			return
 		}
 		dispatch.Main(func() {
+			contacts = w.withOwnAccounts(contacts)
+			if len(contacts) == 0 {
+				return
+			}
 			st := buildContactStore(contacts)
 			attachRecipientCompletion(toEntry, st)
 			attachRecipientCompletion(ccEntry, st)
@@ -734,12 +734,35 @@ func formatContact(c model.Contact) string {
 	return c.Address
 }
 
+// withOwnAccounts prepends the user's registered accounts to the contact list
+// (so you can address your other account), de-duplicated against the past
+// correspondents by address. Own accounts come first so they rank at the top.
+func (w *window) withOwnAccounts(past []model.Contact) []model.Contact {
+	seen := make(map[string]bool, len(w.deps.Accounts))
+	out := make([]model.Contact, 0, len(w.deps.Accounts)+len(past))
+	for _, a := range w.deps.Accounts {
+		addr := strings.ToLower(strings.TrimSpace(a.Email))
+		if addr == "" || seen[addr] {
+			continue
+		}
+		seen[addr] = true
+		out = append(out, model.Contact{Name: w.accountDisplayName(a), Address: a.Email})
+	}
+	for _, c := range past {
+		if seen[strings.ToLower(strings.TrimSpace(c.Address))] {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
 // buildContactStore builds a single-column list model of recipient tokens to
-// back the autocompletion on the To/Cc/Bcc fields.
+// back the autocompletion on the To/Cc/Bcc fields. GtkListStore/TreeModel are
+// deprecated in GTK4 but are still required to back a GtkEntryCompletion
+// (gio.ListStore is not a GtkTreeModel).
 //
-// required to back a GtkEntryCompletion (gio.ListStore is not a GtkTreeModel).
-//
-//nolint:staticcheck // GtkListStore/TreeModel are deprecated in GTK4 but are
+//nolint:staticcheck // GtkListStore/EntryCompletion are deprecated; no replacement.
 func buildContactStore(contacts []model.Contact) *gtk.ListStore {
 	st := gtk.NewListStore([]coreglib.Type{coreglib.TypeString})
 	for _, c := range contacts {

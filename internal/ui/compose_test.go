@@ -1,6 +1,10 @@
 package ui
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/jsnjack/mailbox/internal/model"
+)
 
 func TestEditableBoundary(t *testing.T) {
 	tests := []struct {
@@ -70,5 +74,36 @@ func TestComposeBodyWithSignature(t *testing.T) {
 	}
 	if got := composeBodyWithSignature("> quoted", "Yauhen"); got != "\n\n-- \nYauhen\n\n> quoted" {
 		t.Fatalf("reply sig placement = %q", got)
+	}
+}
+
+func TestWithOwnAccounts(t *testing.T) {
+	w := &window{
+		deps: Deps{Accounts: []AccountInfo{
+			{ID: 1, Email: "me@gmail.com"},
+			{ID: 2, Email: "me@work.com"},
+		}},
+		accountNames: map[string]string{"me@work.com": "Work"},
+	}
+	past := []model.Contact{
+		{Address: "friend@x.com", Name: "Friend"},
+		{Address: "ME@work.com"}, // same as account 2 (case-insensitive) → deduped
+	}
+	got := w.withOwnAccounts(past)
+
+	if len(got) != 3 {
+		t.Fatalf("got %d contacts, want 3: %+v", len(got), got)
+	}
+	// Own accounts come first, in registration order.
+	if got[0].Address != "me@gmail.com" || got[1].Address != "me@work.com" {
+		t.Fatalf("own accounts not first: %+v", got)
+	}
+	// The assigned display name is used.
+	if got[1].Name != "Work" {
+		t.Errorf("account 2 name = %q, want Work", got[1].Name)
+	}
+	// The past correspondent survives; the dup of an own account does not.
+	if got[2].Address != "friend@x.com" {
+		t.Errorf("third = %q, want friend@x.com", got[2].Address)
 	}
 }

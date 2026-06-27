@@ -8,7 +8,7 @@ Version:        %{?appversion}%{!?appversion:0.0.0}
 Release:        1%{?dist}
 Summary:        A native, fast Gmail client for GNOME
 
-License:        Proprietary
+License:        MIT
 URL:            https://github.com/jsnjack/mailbox
 
 Requires:       gtk4

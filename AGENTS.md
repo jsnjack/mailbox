@@ -106,8 +106,11 @@ real install.)
 Reply / reply-all / forward / new compose in a separate window (text/plain via
 `gmailapi.BuildMIME` + `messages.send`, threading headers + threadId on replies);
 To/Cc/Bcc autocomplete from past correspondents (`store.Contacts` ranks
-addresses seen in cached mail by frequency+recency; a `GtkEntryCompletion`
-completes the last comma-separated token). The compose window has an AI-draft button (streams a drafted reply via
+addresses seen in cached mail by frequency+recency) plus the user's own
+registered accounts (`withOwnAccounts`, listed first so you can address another
+of your accounts); a `GtkEntryCompletion` completes the last comma-separated
+token. A sparkle button next to Subject generates it from the body
+(`Assistant.GenerateSubject`). The compose window has an AI-draft button (streams a drafted reply via
 `DraftReply` for a reply/forward, or a from-scratch body via `DraftNew` for a
 new message — both prompted by `askAIIntent`, which also offers an on-demand "Suggest quick replies" button for a reply via `SmartReplies`), an AI grammar-check button
 (`Proofread`), and a Save-draft button
