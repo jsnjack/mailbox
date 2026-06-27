@@ -27,7 +27,15 @@ var sparkleSVG []byte
 //go:embed icons/translate-symbolic.svg
 var translateSVG []byte
 
-// bundledIcons maps each custom icon's name to its SVG bytes.
+// appIconSVG is the application icon, bundled so it resolves by name even when
+// running from ./bin (a packaged install puts it under /usr/share/icons, but a
+// dev run has no installed icon — without this the About dialog shows a broken
+// image). Same asset as packaging/com.jsnjack.mailbox.svg.
+//
+//go:embed icons/com.jsnjack.mailbox.svg
+var appIconSVG []byte
+
+// bundledIcons maps each custom symbolic icon's name to its SVG bytes.
 var bundledIcons = map[string][]byte{
 	"palm-tree-symbolic":    palmTreeSVG,
 	"mail-archive-symbolic": mailArchiveSVG,
@@ -56,6 +64,14 @@ func registerCustomIcons() {
 		if err := os.WriteFile(filepath.Join(dir, name+".svg"), svg, 0o644); err != nil {
 			slog.Warn("ui: write icon", "name", name, "err", err)
 		}
+	}
+	// The application icon goes in the standard "apps" context, named after the
+	// app id, so adw.AboutDialog.SetApplicationIcon(appID) resolves in dev too.
+	appsDir := filepath.Join(base, "hicolor", "scalable", "apps")
+	if err := os.MkdirAll(appsDir, 0o755); err != nil {
+		slog.Warn("ui: app icon dir", "err", err)
+	} else if err := os.WriteFile(filepath.Join(appsDir, appID+".svg"), appIconSVG, 0o644); err != nil {
+		slog.Warn("ui: write app icon", "name", appID, "err", err)
 	}
 	gtk.IconThemeGetForDisplay(display).AddSearchPath(base)
 }

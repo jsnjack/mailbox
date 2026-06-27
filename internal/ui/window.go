@@ -234,7 +234,7 @@ func (w *window) registerAppMenuActions() {
 func (w *window) showAbout() {
 	about := adw.NewAboutDialog()
 	about.SetApplicationName("Mailbox")
-	about.SetApplicationIcon("com.jsnjack.mailbox")
+	about.SetApplicationIcon(appID)
 	about.SetDeveloperName("Yauhen Shulitski")
 	if v := w.deps.Version; v != "" {
 		about.SetVersion(v)
