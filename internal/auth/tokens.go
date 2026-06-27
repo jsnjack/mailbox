@@ -2,12 +2,31 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/zalando/go-keyring"
 	"golang.org/x/oauth2"
 )
+
+// IsAuthError reports whether err is a permanent OAuth failure — the refresh
+// token was revoked or expired ("invalid_grant") — meaning the account needs
+// interactive re-authentication and won't recover on its own. Transient network
+// or 5xx errors are not auth errors. It looks through wrapping (the token error
+// is wrapped by the token source and again by the API client), with a string
+// fallback for layers that don't wrap with %w.
+func IsAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var re *oauth2.RetrieveError
+	if errors.As(err, &re) && re.ErrorCode == "invalid_grant" {
+		return true
+	}
+	return strings.Contains(err.Error(), "invalid_grant")
+}
 
 // keyringService is the Secret Service collection key under which refresh tokens
 // are stored, one item per account email.

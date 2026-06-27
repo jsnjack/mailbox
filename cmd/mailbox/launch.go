@@ -357,6 +357,11 @@ func backgroundSync(ctx context.Context, engine *syncer.Engine, act *activity.Hu
 			n, err = engine.Resync(ctx, client, accountID, resyncBackfillLimit)
 		}
 		if err != nil {
+			if auth.IsAuthError(err) {
+				// Revoked/expired refresh token — can't recover without re-login;
+				// tell the UI so it can prompt the user to reconnect.
+				engine.NotifyAuthExpired(accountID)
+			}
 			done("error: " + err.Error())
 			fmt.Fprintf(os.Stderr, "background sync: %v\n", err)
 		} else if n > 0 {

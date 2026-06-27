@@ -35,7 +35,7 @@ internal/
   config/            XDG paths + config.toml load/save
   dispatch/          THE main-thread bridge: Main(fn) → glib.IdleAdd
   store/             SQLite layer (schema, FTS5, queries) — modernc.org/sqlite
-  auth/              OAuth2 installed-app loopback + keyring-backed token source
+  auth/              OAuth2 installed-app loopback + keyring-backed token source (auto-refresh, rotated-token write-back, IsAuthError detects a revoked/expired refresh token)
   gmailapi/          wrapper over google.golang.org/api/gmail/v1 (semaphore, budget, backoff, MIME)
   sync/              per-account sync workers (backfill ↔ incremental) + notify.Hub
   ai/                provider abstraction (OpenAI-compatible + Anthropic), streaming
@@ -102,7 +102,11 @@ optimistic `ModifyLabels` + Gmail mirror; opening an unread message marks it rea
 Ctrl +/-/0 zoom the message view (`WebView.SetZoomLevel`, persisted);
 a 60s background incremental sync updates label counts through `dispatch`→`Hub`,
 and new inbox mail (arriving after launch) raises a desktop notification via
-`gio.Notification`. (GNOME routes a notification only when it can resolve the
+`gio.Notification`. The background sync self-heals an expired history watermark
+(an account offline past Gmail's history window) by re-backfilling and resetting
+the watermark (`engine.Resync` on `ErrHistoryExpired`); a revoked/expired refresh
+token (`auth.IsAuthError`) instead publishes `AuthExpired`, which reveals a
+"reconnect" banner (it can't recover without re-login). (GNOME routes a notification only when it can resolve the
 GApplication app-id `com.jsnjack.mailbox` to an installed `*.desktop` entry; the
 RPM ships `com.jsnjack.mailbox.desktop` under `/usr/share/applications`, and for a
 binary run from `bin/` `ensureDesktopFile` self-installs a user-level entry —

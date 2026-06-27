@@ -104,6 +104,7 @@ type window struct {
 	readOnlyBanner    *adw.Banner // revealed when no Gmail client (live features off)
 	outboxBanner      *adw.Banner // revealed when sends are queued/failed
 	emptyFolderBanner *adw.Banner // revealed in Trash/Spam to empty them permanently
+	authBanner        *adw.Banner // revealed when an account's sign-in expired/was revoked
 	searchEntry       *gtk.SearchEntry
 	suppressSearch    bool   // guards SetText from firing a search during label switch
 	serverSearch      bool   // current search is a Gmail server-side search, not local FTS
@@ -843,8 +844,17 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 	w.emptyFolderBanner.SetRevealed(false)
 	w.emptyFolderBanner.ConnectButtonClicked(w.onEmptyFolder)
 
+	// Revealed when an account's refresh token is revoked/expired (a sync hit
+	// invalid_grant): the account can't recover without re-login, so say so
+	// instead of silently failing to sync.
+	w.authBanner = adw.NewBanner("")
+	w.authBanner.SetButtonLabel("How to reconnect")
+	w.authBanner.SetRevealed(false)
+	w.authBanner.ConnectButtonClicked(w.showConnectHelp)
+
 	content := gtk.NewBox(gtk.OrientationVertical, 0)
 	content.Append(w.readOnlyBanner)
+	content.Append(w.authBanner)
 	content.Append(w.outboxBanner)
 	content.Append(w.emptyFolderBanner)
 	content.Append(w.searchEntry)
@@ -3631,6 +3641,22 @@ func (w *window) onChange(c syncer.Change) {
 		if c.AccountID == w.activeID {
 			w.refreshOutbox()
 		}
+	case syncer.AuthExpired:
+		// The account's sign-in expired/was revoked; surface it (it won't recover
+		// without re-login) and name the account so multi-account users know which.
+		email := ""
+		for _, a := range w.deps.Accounts {
+			if a.ID == c.AccountID {
+				email = a.Email
+				break
+			}
+		}
+		if email != "" {
+			w.authBanner.SetTitle("Sign-in expired for " + email + " — reconnect to keep syncing")
+		} else {
+			w.authBanner.SetTitle("An account's sign-in expired — reconnect to keep syncing")
+		}
+		w.authBanner.SetRevealed(true)
 	}
 	if c.Kind != syncer.MessageUpserted || c.GmailID == "" {
 		return

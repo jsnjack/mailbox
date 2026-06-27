@@ -50,6 +50,13 @@ func (e *Engine) publish(c Change) {
 	}
 }
 
+// NotifyAuthExpired publishes an AuthExpired change so the UI can tell the user
+// to reconnect the account. Used when a sync fails because the refresh token was
+// revoked or expired — a state that cannot be recovered without re-login.
+func (e *Engine) NotifyAuthExpired(accountID int64) {
+	e.publish(Change{Kind: AuthExpired, AccountID: accountID})
+}
+
 // SyncLabels refreshes the account's label set from Gmail.
 func (e *Engine) SyncLabels(ctx context.Context, c *gmailapi.Client, accountID int64) (int, error) {
 	labels, err := c.ListLabels(ctx)

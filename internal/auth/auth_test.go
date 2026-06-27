@@ -1,11 +1,36 @@
 package auth
 
 import (
+	"errors"
+	"fmt"
 	"slices"
 	"testing"
 
 	"github.com/zalando/go-keyring"
+	"golang.org/x/oauth2"
 )
+
+func TestIsAuthError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"generic", errors.New("connection refused"), false},
+		{"transient retrieve", &oauth2.RetrieveError{ErrorCode: "temporarily_unavailable"}, false},
+		{"invalid_grant typed", &oauth2.RetrieveError{ErrorCode: "invalid_grant"}, true},
+		{"invalid_grant wrapped", fmt.Errorf("refresh token: %w", &oauth2.RetrieveError{ErrorCode: "invalid_grant"}), true},
+		{"invalid_grant string only", errors.New(`oauth2: "invalid_grant" Token has been expired or revoked.`), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsAuthError(tc.err); got != tc.want {
+				t.Fatalf("IsAuthError(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
 
 func TestRefreshTokenRoundTrip(t *testing.T) {
 	keyring.MockInit() // in-memory keyring; no Secret Service needed
