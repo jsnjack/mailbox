@@ -70,7 +70,47 @@ APP=$!
 sleep "$SECONDS_RUN"
 
 if [ -n "$SHOT" ]; then
-  DISPLAY="$DISP" import -window root "$SHOT" 2>/dev/null && echo "shot: $SHOT"
+  # Capture the GTK window by X11 id so no Xvfb root background is included at
+  # all; fall back to a root capture if xprop can't resolve the active window.
+  WID=""
+  WID="$(DISPLAY="$DISP" xprop -root _NET_ACTIVE_WINDOW 2>/dev/null \
+        | sed -n 's/.*window id # //p' || true)"
+  if [ -n "$WID" ]; then
+    DISPLAY="$DISP" import -window "$WID" "$SHOT" 2>/dev/null
+  fi
+  if [ ! -s "$SHOT" ]; then
+    DISPLAY="$DISP" import -window root "$SHOT" 2>/dev/null
+  fi
+  if [ -s "$SHOT" ]; then
+    # A root capture (or GTK landing smaller than the window-id frame) leaves a
+    # screen border: a 1px gray root ring and/or black void where the window
+    # didn't fill the screen. Strip uniform frame rows/cols whose colour is the
+    # corner, pure black, or the common gray rings — so the screenshot is
+    # exactly the app frame, no dark border.
+    python3 - "$SHOT" <<'PY' 2>/dev/null && echo "shot: $SHOT" || echo "shot: $SHOT (trim failed, kept as-is)" >&2
+import sys
+from PIL import Image
+p = sys.argv[1]
+im = Image.open(p).convert("RGB")
+w, h = im.size
+px = im.load()
+corner = px[0, 0]
+frame = {corner, (0, 0, 0), (221, 221, 221), (225, 225, 225)}
+
+def row_frame(y):
+    return all(px[x, y] in frame for x in range(0, w, 3))
+
+def col_frame(x):
+    return all(px[x, y] in frame for y in range(0, h, 3))
+
+top = next((y for y in range(h) if not row_frame(y)), 0)
+bot = next((y for y in range(h - 1, -1, -1) if not row_frame(y)), h - 1) + 1
+left = next((x for x in range(w) if not col_frame(x)), 0)
+right = next((x for x in range(w - 1, -1, -1) if not col_frame(x)), w - 1) + 1
+if right > left and bot > top:
+    im.crop((left, top, right, bot)).save(p)
+PY
+  fi
 fi
 if [ "$KEEP" -eq 1 ]; then
   echo "leaving sandbox running (pid $APP); dir kept at $SBX"
