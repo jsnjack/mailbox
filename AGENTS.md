@@ -131,8 +131,9 @@ new message — both prompted by `askAIIntent`, which also offers an on-demand "
 subject, "attachment" mentioned but none attached → confirm), and closing an
 unsent message offers Save-as-draft alongside Discard. A configurable signature
 is appended to every composed body below the cursor area and above any quote
-(`composeBodyWithSignature`, RFC 3676 "-- " delimiter); it is not re-added when
-editing an existing draft. Signatures have a **global default**
+(`composeBodyWithSignature`) as a plain sign-off — no RFC 3676 "-- " delimiter
+(Gmail/Outlook don't honor it, so for a short sign-off it just shows a stray
+"--" line); it is not re-added when editing an existing draft. Signatures have a **global default**
 (`config.{Load,Save}Signature`, `<config>/signature.txt`) plus optional
 **per-account overrides** (`signatures.json` keyed by email,
 `config.{Load,Save}AccountSignature`; a blank override is removed so the account

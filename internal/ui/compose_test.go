@@ -14,9 +14,19 @@ func TestEditableBoundary(t *testing.T) {
 	}{
 		{"no markers", "Hello there, how are you?", "Hello there, how are you?"},
 		{
-			"signature then quote",
+			// A bare "-- " (e.g. a user types it in their own signature) still marks
+			// the boundary defensively.
+			"explicit delimiter then quote",
 			"Hi Sam,\n\nThanks!\n\n-- \nYauhen\n\nOn Jan 2, 2026, X wrote:\n> old\n",
 			"Hi Sam,\n\nThanks!",
+		},
+		{
+			// The plain sign-off composeBodyWithSignature now inserts has no
+			// delimiter, so it stays in the editable region; only the quote is
+			// preserved.
+			"plain sign-off then quote",
+			"Thanks!\n\nBest,\nYauhen\n\nOn Jan 2, 2026, X wrote:\n> old\n",
+			"Thanks!\n\nBest,\nYauhen",
 		},
 		{
 			"quote, no signature",
@@ -69,10 +79,10 @@ func TestComposeBodyWithSignature(t *testing.T) {
 	if got := composeBodyWithSignature("quote", ""); got != "quote" {
 		t.Fatalf("no sig keeps quote = %q", got)
 	}
-	if got := composeBodyWithSignature("", "Yauhen"); got != "\n\n-- \nYauhen" {
+	if got := composeBodyWithSignature("", "Best,\nYauhen"); got != "\n\nBest,\nYauhen" {
 		t.Fatalf("new message sig = %q", got)
 	}
-	if got := composeBodyWithSignature("> quoted", "Yauhen"); got != "\n\n-- \nYauhen\n\n> quoted" {
+	if got := composeBodyWithSignature("> quoted", "Best,\nYauhen"); got != "\n\nBest,\nYauhen\n\n> quoted" {
 		t.Fatalf("reply sig placement = %q", got)
 	}
 }

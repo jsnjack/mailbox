@@ -711,13 +711,15 @@ func (w *window) askAIIntent(parent gtk.Widgetter, isReply bool, threadContext s
 // composeBodyWithSignature inserts the default signature into a compose body.
 // quote is the prefilled content (empty for a new message, the quoted history
 // for a reply/forward). The signature is placed below the cursor area and above
-// any quote, using the RFC 3676 "-- " delimiter. Empty signature → unchanged.
+// any quote, as a plain sign-off (e.g. "Best,\nYauhen") with no "-- " delimiter:
+// that delimiter is a formal-signature convention Gmail/Outlook don't honor, so
+// for a short sign-off it just shows up as a stray "--" line. Empty → unchanged.
 func composeBodyWithSignature(quote, sig string) string {
 	sig = strings.TrimRight(sig, " \t\r\n")
 	if sig == "" {
 		return quote
 	}
-	block := "\n\n-- \n" + sig
+	block := "\n\n" + sig
 	if quote == "" {
 		return block
 	}
@@ -848,11 +850,13 @@ func grammarRange(buf *gtk.TextBuffer) (*gtk.TextIter, *gtk.TextIter) {
 }
 
 // editableBoundary returns the byte offset in a composed body where the
-// non-editable region (signature, then quoted history) begins — i.e. the
-// earliest of the RFC 3676 "-- " signature delimiter line, a quote attribution
-// ("On … wrote:") line, or the first ">"-quoted line. It returns len(text) when
-// the body is all the user's own writing. The markers are reliable because the
-// compose path generates them (composeBodyWithSignature, quoteOriginal).
+// non-editable region (quoted history) begins — i.e. the earliest of a quote
+// attribution ("On … wrote:") line, the first ">"-quoted line, or a bare "-- "
+// signature delimiter line. It returns len(text) when the body is all the user's
+// own writing. The quote markers are reliable because quoteOriginal generates
+// them; the plain sign-off composeBodyWithSignature now inserts has no delimiter,
+// so it falls inside the editable region (harmless to proofread) — the "-- " case
+// is kept only to respect a delimiter a user puts in their own signature text.
 func editableBoundary(text string) int {
 	boundary := len(text)
 	mark := func(off int) {
