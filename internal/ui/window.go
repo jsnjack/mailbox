@@ -158,7 +158,6 @@ type window struct {
 	// summaryCache memoizes by the thread's message fingerprint, so reopening is
 	// instant and a new reply (different fingerprint) re-generates automatically.
 	summaryBtn      *gtk.Button
-	analyzeBtn      *gtk.Button // on-demand AI phishing/scam analysis
 	summaryRevealer *gtk.Revealer
 	summaryLabel    *gtk.Label
 	cardIcon        *gtk.Image // card icon (set per action: summary vs analysis)
@@ -631,12 +630,10 @@ func (w *window) buildSidebar() *adw.NavigationPage {
 	w.refreshBtn.SetTooltipText("Sync now")
 	w.refreshBtn.SetSensitive(w.deps.Sync != nil)
 	w.refreshBtn.ConnectClicked(w.onRefresh)
-	hb.PackEnd(w.refreshBtn)
 
 	w.syncSpinner = adw.NewSpinner()
 	w.syncSpinner.SetTooltipText("Syncing…")
 	w.syncSpinner.SetVisible(false)
-	hb.PackEnd(w.syncSpinner)
 
 	// Primary (hamburger) menu — the GNOME-standard home for Preferences,
 	// Keyboard Shortcuts and About, consolidating what used to be a lone gear.
@@ -654,7 +651,11 @@ func (w *window) buildSidebar() *adw.NavigationPage {
 	primaryBtn.SetIconName("open-menu-symbolic")
 	primaryBtn.SetTooltipText("Main menu")
 	primaryBtn.SetMenuModel(menu)
+	// PackEnd is right-to-left: the primary menu sits at the trailing edge (GNOME
+	// convention), with refresh — or its sync spinner — to its left.
 	hb.PackEnd(primaryBtn)
+	hb.PackEnd(w.refreshBtn)
+	hb.PackEnd(w.syncSpinner)
 
 	tv := adw.NewToolbarView()
 	tv.AddTopBar(hb)
@@ -1811,11 +1812,8 @@ func (w *window) buildReader() *adw.NavigationPage {
 	w.summaryBtn.SetTooltipText("Summarize thread with AI")
 	w.summaryBtn.ConnectClicked(w.onSummarize)
 
-	w.analyzeBtn = gtk.NewButtonFromIconName("security-high-symbolic")
-	w.analyzeBtn.SetTooltipText("Analyze this email for phishing (AI)")
-	w.analyzeBtn.ConnectClicked(w.onAnalyze)
-
-	// Secondary actions (star, mark-unread, trash, images) live in the overflow.
+	// Secondary actions (phishing analysis, star, mark-unread, trash, images) live
+	// in the overflow — analysis is on-demand and rare, so it doesn't earn a slot.
 	w.overflowBtn = gtk.NewMenuButton()
 	w.overflowBtn.SetIconName("view-more-symbolic")
 	w.overflowBtn.SetTooltipText("More actions")
@@ -1836,7 +1834,6 @@ func (w *window) buildReader() *adw.NavigationPage {
 		hb.PackEnd(w.draftBtn)
 		hb.PackEnd(w.translateBtn)
 		hb.PackEnd(w.summaryBtn)
-		hb.PackEnd(w.analyzeBtn)
 	}
 	w.setActionsSensitive(false)
 
@@ -1855,9 +1852,6 @@ func (w *window) setActionsSensitive(on bool) {
 	w.draftBtn.SetSensitive(canAI)
 	if w.summaryBtn != nil {
 		w.summaryBtn.SetSensitive(canAI)
-	}
-	if w.analyzeBtn != nil {
-		w.analyzeBtn.SetSensitive(canAI)
 	}
 	// The overflow menu builds its own items conditionally; enable it whenever a
 	// message is open.
@@ -2805,6 +2799,7 @@ func (w *window) registerReaderActions() {
 	add("reader-trash", w.onTrash)
 	add("reader-delete-forever", w.onDeleteForever)
 	add("reader-labels", w.showLabelsDialog)
+	add("reader-analyze", w.onAnalyze)
 	add("reader-find-from", func() { w.searchFrom(w.openMsg.FromAddr) })
 
 	w.starAction = gio.NewSimpleActionStateful("reader-star", nil, glib.NewVariantBoolean(false))
@@ -2848,6 +2843,13 @@ func (w *window) buildReaderMenuModel() *gio.Menu {
 		lbl := gio.NewMenu()
 		lbl.Append("Labels…", "win.reader-labels")
 		menu.AppendSection("", lbl)
+	}
+	// On-demand AI phishing/scam analysis (rare, so it lives here rather than the
+	// header). Streams its verdict into the shared AI card.
+	if w.deps.Assistant != nil {
+		sec := gio.NewMenu()
+		sec.Append("Check for phishing", "win.reader-analyze")
+		menu.AppendSection("", sec)
 	}
 	// Find all mail from this sender (Gmail server-side search understands from:).
 	if w.deps.SearchServer != nil && strings.TrimSpace(w.openMsg.FromAddr) != "" {

@@ -20,12 +20,6 @@ Move an item into a commit (and delete it here) when it's done.
   prepared statements for the hot queries would shave parse overhead. Low impact per
   the audit; do only if profiling shows it.
 
-## UX
-
-- **Review header button layout.** Now that the "Messages"/"Reader" titles are
-  gone, revisit which actions live in each pane's header, their order, and what
-  belongs in the overflow menu vs. promoted — simplicity first.
-
 ## Features (noticed while working, not requested yet)
 
 _(none currently — recently shipped: per-account signatures, Reply-To handling.)_

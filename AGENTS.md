@@ -82,9 +82,9 @@ A sender-authentication badge shows Gmail's SPF/DKIM/DMARC verdict
 → green verified / amber partial / red possible-spoof), plus deterministic
 anti-phishing heuristics (`phishing.go`: display-name spoofing and deceptive
 link text, compared at the registrable-domain level — no AI/network) surfaced as
-an amber caution line; a shield button additionally runs an on-demand AI
-phishing analysis (`AnalyzeEmail` — verdict + reasons, fed the auth/heuristic
-signals, shown in the shared AI card), **persisted** per message
+an amber caution line; the reader overflow's "Check for phishing" additionally
+runs an on-demand AI phishing analysis (`AnalyzeEmail` — verdict + reasons, fed
+the auth/heuristic signals, shown in the shared AI card), **persisted** per message
 (`store.{SetAnalysis,Analysis}`, `message_analyses` table — the message + its
 signals are immutable, so it's reused on re-open without re-running the AI). A thread is rendered newest-message-first, with quoted reply history collapsed
 behind a native <details> "Show quoted text" toggle (`cleanEmailHTML`, same single HTML pass as tracker stripping, no JS). An AI-summary button reveals a card
