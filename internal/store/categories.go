@@ -20,6 +20,17 @@ func (s *Store) SetMessageCategory(ctx context.Context, accountID int64, gmailID
 	return nil
 }
 
+// ClearCategories removes all cached categories for an account, so the inbox is
+// re-classified from scratch on the next categorize pass (used by the manual
+// "Re-categorize inbox" action, e.g. after the category prompt changes).
+func (s *Store) ClearCategories(ctx context.Context, accountID int64) error {
+	if _, err := s.writer.ExecContext(ctx,
+		`DELETE FROM message_categories WHERE account_id = ?`, accountID); err != nil {
+		return fmt.Errorf("clear categories: %w", err)
+	}
+	return nil
+}
+
 // MessageCategories returns the cached categories for the given message ids, as
 // a gmail_id → category map. Ids with no stored category are absent from the
 // map (a present-but-empty value means "classified, no tag"). An empty input

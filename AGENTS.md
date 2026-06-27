@@ -167,7 +167,10 @@ batched and **persisted per email** keyed by the latest message's id
 `categorizeInbox` seeds tags from the cache for free on launch and only calls the
 AI for still-uncategorized threads (capped per pass) — each email is classified
 once, not every launch. Gated by a Preferences toggle (`ai.Categorize` /
-`categorizeInbox`).
+`categorizeInbox`). Because results are cached, a category-prompt change won't
+re-classify existing mail on its own; the thread-list overflow menu's
+"Re-categorize inbox" (`onRecategorize` → `store.ClearCategories` + a fresh pass,
+inbox-only) forces a re-run.
 The list is grouped by conversation: a virtualized `gtk.ListView` over a
 `gtk.StringList` of thread ids (looked up in a `threadByID` map of
 `model.ThreadSummary`); rows show the newest message + a count. Refreshes are

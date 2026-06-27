@@ -132,7 +132,7 @@ func (a *Assistant) Categorize(ctx context.Context, items []string) ([]string, e
 	}
 	system := "You classify emails into exactly one category each, using these definitions:\n" +
 		"- \"Needs reply\": a real person is asking you something or clearly expects a response.\n" +
-		"- \"Calendar\": meeting invitations, event reminders, scheduling or RSVP requests.\n" +
+		"- \"Calendar\": meetings or events — invitations, announcements or notices (incl. minutes/agendas), reminders, scheduling, or RSVP requests.\n" +
 		"- \"Travel\": flights, hotels, car/train bookings, itineraries, boarding passes.\n" +
 		"- \"Receipt\": confirmation of an order/payment ALREADY made — invoices paid, order/shipping/delivery updates.\n" +
 		"- \"Finance\": money you still owe or account info — bills or payments DUE, bank/card statements, taxes.\n" +

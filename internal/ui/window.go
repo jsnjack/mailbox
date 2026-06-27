@@ -904,6 +904,10 @@ func (w *window) registerListActions() {
 	markAll.ConnectActivate(func(*glib.Variant) { w.onMarkAllRead() })
 	w.win.AddAction(markAll)
 
+	recat := gio.NewSimpleAction("list-recategorize", nil)
+	recat.ConnectActivate(func(*glib.Variant) { w.onRecategorize() })
+	w.win.AddAction(recat)
+
 	// Per-row context actions; each carries the row's thread id.
 	row := func(name string, fn func(threadID string)) {
 		act := gio.NewSimpleAction(name, glib.NewVariantType("s"))
@@ -954,7 +958,38 @@ func (w *window) buildListMenuModel() *gio.Menu {
 		sec.Append("Mark all as read", "win.list-mark-all-read")
 		menu.AppendSection("", sec)
 	}
+	// Re-classify the inbox from scratch (clears the cached categories so a prompt
+	// change or a fresh judgment takes effect). Only where categorization runs.
+	if w.current == model.LabelInbox && w.deps.Assistant != nil && w.inboxCategories {
+		sec := gio.NewMenu()
+		sec.Append("Re-categorize inbox", "win.list-recategorize")
+		menu.AppendSection("", sec)
+	}
 	return menu
+}
+
+// onRecategorize clears the active account's cached inbox categories (in memory
+// and persisted) and re-runs categorization, so a category-prompt change or a
+// fresh judgment is reflected — categories are otherwise classified once and
+// cached. It re-bills the AI for the inbox, so it is a deliberate menu action.
+func (w *window) onRecategorize() {
+	if w.deps.Assistant == nil {
+		return
+	}
+	acctID := w.activeID
+	go func() {
+		if err := w.deps.Store.ClearCategories(context.Background(), acctID); err != nil {
+			slog.Warn("ui: clear categories", "err", err)
+		}
+		dispatch.Main(func() {
+			if w.activeID != acctID {
+				return // account switched while clearing
+			}
+			w.categories = map[string]string{}
+			// Re-populating the list runs categorizeInbox afresh (no cache to skip).
+			w.refreshList(w.searchEntry.Text())
+		})
+	}()
 }
 
 func (w *window) onMarkAllRead() {

@@ -52,6 +52,18 @@ func TestMessageCategories(t *testing.T) {
 	if got["m1"] != "Receipt" {
 		t.Fatalf("after update m1 = %q, want %q", got["m1"], "Receipt")
 	}
+
+	// ClearCategories wipes the account's cache so the inbox re-classifies.
+	if err := s.SetMessageCategory(ctx, acc, "m2", "Newsletter"); err != nil {
+		t.Fatalf("SetMessageCategory m2: %v", err)
+	}
+	if err := s.ClearCategories(ctx, acc); err != nil {
+		t.Fatalf("ClearCategories: %v", err)
+	}
+	got, _ = s.MessageCategories(ctx, acc, []string{"m1", "m2"})
+	if len(got) != 0 {
+		t.Fatalf("after clear, got %v, want empty", got)
+	}
 }
 
 // TestDeleteMessageClearsCategory verifies that deleting a message also removes
