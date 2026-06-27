@@ -10,6 +10,7 @@ import (
 	"net/mail"
 	"os"
 	"os/exec"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -2526,9 +2527,53 @@ func conversationSection(m model.Message, body model.MessageBody, clean func(str
 		cleaned, blocked := clean(body.HTML)
 		return header + cleaned, blocked
 	case body.Text != "":
-		return header + "<pre style=\"white-space:pre-wrap\">" + html.EscapeString(body.Text) + "</pre>", 0
+		return header + "<pre style=\"white-space:pre-wrap\">" + linkifyText(body.Text) + "</pre>", 0
 	default:
-		return header + "<p>" + html.EscapeString(m.Snippet) + "</p>", 0
+		return header + "<p>" + linkifyText(m.Snippet) + "</p>", 0
+	}
+}
+
+// urlPattern matches an explicit http/https URL. Deliberately narrow (a scheme is
+// required, and the URL stops at whitespace or a char that would break out of an
+// attribute) so linkifyText never fabricates a non-http link or turns an ordinary
+// word into one — fewer false positives than a www./bare-domain matcher.
+var urlPattern = regexp.MustCompile(`https?://[^\s<>"]+`)
+
+// linkifyText renders a plain-text email body (or snippet) as safe HTML: every
+// segment is HTML-escaped, and bare http(s) URLs become <a> links. The reader's
+// navigation policy opens those externally (xdg-open), so no extra plumbing is
+// needed. Escaping both the href and the link text — and matching a scheme that
+// cannot contain a quote — means email text can't inject markup or a bad scheme.
+func linkifyText(text string) string {
+	var b strings.Builder
+	last := 0
+	for _, loc := range urlPattern.FindAllStringIndex(text, -1) {
+		b.WriteString(html.EscapeString(text[last:loc[0]]))
+		raw := trimURLTrailing(text[loc[0]:loc[1]])
+		esc := html.EscapeString(raw)
+		fmt.Fprintf(&b, `<a href="%s">%s</a>`, esc, esc)
+		last = loc[0] + len(raw) // any trimmed tail falls back into plain text
+	}
+	b.WriteString(html.EscapeString(text[last:]))
+	return b.String()
+}
+
+// trimURLTrailing strips punctuation that commonly abuts a URL in prose but isn't
+// part of it — a sentence's ".,;:!?'", and a closing ) or ] only when it isn't
+// balanced inside the URL (so "(see https://x/a)" drops the ")" while
+// ".../Foo_(bar)" keeps it).
+func trimURLTrailing(u string) string {
+	for {
+		t := strings.TrimRight(u, ".,;:!?'")
+		if strings.HasSuffix(t, ")") && strings.Count(t, "(") < strings.Count(t, ")") {
+			t = t[:len(t)-1]
+		} else if strings.HasSuffix(t, "]") && strings.Count(t, "[") < strings.Count(t, "]") {
+			t = t[:len(t)-1]
+		}
+		if t == u {
+			return t
+		}
+		u = t
 	}
 }
 

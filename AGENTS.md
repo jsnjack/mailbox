@@ -77,6 +77,10 @@ script: a strict per-render CSP (`script-src` pinned to a nonce, `default-src
 network. Remote images load by default, but tracking pixels are stripped before
 render (`cleanEmailHTML`: 1x1/tiny imgs, 1px-styled imgs, and known open-tracker
 URL patterns) and the count is surfaced as a "🛡 N trackers blocked" indicator.
+A plain-text body (and the snippet fallback) is HTML-escaped into a `<pre>` with
+bare http(s) URLs auto-linkified (`linkifyText` — explicit-scheme match only, so
+no false positives or non-http schemes), so links in text-only mail (CI/cron/
+monitoring notifications) are clickable and open externally like any other link.
 A sender-authentication badge shows Gmail's SPF/DKIM/DMARC verdict
 (`ToBody` captures `Authentication-Results` into `raw_headers`; `parseAuthResults`
 → green verified / amber partial / red possible-spoof), plus deterministic

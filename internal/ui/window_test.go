@@ -143,3 +143,56 @@ func TestEnsurePrefixes(t *testing.T) {
 		t.Fatalf("ensureFwdPrefix = %q", got)
 	}
 }
+
+func TestLinkifyText(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"no url", "just some text", "just some text"},
+		{
+			"plain url",
+			"Link https://mrt-wake.surfly.com/build/587143",
+			`Link <a href="https://mrt-wake.surfly.com/build/587143">https://mrt-wake.surfly.com/build/587143</a>`,
+		},
+		{
+			"trailing sentence period not in link",
+			"See https://x.com/a.",
+			`See <a href="https://x.com/a">https://x.com/a</a>.`,
+		},
+		{
+			"unbalanced closing paren left out",
+			"(see https://x.com/a)",
+			`(see <a href="https://x.com/a">https://x.com/a</a>)`,
+		},
+		{
+			"balanced parens kept",
+			"https://en.wikipedia.org/wiki/Foo_(bar)",
+			`<a href="https://en.wikipedia.org/wiki/Foo_(bar)">https://en.wikipedia.org/wiki/Foo_(bar)</a>`,
+		},
+		{
+			"query string ampersand escaped in href",
+			"https://x.com/p?a=1&b=2",
+			`<a href="https://x.com/p?a=1&amp;b=2">https://x.com/p?a=1&amp;b=2</a>`,
+		},
+		{
+			"surrounding text is escaped",
+			"a <b> & https://x.com c",
+			`a &lt;b&gt; &amp; <a href="https://x.com">https://x.com</a> c`,
+		},
+		{
+			"two urls",
+			"https://a.com and https://b.com",
+			`<a href="https://a.com">https://a.com</a> and <a href="https://b.com">https://b.com</a>`,
+		},
+		{"no scheme is not linked", "visit example.com today", "visit example.com today"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := linkifyText(tt.in); got != tt.want {
+				t.Fatalf("linkifyText(%q)\n  = %q\nwant %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
