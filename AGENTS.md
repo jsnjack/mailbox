@@ -88,7 +88,10 @@ signals, shown in the shared AI card). A thread is rendered newest-message-first
 behind a native <details> "Show quoted text" toggle (`cleanEmailHTML`, same single HTML pass as tracker stripping, no JS). An AI-summary button reveals a card
 pinned above the conversation that streams a bullet summary (`SummarizeThread`),
 cached by the thread's message-id fingerprint (`summaryKey`) so reopening is
-instant and a new reply auto-invalidates it. Message headers show the sender's
+instant and a new reply auto-invalidates it; the summary is also **persisted**
+keyed by thread id + that fingerprint (`store.{SetThreadSummary,ThreadSummary}`,
+`thread_summaries` table), so an unchanged thread isn't re-summarized after a
+restart. Message headers show the sender's
 full address ("Name <addr>"), not just the display name. Reader actions archive /
 mark-unread / star / move-to-inbox / report-spam (or not-spam in the Spam
 folder), plus "Delete forever" in Trash/Spam and an "Empty now" banner that empties
@@ -133,7 +136,12 @@ conversation in place (markup preserved, "Show original" reverts): every message
 is translated concurrently and cached per message id in `translationCache`
 (`showTranslatedConversation` rebuilds the stacked sections from the cache), so
 reverting, re-opening, or re-translating reuses cached results and an
-already-translated message isn't redone. Draft-reply streams into a compose
+already-translated message isn't redone. Translations are also **persisted** per
+message (`store.{SetTranslation,Translations}`, `message_translations` table,
+keyed by gmail id + target lang — a body is immutable so they never go stale), so
+`onTranslate` seeds from the cache for free before calling the AI for the rest.
+(Both AI caches, like categories, are dropped for a message when it is deleted —
+see `deleteMessageTx`.) Draft-reply streams into a compose
 window via the `ai` provider. Incoming
 attachments are extracted on body fetch (`ReplaceAttachments`) and shown as chips
 in the reader; clicking one downloads it (content-addressed under the cache dir)

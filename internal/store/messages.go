@@ -145,9 +145,10 @@ func (s *Store) DeleteMessages(ctx context.Context, accountID int64, gmailIDs []
 // a no-op. Shared by DeleteMessage and DeleteMessages.
 func deleteMessageTx(ctx context.Context, tx *sql.Tx, accountID int64, gmailID string) error {
 	var rowID int64
+	var threadID string
 	err := tx.QueryRowContext(ctx,
-		`SELECT rowid FROM messages WHERE account_id = ? AND gmail_id = ?`,
-		accountID, gmailID).Scan(&rowID)
+		`SELECT rowid, thread_id FROM messages WHERE account_id = ? AND gmail_id = ?`,
+		accountID, gmailID).Scan(&rowID, &threadID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
@@ -157,12 +158,22 @@ func deleteMessageTx(ctx context.Context, tx *sql.Tx, accountID int64, gmailID s
 	if _, err := tx.ExecContext(ctx, `DELETE FROM messages_fts WHERE rowid = ?`, rowID); err != nil {
 		return fmt.Errorf("delete fts row: %w", err)
 	}
-	// message_categories is keyed by gmail_id with its FK on accounts, so it does
-	// not cascade on message deletion — clean it up explicitly so a deleted email
-	// leaves no orphan category row.
+	// The AI caches (categories, translations, summaries) are keyed by gmail_id /
+	// thread_id with their FK on accounts, so they don't cascade on message
+	// deletion — clean them up explicitly so a deleted email leaves no orphans.
+	// Deleting any message changes the thread's fingerprint, so dropping its
+	// summary is both tidy and correct (it would be stale anyway).
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM message_categories WHERE account_id = ? AND gmail_id = ?`, accountID, gmailID); err != nil {
 		return fmt.Errorf("delete message category: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM message_translations WHERE account_id = ? AND gmail_id = ?`, accountID, gmailID); err != nil {
+		return fmt.Errorf("delete message translations: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM thread_summaries WHERE account_id = ? AND thread_id = ?`, accountID, threadID); err != nil {
+		return fmt.Errorf("delete thread summary: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM messages WHERE rowid = ?`, rowID); err != nil {
 		return fmt.Errorf("delete message: %w", err)

@@ -108,6 +108,30 @@ CREATE TABLE IF NOT EXISTS message_categories (
   PRIMARY KEY (account_id, gmail_id)
 );
 
+-- AI translation per message, keyed by the message's Gmail id (+ target lang).
+-- A message body is immutable, so a translation never goes stale; persisted so
+-- it isn't re-requested from the AI on every open/revert. text is the
+-- translated, markup-preserving body HTML.
+CREATE TABLE IF NOT EXISTS message_translations (
+  account_id      INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  gmail_id        TEXT NOT NULL,
+  lang            TEXT NOT NULL,     -- target language, e.g. 'English'
+  text            TEXT NOT NULL,
+  PRIMARY KEY (account_id, gmail_id, lang)
+);
+
+-- AI thread summary, keyed by thread id with the fingerprint it was computed for
+-- (the thread's message-id set). A fingerprint mismatch means the thread gained
+-- a message, so the summary is stale and regenerated. Persisted so an unchanged
+-- thread's summary survives restarts instead of being re-summarized.
+CREATE TABLE IF NOT EXISTS thread_summaries (
+  account_id      INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  thread_id       TEXT NOT NULL,
+  fingerprint     TEXT NOT NULL,
+  summary         TEXT NOT NULL,
+  PRIMARY KEY (account_id, thread_id)
+);
+
 -- FTS5 index over message text, keyed by messages.rowid. Rows are written
 -- explicitly by the store (not via triggers) because the searchable text spans
 -- messages + message_bodies and bodies arrive later than metadata. Updates are

@@ -2865,8 +2865,10 @@ func (w *window) onTranslate() {
 	}
 	msgs := append([]model.Message(nil), w.openThreadMsgs...) // snapshot (oldest first)
 	threadID := w.openThreadID
+	acctID := w.activeID
 
-	// Which messages still need translating? (cache read on the main thread).
+	// Which messages still need translating? (in-memory cache read on the main
+	// thread; the persisted cache is consulted in the goroutine before any AI).
 	var todo []model.Message
 	for _, m := range msgs {
 		if _, ok := w.translationCache[m.GmailID]; !ok {
@@ -2887,31 +2889,55 @@ func (w *window) onTranslate() {
 	done := w.aiActivity("Translating")
 
 	go func() {
-		// Translate each untranslated message concurrently (bounded). Sources are
-		// read + sanitized here (off the main thread); bluemonday + the store are
-		// safe for concurrent use.
-		results := make(map[string]string, len(todo))
+		// 1) Seed from the persisted per-message cache (no AI cost). A message body
+		// is immutable, so a stored English translation is always valid.
+		ids := make([]string, len(todo))
+		for i, m := range todo {
+			ids[i] = m.GmailID
+		}
+		seeded, err := w.deps.Store.Translations(ctx, acctID, ids, translateLang)
+		if err != nil {
+			slog.Warn("ui: load cached translations", "err", err)
+			seeded = map[string]string{}
+		}
+		var remaining []model.Message
+		for _, m := range todo {
+			if _, ok := seeded[m.GmailID]; !ok {
+				remaining = append(remaining, m)
+			}
+		}
+
+		// 2) Translate the remainder concurrently (bounded), writing each result
+		// through to the store. Sources are read + sanitized here (off the main
+		// thread); bluemonday + the store are safe for concurrent use.
+		results := make(map[string]string, len(remaining))
 		var mu sync.Mutex
 		var firstErr error
 		sem := make(chan struct{}, 4)
 		var wg sync.WaitGroup
-		for _, m := range todo {
+		for _, m := range remaining {
 			wg.Add(1)
 			sem <- struct{}{}
 			go func(m model.Message) {
 				defer wg.Done()
 				defer func() { <-sem }()
 				out, err := translateHTMLText(w.bodyHTMLFor(m), func(segs []string) ([]string, error) {
-					return w.deps.Assistant.TranslateSegments(ctx, segs, "English")
+					return w.deps.Assistant.TranslateSegments(ctx, segs, translateLang)
 				})
-				mu.Lock()
 				if err != nil {
+					mu.Lock()
 					if firstErr == nil {
 						firstErr = err
 					}
-				} else {
-					results[m.GmailID] = stripCodeFence(out)
+					mu.Unlock()
+					return
 				}
+				text := stripCodeFence(out)
+				if serr := w.deps.Store.SetTranslation(ctx, acctID, m.GmailID, translateLang, text); serr != nil {
+					slog.Warn("ui: persist translation", "err", serr)
+				}
+				mu.Lock()
+				results[m.GmailID] = text
 				mu.Unlock()
 			}(m)
 		}
@@ -2926,6 +2952,9 @@ func (w *window) onTranslate() {
 				w.loadReaderHTML(wrapHTML("<p>Translation failed: " + html.EscapeString(firstErr.Error()) + "</p>"))
 				return
 			}
+			for id, out := range seeded {
+				w.translationCache[id] = out
+			}
 			for id, out := range results {
 				w.translationCache[id] = out
 			}
@@ -2933,6 +2962,10 @@ func (w *window) onTranslate() {
 		})
 	}()
 }
+
+// translateLang is the single target language the Translate action uses; also
+// the key under which translations are cached/persisted.
+const translateLang = "English"
 
 // showTranslatedConversation renders the thread (newest first) from each
 // message's cached translation, like renderConversation but with translated
@@ -3061,11 +3094,20 @@ func (w *window) onSummarize() {
 		w.summaryLabel.SetText(cached)
 		return
 	}
+	// Persisted summary for this exact message set (no AI cost). The stored
+	// fingerprint is the same key, so a thread that gained a reply misses and is
+	// re-summarized. A single indexed lookup, fine on the main thread.
+	if fp, sum, ok, err := w.deps.Store.ThreadSummary(context.Background(), w.activeID, w.openThreadID); err == nil && ok && fp == key {
+		w.summaryCache[key] = sum
+		w.summaryLabel.SetText(sum)
+		return
+	}
 
 	w.summaryLabel.SetText("Summarizing…")
 	ctx, cancel := context.WithCancel(context.Background())
 	w.summaryCancel = cancel
 	threadID := w.openThreadID
+	acctID := w.activeID
 	contextText := w.threadContextAll()
 	done := w.aiActivity("Summarizing thread")
 
@@ -3087,6 +3129,17 @@ func (w *window) onSummarize() {
 			}
 			w.summaryLabel.SetText(bulletize(text))
 		})
+		// Finalize + persist off the main thread, so an unchanged thread's summary
+		// survives restarts.
+		final := ""
+		if serr == nil {
+			final = bulletize(strings.TrimSpace(text))
+			if final != "" {
+				if perr := w.deps.Store.SetThreadSummary(context.Background(), acctID, threadID, key, final); perr != nil {
+					slog.Warn("ui: persist summary", "err", perr)
+				}
+			}
+		}
 		dispatch.Main(func() {
 			done(doneErr(serr))
 			if w.openThreadID != threadID || ctx.Err() != nil {
@@ -3096,7 +3149,6 @@ func (w *window) onSummarize() {
 				w.summaryLabel.SetText("Summary failed: " + serr.Error())
 				return
 			}
-			final := bulletize(strings.TrimSpace(text))
 			if final != "" {
 				w.summaryCache[key] = final
 				w.summaryLabel.SetText(final)
