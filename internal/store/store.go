@@ -49,6 +49,12 @@ func Open(path string) (*Store, error) {
 		_ = writer.Close()
 		return nil, fmt.Errorf("open reader: %w", err)
 	}
+	// WAL lets reads run concurrently; cap the pool so a burst can't open an
+	// unbounded number of connections (each re-applies the DSN pragmas), and keep
+	// a few idle so steady-state reads reuse warm connections instead of
+	// reopening. Plenty for the handful of concurrent readers (UI + sync).
+	reader.SetMaxOpenConns(8)
+	reader.SetMaxIdleConns(4)
 
 	return &Store{writer: writer, reader: reader}, nil
 }

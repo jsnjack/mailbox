@@ -25,10 +25,6 @@ Move an item into a commit (and delete it here) when it's done.
   prepared statements for the hot queries would shave parse overhead. Low impact per
   the audit; do only if profiling shows it.
 
-- **Reader pool sizing.** The read pool has no explicit `SetMaxOpenConns`; the writer
-  is capped at 1 (correct). Consider capping the reader pool if idle connections pile
-  up under the 60 s polling.
-
 ## Features (noticed while working, not requested yet)
 
 - Hover row actions (archive/star on row hover) in the thread list.
