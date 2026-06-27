@@ -2,6 +2,9 @@
 # `build` target runs first) and installed from the source tree (srcdir define);
 # rpmbuild does not compile Go here. Build with: make rpm
 %global debug_package %{nil}
+# Releases are tracked as git tags, not an RPM %changelog, so don't derive
+# SOURCE_DATE_EPOCH from one (silences a build warning).
+%global source_date_epoch_from_changelog 0
 
 Name:           mailbox
 Version:        %{?appversion}%{!?appversion:0.0.0}

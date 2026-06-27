@@ -86,14 +86,16 @@ release-artifacts: build rpm
 	@find rpmbuild/RPMS -name 'mailbox-$(RPMVERSION)-*.rpm' ! -name '*debug*' -exec cp {} $(DIST)/ \;
 	@echo "==> release artifacts in $(DIST)/:"; ls -1 $(DIST)
 
-# release builds the artifacts, then creates a GitHub release tagged v<version>
-# (monova) and uploads the tarball + RPM. Requires an authenticated gh and an
-# 'origin' remote; run on a clean main at the commit you want to tag.
+# release builds the artifacts, then publishes a GitHub release tagged v<version>
+# (monova) with grm, uploading the tarball + RPM. grm gets-or-creates the release
+# (so a re-run resumes a partial upload) and authenticates with its configured
+# token (`grm set token …`). Push the commit you want tagged first.
 release: release-artifacts
-	@command -v gh >/dev/null 2>&1 || { echo "gh (GitHub CLI) required: https://cli.github.com/"; exit 1; }
-	gh release create "v$(RPMVERSION)" $(DIST)/*.tar.gz $(DIST)/*.rpm \
-	    --title "$(BINARY) v$(RPMVERSION)" --generate-notes
-	@echo "==> published release v$(RPMVERSION)"
+	@command -v grm >/dev/null 2>&1 || { echo "grm required: grm install jsnjack/grm"; exit 1; }
+	@args=""; for f in $(DIST)/*.tar.gz $(DIST)/*.rpm; do args="$$args -f $$f"; done; \
+	  echo "==> grm release jsnjack/$(BINARY)$$args -t v$(RPMVERSION)"; \
+	  grm release jsnjack/$(BINARY) $$args -t "v$(RPMVERSION)"
+	@echo "==> released v$(RPMVERSION)"
 
 clean:
 	rm -rf bin/ rpmbuild/ $(DIST) $(BINARY)
