@@ -2611,6 +2611,10 @@ func (w *window) onNotSpam() {
 	w.removeFromList("Marked not spam", []string{model.LabelInbox}, []string{model.LabelSpam})
 }
 
+// vacuumAfterEmpty is the message count above which emptying a folder triggers a
+// background VACUUM — small empties aren't worth a full database rebuild.
+const vacuumAfterEmpty = 50
+
 // onEmptyFolder permanently deletes every message in the current folder
 // (Trash/Spam) after a destructive confirmation.
 func (w *window) onEmptyFolder() {
@@ -2645,6 +2649,14 @@ func (w *window) onEmptyFolder() {
 				w.refreshList(w.searchEntry.Text())
 				w.toast(fmt.Sprintf("Permanently deleted %d messages", n))
 			})
+			// A big empty frees a lot of pages WAL would otherwise keep; reclaim
+			// them in the background (after the UI feedback above), but only when
+			// it's worth the full-rebuild cost.
+			if err == nil && n >= vacuumAfterEmpty {
+				if verr := w.deps.Store.Vacuum(context.Background()); verr != nil {
+					slog.Warn("ui: vacuum after empty", "err", verr)
+				}
+			}
 		}()
 	})
 	confirm.Present(w.win)
