@@ -133,7 +133,7 @@ func TestPing(t *testing.T) {
 func TestDraftNew(t *testing.T) {
 	fp := &fakeProvider{chunks: []Chunk{{Text: "Hello,\n"}, {Text: "Let's meet Tuesday."}}}
 	a := NewAssistant(fp)
-	ch, err := a.DraftNew(context.Background(), "Project sync", "Propose a meeting")
+	ch, err := a.DraftNew(context.Background(), "Project sync", "Propose a meeting", false)
 	if err != nil {
 		t.Fatalf("DraftNew: %v", err)
 	}

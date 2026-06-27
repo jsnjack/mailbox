@@ -24,15 +24,14 @@ import (
 
 // openCompose opens a compose window prefilled from init. aiContext, when
 // non-empty and an assistant is configured, enables an "AI draft" button that
-// streams a drafted reply into the body; autoDraft starts that draft
-// immediately on open. title labels the window.
-func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string, autoDraft bool) {
+// streams a drafted reply into the body. title labels the window.
+func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string) {
 	// Fresh composes/replies/forwards get the default signature; an existing
 	// draft or a reopened (undone) message already contains its body verbatim.
-	w.openComposeOpts(init, aiContext, title, autoDraft, init.DraftID == "")
+	w.openComposeOpts(init, aiContext, title, init.DraftID == "")
 }
 
-func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title string, autoDraft, addSignature bool) {
+func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title string, addSignature bool) {
 	if w.deps.Send == nil {
 		return
 	}
@@ -419,14 +418,17 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 			quote := init.Body
 			subject := strings.TrimSpace(subjEntry.Text())
 			buf.SetText(quote)
+			// The body already carries the configured signature; tell the AI not to
+			// add its own sign-off so the reply isn't double-signed.
+			omitSig := addSignature && strings.TrimSpace(w.signature) != ""
 			done := w.aiActivity("Drafting reply")
 			go func() {
 				var ch <-chan ai.Chunk
 				var err error
 				if isReply {
-					ch, err = w.deps.Assistant.DraftReply(aiCtx, aiContext, instruction)
+					ch, err = w.deps.Assistant.DraftReply(aiCtx, aiContext, instruction, omitSig)
 				} else {
-					ch, err = w.deps.Assistant.DraftNew(aiCtx, subject, instruction)
+					ch, err = w.deps.Assistant.DraftNew(aiCtx, subject, instruction, omitSig)
 				}
 				if err != nil {
 					msg := err.Error()
@@ -556,9 +558,6 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 	win.SetVisible(true)
 
 	switch {
-	case autoDraft && startAIDraft != nil:
-		// For an AI-initiated reply, ask for intent once the window is up.
-		startAIDraft()
 	case strings.TrimSpace(init.To) != "":
 		bodyView.GrabFocus() // reply: cursor in the body, above the quote
 	default:

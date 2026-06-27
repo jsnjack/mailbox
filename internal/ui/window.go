@@ -140,7 +140,6 @@ type window struct {
 	replyAllBtn    *adw.SplitButton // primary action; dropdown has Reply/Forward
 	archiveBtn     *gtk.Button
 	translateBtn   *gtk.Button
-	draftBtn       *gtk.Button
 	overflowBtn    *gtk.MenuButton   // star/unread/trash/images live here (native menu model)
 	starAction     *gio.SimpleAction // stateful: the open message's Starred toggle
 	imagesAction   *gio.SimpleAction // stateful: the reader's remote-images toggle
@@ -402,7 +401,7 @@ func (w *window) addShortcuts() {
 			w.onTranslate()
 		case 'c':
 			if w.deps.Send != nil {
-				w.openCompose(model.OutgoingMessage{}, "", "New message", false)
+				w.openCompose(model.OutgoingMessage{}, "", "New message")
 			}
 		case '/':
 			w.searchEntry.GrabFocus()
@@ -630,7 +629,7 @@ func (w *window) buildSidebar() *adw.NavigationPage {
 	newBtn.SetTooltipText("New message")
 	newBtn.SetSensitive(w.deps.Send != nil)
 	newBtn.ConnectClicked(func() {
-		w.openCompose(model.OutgoingMessage{}, "", "New message", false)
+		w.openCompose(model.OutgoingMessage{}, "", "New message")
 	})
 	hb.PackStart(newBtn)
 
@@ -1810,10 +1809,6 @@ func (w *window) buildReader() *adw.NavigationPage {
 	w.translateBtn.SetTooltipText("Translate to English (t)")
 	w.translateBtn.ConnectClicked(w.onTranslate)
 
-	w.draftBtn = gtk.NewButtonFromIconName("document-edit-symbolic")
-	w.draftBtn.SetTooltipText("Draft a reply with AI")
-	w.draftBtn.ConnectClicked(w.onDraftReply)
-
 	w.summaryBtn = gtk.NewButtonFromIconName("view-list-bullet-symbolic")
 	w.summaryBtn.SetTooltipText("Summarize thread with AI")
 	w.summaryBtn.ConnectClicked(w.onSummarize)
@@ -1837,7 +1832,6 @@ func (w *window) buildReader() *adw.NavigationPage {
 	hb.PackStart(w.archiveBtn)
 	hb.PackEnd(w.overflowBtn)
 	if w.deps.Assistant != nil {
-		hb.PackEnd(w.draftBtn)
 		hb.PackEnd(w.translateBtn)
 		hb.PackEnd(w.summaryBtn)
 	}
@@ -1855,7 +1849,6 @@ func (w *window) setActionsSensitive(on bool) {
 	w.replyAllBtn.SetSensitive(on && w.deps.Send != nil)
 	canAI := on && w.deps.Assistant != nil
 	w.translateBtn.SetSensitive(canAI)
-	w.draftBtn.SetSensitive(canAI)
 	if w.summaryBtn != nil {
 		w.summaryBtn.SetSensitive(canAI)
 	}
@@ -1892,7 +1885,7 @@ func (w *window) onReply() {
 	if m.GmailID == "" {
 		return
 	}
-	w.openCompose(w.replyInit(m), w.threadContextFor(m), "Reply", false)
+	w.openCompose(w.replyInit(m), w.threadContextFor(m), "Reply")
 }
 
 func (w *window) onReplyAll() {
@@ -1910,7 +1903,7 @@ func (w *window) onReplyAll() {
 		References: strings.TrimSpace(m.References + " " + m.RFC822MsgID),
 		ThreadID:   m.ThreadID,
 	}
-	w.openCompose(init, w.threadContextFor(m), "Reply all", false)
+	w.openCompose(init, w.threadContextFor(m), "Reply all")
 }
 
 // replyAllRecipients computes To (original sender + original To) and Cc (original
@@ -1947,7 +1940,7 @@ func (w *window) onForward() {
 		Subject: ensureFwdPrefix(m.Subject),
 		Body:    quoteOriginal(m, w.bodyTextFor(m)),
 	}
-	w.openCompose(init, "", "Forward", false)
+	w.openCompose(init, "", "Forward")
 }
 
 // loadLabels rebuilds the sidebar: the curated standard folders first (only those
@@ -2324,7 +2317,7 @@ func (w *window) openDraftForEdit(threadID string) {
 				References: dm.References,
 				ThreadID:   dm.ThreadID,
 				DraftID:    draftID,
-			}, "", "Edit draft", false)
+			}, "", "Edit draft")
 		})
 	}()
 }
@@ -3433,16 +3426,6 @@ func bulletize(s string) string {
 	return strings.Join(lines, "\n")
 }
 
-// onDraftReply opens a reply compose window and streams an AI-drafted reply
-// straight into its body, so the user can edit and send it.
-func (w *window) onDraftReply() {
-	m := w.openMsg
-	if m.GmailID == "" || w.deps.Assistant == nil {
-		return
-	}
-	w.openCompose(w.replyInit(m), w.threadContextFor(m), "Reply", true)
-}
-
 // bodyTextFor returns the best plain-text representation of a message for AI
 // input: the text/plain part when present, otherwise the HTML reduced to text,
 // otherwise the snippet. HTML tags and entities are always stripped so the AI
@@ -3563,7 +3546,7 @@ func (w *window) deferSend(accountID int64, msg model.OutgoingMessage) {
 		cancelled = true
 		toast.Dismiss()
 		// Reopen the message exactly as it was (no second signature).
-		w.openComposeOpts(msg, "", "Message", false, false)
+		w.openComposeOpts(msg, "", "Message", false)
 	})
 	w.toastOverlay.AddToast(toast)
 

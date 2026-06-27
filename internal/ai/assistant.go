@@ -214,10 +214,13 @@ func (a *Assistant) SummarizeThread(ctx context.Context, threadContext string) (
 // DraftNew streams a brand-new email body from an instruction (what the user
 // wants to say); subject is an optional hint. There is no thread to reply to,
 // so this is used when composing from scratch.
-func (a *Assistant) DraftNew(ctx context.Context, subject, instruction string) (<-chan Chunk, error) {
+func (a *Assistant) DraftNew(ctx context.Context, subject, instruction string, omitSignature bool) (<-chan Chunk, error) {
 	system := "You are an email assistant. Write a clear, concise, professional email body from the user's " +
 		"instruction. Output only the body — no subject line and no preamble such as 'Here is'. Match the " +
 		"language of the instruction."
+	if omitSignature {
+		system += " Do not add a closing sign-off or signature — one is appended automatically."
+	}
 	user := strings.TrimSpace(instruction)
 	if user == "" {
 		user = "Write a brief, friendly email."
@@ -264,9 +267,12 @@ func cleanSubject(s string) string {
 
 // DraftReply streams a reply drafted from the thread context. instruction is an
 // optional steer (e.g. "decline politely"); empty for a neutral reply.
-func (a *Assistant) DraftReply(ctx context.Context, threadContext, instruction string) (<-chan Chunk, error) {
+func (a *Assistant) DraftReply(ctx context.Context, threadContext, instruction string, omitSignature bool) (<-chan Chunk, error) {
 	system := "You are an email assistant. Draft a concise, professional reply in the same language as the " +
 		"email thread. Output only the reply body — no subject line and no preamble such as 'Here is'."
+	if omitSignature {
+		system += " Do not add a closing sign-off or signature (e.g. \"Best regards, <name>\") — one is appended automatically."
+	}
 	user := "Email thread to reply to:\n\n" + threadContext
 	if instruction != "" {
 		user += "\n\nAdditional instruction: " + instruction
