@@ -53,15 +53,16 @@ type window struct {
 	accountBadges map[int64]*gtk.Label
 	// signature is the default text appended to composed messages (configurable
 	// in Preferences); empty means none.
-	signature   string
-	labelBox    *gtk.ListBox
-	refreshBtn  *gtk.Button
-	syncSpinner *gtk.Spinner  // shown in place of refreshBtn during a manual sync
-	sidebar     []sidebarItem // one entry per row in labelBox (incl. headings)
-	sidebarSig  string        // signature of the rendered sidebar, to skip no-op rebuilds
-	current     string
-	activeID    int64 // the account currently shown
-	activeEmail string
+	signature    string
+	labelBox     *gtk.ListBox
+	refreshBtn   *gtk.Button
+	syncSpinner  *gtk.Spinner             // shown in place of refreshBtn during a manual sync
+	sidebar      []sidebarItem            // one entry per row in labelBox (incl. headings)
+	sidebarSig   string                   // signature of the rendered sidebar, to skip no-op rebuilds
+	sectionCache map[string]cachedSection // rendered message sections, reused across thread re-opens
+	current      string
+	activeID     int64 // the account currently shown
+	activeEmail  string
 	// suppressLabelSelect guards the row-selected handler while loadLabels
 	// restores the visual highlight, so a background refresh doesn't reset the
 	// list or clear an active search.
@@ -1401,6 +1402,7 @@ func (w *window) onThreadSelected() {
 
 func (w *window) buildReader() *adw.NavigationPage {
 	w.webview = webkit.NewWebView()
+	w.sectionCache = make(map[string]cachedSection)
 	settings := w.webview.Settings()
 	// JavaScript is enabled only so the injected fit-to-width script can run.
 	// Defense in depth keeps it safe: bodies are sanitized (no email scripts
@@ -2047,6 +2049,9 @@ func (w *window) renderConversation(msgs []model.Message) {
 	w.webview.LoadHtml(wrapHTML("<p><i>Loading…</i></p>"), "about:blank")
 
 	threadID := w.openThreadID // guard against a newer thread being opened mid-render
+	// Snapshot already-rendered sections on the main thread; the goroutine reuses
+	// these and only sanitizes the misses, so re-opening a thread is near-instant.
+	cached := w.cachedSectionsFor(msgs)
 	go func() {
 		start := time.Now()
 		ctx := context.Background()
@@ -2078,15 +2083,35 @@ func (w *window) renderConversation(msgs []model.Message) {
 		var b strings.Builder
 		blocked := 0
 		latestAuth, latestHTML := "", ""
+		fresh := map[string]cachedSection{} // newly-rendered sections to cache
 		// Newest message first (msgs is oldest-first from the store).
 		for i := len(msgs) - 1; i >= 0; i-- {
 			m := msgs[i]
-			body, _ := w.deps.Store.GetBody(ctx, m.RowID)
+			// The latest message always needs its body read for the auth/phishing
+			// signals, even when its section is cached.
 			if m.RowID == latest.RowID {
-				latestAuth = body.RawHeaders // Authentication-Results of the newest message
+				body, _ := w.deps.Store.GetBody(ctx, m.RowID)
+				latestAuth = body.RawHeaders
 				latestHTML = body.HTML
+				if cs, ok := cached[m.GmailID]; ok {
+					b.WriteString(cs.html)
+					blocked += cs.trackers
+					continue
+				}
+				sec, n := conversationSection(m, body, w.cleanHTML)
+				fresh[m.GmailID] = cachedSection{html: sec, trackers: n}
+				b.WriteString(sec)
+				blocked += n
+				continue
 			}
+			if cs, ok := cached[m.GmailID]; ok {
+				b.WriteString(cs.html)
+				blocked += cs.trackers
+				continue
+			}
+			body, _ := w.deps.Store.GetBody(ctx, m.RowID)
 			sec, n := conversationSection(m, body, w.cleanHTML)
+			fresh[m.GmailID] = cachedSection{html: sec, trackers: n}
 			b.WriteString(sec)
 			blocked += n
 		}
@@ -2099,6 +2124,7 @@ func (w *window) renderConversation(msgs []model.Message) {
 		slog.Debug("ui: renderConversation", "msgs", len(msgs), "fetched", fetched,
 			"trackers", blocked, "auth", verdict.level, "fetch", fetchDur, "sanitize", time.Since(sanitizeStart))
 		dispatch.Main(func() {
+			w.mergeSectionCache(fresh) // cache newly-rendered sections (main thread)
 			if w.openThreadID != threadID {
 				return // user switched to another conversation while this rendered
 			}
@@ -2109,6 +2135,53 @@ func (w *window) renderConversation(msgs []model.Message) {
 			w.showThreadAttachments(atts)
 		})
 	}()
+}
+
+// cachedSection is a message's rendered (sanitized, de-tracked, quote-collapsed)
+// section HTML plus its blocked-tracker count. Sections are immutable once a
+// message's body is fetched, so they can be reused across thread re-opens.
+type cachedSection struct {
+	html     string
+	trackers int
+}
+
+// sectionCacheCap bounds how many rendered sections are kept in memory.
+const sectionCacheCap = 400
+
+// cachedSectionsFor returns the cached sections for the given messages (main
+// thread); the result is handed to the render goroutine, which reuses hits and
+// sanitizes only the misses.
+func (w *window) cachedSectionsFor(msgs []model.Message) map[string]cachedSection {
+	out := make(map[string]cachedSection, len(msgs))
+	for _, m := range msgs {
+		if cs, ok := w.sectionCache[m.GmailID]; ok {
+			out[m.GmailID] = cs
+		}
+	}
+	return out
+}
+
+// mergeSectionCache stores newly-rendered sections, evicting arbitrary entries
+// when over the cap (sections are immutable, so an eviction is just a future
+// cache miss). Main-thread only.
+func (w *window) mergeSectionCache(fresh map[string]cachedSection) {
+	for k, v := range fresh {
+		w.sectionCache[k] = v
+	}
+	for len(w.sectionCache) > sectionCacheCap {
+		for k := range w.sectionCache {
+			delete(w.sectionCache, k)
+			break
+		}
+	}
+}
+
+// invalidateSection drops a message's cached section, so a re-synced message
+// (changed metadata/body) re-renders. Main-thread only.
+func (w *window) invalidateSection(gmailID string) {
+	if gmailID != "" {
+		delete(w.sectionCache, gmailID)
+	}
 }
 
 // conversationSection renders one message's header + body and returns the HTML
@@ -3069,6 +3142,7 @@ func (w *window) subscribe() {
 func (w *window) onChange(c syncer.Change) {
 	switch c.Kind {
 	case syncer.MessageUpserted, syncer.MessageDeleted:
+		w.invalidateSection(c.GmailID) // a re-synced message must re-render
 		if c.AccountID == w.activeID {
 			w.scheduleRefresh(true) // loadLabels (inside) refreshes pills + title
 		} else {

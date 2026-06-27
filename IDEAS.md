@@ -16,11 +16,6 @@ Move an item into a commit (and delete it here) when it's done.
   the summary map's memory becomes a problem. Build it behind the existing
   `showThreads`/`diffThreadModel` surface.
 
-- **Rendered-section cache for instant thread re-open.** Opening a thread re-fetches
-  each body from SQLite and re-sanitizes it (bluemonday ~10 ms/msg). A small in-memory
-  LRU of the rendered section HTML keyed by message rowid + `body_fetched` would make
-  re-opening a recently-viewed thread instant. Watch memory; invalidate on body update.
-
 - **Prepared-statement reuse.** The store re-parses each SQL string per call. Caching
   prepared statements for the hot queries would shave parse overhead. Low impact per
   the audit; do only if profiling shows it.
