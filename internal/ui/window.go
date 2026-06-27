@@ -1213,6 +1213,16 @@ func (w *window) onSearchChanged() {
 // background sync never stall the UI.
 func (w *window) refreshList(query string) { w.loadThreadsFor(query) }
 
+// refreshListThen repopulates the list and runs done once the new contents are
+// actually rendered. The model is repopulated asynchronously (loadThreads runs
+// the store query off the main thread), so done must wait for the populate —
+// running it right after refreshList returns would act on the stale model (e.g.
+// advancing the selection before the archived thread is spliced out).
+func (w *window) refreshListThen(query string, done func()) {
+	w.afterPopulate = done
+	w.refreshList(query)
+}
+
 // loadThreadsFor decides what to list — current folder (blank query) or a
 // search — and runs it asynchronously.
 func (w *window) loadThreadsFor(query string) {
@@ -2697,8 +2707,7 @@ func (w *window) onDeleteForever() {
 					return
 				}
 				w.loadLabels()
-				w.refreshList(w.searchEntry.Text())
-				w.advanceSelection(pos)
+				w.refreshListThen(w.searchEntry.Text(), func() { w.advanceSelection(pos) })
 				w.toast("Deleted forever")
 			})
 		}()
@@ -3481,9 +3490,12 @@ func (w *window) applyLabels(msgs []model.Message, add, remove []string, after f
 		dispatch.Main(func() {
 			t := time.Now()
 			w.loadLabels()
-			w.refreshList(w.searchEntry.Text())
 			if after != nil {
-				after()
+				// after (e.g. advanceSelection) must run once the list has been
+				// respliced, not before — see refreshListThen.
+				w.refreshListThen(w.searchEntry.Text(), after)
+			} else {
+				w.refreshList(w.searchEntry.Text())
 			}
 			slog.Debug("ui: applyLabels refresh", "dur", time.Since(t))
 		})
