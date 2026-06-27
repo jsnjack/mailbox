@@ -195,11 +195,12 @@ threads, r reply, a archive, c compose, / focus search. Test hooks:
 overrides the initial window size; `MAILBOX_APP_ID` overrides the GApplication id
 so a sandbox instance runs alongside a real one instead of activating it.
 
-Verify GUI changes with `scripts/sandbox-run.sh` rather than launching the
-installed app: it copies the live DB + config into a temp dir, points the XDG
-dirs there, runs under Xvfb with a distinct `MAILBOX_APP_ID` on the real session
-bus (so the keyring still resolves OAuth tokens + the AI key), screenshots, and
-cleans up — live data, zero interference with a running instance.
+Verify GUI changes in a throwaway sandbox rather than launching the installed
+app: copy the live DB + config into a temp dir, point `XDG_{DATA,CONFIG,CACHE}_HOME`
+there, and run under Xvfb (`GDK_BACKEND=x11 GSK_RENDERER=cairo`) with a distinct
+`MAILBOX_APP_ID`. It shares the real session bus (so the keyring still resolves
+OAuth tokens + the AI key) but starts a fresh instance, so it never disturbs a
+running app. `MAILBOX_DEMO=1` hides the "read-only" banner for clean screenshots.
 
 Dependency rule: `store`/`gmailapi`/`sync`/`auth`/`ai` MUST NOT import any GTK
 package (they are headless and unit-testable without a display). `ui` MUST NOT
