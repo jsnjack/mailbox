@@ -132,6 +132,27 @@ func TestUpsertMessageAndListByLabel(t *testing.T) {
 	}
 }
 
+func TestUpsertMessageReplyToRoundTrips(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	acc := seedAccount(t, s)
+
+	m := model.Message{
+		AccountID: acc, GmailID: "m1", ThreadID: "t1", Subject: "Hi",
+		FromAddr: "no-reply@x.com", ReplyTo: "List <list@x.com>", Labels: []string{"INBOX"},
+	}
+	if _, err := s.UpsertMessage(ctx, m); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	got, err := s.GetMessage(ctx, acc, "m1")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.ReplyTo != "List <list@x.com>" {
+		t.Fatalf("ReplyTo = %q, want %q", got.ReplyTo, "List <list@x.com>")
+	}
+}
+
 func TestUpsertMessageIsIdempotent(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()

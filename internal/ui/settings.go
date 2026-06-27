@@ -122,22 +122,42 @@ func (w *window) openSettings() {
 		nameRows[a.Email] = r
 	}
 
-	// Default signature, appended to composed messages.
-	sigView := gtk.NewTextView()
-	sigView.SetWrapMode(gtk.WrapWordChar)
-	sigView.SetTopMargin(6)
-	sigView.SetBottomMargin(6)
-	sigView.SetLeftMargin(8)
-	sigView.SetRightMargin(8)
-	sigView.Buffer().SetText(w.signature)
-	sigScroll := gtk.NewScrolledWindow()
-	sigScroll.SetMinContentHeight(90)
-	sigScroll.SetChild(sigView)
-	sigScroll.AddCSSClass("card")
+	// Per-account signatures, appended to composed messages. Each editor is seeded
+	// with that account's effective signature (its own, or the global default when
+	// it has none); on close, changed editors are saved per account.
 	sigGroup := adw.NewPreferencesGroup()
 	sigGroup.SetTitle("Signature")
 	sigGroup.SetDescription("Appended to new messages and replies (below your text, above any quote). Leave blank for none.")
-	sigGroup.Add(sigScroll)
+	sigAccounts := w.deps.Accounts
+	if len(sigAccounts) == 0 { // no connected account: edit the global default
+		sigAccounts = []AccountInfo{{Email: ""}}
+	}
+	sigViews := map[string]*gtk.TextView{}
+	sigSeeded := map[string]string{}
+	for _, a := range sigAccounts {
+		seeded, _ := config.SignatureFor(a.Email)
+		if len(sigAccounts) > 1 {
+			lbl := gtk.NewLabel(a.Email)
+			lbl.SetXAlign(0)
+			lbl.AddCSSClass("heading")
+			lbl.SetMarginTop(6)
+			sigGroup.Add(lbl)
+		}
+		sigView := gtk.NewTextView()
+		sigView.SetWrapMode(gtk.WrapWordChar)
+		sigView.SetTopMargin(6)
+		sigView.SetBottomMargin(6)
+		sigView.SetLeftMargin(8)
+		sigView.SetRightMargin(8)
+		sigView.Buffer().SetText(seeded)
+		sigScroll := gtk.NewScrolledWindow()
+		sigScroll.SetMinContentHeight(90)
+		sigScroll.SetChild(sigView)
+		sigScroll.AddCSSClass("card")
+		sigGroup.Add(sigScroll)
+		sigViews[a.Email] = sigView
+		sigSeeded[a.Email] = strings.TrimSpace(seeded)
+	}
 
 	// Load-modify-save so the two prefs toggles don't clobber each other's field.
 	savePref := func(mut func(*config.Prefs)) {
@@ -236,10 +256,22 @@ func (w *window) openSettings() {
 			}
 		}
 		w.applyAccountNames(nameRows)
-		if newSig := strings.TrimSpace(bodyText(sigView.Buffer())); newSig != w.signature {
-			if err := config.SaveSignature(newSig); err != nil {
-				slog.Warn("ui: save signature", "err", err)
+		for email, view := range sigViews {
+			newSig := strings.TrimSpace(bodyText(view.Buffer()))
+			if newSig == sigSeeded[email] {
+				continue // unchanged → keep its existing value / global fallback
+			}
+			var err error
+			if email == "" {
+				err = config.SaveSignature(newSig) // no-account mode: global default
 			} else {
+				err = config.SaveAccountSignature(email, newSig)
+			}
+			if err != nil {
+				slog.Warn("ui: save signature", "err", err, "account", email)
+				continue
+			}
+			if email == w.activeEmail {
 				w.signature = newSig
 			}
 		}

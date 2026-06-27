@@ -69,6 +69,7 @@ type Message struct {
 	InternalDate   time.Time
 	FromName       string
 	FromAddr       string
+	ReplyTo        string // Reply-To header (raw); replies target this over From when set
 	ToAddrs        string
 	CcAddrs        string
 	Subject        string

@@ -10,6 +10,7 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"strings"
 
 	_ "modernc.org/sqlite" // registers the "sqlite" database/sql driver
 )
@@ -43,6 +44,10 @@ func Open(path string) (*Store, error) {
 		_ = writer.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
+	if err := migrate(writer); err != nil {
+		_ = writer.Close()
+		return nil, fmt.Errorf("migrate: %w", err)
+	}
 
 	reader, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -62,6 +67,23 @@ func Open(path string) (*Store, error) {
 // Close closes both database handles.
 func (s *Store) Close() error {
 	return errors.Join(s.reader.Close(), s.writer.Close())
+}
+
+// migrate applies column additions that `CREATE TABLE IF NOT EXISTS` cannot make
+// to a pre-existing table (it is a no-op when the table already exists). Each
+// ALTER is idempotent: re-adding an existing column ("duplicate column name")
+// is treated as already-applied, so this is safe to run on every open.
+func migrate(db *sql.DB) error {
+	stmts := []string{
+		`ALTER TABLE messages ADD COLUMN reply_to TEXT`,
+	}
+	for _, s := range stmts {
+		if _, err := db.Exec(s); err != nil &&
+			!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("%s: %w", s, err)
+		}
+	}
+	return nil
 }
 
 // withTx runs fn inside a write transaction, rolling back on error. All writes

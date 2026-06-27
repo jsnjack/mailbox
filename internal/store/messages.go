@@ -14,7 +14,7 @@ import (
 // msgCols is the messages column list, aliased to m, for SELECTs that may join
 // message_labels (where account_id would otherwise be ambiguous).
 const msgCols = `m.rowid, m.account_id, m.gmail_id, m.thread_id, m.internal_date, ` +
-	`m.from_name, m.from_addr, m.to_addrs, m.cc_addrs, m.subject, m.snippet, ` +
+	`m.from_name, m.from_addr, m.reply_to, m.to_addrs, m.cc_addrs, m.subject, m.snippet, ` +
 	`m.rfc822_msgid, m.in_reply_to, m.references_hdr, m.is_unread, m.is_starred, ` +
 	`m.has_attachments, m.size_estimate, m.body_fetched`
 
@@ -59,13 +59,13 @@ func upsertMessageTx(ctx context.Context, tx *sql.Tx, m model.Message) (int64, e
 	err := tx.QueryRowContext(ctx, `
 		INSERT INTO messages (
 			account_id, gmail_id, thread_id, internal_date, from_name, from_addr,
-			to_addrs, cc_addrs, subject, snippet, rfc822_msgid, in_reply_to,
+			reply_to, to_addrs, cc_addrs, subject, snippet, rfc822_msgid, in_reply_to,
 			references_hdr, is_unread, is_starred, has_attachments, size_estimate)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(account_id, gmail_id) DO UPDATE SET
 			thread_id=excluded.thread_id, internal_date=excluded.internal_date,
 			from_name=excluded.from_name, from_addr=excluded.from_addr,
-			to_addrs=excluded.to_addrs, cc_addrs=excluded.cc_addrs,
+			reply_to=excluded.reply_to, to_addrs=excluded.to_addrs, cc_addrs=excluded.cc_addrs,
 			subject=excluded.subject, snippet=excluded.snippet,
 			rfc822_msgid=excluded.rfc822_msgid, in_reply_to=excluded.in_reply_to,
 			references_hdr=excluded.references_hdr, is_unread=excluded.is_unread,
@@ -73,7 +73,7 @@ func upsertMessageTx(ctx context.Context, tx *sql.Tx, m model.Message) (int64, e
 			size_estimate=excluded.size_estimate
 		RETURNING rowid`,
 		m.AccountID, m.GmailID, m.ThreadID, idate, m.FromName, m.FromAddr,
-		m.ToAddrs, m.CcAddrs, m.Subject, m.Snippet, m.RFC822MsgID, m.InReplyTo,
+		m.ReplyTo, m.ToAddrs, m.CcAddrs, m.Subject, m.Snippet, m.RFC822MsgID, m.InReplyTo,
 		m.References, b2i(m.IsUnread), b2i(m.IsStarred), b2i(m.HasAttachments), m.SizeEstimate,
 	).Scan(&rowid)
 	if err != nil {
@@ -536,20 +536,20 @@ func scanMessage(sc rowScanner) (model.Message, error) {
 		starred int
 		hasAtt  int
 		fetched int
-		strs    = make([]sql.NullString, 9) // from_name..references_hdr text columns
+		strs    = make([]sql.NullString, 10) // from_name..references_hdr text columns
 	)
 	if err := sc.Scan(
 		&m.RowID, &m.AccountID, &m.GmailID, &m.ThreadID, &idate,
 		&strs[0], &strs[1], &strs[2], &strs[3], &strs[4], &strs[5],
-		&strs[6], &strs[7], &strs[8],
+		&strs[6], &strs[7], &strs[8], &strs[9],
 		&unread, &starred, &hasAtt, &size, &fetched,
 	); err != nil {
 		return model.Message{}, err
 	}
-	m.FromName, m.FromAddr = strs[0].String, strs[1].String
-	m.ToAddrs, m.CcAddrs = strs[2].String, strs[3].String
-	m.Subject, m.Snippet = strs[4].String, strs[5].String
-	m.RFC822MsgID, m.InReplyTo, m.References = strs[6].String, strs[7].String, strs[8].String
+	m.FromName, m.FromAddr, m.ReplyTo = strs[0].String, strs[1].String, strs[2].String
+	m.ToAddrs, m.CcAddrs = strs[3].String, strs[4].String
+	m.Subject, m.Snippet = strs[5].String, strs[6].String
+	m.RFC822MsgID, m.InReplyTo, m.References = strs[7].String, strs[8].String, strs[9].String
 	if idate.Valid {
 		m.InternalDate = time.Unix(idate.Int64, 0)
 	}

@@ -28,5 +28,4 @@ Move an item into a commit (and delete it here) when it's done.
 
 ## Features (noticed while working, not requested yet)
 
-- Per-account signature (currently one global signature).
-- Capture `Reply-To` and honor it when replying.
+_(none currently — recently shipped: per-account signatures, Reply-To handling.)_

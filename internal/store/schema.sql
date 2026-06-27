@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS messages (
   internal_date   INTEGER,          -- unix seconds from Gmail internalDate
   from_name       TEXT,
   from_addr       TEXT,
+  reply_to        TEXT,             -- Reply-To header; replies target this over From
   to_addrs        TEXT,
   cc_addrs        TEXT,
   subject         TEXT,

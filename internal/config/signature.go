@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -58,4 +59,79 @@ func SaveSignature(sig string) error {
 		return fmt.Errorf("write signature: %w", err)
 	}
 	return nil
+}
+
+// accountSignaturesPath is the JSON file mapping account email → that account's
+// signature, which overrides the global default (signature.txt).
+func accountSignaturesPath() (string, error) {
+	dir, err := ConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "signatures.json"), nil
+}
+
+// LoadAccountSignatures reads per-account signatures keyed by email. A missing or
+// unparseable file yields an empty map (callers fall back to the global default).
+func LoadAccountSignatures() (map[string]string, error) {
+	path, err := accountSignaturesPath()
+	if err != nil {
+		return map[string]string{}, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return map[string]string{}, nil
+		}
+		return map[string]string{}, fmt.Errorf("read signatures: %w", err)
+	}
+	var m map[string]string
+	if err := json.Unmarshal(data, &m); err != nil {
+		return map[string]string{}, nil // ignore a corrupt file
+	}
+	if m == nil {
+		m = map[string]string{}
+	}
+	return m, nil
+}
+
+// SaveAccountSignature sets the signature for an account email and persists the
+// whole map. An explicit empty string is stored (and means "no signature for
+// this account"), distinct from never having set one (which falls back to the
+// global default).
+func SaveAccountSignature(email, sig string) error {
+	sigs, err := LoadAccountSignatures()
+	if err != nil {
+		return err
+	}
+	sigs[email] = sig
+
+	dir, err := ConfigDir()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	data, err := json.Marshal(sigs)
+	if err != nil {
+		return fmt.Errorf("marshal signatures: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "signatures.json"), data, 0o600); err != nil {
+		return fmt.Errorf("write signatures: %w", err)
+	}
+	return nil
+}
+
+// SignatureFor returns the signature to use for an account: its own per-account
+// signature when one has been set, otherwise the global default (signature.txt).
+func SignatureFor(email string) (string, error) {
+	sigs, err := LoadAccountSignatures()
+	if err != nil {
+		return "", err
+	}
+	if sig, ok := sigs[email]; ok {
+		return sig, nil
+	}
+	return LoadSignature()
 }

@@ -23,6 +23,7 @@ func ToMessage(accountID int64, m *gmail.Message) model.Message {
 		InternalDate: internalDate(m.InternalDate),
 		FromName:     name,
 		FromAddr:     addr,
+		ReplyTo:      headerValue(headers, "Reply-To"),
 		ToAddrs:      headerValue(headers, "To"),
 		CcAddrs:      headerValue(headers, "Cc"),
 		Subject:      headerValue(headers, "Subject"),

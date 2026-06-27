@@ -51,6 +51,33 @@ func TestReplyAllRecipients(t *testing.T) {
 	}
 }
 
+func TestReplyTarget(t *testing.T) {
+	// No Reply-To: falls back to From.
+	if got := replyTarget(model.Message{FromAddr: "alice@x.com"}); got != "alice@x.com" {
+		t.Fatalf("no reply-to: got %q, want alice@x.com", got)
+	}
+	// Reply-To set: it wins over From.
+	if got := replyTarget(model.Message{FromAddr: "no-reply@x.com", ReplyTo: "list@x.com"}); got != "list@x.com" {
+		t.Fatalf("reply-to: got %q, want list@x.com", got)
+	}
+}
+
+func TestReplyAllHonorsReplyTo(t *testing.T) {
+	// Reply-To replaces From in the To line; From is not added.
+	m := model.Message{
+		FromAddr: "no-reply@x.com",
+		ReplyTo:  "List <list@x.com>",
+		ToAddrs:  "Bob <bob@x.com>",
+	}
+	to, _ := replyAllRecipients(m, "me@self.com")
+	if !strings.Contains(to, "list@x.com") {
+		t.Fatalf("To missing Reply-To address: %q", to)
+	}
+	if strings.Contains(to, "no-reply@x.com") {
+		t.Fatalf("From should not be a recipient when Reply-To is set: %q", to)
+	}
+}
+
 func TestHTMLToText(t *testing.T) {
 	got := htmlToText(`<p>Hello <b>Bob</b>,</p><div>It&#39;s &amp; done</div>`)
 	if strings.ContainsAny(got, "<>") {

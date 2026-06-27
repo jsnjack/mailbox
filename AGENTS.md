@@ -110,7 +110,10 @@ pointed at the running binary — into `~/.local/share/applications` at startup,
 skipping it when a system or user entry already exists so it never shadows a
 real install.)
 Reply / reply-all / forward / new compose in a separate window (text/plain via
-`gmailapi.BuildMIME` + `messages.send`, threading headers + threadId on replies);
+`gmailapi.BuildMIME` + `messages.send`, threading headers + threadId on replies;
+replies target the sender's `Reply-To` header when present — captured into
+`model.Message.ReplyTo` / the `reply_to` column — else the From address, via
+`replyTarget`);
 To/Cc/Bcc autocomplete from past correspondents (`store.Contacts` ranks
 addresses seen in cached mail by frequency+recency) plus the user's own
 registered accounts (`withOwnAccounts`, listed first so you can address another
@@ -122,12 +125,14 @@ new message — both prompted by `askAIIntent`, which also offers an on-demand "
 (`Proofread`), and a Save-draft button
 (`users.drafts.create`). Send runs pre-send guards (`preSendWarning`: empty
 subject, "attachment" mentioned but none attached → confirm), and closing an
-unsent message offers Save-as-draft alongside Discard. A configurable default
-signature
-(`config.{Load,Save}Signature`, `<config>/signature.txt`, edited in
-Preferences) is appended to every composed body below the cursor area and above
-any quote (`composeBodyWithSignature`, RFC 3676 "-- " delimiter); it is not
-re-added when editing an existing draft. Clicking a conversation in the Drafts
+unsent message offers Save-as-draft alongside Discard. A configurable signature
+is appended to every composed body below the cursor area and above any quote
+(`composeBodyWithSignature`, RFC 3676 "-- " delimiter); it is not re-added when
+editing an existing draft. Signatures are **per account**: `config.SignatureFor`
+returns the active account's own signature (`signatures.json`, keyed by email,
+`config.{Load,Save}AccountSignature`) or falls back to the global default
+(`config.{Load,Save}Signature`, `<config>/signature.txt`); Preferences shows one
+editor per connected account, and `w.signature` is refreshed on account switch. Clicking a conversation in the Drafts
 folder resumes editing it in compose (`openDraftForEdit`) instead of rendering
 it read-only: the body/recipients are prefilled and the draft's Gmail resource
 id is resolved (`Client.FindDraftID`) so Save updates that draft
@@ -254,7 +259,7 @@ afterward. The `sync` command and the headless packages build without GTK.
 - AI API key: keyring service `mailbox-ai` (user = provider) or `MAILBOX_AI_KEY`; never in the config file. Store it with `printf '%s' "$KEY" | mailbox set-ai-key`.
 - Persistent state (SQLite DB): `~/.local/share/mailbox/mailbox.db`.
 - Account display names: `~/.local/share/mailbox/accounts.json` (email → name).
-- Default signature: `~/.config/mailbox/signature.txt` (plain text, may be empty).
+- Default signature: `~/.config/mailbox/signature.txt` (plain text, may be empty); per-account overrides in `~/.config/mailbox/signatures.json` (email → signature).
 - View state (last folder, unread filter, reader zoom): `~/.local/share/mailbox/view.json`.
 - General prefs (e.g. block remote images by default): `~/.config/mailbox/prefs.json`.
 - Attachment cache: `~/.cache/mailbox/attachments/` (content-addressed by sha256).

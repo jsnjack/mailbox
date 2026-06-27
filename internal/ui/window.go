@@ -188,7 +188,6 @@ func newWindow(app *adw.Application, deps Deps) *window {
 		categories:       map[string]string{},
 	}
 	w.accountNames, _ = config.LoadAccountNames()
-	w.signature, _ = config.LoadSignature()
 	if p, err := config.LoadPrefs(); err == nil {
 		w.blockImages = p.BlockRemoteImages
 		w.inboxCategories = !p.DisableInboxCategories
@@ -197,6 +196,8 @@ func newWindow(app *adw.Application, deps Deps) *window {
 		w.activeID = deps.Accounts[0].ID
 		w.activeEmail = deps.Accounts[0].Email
 	}
+	// Signature is per active account (falls back to the global default).
+	w.signature, _ = config.SignatureFor(w.activeEmail)
 	w.build()
 	w.registerActions()
 	return w
@@ -1812,11 +1813,21 @@ func (w *window) setActionsSensitive(on bool) {
 	w.overflowBtn.SetSensitive(on)
 }
 
+// replyTarget is the address(es) a reply should go to: the Reply-To header when
+// the sender set one (some senders route replies elsewhere — lists, no-reply
+// aliases), otherwise the From address.
+func replyTarget(m model.Message) string {
+	if rt := strings.TrimSpace(m.ReplyTo); rt != "" {
+		return rt
+	}
+	return m.FromAddr
+}
+
 // replyInit builds the prefilled compose for a reply to m (To, Re: subject,
 // quoted body, threading headers).
 func (w *window) replyInit(m model.Message) model.OutgoingMessage {
 	return model.OutgoingMessage{
-		To:         m.FromAddr,
+		To:         replyTarget(m),
 		Subject:    ensureRePrefix(m.Subject),
 		Body:       quoteOriginal(m, w.bodyTextFor(m)),
 		InReplyTo:  m.RFC822MsgID,
@@ -1871,7 +1882,7 @@ func replyAllRecipients(m model.Message, self string) (to, cc string) {
 		}
 		return out
 	}
-	toList := append(collect(m.FromAddr), collect(m.ToAddrs)...)
+	toList := append(collect(replyTarget(m)), collect(m.ToAddrs)...)
 	ccList := collect(m.CcAddrs)
 	return strings.Join(toList, ", "), strings.Join(ccList, ", ")
 }
@@ -2064,6 +2075,7 @@ func (w *window) setActiveAccount(a AccountInfo) {
 	}
 	w.activeID = a.ID
 	w.activeEmail = a.Email
+	w.signature, _ = config.SignatureFor(a.Email) // per-account signature for compose
 	w.current = model.LabelInbox
 	w.clearReader()
 	w.loadLabels()
