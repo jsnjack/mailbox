@@ -91,6 +91,7 @@ type window struct {
 	threadStack  *gtk.Stack      // "list" vs "empty" placeholder
 	emptyPage    *adw.StatusPage // the "empty" placeholder (text set per context)
 	readerStack  *gtk.Stack      // "message" vs "empty" placeholder
+	readerCover  *gtk.Box        // opaque cover over the webview during a load (hides the swap flash)
 	markReadBtn  *gtk.Button
 	unreadToggle *gtk.ToggleButton // "show unread only" filter for the current view
 	unreadOnly   bool
@@ -1431,12 +1432,19 @@ func (w *window) buildReader() *adw.NavigationPage {
 	w.registerReaderActions()
 	w.webview = webkit.NewWebView()
 	w.sectionCache = make(map[string]cachedSection)
-	// Paint an opaque white background so switching messages doesn't flash black:
-	// during a LoadHtml the WebView otherwise clears to its (transparent/black)
-	// base before the new page paints. White matches email content and our
-	// light-background wrapper.
+	// Paint an opaque white page background (matches email content + the light
+	// wrapper). The cover (below) hides the widget-level swap flash.
 	white := gdk.NewRGBA(1, 1, 1, 1)
 	w.webview.SetBackgroundColor(&white)
+	// While a page loads, WebKit's content swap can flash black at the widget
+	// level (the page background-color above doesn't cover it). Keep the WebView
+	// mapped (so it keeps rendering) and mask the swap with an opaque white cover
+	// shown during the load and hidden once it finishes painting.
+	w.webview.ConnectLoadChanged(func(e webkit.LoadEvent) {
+		if e == webkit.LoadFinished && w.readerCover != nil {
+			w.readerCover.SetVisible(false)
+		}
+	})
 	settings := w.webview.Settings()
 	// JavaScript is enabled only so the injected fit-to-width script can run.
 	// Defense in depth keeps it safe: bodies are sanitized (no email scripts
@@ -1500,7 +1508,21 @@ func (w *window) buildReader() *adw.NavigationPage {
 	box.Append(w.authLabel)
 	box.Append(w.cautionLabel)
 	box.Append(w.trackerLabel)
-	box.Append(w.webview)
+
+	// The WebView sits under an opaque cover (shown during loads) so a content
+	// swap never flashes black; the WebView stays mapped so it keeps rendering.
+	w.readerCover = gtk.NewBox(gtk.OrientationVertical, 0)
+	w.readerCover.AddCSSClass("reader-cover")
+	w.readerCover.SetHAlign(gtk.AlignFill)
+	w.readerCover.SetVAlign(gtk.AlignFill)
+	w.readerCover.SetCanTarget(false) // never intercept input
+	w.readerCover.SetVisible(false)
+	overlay := gtk.NewOverlay()
+	overlay.SetVExpand(true)
+	overlay.SetHExpand(true)
+	overlay.SetChild(w.webview)
+	overlay.AddOverlay(w.readerCover)
+	box.Append(overlay)
 
 	// The reader's empty state is just a centered, dimmed envelope — no text.
 	empty := gtk.NewImageFromIconName("mail-unread-symbolic")
@@ -2089,7 +2111,9 @@ func (w *window) renderConversation(msgs []model.Message) {
 	}
 	w.header.SetMarkup(fmt.Sprintf("<b>%s</b>\n<span size=\"small\">%s</span>",
 		html.EscapeString(latest.Subject), meta))
-	w.webview.LoadHtml(wrapHTML("<p><i>Loading…</i></p>"), "about:blank")
+	// No "Loading…" placeholder: the previous message stays put while bodies are
+	// fetched (the status bar reports progress), then loadReaderHTML swaps to the
+	// rendered thread behind the cover — so there's no blank/black flash.
 
 	threadID := w.openThreadID // guard against a newer thread being opened mid-render
 	// Snapshot already-rendered sections on the main thread; the goroutine reuses
@@ -2174,10 +2198,20 @@ func (w *window) renderConversation(msgs []model.Message) {
 			w.setTrackerCount(blocked)
 			w.setAuthBadge(verdict)
 			w.setCaution(warnings)
-			w.webview.LoadHtml(wrapHTML(out), "about:blank")
+			w.loadReaderHTML(wrapHTML(out))
 			w.showThreadAttachments(atts)
 		})
 	}()
+}
+
+// loadReaderHTML loads fully-wrapped HTML into the reader, raising the opaque
+// cover first so WebKit's content swap doesn't flash black; the cover is dropped
+// when the load finishes (see the load-changed handler in buildReader).
+func (w *window) loadReaderHTML(full string) {
+	if w.readerCover != nil {
+		w.readerCover.SetVisible(true)
+	}
+	w.webview.LoadHtml(full, "about:blank")
 }
 
 // cachedSection is a message's rendered (sanitized, de-tracked, quote-collapsed)
@@ -2665,7 +2699,8 @@ func (w *window) onTranslate() {
 	w.translateCancel = cancel
 	w.translationBanner.SetTitle("Translating…")
 	w.translationBanner.SetRevealed(true)
-	w.webview.LoadHtml(wrapHTML("<p><i>Translating…</i></p>"), "about:blank")
+	// Keep the original showing while translating (the banner says "Translating…");
+	// loadReaderHTML swaps to the translation behind the cover when it's ready.
 	done := w.aiActivity("Translating")
 
 	go func() {
@@ -2705,7 +2740,7 @@ func (w *window) onTranslate() {
 				return // user switched conversations or reverted
 			}
 			if firstErr != nil {
-				w.webview.LoadHtml(wrapHTML("<p>Translation failed: "+html.EscapeString(firstErr.Error())+"</p>"), "about:blank")
+				w.loadReaderHTML(wrapHTML("<p>Translation failed: " + html.EscapeString(firstErr.Error()) + "</p>"))
 				return
 			}
 			for id, out := range results {
@@ -2732,7 +2767,7 @@ func (w *window) showTranslatedConversation(msgs []model.Message) {
 		blocked += n
 	}
 	w.setTrackerCount(blocked)
-	w.webview.LoadHtml(wrapHTML(b.String()), "about:blank")
+	w.loadReaderHTML(wrapHTML(b.String()))
 }
 
 // bodyHTMLFor returns the open message's HTML body for translation (sanitized),
