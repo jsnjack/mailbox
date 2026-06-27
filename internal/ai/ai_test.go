@@ -158,17 +158,19 @@ func TestExtractOpenAIDelta(t *testing.T) {
 		data     string
 		wantText string
 		wantDone bool
+		wantErr  bool
 	}{
-		{"content", `{"choices":[{"delta":{"content":"hello"}}]}`, "hello", false},
-		{"finish", `{"choices":[{"delta":{},"finish_reason":"stop"}]}`, "", true},
-		{"empty choices", `{"choices":[]}`, "", false},
-		{"garbage", `not json`, "", false},
+		{"content", `{"choices":[{"delta":{"content":"hello"}}]}`, "hello", false, false},
+		{"finish", `{"choices":[{"delta":{},"finish_reason":"stop"}]}`, "", true, false},
+		{"empty choices", `{"choices":[]}`, "", false, false},
+		{"garbage", `not json`, "", false, false},
+		{"mid-stream error", `{"error":{"message":"server overloaded"}}`, "", false, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			text, done := extractOpenAIDelta([]byte(tc.data))
-			if text != tc.wantText || done != tc.wantDone {
-				t.Fatalf("got (%q,%v), want (%q,%v)", text, done, tc.wantText, tc.wantDone)
+			text, done, err := extractOpenAIDelta([]byte(tc.data))
+			if text != tc.wantText || done != tc.wantDone || (err != nil) != tc.wantErr {
+				t.Fatalf("got (%q,%v,err=%v), want (%q,%v,err=%v)", text, done, err, tc.wantText, tc.wantDone, tc.wantErr)
 			}
 		})
 	}
@@ -180,16 +182,19 @@ func TestExtractAnthropicDelta(t *testing.T) {
 		data     string
 		wantText string
 		wantDone bool
+		wantErr  bool
 	}{
-		{"text delta", `{"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}`, "hi", false},
-		{"stop", `{"type":"message_stop"}`, "", true},
-		{"ping", `{"type":"ping"}`, "", false},
+		{"text delta", `{"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}`, "hi", false, false},
+		{"stop", `{"type":"message_stop"}`, "", true, false},
+		{"ping", `{"type":"ping"}`, "", false, false},
+		{"garbage", `not json`, "", false, false},
+		{"mid-stream error", `{"type":"error","error":{"message":"overloaded_error"}}`, "", false, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			text, done := extractAnthropicDelta([]byte(tc.data))
-			if text != tc.wantText || done != tc.wantDone {
-				t.Fatalf("got (%q,%v), want (%q,%v)", text, done, tc.wantText, tc.wantDone)
+			text, done, err := extractAnthropicDelta([]byte(tc.data))
+			if text != tc.wantText || done != tc.wantDone || (err != nil) != tc.wantErr {
+				t.Fatalf("got (%q,%v,err=%v), want (%q,%v,err=%v)", text, done, err, tc.wantText, tc.wantDone, tc.wantErr)
 			}
 		})
 	}

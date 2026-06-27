@@ -12,9 +12,11 @@ import (
 // maxSSELine bounds a single SSE data line (some providers send large JSON deltas).
 const maxSSELine = 1 << 20
 
-// extractFunc pulls the incremental text (if any) and a done flag from one SSE
-// data payload. A provider supplies its own decoder.
-type extractFunc func(data []byte) (text string, done bool)
+// extractFunc pulls the incremental text (if any), a done flag, and any
+// provider error event from one SSE data payload. A provider supplies its own
+// decoder. A non-nil err means the provider reported a mid-stream error (after a
+// 2xx), which must be surfaced rather than silently truncating the result.
+type extractFunc func(data []byte) (text string, done bool, err error)
 
 // streamSSE performs req and turns its Server-Sent-Events body into a channel of
 // Chunks, using extract to decode each data line. Non-2xx responses return an
@@ -49,7 +51,14 @@ func streamSSE(ctx context.Context, client *http.Client, req *http.Request, extr
 			if data == "[DONE]" {
 				return
 			}
-			text, done := extract([]byte(data))
+			text, done, eerr := extract([]byte(data))
+			if eerr != nil {
+				select {
+				case ch <- Chunk{Err: eerr}:
+				case <-ctx.Done():
+				}
+				return
+			}
 			if text != "" {
 				select {
 				case ch <- Chunk{Text: text}:

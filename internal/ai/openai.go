@@ -66,8 +66,11 @@ func openAIMessages(system string, msgs []Msg) []map[string]string {
 	return out
 }
 
-func extractOpenAIDelta(data []byte) (string, bool) {
+func extractOpenAIDelta(data []byte) (string, bool, error) {
 	var d struct {
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error"`
 		Choices []struct {
 			Delta struct {
 				Content string `json:"content"`
@@ -75,8 +78,14 @@ func extractOpenAIDelta(data []byte) (string, bool) {
 			FinishReason *string `json:"finish_reason"`
 		} `json:"choices"`
 	}
-	if err := json.Unmarshal(data, &d); err != nil || len(d.Choices) == 0 {
-		return "", false
+	if err := json.Unmarshal(data, &d); err != nil {
+		return "", false, nil // unparseable SSE line; skip it
 	}
-	return d.Choices[0].Delta.Content, d.Choices[0].FinishReason != nil
+	if d.Error != nil && d.Error.Message != "" {
+		return "", false, fmt.Errorf("openai stream error: %s", d.Error.Message)
+	}
+	if len(d.Choices) == 0 {
+		return "", false, nil
+	}
+	return d.Choices[0].Delta.Content, d.Choices[0].FinishReason != nil, nil
 }

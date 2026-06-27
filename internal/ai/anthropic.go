@@ -75,24 +75,33 @@ func anthropicMessages(msgs []Msg) []map[string]any {
 	return out
 }
 
-func extractAnthropicDelta(data []byte) (string, bool) {
+func extractAnthropicDelta(data []byte) (string, bool, error) {
 	var d struct {
 		Type  string `json:"type"`
 		Delta struct {
 			Type string `json:"type"`
 			Text string `json:"text"`
 		} `json:"delta"`
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error"`
 	}
 	if err := json.Unmarshal(data, &d); err != nil {
-		return "", false
+		return "", false, nil
 	}
 	switch d.Type {
 	case "content_block_delta":
 		if d.Delta.Type == "text_delta" {
-			return d.Delta.Text, false
+			return d.Delta.Text, false, nil
 		}
 	case "message_stop":
-		return "", true
+		return "", true, nil
+	case "error":
+		msg := "stream error"
+		if d.Error != nil && d.Error.Message != "" {
+			msg = d.Error.Message
+		}
+		return "", false, fmt.Errorf("anthropic stream error: %s", msg)
 	}
-	return "", false
+	return "", false, nil
 }
