@@ -425,21 +425,22 @@ func (e *Engine) ModifyLabelsBatch(ctx context.Context, c *gmailapi.Client, acco
 			return fmt.Errorf("modify labels (local): %w", err)
 		}
 	}
-	localDur := time.Since(start)
 	// One coarse event (no GmailID) so the UI refreshes once, not per message.
 	e.publish(Change{Kind: MessageUpserted, AccountID: accountID})
+	slog.Default().Debug("engine: ModifyLabelsBatch (local)",
+		"n", len(gmailIDs), "add", add, "remove", remove, "dur", time.Since(start))
 
-	var netDur time.Duration
+	// Mirror to Gmail in the background so the UI updates instantly off the local
+	// change instead of waiting on the round-trip (e.g. unstarring should leave the
+	// Starred folder at once). A failure is logged; the next incremental sync
+	// reconciles any divergence.
 	if c != nil {
-		netStart := time.Now()
-		if err := c.BatchModify(ctx, gmailIDs, add, remove); err != nil {
-			return fmt.Errorf("modify labels on server: %w", err)
-		}
-		netDur = time.Since(netStart)
+		go func() {
+			if err := c.BatchModify(context.Background(), gmailIDs, add, remove); err != nil {
+				slog.Default().Warn("modify labels: mirror to gmail", "n", len(gmailIDs), "err", err)
+			}
+		}()
 	}
-	slog.Default().Debug("engine: ModifyLabelsBatch",
-		"n", len(gmailIDs), "add", add, "remove", remove,
-		"local", localDur, "network", netDur, "total", time.Since(start))
 	return nil
 }
 
