@@ -1296,8 +1296,10 @@ func (w *window) categorizeInbox() {
 		return
 	}
 	w.categorizing = true
+	done := w.aiActivity(fmt.Sprintf("Categorizing %d threads", len(ids)))
 	go func() {
 		ctx := context.Background()
+		var firstErr error
 		for start := 0; start < len(ids); start += 20 {
 			end := start + 20
 			if end > len(ids) {
@@ -1306,6 +1308,7 @@ func (w *window) categorizeInbox() {
 			chunkIDs := ids[start:end]
 			cats, err := w.deps.Assistant.Categorize(ctx, ctxs[start:end])
 			if err != nil {
+				firstErr = err
 				slog.Warn("ui: categorize inbox", "err", err)
 				break
 			}
@@ -1318,6 +1321,7 @@ func (w *window) categorizeInbox() {
 			})
 		}
 		dispatch.Main(func() {
+			done(doneErr(firstErr))
 			w.categorizing = false
 			w.refreshList(w.searchEntry.Text()) // re-bind rows to show the tags
 		})

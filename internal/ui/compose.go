@@ -628,11 +628,13 @@ func (w *window) askAIIntent(parent gtk.Widgetter, isReply bool, threadContext s
 				busy.AddCSSClass("dim-label")
 				busy.AddCSSClass("caption")
 				quick.Append(busy)
+				done := w.aiActivity("Suggesting quick replies")
 				go func() {
 					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 					defer cancel()
 					replies, err := w.deps.Assistant.SmartReplies(ctx, threadContext)
 					dispatch.Main(func() {
+						done(doneErr(err))
 						clearQuick()
 						if err != nil || len(replies) == 0 {
 							if err != nil {
