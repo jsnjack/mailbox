@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -26,6 +27,10 @@ const aiKeyringService = "mailbox-ai"
 // syncInterval is how often the background incremental sync runs while the GUI
 // is open.
 const syncInterval = 60 * time.Second
+
+// resyncBackfillLimit bounds how many newest messages a recovery re-backfills
+// when an expired history watermark forces a resync (see engine.Resync).
+const resyncBackfillLimit = 500
 
 // launchUI opens the store, picks the first connected account, optionally builds
 // a live Gmail client (when credentials are available), starts a background
@@ -196,6 +201,9 @@ func launchUI() error {
 				return err
 			}
 			_, err = engine.Incremental(ctx, c, accountID)
+			if errors.Is(err, syncer.ErrHistoryExpired) {
+				_, err = engine.Resync(ctx, c, accountID, resyncBackfillLimit)
+			}
 			return err
 		}
 		deps.SearchServer = func(ctx context.Context, accountID int64, query string, max int) ([]string, error) {
@@ -342,6 +350,12 @@ func backgroundSync(ctx context.Context, engine *syncer.Engine, act *activity.Hu
 	for {
 		done := act.Begin("sync", "Syncing "+email)
 		n, err := engine.Incremental(ctx, client, accountID)
+		if errors.Is(err, syncer.ErrHistoryExpired) {
+			// Watermark too old (offline past Gmail's history window). Recover by
+			// re-backfilling and resetting it, else incremental fails forever.
+			fmt.Fprintf(os.Stderr, "background sync: history expired for %s, resyncing\n", email)
+			n, err = engine.Resync(ctx, client, accountID, resyncBackfillLimit)
+		}
 		if err != nil {
 			done("error: " + err.Error())
 			fmt.Fprintf(os.Stderr, "background sync: %v\n", err)

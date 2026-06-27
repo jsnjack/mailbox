@@ -552,6 +552,35 @@ func (e *Engine) Incremental(ctx context.Context, c *gmailapi.Client, accountID 
 	return changed, nil
 }
 
+// Resync recovers from an expired history watermark — the ErrHistoryExpired that
+// Incremental returns once an account has been offline past Gmail's history
+// retention window. It captures the current historyId, re-backfills the newest
+// max messages (upserting — it never truncates the cache), then advances the
+// watermark so incremental sync resumes from a valid point. Without this an
+// expired watermark leaves the account stuck failing every incremental forever,
+// so new mail never appears.
+//
+// The watermark is captured before backfilling (so mail arriving during the
+// backfill isn't missed) but stored only after it succeeds (so a failed backfill
+// never advances past un-fetched history). Deletions made while the watermark was
+// expired aren't reconciled — incremental handles deletions going forward, and a
+// full-mailbox id diff isn't worth its cost here.
+func (e *Engine) Resync(ctx context.Context, c *gmailapi.Client, accountID int64, max int) (int, error) {
+	prof, err := c.GetProfile(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("resync: profile: %w", err)
+	}
+	watermark := fmt.Sprintf("%d", prof.HistoryId)
+	n, err := e.Backfill(ctx, c, accountID, "", max)
+	if err != nil {
+		return n, fmt.Errorf("resync: backfill: %w", err)
+	}
+	if err := e.Store.SetLastHistoryID(ctx, accountID, watermark); err != nil {
+		return n, fmt.Errorf("resync: set watermark: %w", err)
+	}
+	return n, nil
+}
+
 // fetchMetadataConcurrent fetches each id's metadata in parallel (bounded by
 // backfillWorkers) and returns the converted messages and their ids in input
 // order, skipping ids that fail to fetch (a message can vanish between the
