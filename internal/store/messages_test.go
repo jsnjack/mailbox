@@ -408,3 +408,22 @@ func TestSearchSubjectAndBody(t *testing.T) {
 		t.Fatal("body text empty")
 	}
 }
+
+// TestSearchMalformedInputDoesNotError guards the FTS5 query builder: arbitrary
+// user input (operators, punctuation, smart quotes) must produce a valid MATCH
+// expression, never an FTS syntax error.
+func TestSearchMalformedInputDoesNotError(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	acc := seedAccount(t, s)
+	if _, err := s.UpsertMessage(ctx, model.Message{
+		AccountID: acc, GmailID: "m1", ThreadID: "t1", Subject: "hello world", Snippet: "body text", Labels: []string{"INBOX"},
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	for _, q := range []string{"*", ":", "()", "a*b", "-foo", `""`, "***", "AND", "OR", "NOT", "^", "foo:bar", "a OR b", "“smart”"} {
+		if _, err := s.Search(ctx, acc, q, 20); err != nil {
+			t.Errorf("Search(%q) errored: %v", q, err)
+		}
+	}
+}

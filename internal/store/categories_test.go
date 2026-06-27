@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/jsnjack/mailbox/internal/model"
@@ -92,5 +93,29 @@ func TestDeleteMessageClearsCategory(t *testing.T) {
 	}
 	if _, ok := got["g1"]; ok {
 		t.Fatalf("category for deleted message should be gone, got %q", got["g1"])
+	}
+}
+
+// TestMessageCategoriesChunking verifies the IN-clause is chunked: querying more
+// ids than the chunk size (500) returns them all, across the boundary.
+func TestMessageCategoriesChunking(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	acc := seedAccount(t, s)
+
+	const n = 1100 // > 2 chunks
+	ids := make([]string, n)
+	for i := 0; i < n; i++ {
+		ids[i] = fmt.Sprintf("g%04d", i)
+		if err := s.SetMessageCategory(ctx, acc, ids[i], "Newsletter"); err != nil {
+			t.Fatalf("set %d: %v", i, err)
+		}
+	}
+	got, err := s.MessageCategories(ctx, acc, ids)
+	if err != nil {
+		t.Fatalf("MessageCategories: %v", err)
+	}
+	if len(got) != n {
+		t.Fatalf("got %d categories, want %d (chunking lost rows)", len(got), n)
 	}
 }

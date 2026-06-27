@@ -37,31 +37,39 @@ func (s *Store) ClearCategories(ctx context.Context, accountID int64) error {
 // returns an empty map without querying.
 func (s *Store) MessageCategories(ctx context.Context, accountID int64, gmailIDs []string) (map[string]string, error) {
 	out := make(map[string]string, len(gmailIDs))
-	if len(gmailIDs) == 0 {
-		return out, nil
-	}
-	args := make([]any, 0, len(gmailIDs)+1)
-	args = append(args, accountID)
-	for _, id := range gmailIDs {
-		args = append(args, id)
-	}
-	rows, err := s.reader.QueryContext(ctx,
-		`SELECT gmail_id, category FROM message_categories
-		   WHERE account_id = ? AND gmail_id IN (`+placeholders(len(gmailIDs))+`)`,
-		args...)
-	if err != nil {
-		return nil, fmt.Errorf("query message categories: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-	for rows.Next() {
-		var id, cat string
-		if err := rows.Scan(&id, &cat); err != nil {
+	const chunk = 500 // stay well under SQLite's bound-variable limit
+	for start := 0; start < len(gmailIDs); start += chunk {
+		end := start + chunk
+		if end > len(gmailIDs) {
+			end = len(gmailIDs)
+		}
+		ids := gmailIDs[start:end]
+		args := make([]any, 0, len(ids)+1)
+		args = append(args, accountID)
+		for _, id := range ids {
+			args = append(args, id)
+		}
+		rows, err := s.reader.QueryContext(ctx,
+			`SELECT gmail_id, category FROM message_categories
+			   WHERE account_id = ? AND gmail_id IN (`+placeholders(len(ids))+`)`,
+			args...)
+		if err != nil {
+			return nil, fmt.Errorf("query message categories: %w", err)
+		}
+		err = func() error {
+			defer func() { _ = rows.Close() }()
+			for rows.Next() {
+				var id, cat string
+				if err := rows.Scan(&id, &cat); err != nil {
+					return err
+				}
+				out[id] = cat
+			}
+			return rows.Err()
+		}()
+		if err != nil {
 			return nil, err
 		}
-		out[id] = cat
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
 	}
 	return out, nil
 }
