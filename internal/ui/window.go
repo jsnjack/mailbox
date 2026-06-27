@@ -1501,6 +1501,9 @@ func (w *window) categorizeInbox() {
 			}
 		}
 		dispatch.Main(func() {
+			if w.activeID != acctID {
+				return // switched accounts; these tags belong to the other account
+			}
 			for _, c := range cands {
 				if cat, ok := cached[c.msgID]; ok {
 					w.categories[c.threadID] = cat
@@ -1545,6 +1548,9 @@ func (w *window) categorizeInbox() {
 					results[c.threadID] = cat
 				}
 				dispatch.Main(func() {
+					if w.activeID != acctID {
+						return // switched accounts; don't write its tags into the other's map
+					}
 					for id, cat := range results {
 						w.categories[id] = cat
 					}
