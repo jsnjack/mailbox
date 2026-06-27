@@ -211,9 +211,46 @@ func (w *window) openSettings() {
 		clearBtn.SetSensitive(false)
 	})
 	clearRow.AddSuffix(clearBtn)
+
+	// Storage: compact the database, reclaiming space left by deleted mail.
+	dbRow := adw.NewActionRow()
+	dbRow.SetTitle("Database")
+	if sz, err := config.DBSize(); err == nil && sz > 0 {
+		dbRow.SetSubtitle(fmt.Sprintf("%s on disk. Compact to reclaim space from deleted mail.", humanBytes(sz)))
+	} else {
+		dbRow.SetSubtitle("Compact to reclaim space left by deleted mail.")
+	}
+	compactBtn := gtk.NewButtonWithLabel("Compact")
+	compactBtn.SetVAlign(gtk.AlignCenter)
+	compactBtn.ConnectClicked(func() {
+		compactBtn.SetSensitive(false)
+		compactBtn.SetLabel("Compacting…")
+		before, _ := config.DBSize()
+		go func() {
+			err := w.deps.Store.Vacuum(context.Background())
+			after, _ := config.DBSize()
+			dispatch.Main(func() {
+				compactBtn.SetLabel("Compact")
+				if err != nil {
+					slog.Warn("ui: compact database", "err", err)
+					dbRow.SetSubtitle("Couldn't compact the database.")
+					compactBtn.SetSensitive(true)
+					return
+				}
+				if freed := before - after; freed > 0 {
+					dbRow.SetSubtitle(fmt.Sprintf("Compacted — freed %s (now %s).", humanBytes(freed), humanBytes(after)))
+				} else {
+					dbRow.SetSubtitle(fmt.Sprintf("Already compact (%s).", humanBytes(after)))
+				}
+			})
+		}()
+	})
+	dbRow.AddSuffix(compactBtn)
+
 	storageGroup := adw.NewPreferencesGroup()
 	storageGroup.SetTitle("Storage")
 	storageGroup.Add(clearRow)
+	storageGroup.Add(dbRow)
 
 	page := adw.NewPreferencesPage()
 	page.Add(group)

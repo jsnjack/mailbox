@@ -1,8 +1,12 @@
 package store
 
 import (
+	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
+
+	"github.com/jsnjack/mailbox/internal/model"
 )
 
 func openTestStore(t *testing.T) *Store {
@@ -65,5 +69,39 @@ func TestWALEnabled(t *testing.T) {
 	}
 	if mode != "wal" {
 		t.Fatalf("journal_mode = %q, want wal", mode)
+	}
+}
+
+func TestVacuum(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	acc := seedAccount(t, s)
+
+	// Insert then delete a chunk of messages so VACUUM has freed pages to reclaim.
+	var msgs []model.Message
+	for i := 0; i < 200; i++ {
+		msgs = append(msgs, model.Message{
+			AccountID: acc, GmailID: fmt.Sprintf("g%d", i), ThreadID: fmt.Sprintf("t%d", i),
+			Subject: "subject for vacuum test", Snippet: "some snippet text to take up space",
+			Labels: []string{"INBOX"},
+		})
+	}
+	if err := s.UpsertMessages(ctx, msgs); err != nil {
+		t.Fatalf("UpsertMessages: %v", err)
+	}
+	ids := make([]string, len(msgs))
+	for i, m := range msgs {
+		ids[i] = m.GmailID
+	}
+	if err := s.DeleteMessages(ctx, acc, ids); err != nil {
+		t.Fatalf("DeleteMessages: %v", err)
+	}
+
+	if err := s.Vacuum(ctx); err != nil {
+		t.Fatalf("Vacuum: %v", err)
+	}
+	// The store still works after a vacuum.
+	if n, err := s.CountByLabel(ctx, acc, "INBOX"); err != nil || n != 0 {
+		t.Fatalf("after vacuum CountByLabel = %d err=%v, want 0", n, err)
 	}
 }

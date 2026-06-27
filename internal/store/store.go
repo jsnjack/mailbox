@@ -86,6 +86,22 @@ func migrate(db *sql.DB) error {
 	return nil
 }
 
+// Vacuum rebuilds the database file, returning pages freed by deleted rows
+// (messages, bodies, FTS, the AI caches) to the OS — WAL keeps that space until
+// a VACUUM, so the file only grows after large deletions (emptying Trash/Spam,
+// clearing categories) otherwise. The trailing checkpoint truncates the WAL so
+// the on-disk size actually shrinks. It briefly takes the write lock, so callers
+// should run it off the UI thread.
+func (s *Store) Vacuum(ctx context.Context) error {
+	if _, err := s.writer.ExecContext(ctx, "VACUUM"); err != nil {
+		return fmt.Errorf("vacuum: %w", err)
+	}
+	if _, err := s.writer.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+		return fmt.Errorf("checkpoint after vacuum: %w", err)
+	}
+	return nil
+}
+
 // withTx runs fn inside a write transaction, rolling back on error. All writes
 // go through the single writer connection, so transactions never contend.
 func (s *Store) withTx(ctx context.Context, fn func(*sql.Tx) error) error {

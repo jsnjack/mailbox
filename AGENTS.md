@@ -267,7 +267,7 @@ afterward. The `sync` command and the headless packages build without GTK.
 
 - Config file: `~/.config/mailbox/config.toml`, `[ai]` table: `provider` (`openai`|`litellm`|`anthropic`), `endpoint` (base URL incl. `/v1`), `model`. Editable in-app via the Preferences dialog (`ai.SaveConfig`; applies on next launch). Env overrides: `MAILBOX_AI_{PROVIDER,ENDPOINT,MODEL,KEY}`.
 - AI API key: keyring service `mailbox-ai` (user = provider) or `MAILBOX_AI_KEY`; never in the config file. Store it with `printf '%s' "$KEY" | mailbox set-ai-key`.
-- Persistent state (SQLite DB): `~/.local/share/mailbox/mailbox.db`.
+- Persistent state (SQLite DB): `~/.local/share/mailbox/mailbox.db`. Preferences → Storage can clear the attachment cache (`config.ClearAttachmentsCache`) and compact the DB (`store.Vacuum` — `VACUUM` + WAL-truncate, reclaiming pages freed by deleted mail; WAL keeps that space otherwise).
 - Account display names: `~/.local/share/mailbox/accounts.json` (email → name).
 - Default signature: `~/.config/mailbox/signature.txt` (plain text, may be empty); per-account overrides in `~/.config/mailbox/signatures.json` (email → signature).
 - View state (last folder, unread filter, reader zoom): `~/.local/share/mailbox/view.json`.
