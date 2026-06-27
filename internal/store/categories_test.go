@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"testing"
+
+	"github.com/jsnjack/mailbox/internal/model"
 )
 
 func TestMessageCategories(t *testing.T) {
@@ -49,5 +51,34 @@ func TestMessageCategories(t *testing.T) {
 	got, _ = s.MessageCategories(ctx, acc, []string{"m1"})
 	if got["m1"] != "Receipt" {
 		t.Fatalf("after update m1 = %q, want %q", got["m1"], "Receipt")
+	}
+}
+
+// TestDeleteMessageClearsCategory verifies that deleting a message also removes
+// its persisted category, so no orphan category row is left behind (the row is
+// keyed by gmail_id with its FK on accounts, so it doesn't cascade on its own).
+func TestDeleteMessageClearsCategory(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	acc := seedAccount(t, s)
+
+	if _, err := s.UpsertMessage(ctx, model.Message{
+		AccountID: acc, GmailID: "g1", ThreadID: "t1", Subject: "hi", Labels: []string{"INBOX"},
+	}); err != nil {
+		t.Fatalf("UpsertMessage: %v", err)
+	}
+	if err := s.SetMessageCategory(ctx, acc, "g1", "Receipt"); err != nil {
+		t.Fatalf("SetMessageCategory: %v", err)
+	}
+
+	if err := s.DeleteMessages(ctx, acc, []string{"g1"}); err != nil {
+		t.Fatalf("DeleteMessages: %v", err)
+	}
+	got, err := s.MessageCategories(ctx, acc, []string{"g1"})
+	if err != nil {
+		t.Fatalf("MessageCategories: %v", err)
+	}
+	if _, ok := got["g1"]; ok {
+		t.Fatalf("category for deleted message should be gone, got %q", got["g1"])
 	}
 }

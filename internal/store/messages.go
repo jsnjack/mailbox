@@ -157,6 +157,13 @@ func deleteMessageTx(ctx context.Context, tx *sql.Tx, accountID int64, gmailID s
 	if _, err := tx.ExecContext(ctx, `DELETE FROM messages_fts WHERE rowid = ?`, rowID); err != nil {
 		return fmt.Errorf("delete fts row: %w", err)
 	}
+	// message_categories is keyed by gmail_id with its FK on accounts, so it does
+	// not cascade on message deletion — clean it up explicitly so a deleted email
+	// leaves no orphan category row.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM message_categories WHERE account_id = ? AND gmail_id = ?`, accountID, gmailID); err != nil {
+		return fmt.Errorf("delete message category: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM messages WHERE rowid = ?`, rowID); err != nil {
 		return fmt.Errorf("delete message: %w", err)
 	}
