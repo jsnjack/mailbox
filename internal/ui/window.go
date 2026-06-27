@@ -3189,11 +3189,21 @@ func (w *window) onAnalyze() {
 		w.summaryLabel.SetText(cached)
 		return
 	}
+	// Persisted analysis for this message (no AI cost). The message + its signals
+	// are immutable, so a stored analysis is always valid. A single indexed
+	// lookup, fine on the main thread.
+	if a, ok, err := w.deps.Store.Analysis(context.Background(), w.activeID, m.GmailID); err == nil && ok {
+		w.summaryCache[key] = a
+		w.summaryLabel.SetText(a)
+		return
+	}
 
 	w.summaryLabel.SetText("Analyzing…")
 	ctx, cancel := context.WithCancel(context.Background())
 	w.summaryCancel = cancel
 	threadID := w.openThreadID
+	acctID := w.activeID
+	gmailID := m.GmailID
 	emailCtx := w.analysisContextFor(m)
 	done := w.aiActivity("Analyzing email")
 
@@ -3215,6 +3225,17 @@ func (w *window) onAnalyze() {
 			}
 			w.summaryLabel.SetText(bulletize(text))
 		})
+		// Finalize + persist off the main thread, so re-opening the message reuses
+		// the analysis instead of re-running the AI.
+		final := ""
+		if serr == nil {
+			final = bulletize(strings.TrimSpace(text))
+			if final != "" {
+				if perr := w.deps.Store.SetAnalysis(context.Background(), acctID, gmailID, final); perr != nil {
+					slog.Warn("ui: persist analysis", "err", perr)
+				}
+			}
+		}
 		dispatch.Main(func() {
 			done(doneErr(serr))
 			if w.openThreadID != threadID || ctx.Err() != nil {
@@ -3224,7 +3245,6 @@ func (w *window) onAnalyze() {
 				w.summaryLabel.SetText("Analysis failed: " + serr.Error())
 				return
 			}
-			final := bulletize(strings.TrimSpace(text))
 			if final != "" {
 				w.summaryCache[key] = final
 				w.summaryLabel.SetText(final)

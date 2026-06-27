@@ -132,6 +132,17 @@ CREATE TABLE IF NOT EXISTS thread_summaries (
   PRIMARY KEY (account_id, thread_id)
 );
 
+-- AI security analysis (phishing/scam verdict + reasons) per message, keyed by
+-- the message's Gmail id. The message and its auth/heuristic signals are
+-- immutable, so the analysis never goes stale; persisted so re-opening a message
+-- doesn't re-run the AI.
+CREATE TABLE IF NOT EXISTS message_analyses (
+  account_id      INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  gmail_id        TEXT NOT NULL,
+  analysis        TEXT NOT NULL,
+  PRIMARY KEY (account_id, gmail_id)
+);
+
 -- FTS5 index over message text, keyed by messages.rowid. Rows are written
 -- explicitly by the store (not via triggers) because the searchable text spans
 -- messages + message_bodies and bodies arrive later than metadata. Updates are
