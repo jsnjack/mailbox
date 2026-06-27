@@ -13,7 +13,7 @@ import (
 // dropped.
 const desktopFileName = appID + ".desktop"
 
-// desktopEntry mirrors packaging/com.surfly.mailbox.desktop. The Exec line is
+// desktopEntry mirrors packaging/com.jsnjack.mailbox.desktop. The Exec line is
 // rewritten to the running binary's absolute path when self-installed for
 // development (the packaged entry uses the on-PATH name).
 const desktopEntry = `[Desktop Entry]
@@ -22,7 +22,7 @@ Name=Mailbox
 GenericName=Email Client
 Comment=A native, fast Gmail client
 Exec=mailbox
-Icon=com.surfly.mailbox
+Icon=com.jsnjack.mailbox
 Terminal=false
 Categories=Network;Email;GTK;GNOME;
 Keywords=Email;Gmail;Mail;

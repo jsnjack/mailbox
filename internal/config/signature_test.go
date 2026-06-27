@@ -13,7 +13,7 @@ func TestSignatureRoundTrip(t *testing.T) {
 		t.Fatalf("absent signature: %q err=%v, want empty", s, err)
 	}
 
-	want := "Yauhen Shulitski\nSurfly\n+00 000"
+	want := "Yauhen Shulitski\njsnjack\n+00 000"
 	if err := SaveSignature(want); err != nil {
 		t.Fatalf("SaveSignature: %v", err)
 	}

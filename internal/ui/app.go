@@ -18,7 +18,7 @@ import (
 )
 
 // appID is the GTK/D-Bus application identifier.
-const appID = "com.surfly.mailbox"
+const appID = "com.jsnjack.mailbox"
 
 // applicationID is the id the GApplication registers under. A test sandbox can
 // override it via MAILBOX_APP_ID so it runs as a distinct instance alongside a

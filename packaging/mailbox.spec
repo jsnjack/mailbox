@@ -23,10 +23,10 @@ locked-down WebKitGTK view, and includes AI assistance (translate, draft reply).
 
 %install
 install -Dm0755 %{srcdir}/bin/mailbox %{buildroot}%{_bindir}/mailbox
-install -Dm0644 %{srcdir}/packaging/com.surfly.mailbox.desktop %{buildroot}%{_datadir}/applications/com.surfly.mailbox.desktop
-install -Dm0644 %{srcdir}/packaging/com.surfly.mailbox.svg %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/com.surfly.mailbox.svg
+install -Dm0644 %{srcdir}/packaging/com.jsnjack.mailbox.desktop %{buildroot}%{_datadir}/applications/com.jsnjack.mailbox.desktop
+install -Dm0644 %{srcdir}/packaging/com.jsnjack.mailbox.svg %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/com.jsnjack.mailbox.svg
 
 %files
 %{_bindir}/mailbox
-%{_datadir}/applications/com.surfly.mailbox.desktop
-%{_datadir}/icons/hicolor/scalable/apps/com.surfly.mailbox.svg
+%{_datadir}/applications/com.jsnjack.mailbox.desktop
+%{_datadir}/icons/hicolor/scalable/apps/com.jsnjack.mailbox.svg
