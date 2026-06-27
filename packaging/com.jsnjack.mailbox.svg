@@ -1,26 +1,16 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
   <defs>
-    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#62a0ea"/>
-      <stop offset="1" stop-color="#1c64c4"/>
+    <linearGradient id="tile2" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4f96ee"/>
+      <stop offset="1" stop-color="#1f6ad0"/>
     </linearGradient>
-    <linearGradient id="flap" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#3d8be9"/>
-      <stop offset="1" stop-color="#2f7cdf"/>
-    </linearGradient>
-    <filter id="drop" x="-30%" y="-30%" width="160%" height="170%">
-      <feDropShadow dx="0" dy="2.5" stdDeviation="3" flood-color="#0a2a57" flood-opacity="0.35"/>
-    </filter>
   </defs>
+  <!-- flat tile with a subtle inner highlight ring (Adwaita-ish) -->
+  <rect x="8" y="8" width="112" height="112" rx="30" fill="url(#tile2)"/>
+  <rect x="9.5" y="9.5" width="109" height="109" rx="28.5" fill="none" stroke="#ffffff" stroke-opacity="0.18" stroke-width="1.5"/>
 
-  <rect x="8" y="8" width="112" height="112" rx="28" fill="url(#tile)"/>
-  <!-- faint top sheen for a touch of depth, not gloss -->
-  <path d="M36 8 h56 a28 28 0 0 1 28 28 v8 a72 44 0 0 0 -112 0 v-8 a28 28 0 0 1 28 -28 z" fill="#ffffff" opacity="0.10"/>
-
-  <g filter="url(#drop)">
-    <!-- white envelope body -->
-    <rect x="28" y="44" width="72" height="42" rx="9" fill="#ffffff"/>
-    <!-- accent-blue folded flap -->
-    <path d="M36.5 44 H91.5 a9 9 0 0 1 5.9 2.6 L67.4 71 a5 5 0 0 1 -6.8 0 L30.6 46.6 A9 9 0 0 1 36.5 44 Z" fill="url(#flap)"/>
-  </g>
+  <!-- envelope: white body, clean filled flap, no gloss -->
+  <rect x="29" y="44" width="70" height="41" rx="8" fill="#ffffff"/>
+  <path d="M37 44 H91 a8 8 0 0 1 6 2.7 L67 70.5 a4.5 4.5 0 0 1 -6 0 L31 46.7 A8 8 0 0 1 37 44 Z" fill="#e6eefb"/>
+  <path d="M30.5 46 L64 70 L97.5 46" fill="none" stroke="#7ba8e6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>
