@@ -13,6 +13,7 @@ import (
 	"math"
 	"math/rand"
 	"net"
+	"net/http"
 	"strconv"
 	"time"
 
@@ -26,6 +27,9 @@ const (
 	maxRetries    = 5
 	backoffBase   = 500 * time.Millisecond
 	backoffCap    = 30 * time.Second
+	// maxRetryAfter caps how long a server Retry-After hint can delay a retry, so
+	// an unreasonable value can't hang an operation.
+	maxRetryAfter = 60 * time.Second
 )
 
 // Client is a throttled, retrying Gmail client for one account.
@@ -54,13 +58,30 @@ func NewClientStats(srv *gmail.Service, stats *Stats) *Client {
 	}
 }
 
-// do reserves quota, acquires a concurrency slot, and runs fn with retry/backoff.
+// do runs an idempotent call (reads, label changes, deletes): it is retried on
+// transient network failures as well as rate-limit/5xx responses.
 func (c *Client) do(ctx context.Context, cost int, fn func() error) error {
+	return c.doRetry(ctx, cost, isRetryable, fn)
+}
+
+// doSend runs a non-idempotent call (sending mail). It retries only on explicit
+// rate-limit/5xx RESPONSES — never on a bare network error, which may mean the
+// message was delivered but the response was lost, so retrying would duplicate
+// it. Transient send failures are recovered at a higher level (the outbox).
+func (c *Client) doSend(ctx context.Context, cost int, fn func() error) error {
+	return c.doRetry(ctx, cost, isRetryableResponse, fn)
+}
+
+// doRetry reserves quota, acquires a concurrency slot, and runs fn with bounded
+// exponential backoff, retrying while retryable(err) holds. Each attempt is a
+// real HTTP request, so quota is reserved and the request counted per attempt
+// (the first reservation happens before the slot is taken, so a budget wait
+// doesn't tie one up); on a retry the server's Retry-After hint is honored when
+// it exceeds the computed backoff.
+func (c *Client) doRetry(ctx context.Context, cost int, retryable func(error) bool, fn func() error) error {
 	if err := c.budget.Reserve(ctx, cost); err != nil {
 		return err
 	}
-	c.stats.requests.Add(1)
-	c.stats.quotaUnits.Add(int64(cost))
 	select {
 	case c.sem <- struct{}{}:
 	case <-ctx.Done():
@@ -71,12 +92,21 @@ func (c *Client) do(ctx context.Context, cost int, fn func() error) error {
 	var lastErr error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
-			if err := sleepCtx(ctx, backoffDuration(attempt)); err != nil {
+			d := backoffDuration(attempt)
+			if ra := retryAfter(lastErr); ra > d {
+				d = ra
+			}
+			if err := sleepCtx(ctx, d); err != nil {
+				return err
+			}
+			if err := c.budget.Reserve(ctx, cost); err != nil { // a retry is another request
 				return err
 			}
 		}
+		c.stats.requests.Add(1)
+		c.stats.quotaUnits.Add(int64(cost))
 		if err := fn(); err != nil {
-			if !isRetryable(err) {
+			if !retryable(err) {
 				return err
 			}
 			lastErr = err
@@ -192,7 +222,7 @@ func (c *Client) GetMessageFull(ctx context.Context, id string) (*gmail.Message,
 // existing Gmail conversation. It returns the new message id.
 func (c *Client) Send(ctx context.Context, raw []byte, threadID string) (string, error) {
 	var sent *gmail.Message
-	err := c.do(ctx, costSend, func() error {
+	err := c.doSend(ctx, costSend, func() error {
 		msg := &gmail.Message{Raw: base64.URLEncoding.EncodeToString(raw)}
 		if threadID != "" {
 			msg.ThreadId = threadID
@@ -410,37 +440,79 @@ func IsHistoryExpired(err error) bool {
 	return errors.As(err, &gerr) && gerr.Code == 404
 }
 
-func isRetryable(err error) bool {
-	if err == nil {
+// isRetryableResponse reports whether err is a retryable HTTP error RESPONSE:
+// the server received the request and returned a rate-limit or transient server
+// error. It never matches bare network failures, so it's safe for
+// non-idempotent calls (a network error there may mean the request succeeded).
+func isRetryableResponse(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
-	// Deliberate cancellation or an exceeded deadline won't be helped by a retry
-	// (and the backoff sleep would fail immediately anyway).
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	var gerr *googleapi.Error
+	if !errors.As(err, &gerr) {
+		return false
+	}
+	switch gerr.Code {
+	case 429, 500, 502, 503, 504:
+		return true
+	case 403:
+		for _, e := range gerr.Errors {
+			if e.Reason == "rateLimitExceeded" || e.Reason == "userRateLimitExceeded" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isRetryable reports whether an idempotent call should be retried: a retryable
+// HTTP response, or a transient transport failure (connection reset/refused,
+// timeout, dropped connection) that has no HTTP response — failing a whole sync
+// or body fetch on a momentary blip is worse than a backed-off retry.
+func isRetryable(err error) bool {
+	if isRetryableResponse(err) {
+		return true
+	}
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
 	var gerr *googleapi.Error
 	if errors.As(err, &gerr) {
-		switch gerr.Code {
-		case 429, 500, 502, 503, 504:
-			return true
-		case 403:
-			for _, e := range gerr.Errors {
-				if e.Reason == "rateLimitExceeded" || e.Reason == "userRateLimitExceeded" {
-					return true
-				}
-			}
-		}
-		return false // an HTTP response with a non-retryable code (400, 401, 404, …)
+		return false // an HTTP response already classified non-retryable (400/401/404/…)
 	}
-	// No HTTP response → a transport-level failure (connection reset/refused,
-	// timeout, dropped connection). These are usually transient, so retry with
-	// backoff rather than failing a whole sync or body fetch on a blip.
 	var nerr net.Error
 	if errors.As(err, &nerr) {
 		return true
 	}
 	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+}
+
+// retryAfter returns the server's Retry-After delay from err's HTTP response, or
+// 0 when absent or unparseable. It accepts both delta-seconds and an HTTP-date,
+// and is capped (maxRetryAfter) so an unreasonable hint can't hang an operation
+// — the bounded retry count still applies on top.
+func retryAfter(err error) time.Duration {
+	var gerr *googleapi.Error
+	if !errors.As(err, &gerr) || gerr.Header == nil {
+		return 0
+	}
+	v := gerr.Header.Get("Retry-After")
+	if v == "" {
+		return 0
+	}
+	var d time.Duration
+	if secs, e := strconv.Atoi(v); e == nil {
+		d = time.Duration(secs) * time.Second
+	} else if t, e := http.ParseTime(v); e == nil {
+		d = time.Until(t)
+	}
+	if d < 0 {
+		d = 0
+	}
+	if d > maxRetryAfter {
+		d = maxRetryAfter
+	}
+	return d
 }
 
 func backoffDuration(attempt int) time.Duration {

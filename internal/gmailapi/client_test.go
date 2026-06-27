@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"testing"
 	"time"
 
@@ -40,6 +41,54 @@ func TestIsRetryable(t *testing.T) {
 				t.Fatalf("isRetryable = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// isRetryableResponse (used for non-idempotent sends) must NOT retry bare network
+// errors — only explicit rate-limit/5xx responses.
+func TestIsRetryableResponse(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"429", &googleapi.Error{Code: 429}, true},
+		{"503", &googleapi.Error{Code: 503}, true},
+		{"403 rate limit", &googleapi.Error{Code: 403, Errors: []googleapi.ErrorItem{{Reason: "rateLimitExceeded"}}}, true},
+		{"404", &googleapi.Error{Code: 404}, false},
+		{"net error NOT retried", &net.OpError{Op: "dial", Err: errors.New("connection refused")}, false},
+		{"io.EOF NOT retried", io.EOF, false},
+		{"context canceled", context.Canceled, false},
+		{"nil", nil, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isRetryableResponse(tc.err); got != tc.want {
+				t.Fatalf("isRetryableResponse = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRetryAfter(t *testing.T) {
+	withHeader := func(v string) *googleapi.Error {
+		return &googleapi.Error{Code: 429, Header: http.Header{"Retry-After": []string{v}}}
+	}
+	if got := retryAfter(withHeader("5")); got != 5*time.Second {
+		t.Fatalf("delta-seconds: got %v, want 5s", got)
+	}
+	if got := retryAfter(withHeader("99999")); got != maxRetryAfter {
+		t.Fatalf("oversized hint should cap at %v, got %v", maxRetryAfter, got)
+	}
+	if got := retryAfter(&googleapi.Error{Code: 429}); got != 0 {
+		t.Fatalf("no header: got %v, want 0", got)
+	}
+	if got := retryAfter(errors.New("not a googleapi error")); got != 0 {
+		t.Fatalf("non-googleapi: got %v, want 0", got)
+	}
+	// An HTTP-date in the past yields 0 (not negative).
+	if got := retryAfter(withHeader("Mon, 02 Jan 2006 15:04:05 GMT")); got != 0 {
+		t.Fatalf("past date: got %v, want 0", got)
 	}
 }
 

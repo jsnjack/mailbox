@@ -36,7 +36,7 @@ internal/
   dispatch/          THE main-thread bridge: Main(fn) → glib.IdleAdd
   store/             SQLite layer (schema, FTS5, queries) — modernc.org/sqlite
   auth/              OAuth2 installed-app loopback + keyring-backed token source (auto-refresh, rotated-token write-back, IsAuthError detects a revoked/expired refresh token)
-  gmailapi/          wrapper over google.golang.org/api/gmail/v1 (semaphore, budget, backoff, MIME)
+  gmailapi/          wrapper over google.golang.org/api/gmail/v1 (semaphore, per-attempt quota budget, backoff honoring Retry-After; network errors retried for idempotent calls but not sends; MIME)
   sync/              per-account sync workers (backfill ↔ incremental) + notify.Hub
   ai/                provider abstraction (OpenAI-compatible + Anthropic), streaming
   activity/          headless pub/sub of transient "what is the app doing" events (status bar)
