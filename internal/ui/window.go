@@ -1431,6 +1431,12 @@ func (w *window) buildReader() *adw.NavigationPage {
 	w.registerReaderActions()
 	w.webview = webkit.NewWebView()
 	w.sectionCache = make(map[string]cachedSection)
+	// Paint an opaque white background so switching messages doesn't flash black:
+	// during a LoadHtml the WebView otherwise clears to its (transparent/black)
+	// base before the new page paints. White matches email content and our
+	// light-background wrapper.
+	white := gdk.NewRGBA(1, 1, 1, 1)
+	w.webview.SetBackgroundColor(&white)
 	settings := w.webview.Settings()
 	// JavaScript is enabled only so the injected fit-to-width script can run.
 	// Defense in depth keeps it safe: bodies are sanitized (no email scripts
