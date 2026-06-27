@@ -527,21 +527,15 @@ func (e *Engine) Incremental(ctx context.Context, c *gmailapi.Client, accountID 
 		changed += len(delIDs)
 	}
 
-	// Fetch all changed messages, write them in one transaction, then publish a
-	// per-id event so new-mail notifications (which need the id) still fire.
-	msgs := make([]model.Message, 0, len(refetch))
-	fetchedIDs := make([]string, 0, len(refetch))
+	// Fetch all changed messages concurrently, write them in one transaction,
+	// then publish a per-id event so new-mail notifications (which need the id)
+	// still fire. Concurrency makes catching up a burst of external changes
+	// (e.g. a bulk archive done on another device) N/workers round-trips, not N.
+	refetchIDs := make([]string, 0, len(refetch))
 	for id := range refetch {
-		msg, err := c.GetMessageMetadata(ctx, id)
-		if err != nil {
-			// The message may have been removed between the history record and
-			// this fetch; log and move on rather than aborting the sync.
-			slog.Default().Warn("incremental: fetch metadata", "id", id, "err", err)
-			continue
-		}
-		msgs = append(msgs, gmailapi.ToMessage(accountID, msg))
-		fetchedIDs = append(fetchedIDs, id)
+		refetchIDs = append(refetchIDs, id)
 	}
+	msgs, fetchedIDs := e.fetchMetadataConcurrent(ctx, c, accountID, refetchIDs)
 	if len(msgs) > 0 {
 		if err := e.Store.UpsertMessages(ctx, msgs); err != nil {
 			return changed, err
@@ -556,4 +550,44 @@ func (e *Engine) Incremental(ctx context.Context, c *gmailapi.Client, accountID 
 		return changed, err
 	}
 	return changed, nil
+}
+
+// fetchMetadataConcurrent fetches each id's metadata in parallel (bounded by
+// backfillWorkers) and returns the converted messages and their ids in input
+// order, skipping ids that fail to fetch (a message can vanish between the
+// history record and the fetch). Each goroutine writes its own slot, so there is
+// no shared-state contention.
+func (e *Engine) fetchMetadataConcurrent(ctx context.Context, c *gmailapi.Client, accountID int64, ids []string) ([]model.Message, []string) {
+	type slot struct {
+		msg model.Message
+		ok  bool
+	}
+	slots := make([]slot, len(ids))
+	sem := make(chan struct{}, backfillWorkers)
+	var wg sync.WaitGroup
+	for i, id := range ids {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, id string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			msg, err := c.GetMessageMetadata(ctx, id)
+			if err != nil {
+				slog.Default().Warn("incremental: fetch metadata", "id", id, "err", err)
+				return
+			}
+			slots[i] = slot{msg: gmailapi.ToMessage(accountID, msg), ok: true}
+		}(i, id)
+	}
+	wg.Wait()
+
+	msgs := make([]model.Message, 0, len(ids))
+	gids := make([]string, 0, len(ids))
+	for i, s := range slots {
+		if s.ok {
+			msgs = append(msgs, s.msg)
+			gids = append(gids, ids[i])
+		}
+	}
+	return msgs, gids
 }
