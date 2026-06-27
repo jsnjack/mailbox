@@ -9,8 +9,10 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"math/rand"
+	"net"
 	"strconv"
 	"time"
 
@@ -409,21 +411,36 @@ func IsHistoryExpired(err error) bool {
 }
 
 func isRetryable(err error) bool {
-	var gerr *googleapi.Error
-	if !errors.As(err, &gerr) {
+	if err == nil {
 		return false
 	}
-	switch gerr.Code {
-	case 429, 500, 502, 503, 504:
-		return true
-	case 403:
-		for _, e := range gerr.Errors {
-			if e.Reason == "rateLimitExceeded" || e.Reason == "userRateLimitExceeded" {
-				return true
+	// Deliberate cancellation or an exceeded deadline won't be helped by a retry
+	// (and the backoff sleep would fail immediately anyway).
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var gerr *googleapi.Error
+	if errors.As(err, &gerr) {
+		switch gerr.Code {
+		case 429, 500, 502, 503, 504:
+			return true
+		case 403:
+			for _, e := range gerr.Errors {
+				if e.Reason == "rateLimitExceeded" || e.Reason == "userRateLimitExceeded" {
+					return true
+				}
 			}
 		}
+		return false // an HTTP response with a non-retryable code (400, 401, 404, …)
 	}
-	return false
+	// No HTTP response → a transport-level failure (connection reset/refused,
+	// timeout, dropped connection). These are usually transient, so retry with
+	// backoff rather than failing a whole sync or body fetch on a blip.
+	var nerr net.Error
+	if errors.As(err, &nerr) {
+		return true
+	}
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
 }
 
 func backoffDuration(attempt int) time.Duration {

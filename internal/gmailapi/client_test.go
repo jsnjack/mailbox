@@ -1,7 +1,11 @@
 package gmailapi
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"io"
+	"net"
 	"testing"
 	"time"
 
@@ -19,7 +23,16 @@ func TestIsRetryable(t *testing.T) {
 		{"403 rate limit", &googleapi.Error{Code: 403, Errors: []googleapi.ErrorItem{{Reason: "userRateLimitExceeded"}}}, true},
 		{"403 other", &googleapi.Error{Code: 403, Errors: []googleapi.ErrorItem{{Reason: "insufficientPermissions"}}}, false},
 		{"404", &googleapi.Error{Code: 404}, false},
+		{"400", &googleapi.Error{Code: 400}, false},
 		{"plain error", errors.New("boom"), false},
+		{"net conn refused", &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}, true},
+		{"wrapped net error", fmt.Errorf("get: %w", &net.OpError{Op: "read", Err: errors.New("connection reset by peer")}), true},
+		{"io.EOF", io.EOF, true},
+		{"io.ErrUnexpectedEOF", io.ErrUnexpectedEOF, true},
+		{"context canceled", context.Canceled, false},
+		{"wrapped context canceled", fmt.Errorf("call: %w", context.Canceled), false},
+		{"context deadline", context.DeadlineExceeded, false},
+		{"nil", nil, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
