@@ -438,7 +438,7 @@ func (w *window) selectAdjacent(delta int) {
 	w.threadSel.SetSelected(uint(next))
 }
 
-// toggleStar flips the star on the open message. No-op when nothing is open.
+// toggleStar flips the star on the open conversation. No-op when nothing is open.
 func (w *window) toggleStar() {
 	if w.openMsg.GmailID == "" {
 		return
@@ -446,17 +446,25 @@ func (w *window) toggleStar() {
 	w.setStarred(!w.openMsg.IsStarred)
 }
 
-// setStarred adds or removes the star on the open message (optimistic), keeping
-// openMsg's flag in sync so the overflow checkbox and the 's' shortcut agree.
+// setStarred adds or removes the star across the whole open conversation
+// (optimistic), keeping openMsg's flag in sync so the overflow checkbox and the
+// 's' shortcut agree. It stars the entire thread, not just the newest message,
+// so unstarring actually removes the conversation from the Starred folder (which
+// lists any thread with any starred message) rather than leaving older replies
+// starred.
 func (w *window) setStarred(star bool) {
 	if w.openMsg.GmailID == "" {
 		return
 	}
 	w.openMsg.IsStarred = star
+	msgs := w.openThreadMsgs
+	if len(msgs) == 0 {
+		msgs = []model.Message{w.openMsg}
+	}
 	if star {
-		w.applyLabels([]model.Message{w.openMsg}, []string{model.LabelStarred}, nil, nil)
+		w.applyLabels(msgs, []string{model.LabelStarred}, nil, nil)
 	} else {
-		w.applyLabels([]model.Message{w.openMsg}, nil, []string{model.LabelStarred}, nil)
+		w.applyLabels(msgs, nil, []string{model.LabelStarred}, nil)
 	}
 }
 
@@ -937,12 +945,10 @@ func (w *window) registerListActions() {
 		w.threadModifyAll(id, "Moved to Trash", []string{model.LabelTrash}, []string{model.LabelInbox})
 	})
 	row("row-mark-read", func(id string) { w.threadModifyAll(id, "Marked as read", nil, []string{model.LabelUnread}) })
-	row("row-star", func(id string) {
-		w.rowLatest(id, func(m model.Message) { w.applyLabels([]model.Message{m}, []string{model.LabelStarred}, nil, nil) })
-	})
-	row("row-unstar", func(id string) {
-		w.rowLatest(id, func(m model.Message) { w.applyLabels([]model.Message{m}, nil, []string{model.LabelStarred}, nil) })
-	})
+	// Star/unstar the whole thread (no toast — trivially reversible), so unstarring
+	// clears it from the Starred folder instead of leaving older replies starred.
+	row("row-star", func(id string) { w.threadModifyAll(id, "", []string{model.LabelStarred}, nil) })
+	row("row-unstar", func(id string) { w.threadModifyAll(id, "", nil, []string{model.LabelStarred}) })
 	row("row-mark-unread", func(id string) {
 		w.rowLatest(id, func(m model.Message) { w.applyLabels([]model.Message{m}, []string{model.LabelUnread}, nil, nil) })
 	})
