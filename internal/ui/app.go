@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/jsnjack/mailbox/internal/activity"
 	"github.com/jsnjack/mailbox/internal/ai"
 	"github.com/jsnjack/mailbox/internal/model"
 	"github.com/jsnjack/mailbox/internal/store"
@@ -81,6 +82,17 @@ type PermanentDeleter func(ctx context.Context, accountID int64, gmailIDs []stri
 // returning the count removed.
 type FolderEmptier func(ctx context.Context, accountID int64, labelID string) (int, error)
 
+// StatusStats is a snapshot of cumulative counters shown in the status bar.
+type StatusStats struct {
+	Requests   int64 // Gmail API requests issued this session
+	QuotaUnits int64 // Gmail API quota units spent this session
+	BytesIn    int64 // bytes received from the Gmail API
+	BytesOut   int64 // bytes sent to the Gmail API
+	DBBytes    int64 // size of the SQLite cache on disk
+	CacheBytes int64 // size of the attachment cache on disk
+	Messages   int64 // cached message count
+}
+
 // Deps are the dependencies the UI needs. FetchBody, ModifyLabels and Hub may be
 // nil (the UI then renders the cache read-only without live updates, on-demand
 // bodies, or message actions).
@@ -103,6 +115,12 @@ type Deps struct {
 	DeleteForever PermanentDeleter
 	EmptyFolder   FolderEmptier
 	Assistant     *ai.Assistant
+
+	// Activity carries transient "what the app is doing" events for the status
+	// bar (sync, AI, search, fetch). May be nil. Stats, if set, returns a
+	// snapshot of cumulative API/cache counters for the status bar's metrics.
+	Activity *activity.Hub
+	Stats    func() StatusStats
 
 	// AISettings/SaveAISettings read and persist the [ai] config (provider,
 	// endpoint, model). Always wired, independent of whether an account exists.

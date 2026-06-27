@@ -45,7 +45,21 @@ type window struct {
 	toastOverlay *adw.ToastOverlay
 	outerSplit   *adw.NavigationSplitView
 	innerSplit   *adw.NavigationSplitView
-	accountBox   *gtk.ListBox
+
+	// Bottom status bar: activity-first (spinner + current op + live elapsed on
+	// the left); cumulative session stats + the log live in a popover.
+	statusSpinner    *gtk.Spinner
+	statusLabel      *gtk.Label
+	statusStatsLabel *gtk.Label           // session stats inside the popover
+	statusLogBox     *gtk.Box             // log lines (newest first) inside the popover
+	statusLogBtn     *gtk.MenuButton      // opens the activity-log popover
+	statusActive     []string             // labels of in-flight operations, most recent last
+	statusStarted    map[string]time.Time // op label → start time (elapsed + duration)
+	statusProgText   map[string]string    // op label → bounded "N/M" progress text
+	statusLogLines   int                  // current number of log rows (capped)
+	activityTimer    glib.SourceHandle
+	lastSyncLabel    string // idle text once a sync has completed
+	accountBox       *gtk.ListBox
 	// accountNames maps account email → user-assigned display name ("Home",
 	// "Work"); accountBadges maps account id → its unread-inbox count pill in the
 	// switcher, so badges can refresh in place when any account syncs.
@@ -276,7 +290,13 @@ func (w *window) build() {
 
 	w.toastOverlay = adw.NewToastOverlay()
 	w.toastOverlay.SetChild(w.outerSplit)
-	w.win.SetContent(w.toastOverlay)
+	w.toastOverlay.SetVExpand(true)
+
+	root := gtk.NewBox(gtk.OrientationVertical, 0)
+	root.Append(w.toastOverlay)
+	root.Append(w.buildStatusBar())
+	w.win.SetContent(root)
+	w.subscribeActivity()
 	w.addBreakpoints()
 	w.addShortcuts()
 }
@@ -2638,6 +2658,7 @@ func (w *window) onTranslate() {
 	w.translationBanner.SetTitle("Translating…")
 	w.translationBanner.SetRevealed(true)
 	w.webview.LoadHtml(wrapHTML("<p><i>Translating…</i></p>"), "about:blank")
+	done := w.aiActivity("Translating")
 
 	go func() {
 		// Translate only the text segments (cheap) and reinsert them into the
@@ -2646,6 +2667,7 @@ func (w *window) onTranslate() {
 			return w.deps.Assistant.TranslateSegments(ctx, segs, "English")
 		})
 		dispatch.Main(func() {
+			done(doneErr(err))
 			// Skip if the user switched conversations or reverted (cancels ctx).
 			if w.openThreadID != threadID || ctx.Err() != nil {
 				return
@@ -2774,12 +2796,14 @@ func (w *window) onSummarize() {
 	w.summaryCancel = cancel
 	threadID := w.openThreadID
 	contextText := w.threadContextAll()
+	done := w.aiActivity("Summarizing thread")
 
 	go func() {
 		ch, err := w.deps.Assistant.SummarizeThread(ctx, contextText)
 		if err != nil {
 			msg := err.Error()
 			dispatch.Main(func() {
+				done(doneErr(err))
 				if w.openThreadID == threadID && ctx.Err() == nil {
 					w.summaryLabel.SetText("Summary failed: " + msg)
 				}
@@ -2793,6 +2817,7 @@ func (w *window) onSummarize() {
 			w.summaryLabel.SetText(bulletize(text))
 		})
 		dispatch.Main(func() {
+			done(doneErr(serr))
 			if w.openThreadID != threadID || ctx.Err() != nil {
 				return
 			}
@@ -2847,12 +2872,14 @@ func (w *window) onAnalyze() {
 	w.summaryCancel = cancel
 	threadID := w.openThreadID
 	emailCtx := w.analysisContextFor(m)
+	done := w.aiActivity("Analyzing email")
 
 	go func() {
 		ch, err := w.deps.Assistant.AnalyzeEmail(ctx, emailCtx)
 		if err != nil {
 			msg := err.Error()
 			dispatch.Main(func() {
+				done(doneErr(err))
 				if w.openThreadID == threadID && ctx.Err() == nil {
 					w.summaryLabel.SetText("Analysis failed: " + msg)
 				}
@@ -2866,6 +2893,7 @@ func (w *window) onAnalyze() {
 			w.summaryLabel.SetText(bulletize(text))
 		})
 		dispatch.Main(func() {
+			done(doneErr(serr))
 			if w.openThreadID != threadID || ctx.Err() != nil {
 				return
 			}

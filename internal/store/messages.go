@@ -278,6 +278,15 @@ func (s *Store) UnreadCountByLabelForAccounts(ctx context.Context, accountIDs []
 	return out, rows.Err()
 }
 
+// Count returns the total number of cached messages across all accounts.
+func (s *Store) Count(ctx context.Context) (int64, error) {
+	var n int64
+	if err := s.reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages`).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count messages: %w", err)
+	}
+	return n, nil
+}
+
 // CountByLabel returns the number of messages carrying the given label.
 func (s *Store) CountByLabel(ctx context.Context, accountID int64, labelID string) (int, error) {
 	var n int

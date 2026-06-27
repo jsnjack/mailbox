@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"time"
 
+	"github.com/jsnjack/mailbox/internal/activity"
 	"github.com/jsnjack/mailbox/internal/ai"
 	"github.com/jsnjack/mailbox/internal/auth"
 	"github.com/jsnjack/mailbox/internal/config"
@@ -16,8 +18,6 @@ import (
 	"github.com/jsnjack/mailbox/internal/syncer"
 	"github.com/jsnjack/mailbox/internal/ui"
 	"github.com/zalando/go-keyring"
-	gmailv1 "google.golang.org/api/gmail/v1"
-	"google.golang.org/api/option"
 )
 
 // aiKeyringService is the keyring collection for the AI provider API key.
@@ -57,6 +57,10 @@ func launchUI() error {
 	for _, a := range accounts {
 		deps.Accounts = append(deps.Accounts, ui.AccountInfo{ID: a.ID, Email: a.Email})
 	}
+
+	// Activity hub feeds the status bar (Stats, below, feeds its metrics).
+	act := activity.NewHub()
+	deps.Activity = act
 
 	// AI settings are editable regardless of account/client state.
 	if cfgPath, err := config.ConfigFilePath(); err == nil {
@@ -99,8 +103,35 @@ func launchUI() error {
 			continue
 		}
 		clients[a.ID] = client
-		go backgroundSync(ctx, engine, client, a.ID)
+		go backgroundSync(ctx, engine, act, client, a.ID, a.Email)
 		go backgroundSweep(ctx, engine, client, a.ID)
+	}
+
+	// Cumulative metrics for the status bar: cache sizes + per-account API stats.
+	deps.Stats = func() ui.StatusStats {
+		s := ui.StatusStats{}
+		if fi, err := os.Stat(dbPath); err == nil {
+			s.DBBytes = fi.Size()
+		}
+		s.CacheBytes = dirSize(cacheDir())
+		if n, err := st.Count(context.Background()); err == nil {
+			s.Messages = n
+		}
+		for _, c := range clients {
+			cs := c.Stats()
+			s.Requests += cs.Requests
+			s.QuotaUnits += cs.QuotaUnits
+			s.BytesIn += cs.BytesIn
+			s.BytesOut += cs.BytesOut
+		}
+		// Include AI provider traffic so "data transferred" reflects all network
+		// activity, not just Gmail.
+		if deps.Assistant != nil {
+			in, out := deps.Assistant.Transferred()
+			s.BytesIn += in
+			s.BytesOut += out
+		}
+		return s
 	}
 
 	if len(clients) > 0 {
@@ -116,7 +147,10 @@ func launchUI() error {
 			if err != nil {
 				return err
 			}
-			return engine.FetchBody(ctx, c, accountID, gmailID)
+			done := act.Begin("fetch", "Fetching message")
+			err = engine.FetchBody(ctx, c, accountID, gmailID)
+			done(doneNote(err))
+			return err
 		}
 		deps.ModifyLabels = func(ctx context.Context, accountID int64, gmailIDs []string, add, remove []string) error {
 			c, err := clientFor(accountID)
@@ -130,7 +164,10 @@ func launchUI() error {
 			if err != nil {
 				return err
 			}
-			return engine.Send(ctx, c, accountID, msg)
+			done := act.Begin("send", "Sending message")
+			err = engine.Send(ctx, c, accountID, msg)
+			done(doneNote(err))
+			return err
 		}
 		deps.SaveDraft = func(ctx context.Context, accountID int64, msg model.OutgoingMessage) error {
 			c, err := clientFor(accountID)
@@ -166,7 +203,14 @@ func launchUI() error {
 			if err != nil {
 				return nil, err
 			}
-			return engine.SearchServer(ctx, c, accountID, query, max)
+			done := act.Begin("search", "Searching all mail")
+			ids, err := engine.SearchServer(ctx, c, accountID, query, max)
+			if err != nil {
+				done(doneNote(err))
+			} else {
+				done(fmt.Sprintf("%d result(s)", len(ids)))
+			}
+			return ids, err
 		}
 		deps.MarkAllRead = func(ctx context.Context, accountID int64, labelID string) error {
 			c, err := clientFor(accountID)
@@ -261,11 +305,14 @@ func buildClientForAccount(ctx context.Context, email string) (*gmailapi.Client,
 	if err != nil {
 		return nil, err
 	}
-	srv, err := gmailv1.NewService(ctx, option.WithTokenSource(ts))
+	// A byte-counting service + a client sharing its Stats, so the status bar can
+	// report requests, quota units, and bytes transferred.
+	stats := &gmailapi.Stats{}
+	srv, err := gmailapi.NewService(ctx, ts, stats)
 	if err != nil {
 		return nil, err
 	}
-	return gmailapi.NewClient(srv), nil
+	return gmailapi.NewClientStats(srv, stats), nil
 }
 
 // sweepInterval is how often the outbox is retried while the GUI is open.
@@ -287,13 +334,21 @@ func backgroundSweep(ctx context.Context, engine *syncer.Engine, client *gmailap
 	}
 }
 
-// backgroundSync runs an incremental sync immediately and then on a timer.
-func backgroundSync(ctx context.Context, engine *syncer.Engine, client *gmailapi.Client, accountID int64) {
+// backgroundSync runs an incremental sync immediately and then on a timer,
+// reporting each pass to the activity hub for the status bar.
+func backgroundSync(ctx context.Context, engine *syncer.Engine, act *activity.Hub, client *gmailapi.Client, accountID int64, email string) {
 	ticker := time.NewTicker(syncInterval)
 	defer ticker.Stop()
 	for {
-		if _, err := engine.Incremental(ctx, client, accountID); err != nil {
+		done := act.Begin("sync", "Syncing "+email)
+		n, err := engine.Incremental(ctx, client, accountID)
+		if err != nil {
+			done("error: " + err.Error())
 			fmt.Fprintf(os.Stderr, "background sync: %v\n", err)
+		} else if n > 0 {
+			done(fmt.Sprintf("%d change(s)", n))
+		} else {
+			done("up to date")
 		}
 		select {
 		case <-ctx.Done():
@@ -301,4 +356,39 @@ func backgroundSync(ctx context.Context, engine *syncer.Engine, client *gmailapi
 		case <-ticker.C:
 		}
 	}
+}
+
+// doneNote summarizes an operation's result for the activity log.
+func doneNote(err error) string {
+	if err != nil {
+		return "error: " + err.Error()
+	}
+	return ""
+}
+
+// cacheDir is the app's cache directory (attachments etc.).
+func cacheDir() string {
+	c, err := os.UserCacheDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(c, "mailbox")
+}
+
+// dirSize sums the sizes of all regular files under dir (0 if missing).
+func dirSize(dir string) int64 {
+	if dir == "" {
+		return 0
+	}
+	var total int64
+	_ = filepath.WalkDir(dir, func(_ string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		if fi, e := d.Info(); e == nil {
+			total += fi.Size()
+		}
+		return nil
+	})
+	return total
 }

@@ -97,6 +97,13 @@ const appCSS = `
 	color: @accent_color;
 }
 
+/* Bottom status bar: a quiet strip set off by a hairline top border. */
+.status-bar {
+	border-top: 1px solid alpha(@card_fg_color, 0.12);
+	font-size: 0.85em;
+	min-height: 22px;
+}
+
 /* AI thread-summary card: a soft accent-tinted panel pinned above the thread. */
 .summary-card {
 	background-color: alpha(@accent_color, 0.08);

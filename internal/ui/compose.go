@@ -154,9 +154,11 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 			subjBtn.SetSensitive(false)
 			status.SetVisible(true)
 			status.SetText("Generating subject…")
+			done := w.aiActivity("Generating subject")
 			go func() {
 				subject, err := w.deps.Assistant.GenerateSubject(aiCtx, body)
 				dispatch.Main(func() {
+					done(doneErr(err))
 					subjBtn.SetSensitive(true)
 					if err != nil || subject == "" {
 						status.SetText("Couldn't generate a subject")
@@ -417,6 +419,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 			quote := init.Body
 			subject := strings.TrimSpace(subjEntry.Text())
 			buf.SetText(quote)
+			done := w.aiActivity("Drafting reply")
 			go func() {
 				var ch <-chan ai.Chunk
 				var err error
@@ -428,6 +431,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 				if err != nil {
 					msg := err.Error()
 					dispatch.Main(func() {
+						done(doneErr(err))
 						buf.SetText("AI error: " + msg + "\n" + quote)
 						aiBtn.SetSensitive(true)
 					})
@@ -437,6 +441,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 					buf.SetText(text + quote)
 				})
 				dispatch.Main(func() {
+					done("")
 					buf.SetText(final + quote)
 					aiBtn.SetSensitive(true)
 				})
@@ -475,6 +480,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 			grammarBtn.SetSensitive(false)
 			status.SetVisible(true)
 			status.SetText("Checking grammar…")
+			done := w.aiActivity("Checking grammar")
 			go func() {
 				ch, err := w.deps.Assistant.Proofread(aiCtx, original)
 				var acc strings.Builder
@@ -487,6 +493,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 				}
 				corrected := strings.TrimRight(acc.String(), " \t\r\n")
 				dispatch.Main(func() {
+					done(doneErr(err))
 					grammarBtn.SetSensitive(true)
 					defer func() { buf.DeleteMark(startMark); buf.DeleteMark(endMark) }()
 					if err != nil || strings.TrimSpace(corrected) == "" {

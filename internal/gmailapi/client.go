@@ -31,14 +31,24 @@ type Client struct {
 	srv    *gmail.Service
 	sem    chan struct{}
 	budget *RateBudget
+	stats  *Stats
 }
 
 // NewClient wraps a Gmail service for one account.
-func NewClient(srv *gmail.Service) *Client {
+func NewClient(srv *gmail.Service) *Client { return NewClientStats(srv, nil) }
+
+// NewClientStats wraps a Gmail service, recording API usage into stats (shared
+// with the service's byte-counting transport from NewService). A nil stats gets
+// a private one.
+func NewClientStats(srv *gmail.Service, stats *Stats) *Client {
+	if stats == nil {
+		stats = &Stats{}
+	}
 	return &Client{
 		srv:    srv,
 		sem:    make(chan struct{}, maxConcurrent),
 		budget: NewRateBudget(),
+		stats:  stats,
 	}
 }
 
@@ -47,6 +57,8 @@ func (c *Client) do(ctx context.Context, cost int, fn func() error) error {
 	if err := c.budget.Reserve(ctx, cost); err != nil {
 		return err
 	}
+	c.stats.requests.Add(1)
+	c.stats.quotaUnits.Add(int64(cost))
 	select {
 	case c.sem <- struct{}{}:
 	case <-ctx.Done():

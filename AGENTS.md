@@ -39,6 +39,7 @@ internal/
   gmailapi/          wrapper over google.golang.org/api/gmail/v1 (semaphore, budget, backoff, MIME)
   sync/              per-account sync workers (backfill ↔ incremental) + notify.Hub
   ai/                provider abstraction (OpenAI-compatible + Anthropic), streaming
+  activity/          headless pub/sub of transient "what is the app doing" events (status bar)
   ui/                all GTK/adw/webkit widget code (3-pane shell, list, reader, actions)
 ```
 
@@ -172,7 +173,14 @@ and the message is held ~5s behind an "Undo" toast (`deferSend`) before it goes
 out; a failed send is queued to the `outbox` table and retried by a background
 sweeper (`SweepOutbox`, ~45s); pending/failed sends are surfaced by an
 `adw.Banner` over the thread list and an Outbox dialog (per-item retry/discard
-plus "send now"). The window collapses responsively via
+plus "send now"). A bottom status bar shows what the app is doing — the current
+operation with a spinner/progress bar (left) and live cumulative metrics (right:
+bytes transferred, Gmail API requests + quota units, DB size, cached-message
+count) — plus an expandable timestamped activity log. Background layers report
+transient activity to a headless `activity.Hub` (`deps.Activity`) that the bar
+drains via `dispatch`; the AI ops the UI brackets directly; metrics come from
+per-account `gmailapi.Stats` (a byte-counting transport + request/quota counters)
+aggregated by `deps.Stats`. The window collapses responsively via
 `adw.Breakpoint` (3 panes → list+reader below ~860sp → single pane below ~520sp),
 with `SetShowContent` driving navigation when collapsed. Single-key shortcuts
 (bubble-phase key controller, so text entries keep their input): j/k navigate

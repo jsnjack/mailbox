@@ -17,19 +17,24 @@ const (
 // anthropicProvider speaks the Anthropic Messages API.
 type anthropicProvider struct {
 	client   *http.Client
+	xfer     *transferCounter
 	endpoint string // base URL including /v1
 	apiKey   string
 	model    string
 }
 
 func newAnthropicProvider(endpoint, apiKey, model string) *anthropicProvider {
+	xfer := &transferCounter{}
 	return &anthropicProvider{
-		client:   &http.Client{Timeout: 120 * time.Second},
+		client:   countingClient(120*time.Second, xfer),
+		xfer:     xfer,
 		endpoint: endpoint,
 		apiKey:   apiKey,
 		model:    model,
 	}
 }
+
+func (p *anthropicProvider) transfer() (in, out int64) { return p.xfer.snapshot() }
 
 func (p *anthropicProvider) Name() string { return "anthropic" }
 

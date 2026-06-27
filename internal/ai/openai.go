@@ -13,14 +13,17 @@ import (
 // implementation serves OpenAI and the LiteLLM proxy (both expose /chat/completions).
 type openAIProvider struct {
 	client   *http.Client
+	xfer     *transferCounter
 	endpoint string // base URL including /v1
 	apiKey   string
 	model    string
 }
 
 func newOpenAIProvider(endpoint, apiKey, model string) *openAIProvider {
+	xfer := &transferCounter{}
 	return &openAIProvider{
-		client:   &http.Client{Timeout: 120 * time.Second},
+		client:   countingClient(120*time.Second, xfer),
+		xfer:     xfer,
 		endpoint: endpoint,
 		apiKey:   apiKey,
 		model:    model,
@@ -28,6 +31,8 @@ func newOpenAIProvider(endpoint, apiKey, model string) *openAIProvider {
 }
 
 func (p *openAIProvider) Name() string { return "openai" }
+
+func (p *openAIProvider) transfer() (in, out int64) { return p.xfer.snapshot() }
 
 func (p *openAIProvider) Stream(ctx context.Context, system string, msgs []Msg) (<-chan Chunk, error) {
 	payload := map[string]any{
