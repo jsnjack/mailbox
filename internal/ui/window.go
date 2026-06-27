@@ -765,6 +765,7 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 	content.Append(w.threadStack)
 
 	hb := adw.NewHeaderBar()
+	hb.SetShowTitle(false) // "Messages" is redundant — the pane is self-evident
 
 	w.unreadToggle = gtk.NewToggleButton()
 	w.unreadToggle.SetIconName("mail-unread-symbolic")
@@ -1485,6 +1486,7 @@ func (w *window) buildReader() *adw.NavigationPage {
 	w.readerStack.SetVisibleChildName("empty")
 
 	hb := adw.NewHeaderBar()
+	hb.SetShowTitle(false) // "Reader" is redundant — drop it for a cleaner header
 
 	// Reply-all is the primary action; its dropdown offers Reply and Forward.
 	replyPop := gtk.NewPopover()

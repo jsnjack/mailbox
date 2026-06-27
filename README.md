@@ -23,10 +23,10 @@ AI provider is user-configurable: OpenAI-compatible endpoints (including LiteLLM
 
 ## Security
 
-- **SPF/DKIM/DMARC badge** — sender authentication verdict shown per message
-- **Deception detection** — deterministic checks for display-name spoofing and deceptive link text
-- **Tracker blocking** — tracking pixels stripped before render, count surfaced per message
-- **Sanitized rendering** — email-tuned HTML sanitizer with strict per-render CSP (no email-supplied JavaScript)
+- **Sender verification** — SPF/DKIM/DMARC results shown per message
+- **Deception detection** — catches display-name spoofing and deceptive links
+- **Tracker blocking** — tracking pixels stripped before render
+- **Sanitized rendering** — no email-supplied JavaScript can run
 
 ## Requirements
 
