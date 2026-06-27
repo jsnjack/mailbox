@@ -6,7 +6,7 @@ Written in Go with GTK4 + libadwaita.
 
 ## Why This Exists
 
-GNOME doesn't have a good modern, fast email client. Evolution is bloated. Geary is unmaintained. The alternatives are Electron apps or web wrappers.
+GNOME doesn't have a good modern, fast email client. Geary is buggy, Thunderbird is slow and heavy, and the rest are Electron apps or web wrappers.
 
 Mailbox fills that gap — a native GTK4 app that's fast, small, and feels at home on GNOME, with Gmail as the backend and AI as a genuine productivity layer.
 
@@ -33,20 +33,38 @@ AI provider is user-configurable: OpenAI-compatible endpoints (including LiteLLM
 - Linux (GNOME recommended)
 - GTK4, libadwaita, WebKitGTK 6.0, libsecret
 
-## Build
+## Screenshot
+
+![Mailbox](screenshots/main.png)
+
+## Install
+
+From source:
 
 ```bash
 make build    # compiles to bin/mailbox
-make run      # build and launch
-make check    # fmt → vet → build → test → lint
-make rpm      # build RPM package
 ```
 
-Headless sync (no GUI required):
+On Fedora, you can build an RPM:
 
 ```bash
-mailbox sync --account <email> --credentials <client_secret.json>
+make rpm
+sudo dnf install ./rpmbuild/RPMS/x86_64/mailbox-*.rpm
 ```
+
+Build dependencies (Fedora):
+
+```bash
+sudo dnf install gtk4-devel libadwaita-devel webkitgtk6.0-devel libsecret-devel
+```
+
+## Quick Start
+
+1. **Create a Google OAuth credential** — go to [Google Cloud Console](https://console.cloud.google.com), create an OAuth 2.0 client ID (type: Desktop app), and download the JSON as `credentials.json` into `~/.config/mailbox/`.
+2. **Add your account** — run `mailbox sync --account your@gmail.com --credentials ~/.config/mailbox/credentials.json`. This opens a browser for OAuth login, then syncs your mail.
+3. **Launch** — run `mailbox` to start the GUI.
+
+After the first sync you can just run `mailbox` — tokens are stored in the OS keyring and the config is persisted.
 
 ## Configuration
 
@@ -56,14 +74,6 @@ mailbox sync --account <email> --credentials <client_secret.json>
 - **Signature:** `~/.config/mailbox/signature.txt`
 
 AI provider can be configured in the Preferences dialog or via env vars: `MAILBOX_AI_PROVIDER`, `MAILBOX_AI_ENDPOINT`, `MAILBOX_AI_MODEL`, `MAILBOX_AI_KEY`.
-
-## Architecture
-
-Single SQLite cache as source of truth. Background goroutines sync Gmail into SQLite and publish ID-only change events. GTK UI reads SQLite and re-queries on each event.
-
-```
-Gmail REST API → sync engine → SQLite → dispatch.Main → GTK UI
-```
 
 ## License
 

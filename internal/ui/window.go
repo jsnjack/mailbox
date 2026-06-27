@@ -1515,7 +1515,7 @@ func (w *window) buildReader() *adw.NavigationPage {
 	})
 
 	// AI actions (only useful when an assistant is configured).
-	w.translateBtn = gtk.NewButtonFromIconName("accessories-character-map-symbolic")
+	w.translateBtn = gtk.NewButtonFromIconName("translate-symbolic")
 	w.translateBtn.SetTooltipText("Translate to English (t)")
 	w.translateBtn.ConnectClicked(w.onTranslate)
 
