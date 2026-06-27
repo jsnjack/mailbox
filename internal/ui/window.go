@@ -1408,57 +1408,115 @@ func (w *window) renderSig(id string) string {
 // so a huge inbox can't trigger a flood of AI calls.
 const maxCategorize = 40
 
-// categorizeInbox classifies the newest uncategorized inbox threads in the
-// background (batched), caching each thread's category and refreshing the list
-// to show the tags. Gated by the inboxCategories preference + an assistant.
+// categoryCand is one thread to (maybe) categorize: its thread id, the gmail id
+// of its latest message (what the category is keyed/persisted by), and the
+// "From / Subject / Snippet" context fed to the AI.
+type categoryCand struct {
+	threadID, msgID, ctx string
+}
+
+// categorizeInbox shows inbox category tags with minimal AI cost. It first seeds
+// from the persisted per-email cache (store.MessageCategories — no AI call), then
+// classifies only the still-uncategorized threads with the AI (batched, capped),
+// persisting each result so it survives restarts. Gated by the inboxCategories
+// preference + an assistant.
 func (w *window) categorizeInbox() {
 	if !w.inboxCategories || w.deps.Assistant == nil || w.categorizing || w.current != model.LabelInbox {
 		return
 	}
-	// Categorize the full inbox (threadByID), not just the filtered view, capped
-	// to bound cost; remaining uncategorized threads finish on subsequent passes.
-	var ids, ctxs []string
+	// Candidates: inbox threads not yet categorized in memory this session. Built
+	// on the main thread (reads threadByID/categories); the rest runs in the
+	// background and marshals UI updates through dispatch.
+	var cands []categoryCand
 	for id, t := range w.threadByID {
 		if _, done := w.categories[id]; done {
 			continue
 		}
 		m := t.Latest
-		ids = append(ids, id)
-		ctxs = append(ctxs, fmt.Sprintf("From: %s / Subject: %s / %s", displayFrom(m), m.Subject, m.Snippet))
-		if len(ids) >= maxCategorize {
-			break
-		}
+		cands = append(cands, categoryCand{
+			threadID: id,
+			msgID:    m.GmailID,
+			ctx:      fmt.Sprintf("From: %s / Subject: %s / %s", displayFrom(m), m.Subject, m.Snippet),
+		})
 	}
-	if len(ids) == 0 {
+	if len(cands) == 0 {
 		return
 	}
 	w.categorizing = true
-	done := w.aiActivity(fmt.Sprintf("Categorizing %d threads", len(ids)))
+	acctID := w.activeID
 	go func() {
 		ctx := context.Background()
-		var firstErr error
-		for start := 0; start < len(ids); start += 20 {
-			end := start + 20
-			if end > len(ids) {
-				end = len(ids)
+
+		// 1) Seed from the persisted cache — free, covers everything classified on
+		// a prior run.
+		msgIDs := make([]string, len(cands))
+		for i, c := range cands {
+			msgIDs[i] = c.msgID
+		}
+		cached, err := w.deps.Store.MessageCategories(ctx, acctID, msgIDs)
+		if err != nil {
+			slog.Warn("ui: load cached categories", "err", err)
+			cached = map[string]string{}
+		}
+		var todo []categoryCand
+		for _, c := range cands {
+			if _, ok := cached[c.msgID]; !ok {
+				todo = append(todo, c)
 			}
-			chunkIDs := ids[start:end]
-			cats, err := w.deps.Assistant.Categorize(ctx, ctxs[start:end])
-			if err != nil {
-				firstErr = err
-				slog.Warn("ui: categorize inbox", "err", err)
-				break
-			}
-			dispatch.Main(func() {
-				for i, id := range chunkIDs {
-					if i < len(cats) {
-						w.categories[id] = normalizeCategory(cats[i])
-					}
-				}
-			})
 		}
 		dispatch.Main(func() {
-			done(doneErr(firstErr))
+			for _, c := range cands {
+				if cat, ok := cached[c.msgID]; ok {
+					w.categories[c.threadID] = cat
+				}
+			}
+			w.refreshList(w.searchEntry.Text()) // show seeded tags immediately
+		})
+
+		// 2) Classify the remainder with the AI (capped to bound cost; the rest
+		// finishes on subsequent passes), persisting each result per email.
+		if len(todo) > maxCategorize {
+			todo = todo[:maxCategorize]
+		}
+		var firstErr error
+		if len(todo) > 0 {
+			done := w.aiActivity(fmt.Sprintf("Categorizing %d threads", len(todo)))
+			for start := 0; start < len(todo); start += 20 {
+				end := start + 20
+				if end > len(todo) {
+					end = len(todo)
+				}
+				chunk := todo[start:end]
+				ctxs := make([]string, len(chunk))
+				for i, c := range chunk {
+					ctxs[i] = c.ctx
+				}
+				cats, err := w.deps.Assistant.Categorize(ctx, ctxs)
+				if err != nil {
+					firstErr = err
+					slog.Warn("ui: categorize inbox", "err", err)
+					break
+				}
+				results := make(map[string]string, len(chunk)) // threadID → category
+				for i, c := range chunk {
+					if i >= len(cats) {
+						break
+					}
+					cat := normalizeCategory(cats[i])
+					if err := w.deps.Store.SetMessageCategory(ctx, acctID, c.msgID, cat); err != nil {
+						slog.Warn("ui: persist category", "err", err)
+					}
+					results[c.threadID] = cat
+				}
+				dispatch.Main(func() {
+					for id, cat := range results {
+						w.categories[id] = cat
+					}
+				})
+			}
+			dispatch.Main(func() { done(doneErr(firstErr)) })
+		}
+		dispatch.Main(func() {
 			w.categorizing = false
 			w.refreshList(w.searchEntry.Text()) // re-bind rows to show the tags
 		})

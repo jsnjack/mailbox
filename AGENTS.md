@@ -141,8 +141,12 @@ and opens it with `xdg-open`.
 
 Inbox mail is auto-categorized by AI into action tags (Needs reply / Calendar /
 Travel / Receipt / Finance / Security / Discount / Newsletter / Notification; no
-match = no tag) shown on rows — category definitions live in the prompt — batched, cached in-memory, capped to
-the newest threads, gated by a Preferences toggle (`ai.Categorize` /
+match = no tag) shown on rows — category definitions live in the prompt —
+batched and **persisted per email** keyed by the latest message's id
+(`store.{SetMessageCategory,MessageCategories}`, `message_categories` table), so
+`categorizeInbox` seeds tags from the cache for free on launch and only calls the
+AI for still-uncategorized threads (capped per pass) — each email is classified
+once, not every launch. Gated by a Preferences toggle (`ai.Categorize` /
 `categorizeInbox`).
 The list is grouped by conversation: a virtualized `gtk.ListView` over a
 `gtk.StringList` of thread ids (looked up in a `threadByID` map of
