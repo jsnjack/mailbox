@@ -50,8 +50,12 @@ account's display name (email as a caption when named) and an unread-INBOX
 count pill;
 names are user-assigned in Preferences → Accounts (`config.{Load,Save}AccountName`,
 stored in `<data>/accounts.json` keyed by email — when set, the name is primary
-and the email becomes a caption). Per-account badges refresh on any sidebar
-reload and whenever a non-active account syncs (`refreshAccountBadges`).
+and the email becomes a caption). Per-account pills and the window title come
+from one batched `store.UnreadCountByLabelForAccounts` query (`refreshAccountUnread`
+/ `applyAccountUnread`), refreshed on any sidebar reload and whenever a non-active
+account syncs. `loadLabels` only rebuilds the sidebar widgets when its structure or
+the inbox badge actually changed (`sidebarSignature`), so an idle 60s sync touches
+nothing.
 
 Colour follows GNOME's HIG (monochrome symbolic icons, one accent reserved for
 state): a small application stylesheet (`internal/ui/theme.go`, registered on

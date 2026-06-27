@@ -58,6 +58,7 @@ type window struct {
 	refreshBtn  *gtk.Button
 	syncSpinner *gtk.Spinner  // shown in place of refreshBtn during a manual sync
 	sidebar     []sidebarItem // one entry per row in labelBox (incl. headings)
+	sidebarSig  string        // signature of the rendered sidebar, to skip no-op rebuilds
 	current     string
 	activeID    int64 // the account currently shown
 	activeEmail string
@@ -587,7 +588,7 @@ func (w *window) buildSidebar() *adw.NavigationPage {
 // accountSwitcherRow builds a sidebar account entry: the display name (custom
 // name if set, else the email) with the email as a caption when a custom name
 // replaces it, and an unread-inbox count pill. The badge is recorded in
-// accountBadges so refreshAccountBadges can update it in place.
+// accountBadges so applyAccountUnread can update it in place.
 func (w *window) accountSwitcherRow(a AccountInfo) *gtk.Box {
 	name := w.accountDisplayName(a)
 
@@ -634,28 +635,6 @@ func (w *window) hasCustomName(email string) bool {
 	return strings.TrimSpace(w.accountNames[email]) != ""
 }
 
-// refreshAccountBadges recomputes each account's unread-inbox count and updates
-// its switcher pill (hidden at zero). Cheap — one indexed COUNT per account.
-func (w *window) refreshAccountBadges() {
-	if len(w.accountBadges) == 0 {
-		return
-	}
-	ctx := context.Background()
-	for _, a := range w.deps.Accounts {
-		badge := w.accountBadges[a.ID]
-		if badge == nil {
-			continue
-		}
-		n, _ := w.deps.Store.CountUnreadByLabel(ctx, a.ID, model.LabelInbox)
-		if n > 0 {
-			badge.SetText(fmt.Sprintf("%d", n))
-			badge.SetVisible(true)
-		} else {
-			badge.SetVisible(false)
-		}
-	}
-}
-
 // rebuildAccountSwitcher re-renders the multi-account switcher rows (after a
 // rename), preserving the current selection. Single-account naming applies on
 // next launch.
@@ -677,7 +656,7 @@ func (w *window) rebuildAccountSwitcher() {
 			w.accountBox.SelectRow(r)
 		}
 	}
-	w.refreshAccountBadges()
+	w.refreshAccountUnread()
 }
 
 func (w *window) buildThreadList() *adw.NavigationPage {
@@ -1699,58 +1678,116 @@ func (w *window) loadLabels() {
 		have[l.GmailID] = true
 	}
 
-	w.labelBox.RemoveAll()
-	w.sidebar = w.sidebar[:0]
+	// Per-account unread-inbox counts in one query (feeds the inbox badge, the
+	// account pills, and the title).
+	counts := w.accountUnreadInbox(ctx)
+	inboxCount := counts[w.activeID]
 
-	// Only the Inbox carries an unread-count badge — that's where new mail
-	// matters; badges on every folder/label read as noise.
-	for _, f := range systemFolders {
-		count := 0
-		if f.id == model.LabelInbox {
-			count, _ = w.deps.Store.CountUnreadByLabel(ctx, w.activeID, f.id)
+	// Rebuild the sidebar widgets only when its structure or the inbox badge
+	// actually changed — an idle 60s sync (no new mail) leaves it untouched,
+	// avoiding widget churn and a selection flicker every cycle.
+	sig := w.sidebarSignature(labels, have, inboxCount)
+	if sig != w.sidebarSig {
+		w.sidebarSig = sig
+		w.labelBox.RemoveAll()
+		w.sidebar = w.sidebar[:0]
+
+		// Only the Inbox carries an unread-count badge — that's where new mail
+		// matters; badges on every folder/label read as noise.
+		for _, f := range systemFolders {
+			if f.id == allMailID {
+				w.appendFolder(f.id, f.icon, f.name, 0)
+				continue
+			}
+			if !have[f.id] {
+				continue
+			}
+			count := 0
+			if f.id == model.LabelInbox {
+				count = inboxCount
+			}
+			w.appendFolder(f.id, f.icon, f.name, count)
 		}
-		if f.id == allMailID {
-			w.appendFolder(f.id, f.icon, f.name, 0)
-			continue
+
+		// User-created labels, alphabetical (ListLabels already orders by name).
+		firstUser := true
+		for _, l := range labels {
+			if l.Type != model.LabelUser {
+				continue
+			}
+			if firstUser {
+				w.appendHeading("Labels")
+				firstUser = false
+			}
+			w.appendFolder(l.GmailID, "user-bookmarks-symbolic", l.Name, 0)
 		}
-		if !have[f.id] {
-			continue
-		}
-		w.appendFolder(f.id, f.icon, f.name, count)
+		w.restoreSidebarSelection()
 	}
 
-	// User-created labels, alphabetical (ListLabels already orders by name).
-	firstUser := true
-	for _, l := range labels {
-		if l.Type != model.LabelUser {
-			continue
-		}
-		if firstUser {
-			w.appendHeading("Labels")
-			firstUser = false
-		}
-		w.appendFolder(l.GmailID, "user-bookmarks-symbolic", l.Name, 0)
-	}
-
-	w.restoreSidebarSelection()
-	w.refreshAccountBadges() // keep the per-account unread pills current
-	w.updateTitle()
+	w.applyAccountUnread(counts) // pills + title from the same counts
 }
 
-// updateTitle reflects the total unread-inbox count (across all accounts) in the
-// window title, so it shows in the taskbar / overview.
-func (w *window) updateTitle() {
-	total := 0
-	ctx := context.Background()
+// sidebarSignature captures everything the label sidebar renders — the active
+// account, the visible folders/labels, and the inbox badge count — so loadLabels
+// can skip the widget rebuild when none of it changed.
+func (w *window) sidebarSignature(labels []model.Label, have map[string]bool, inboxUnread int) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "a=%d;inbox=%d;", w.activeID, inboxUnread)
+	for _, f := range systemFolders {
+		if f.id == allMailID || have[f.id] {
+			b.WriteString("f:" + f.id + ";")
+		}
+	}
+	for _, l := range labels {
+		if l.Type == model.LabelUser {
+			b.WriteString("u:" + l.GmailID + "=" + l.Name + ";")
+		}
+	}
+	return b.String()
+}
+
+// accountUnreadInbox returns each account's unread-inbox count (one query).
+func (w *window) accountUnreadInbox(ctx context.Context) map[int64]int {
+	ids := make([]int64, 0, len(w.deps.Accounts))
 	for _, a := range w.deps.Accounts {
-		n, _ := w.deps.Store.CountUnreadByLabel(ctx, a.ID, model.LabelInbox)
+		ids = append(ids, a.ID)
+	}
+	counts, err := w.deps.Store.UnreadCountByLabelForAccounts(ctx, ids, model.LabelInbox)
+	if err != nil {
+		slog.Warn("ui: account unread counts", "err", err)
+		return map[int64]int{}
+	}
+	return counts
+}
+
+// applyAccountUnread updates the per-account pills and the window title from a
+// precomputed per-account unread-inbox map (no queries).
+func (w *window) applyAccountUnread(counts map[int64]int) {
+	total := 0
+	for _, a := range w.deps.Accounts {
+		n := counts[a.ID]
 		total += n
+		if badge := w.accountBadges[a.ID]; badge != nil {
+			if n > 0 {
+				badge.SetText(fmt.Sprintf("%d", n))
+				badge.SetVisible(true)
+			} else {
+				badge.SetVisible(false)
+			}
+		}
 	}
 	if total > 0 {
 		w.win.SetTitle(fmt.Sprintf("Mailbox — %d unread", total))
 	} else {
 		w.win.SetTitle("Mailbox")
 	}
+}
+
+// refreshAccountUnread fetches the per-account unread-inbox counts and applies
+// them to the pills and title. Used when only sibling-account counts changed
+// (so the active account's sidebar needn't reload).
+func (w *window) refreshAccountUnread() {
+	w.applyAccountUnread(w.accountUnreadInbox(context.Background()))
 }
 
 // appendFolder adds a selectable folder/label row mapped to id.
@@ -3033,17 +3070,15 @@ func (w *window) onChange(c syncer.Change) {
 	switch c.Kind {
 	case syncer.MessageUpserted, syncer.MessageDeleted:
 		if c.AccountID == w.activeID {
-			w.scheduleRefresh(true) // loadLabels (inside) refreshes badges + title
+			w.scheduleRefresh(true) // loadLabels (inside) refreshes pills + title
 		} else {
-			w.refreshAccountBadges() // a sibling account's unread count changed
-			w.updateTitle()
+			w.refreshAccountUnread() // a sibling account's unread count changed
 		}
 	case syncer.LabelsSynced:
 		if c.AccountID == w.activeID {
 			w.scheduleRefresh(false)
 		} else {
-			w.refreshAccountBadges()
-			w.updateTitle()
+			w.refreshAccountUnread()
 		}
 	case syncer.SendStateChanged:
 		if c.AccountID == w.activeID {

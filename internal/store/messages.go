@@ -245,6 +245,39 @@ func (s *Store) MarkLabelReadLocal(ctx context.Context, accountID int64, labelID
 	})
 }
 
+// UnreadCountByLabelForAccounts returns, per account, the number of unread
+// messages carrying labelID — in one query, so the sidebar badges and window
+// title don't issue a count per account.
+func (s *Store) UnreadCountByLabelForAccounts(ctx context.Context, accountIDs []int64, labelID string) (map[int64]int, error) {
+	out := make(map[int64]int, len(accountIDs))
+	if len(accountIDs) == 0 {
+		return out, nil
+	}
+	args := make([]any, 0, len(accountIDs)+1)
+	args = append(args, labelID)
+	for _, id := range accountIDs {
+		args = append(args, id)
+	}
+	rows, err := s.reader.QueryContext(ctx, `
+		SELECT m.account_id, COUNT(*) FROM messages m
+		JOIN message_labels ml ON ml.message_rowid = m.rowid AND ml.label_id = ?
+		WHERE m.is_unread = 1 AND m.account_id IN (`+placeholders(len(accountIDs))+`)
+		GROUP BY m.account_id`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("unread counts by accounts: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var id int64
+		var n int
+		if err := rows.Scan(&id, &n); err != nil {
+			return nil, fmt.Errorf("scan unread count: %w", err)
+		}
+		out[id] = n
+	}
+	return out, rows.Err()
+}
+
 // CountByLabel returns the number of messages carrying the given label.
 func (s *Store) CountByLabel(ctx context.Context, accountID int64, labelID string) (int, error) {
 	var n int

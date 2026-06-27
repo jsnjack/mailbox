@@ -229,6 +229,39 @@ func TestCountUnreadByLabel(t *testing.T) {
 	}
 }
 
+func TestUnreadCountByLabelForAccounts(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	a1 := seedAccount(t, s)
+	a2, err := s.UpsertAccount(ctx, model.Account{Email: "other@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, m := range []model.Message{
+		{AccountID: a1, GmailID: "u1", ThreadID: "t1", IsUnread: true, Labels: []string{"INBOX", "UNREAD"}},
+		{AccountID: a1, GmailID: "u2", ThreadID: "t2", IsUnread: true, Labels: []string{"INBOX", "UNREAD"}},
+		{AccountID: a1, GmailID: "r1", ThreadID: "t3", IsUnread: false, Labels: []string{"INBOX"}},
+		{AccountID: a2, GmailID: "x1", ThreadID: "t4", IsUnread: true, Labels: []string{"INBOX", "UNREAD"}},
+	} {
+		if _, err := s.UpsertMessage(ctx, m); err != nil {
+			t.Fatalf("upsert %s: %v", m.GmailID, err)
+		}
+	}
+
+	got, err := s.UnreadCountByLabelForAccounts(ctx, []int64{a1, a2}, "INBOX")
+	if err != nil {
+		t.Fatalf("UnreadCountByLabelForAccounts: %v", err)
+	}
+	if got[a1] != 2 || got[a2] != 1 {
+		t.Fatalf("counts = %v, want {a1:2, a2:1}", got)
+	}
+	// Empty input → empty map, no error.
+	if m, err := s.UnreadCountByLabelForAccounts(ctx, nil, "INBOX"); err != nil || len(m) != 0 {
+		t.Fatalf("empty input: %v, %v", m, err)
+	}
+}
+
 func TestModifyLabels(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
