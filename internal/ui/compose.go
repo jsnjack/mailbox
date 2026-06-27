@@ -521,6 +521,15 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 			send.Activate()
 			return true
 		}
+		// Esc closes the window (through the unsaved-changes guard), unless the
+		// focus is a field that wants Esc itself (e.g. dismissing autocomplete).
+		if keyval == gdk.KEY_Escape {
+			if _, ok := win.Focus().(*gtk.Text); ok {
+				return false
+			}
+			win.Close()
+			return true
+		}
 		return false
 	})
 	win.AddController(keyCtl)
