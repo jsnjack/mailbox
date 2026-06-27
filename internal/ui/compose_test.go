@@ -50,6 +50,62 @@ func TestEditableBoundary(t *testing.T) {
 	}
 }
 
+func TestParseMailto(t *testing.T) {
+	tests := []struct {
+		name                       string
+		uri                        string
+		ok                         bool
+		to, cc, bcc, subject, body string
+	}{
+		{"not mailto", "https://example.com", false, "", "", "", "", ""},
+		{"bare address", "mailto:alice@example.com", true, "alice@example.com", "", "", "", ""},
+		{
+			"subject and body",
+			"mailto:alice@example.com?subject=Hi%20there&body=Line%20one",
+			true, "alice@example.com", "", "", "Hi there", "Line one",
+		},
+		{
+			"multiple recipients plus cc/bcc",
+			"mailto:a@x.com,b@y.com?cc=c@z.com&bcc=d@w.com",
+			true, "a@x.com, b@y.com", "c@z.com", "d@w.com", "", "",
+		},
+		{
+			"percent-encoded address",
+			"mailto:bob%40example.com?subject=Re%3A%20hi",
+			true, "bob@example.com", "", "", "Re: hi", "",
+		},
+		{
+			"empty recipient with subject",
+			"mailto:?subject=No%20one",
+			true, "", "", "", "No one", "",
+		},
+		{"uppercase scheme", "MAILTO:eve@example.com", true, "eve@example.com", "", "", "", ""},
+		{
+			// GIO normalises a command-line mailto into this hierarchical form; the
+			// recipient is in the path, not the opaque part.
+			"gio-normalised triple-slash form",
+			"mailto:///alice@example.com?subject=Hi&cc=bob@example.com",
+			true, "alice@example.com", "bob@example.com", "", "Hi", "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg, ok := parseMailto(tt.uri)
+			if ok != tt.ok {
+				t.Fatalf("ok = %v, want %v", ok, tt.ok)
+			}
+			if !ok {
+				return
+			}
+			if msg.To != tt.to || msg.Cc != tt.cc || msg.Bcc != tt.bcc ||
+				msg.Subject != tt.subject || msg.Body != tt.body {
+				t.Fatalf("parseMailto(%q) =\n  To=%q Cc=%q Bcc=%q Subject=%q Body=%q\nwant\n  To=%q Cc=%q Bcc=%q Subject=%q Body=%q",
+					tt.uri, msg.To, msg.Cc, msg.Bcc, msg.Subject, msg.Body, tt.to, tt.cc, tt.bcc, tt.subject, tt.body)
+			}
+		})
+	}
+}
+
 func TestMentionsAttachment(t *testing.T) {
 	tests := []struct {
 		name string

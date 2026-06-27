@@ -117,6 +117,17 @@ binary run from `bin/` `ensureDesktopFile` self-installs a user-level entry —
 pointed at the running binary — into `~/.local/share/applications` at startup,
 skipping it when a system or user entry already exists so it never shadows a
 real install.)
+The desktop entry registers `MimeType=x-scheme-handler/mailto;` with `Exec=mailbox
+%u`, so the app appears under GNOME's Default Apps → Mail and can be set as the
+default mail client. The GApplication uses `ApplicationHandlesOpen`: a clicked
+`mailto:` URI is delivered to the `open` handler (and routed to an
+already-running instance), which opens a prefilled compose (`parseMailto` →
+`composeFromMailto`, handling both the plain `mailto:` and GIO's normalised
+`mailto:///` forms). `main` strips the `mailto:` arg before cobra parses (the
+root command has subcommands) — `SetArgs` with a non-nil empty slice, since
+`SetArgs(nil)` falls back to `os.Args`. The RPM's `%post` runs
+`update-desktop-database` so the registration takes effect on install; the dev
+self-install runs it too.
 Reply / reply-all / forward / new compose in a separate window (text/plain via
 `gmailapi.BuildMIME` + `messages.send`, threading headers + threadId on replies;
 replies target the sender's `Reply-To` header when present — captured into

@@ -35,7 +35,7 @@ const resyncBackfillLimit = 500
 // launchUI opens the store, picks the first connected account, optionally builds
 // a live Gmail client (when credentials are available), starts a background
 // incremental sync, and runs the GTK application.
-func launchUI() error {
+func launchUI(mailto string) error {
 	if err := config.EnsureDirs(); err != nil {
 		return err
 	}
@@ -269,7 +269,7 @@ func launchUI() error {
 		deps.Assistant = asst
 	}
 
-	return ui.Run(deps)
+	return ui.Run(deps, mailto)
 }
 
 // buildAssistant constructs the AI assistant from the config file + key (keyring

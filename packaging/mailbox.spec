@@ -29,6 +29,20 @@ install -Dm0755 %{srcdir}/bin/mailbox %{buildroot}%{_bindir}/mailbox
 install -Dm0644 %{srcdir}/packaging/com.jsnjack.mailbox.desktop %{buildroot}%{_datadir}/applications/com.jsnjack.mailbox.desktop
 install -Dm0644 %{srcdir}/packaging/com.jsnjack.mailbox.svg %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/com.jsnjack.mailbox.svg
 
+# Refresh the desktop MIME cache so the mailto handler registration takes effect
+# (the app appears under GNOME's Default Apps → Mail) and the icon cache.
+%post
+update-desktop-database &>/dev/null || :
+touch --no-create %{_datadir}/icons/hicolor &>/dev/null || :
+gtk-update-icon-cache %{_datadir}/icons/hicolor &>/dev/null || :
+
+%postun
+update-desktop-database &>/dev/null || :
+if [ $1 -eq 0 ]; then
+    touch --no-create %{_datadir}/icons/hicolor &>/dev/null || :
+    gtk-update-icon-cache %{_datadir}/icons/hicolor &>/dev/null || :
+fi
+
 %files
 %{_bindir}/mailbox
 %{_datadir}/applications/com.jsnjack.mailbox.desktop

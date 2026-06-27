@@ -10,6 +10,8 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/diamondburned/gotk4-adwaita/pkg/adw"
+	"github.com/diamondburned/gotk4/pkg/gio/v2"
 	"github.com/jsnjack/mailbox/internal/activity"
 	"github.com/jsnjack/mailbox/internal/ai"
 	"github.com/jsnjack/mailbox/internal/model"
@@ -132,19 +134,42 @@ type Deps struct {
 	TestAISettings func(ctx context.Context, provider, endpoint, model string) error
 }
 
-// Run launches the GTK application and blocks until the window is closed.
-func Run(deps Deps) error {
+// Run launches the GTK application and blocks until the window is closed. mailto,
+// when set, is a mailto: URI the app was invoked with (it's the default mail
+// handler) — it opens a prefilled compose. GApplication routes it to an
+// already-running instance, so clicking a mailto link reuses the open window.
+func Run(deps Deps, mailto string) error {
 	// Notifications are routed by the desktop environment via the app id's
 	// installed desktop entry; make sure one exists before any can fire.
 	ensureDesktopFile()
-	app := newAdwApplication()
+	// HandlesOpen so a mailto: URI passed on the command line is delivered to the
+	// "open" handler (and forwarded to the primary instance when one is running).
+	app := adw.NewApplication(applicationID(), gio.ApplicationHandlesOpen)
+	var win *window
+	ensureWindow := func() *window {
+		if win == nil {
+			win = newWindow(app, deps)
+			win.present()
+			slog.Debug("ui: window presented")
+		}
+		return win
+	}
 	app.ConnectActivate(func() {
 		slog.Debug("ui: activate")
-		w := newWindow(app, deps)
-		w.present()
-		slog.Debug("ui: window presented")
+		ensureWindow()
 	})
-	code := app.Run([]string{"mailbox"})
+	app.ConnectOpen(func(files []gio.Filer, hint string) {
+		slog.Debug("ui: open", "n", len(files))
+		w := ensureWindow()
+		for _, f := range files {
+			w.composeFromMailto(f.URI())
+		}
+	})
+	argv := []string{"mailbox"}
+	if mailto != "" {
+		argv = append(argv, mailto)
+	}
+	code := app.Run(argv)
 	slog.Debug("ui: app.Run returned", "code", code)
 	if code != 0 {
 		return fmt.Errorf("gtk application exited with code %d", code)

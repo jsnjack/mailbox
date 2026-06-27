@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"mime"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,6 +30,18 @@ func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string
 	// Fresh composes/replies/forwards get the default signature; an existing
 	// draft or a reopened (undone) message already contains its body verbatim.
 	w.openComposeOpts(init, aiContext, title, init.DraftID == "")
+}
+
+// composeFromMailto opens a compose window prefilled from a mailto: URI (clicked
+// in another app once mailbox is the default mail handler). A new compose, so it
+// gets the signature like any other.
+func (w *window) composeFromMailto(uri string) {
+	msg, ok := parseMailto(uri)
+	if !ok {
+		slog.Debug("ui: ignoring non-mailto open", "uri", uri)
+		return
+	}
+	w.openCompose(msg, "", "New message")
 }
 
 func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title string, addSignature bool) {
@@ -724,6 +737,49 @@ func composeBodyWithSignature(quote, sig string) string {
 		return block
 	}
 	return block + "\n\n" + quote
+}
+
+// parseMailto parses an RFC 6068 mailto: URI into an outgoing message. The
+// recipients before the "?" become To (comma-separated, percent-decoded); the
+// query supplies subject, body, cc, bcc, and any additional to. Returns false if
+// the string isn't a mailto: URI or can't be parsed.
+func parseMailto(uri string) (model.OutgoingMessage, bool) {
+	if !strings.HasPrefix(strings.ToLower(uri), "mailto:") {
+		return model.OutgoingMessage{}, false
+	}
+	u, err := url.Parse(uri)
+	if err != nil {
+		return model.OutgoingMessage{}, false
+	}
+	var to []string
+	// Recipients sit in u.Opaque for a plain "mailto:a@b,c@d?…"; GIO normalises a
+	// command-line mailto into "mailto:///a@b?…", which url.Parse treats as
+	// hierarchical, putting them in u.Path instead. Accept either.
+	recipients := u.Opaque
+	if recipients == "" {
+		recipients = strings.TrimLeft(u.Path, "/")
+	}
+	for _, raw := range strings.Split(recipients, ",") {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		if dec, err := url.QueryUnescape(raw); err == nil {
+			to = append(to, dec)
+		} else {
+			to = append(to, raw)
+		}
+	}
+	q := u.Query()
+	to = append(to, q["to"]...)
+	msg := model.OutgoingMessage{
+		To:      strings.Join(to, ", "),
+		Cc:      strings.Join(q["cc"], ", "),
+		Bcc:     strings.Join(q["bcc"], ", "),
+		Subject: q.Get("subject"),
+		Body:    q.Get("body"),
+	}
+	return msg, true
 }
 
 // mentionsAttachment reports whether the body text suggests the user meant to

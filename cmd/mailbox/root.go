@@ -17,6 +17,12 @@ var (
 	flagConfig      string
 	flagCredentials string
 
+	// launchMailto holds a mailto: URI the app was invoked with (as the default
+	// mail handler). main extracts it from the args before cobra parses them — the
+	// root command has subcommands, so an unrecognised "mailto:…" positional would
+	// otherwise be rejected as an unknown command.
+	launchMailto string
+
 	// logCleanup is set by PersistentPreRunE and invoked from main on exit.
 	logCleanup = func() {}
 )
@@ -55,7 +61,7 @@ var rootCmd = &cobra.Command{
 	},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		slog.Info("mailbox starting", "version", Version)
-		return launchUI()
+		return launchUI(launchMailto)
 	},
 }
 

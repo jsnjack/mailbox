@@ -33,10 +33,6 @@ import (
 	"github.com/microcosm-cc/bluemonday"
 )
 
-func newAdwApplication() *adw.Application {
-	return adw.NewApplication(applicationID(), gio.ApplicationFlagsNone)
-}
-
 // window owns the widget tree and the currently displayed selection.
 type window struct {
 	app  *adw.Application

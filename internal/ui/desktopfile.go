@@ -3,6 +3,7 @@ package ui
 import (
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -15,17 +16,20 @@ const desktopFileName = appID + ".desktop"
 
 // desktopEntry mirrors packaging/com.jsnjack.mailbox.desktop. The Exec line is
 // rewritten to the running binary's absolute path when self-installed for
-// development (the packaged entry uses the on-PATH name).
+// development (the packaged entry uses the on-PATH name). MimeType registers the
+// app as a mailto handler so it appears under GNOME's Default Apps → Mail; the
+// "%u" passes the clicked mailto: URI to the running app (see composeFromMailto).
 const desktopEntry = `[Desktop Entry]
 Type=Application
 Name=Mailbox
 GenericName=Email Client
 Comment=A native, fast Gmail client
-Exec=mailbox
+Exec=mailbox %u
 Icon=com.jsnjack.mailbox
 Terminal=false
 Categories=Network;Email;GTK;GNOME;
 Keywords=Email;Gmail;Mail;
+MimeType=x-scheme-handler/mailto;
 StartupNotify=true
 `
 
@@ -64,6 +68,14 @@ func ensureDesktopFile() {
 		return
 	}
 	slog.Info("ui: installed user desktop entry so notifications resolve", "path", dest)
+	// Rebuild the user mimeinfo cache so the mailto registration takes effect
+	// (otherwise the app won't show under Default Apps → Mail until the next login
+	// or a manual refresh). Best-effort; the binary may not exist on minimal hosts.
+	if bin, err := exec.LookPath("update-desktop-database"); err == nil {
+		if err := exec.Command(bin, filepath.Dir(dest)).Run(); err != nil {
+			slog.Debug("ui: update-desktop-database", "err", err)
+		}
+	}
 }
 
 // userAppDir is the per-user applications directory (XDG_DATA_HOME aware).
