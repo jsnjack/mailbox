@@ -1,11 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="#2e3436">
-  <!-- Latin "A": two slanted legs (filled quads) meeting at the apex + a crossbar -->
+  <!-- Latin "A": two slanted legs (filled quads) + crossbar -->
   <path d="M4.78 3.38 L3.22 3.03 L1.02 12.83 L2.58 13.18 Z"/>
   <path d="M4.78 3.03 L3.22 3.38 L5.42 13.18 L6.98 12.83 Z"/>
   <rect x="2.5" y="8.6" width="3.0" height="1.2" rx="0.2"/>
-  <!-- CJK "文": top dot, horizontal stroke, and the crossing falling strokes -->
-  <rect x="10.8" y="2.3" width="1.2" height="1.5" rx="0.55"/>
-  <rect x="8.7" y="4.3" width="5.8" height="1.2" rx="0.25"/>
-  <path d="M11.92 5.18 L10.88 4.82 L8.08 13.02 L9.12 13.38 Z"/>
-  <path d="M11.28 6.33 L10.32 6.87 L14.12 13.47 L15.08 12.93 Z"/>
+  <!-- CJK "文" — real glyph outline (Droid Sans Fallback), fitted to the right half -->
+  <path d="M8.387 5.778H11.597L11.005 4.874L11.535 4.500Q12.003 5.061 12.345 5.778H15.369V6.370H14.153Q13.904 7.555 13.358 8.427Q12.813 9.300 12.439 9.518Q13.561 10.360 15.400 11.014L15.026 11.700Q13.281 11.108 11.878 9.986Q10.569 10.952 8.636 11.669L8.200 11.077Q10.070 10.422 11.348 9.518Q10.070 8.271 9.540 6.370H8.387ZM10.226 6.370Q10.756 8.053 11.909 9.082Q13.062 8.084 13.468 6.370Z"/>
 </svg>
