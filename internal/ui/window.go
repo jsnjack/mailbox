@@ -763,11 +763,12 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 	w.outboxBanner.ConnectButtonClicked(w.openOutbox)
 
 	// When no Gmail client could be built the UI is read-only; say so instead of
-	// leaving the actions silently inert.
+	// leaving the actions silently inert. MAILBOX_DEMO hides it for screenshots
+	// taken against a synthetic cache that has no Gmail client by design.
 	w.readOnlyBanner = adw.NewBanner("Read-only — not connected to Gmail")
 	w.readOnlyBanner.SetButtonLabel("How to connect")
 	w.readOnlyBanner.ConnectButtonClicked(w.showConnectHelp)
-	w.readOnlyBanner.SetRevealed(w.deps.ModifyLabels == nil)
+	w.readOnlyBanner.SetRevealed(w.deps.ModifyLabels == nil && os.Getenv("MAILBOX_DEMO") == "")
 
 	w.buildSelectionBar()
 
@@ -2623,63 +2624,105 @@ func (w *window) setImagesEnabled(on bool) {
 	}
 }
 
-// onTranslate shows an English translation of the open message in place,
-// preserving the email's markup (so styling is kept). The result is cached per
-// message, so toggling back to it (or re-translating) is instant.
+// onTranslate shows an English translation of the whole open conversation in
+// place, preserving each message's markup. Every message is translated and
+// cached per message id, so re-opening, reverting, or re-translating reuses the
+// cached result (and an already-translated message in the thread isn't redone).
 func (w *window) onTranslate() {
-	m := w.openMsg
-	if m.GmailID == "" || w.deps.Assistant == nil {
+	if w.deps.Assistant == nil || len(w.openThreadMsgs) == 0 {
 		return
 	}
 	if w.translateCancel != nil {
 		w.translateCancel()
 		w.translateCancel = nil
 	}
-	gmailID := m.GmailID
+	msgs := append([]model.Message(nil), w.openThreadMsgs...) // snapshot (oldest first)
+	threadID := w.openThreadID
 
-	show := func(translatedHTML string) {
-		w.translationBanner.SetTitle("Showing translation")
-		w.translationBanner.SetRevealed(true)
-		cleaned, blocked := w.cleanHTML(stripCodeFence(translatedHTML))
-		w.setTrackerCount(blocked)
-		w.webview.LoadHtml(wrapHTML(cleaned), "about:blank")
+	// Which messages still need translating? (cache read on the main thread).
+	var todo []model.Message
+	for _, m := range msgs {
+		if _, ok := w.translationCache[m.GmailID]; !ok {
+			todo = append(todo, m)
+		}
 	}
-
-	if cached, ok := w.translationCache[gmailID]; ok {
-		show(cached)
+	if len(todo) == 0 { // whole thread already translated → show instantly
+		w.showTranslatedConversation(msgs)
 		return
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	w.translateCancel = cancel
-	threadID := w.openThreadID
-	source := w.bodyHTMLFor(m)
-
 	w.translationBanner.SetTitle("Translating…")
 	w.translationBanner.SetRevealed(true)
 	w.webview.LoadHtml(wrapHTML("<p><i>Translating…</i></p>"), "about:blank")
 	done := w.aiActivity("Translating")
 
 	go func() {
-		// Translate only the text segments (cheap) and reinsert them into the
-		// original markup locally, so the model never regenerates the HTML.
-		out, err := translateHTMLText(source, func(segs []string) ([]string, error) {
-			return w.deps.Assistant.TranslateSegments(ctx, segs, "English")
-		})
+		// Translate each untranslated message concurrently (bounded). Sources are
+		// read + sanitized here (off the main thread); bluemonday + the store are
+		// safe for concurrent use.
+		results := make(map[string]string, len(todo))
+		var mu sync.Mutex
+		var firstErr error
+		sem := make(chan struct{}, 4)
+		var wg sync.WaitGroup
+		for _, m := range todo {
+			wg.Add(1)
+			sem <- struct{}{}
+			go func(m model.Message) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				out, err := translateHTMLText(w.bodyHTMLFor(m), func(segs []string) ([]string, error) {
+					return w.deps.Assistant.TranslateSegments(ctx, segs, "English")
+				})
+				mu.Lock()
+				if err != nil {
+					if firstErr == nil {
+						firstErr = err
+					}
+				} else {
+					results[m.GmailID] = stripCodeFence(out)
+				}
+				mu.Unlock()
+			}(m)
+		}
+		wg.Wait()
+
 		dispatch.Main(func() {
-			done(doneErr(err))
-			// Skip if the user switched conversations or reverted (cancels ctx).
+			done(doneErr(firstErr))
 			if w.openThreadID != threadID || ctx.Err() != nil {
+				return // user switched conversations or reverted
+			}
+			if firstErr != nil {
+				w.webview.LoadHtml(wrapHTML("<p>Translation failed: "+html.EscapeString(firstErr.Error())+"</p>"), "about:blank")
 				return
 			}
-			if err != nil {
-				w.webview.LoadHtml(wrapHTML("<p>Translation failed: "+html.EscapeString(err.Error())+"</p>"), "about:blank")
-				return
+			for id, out := range results {
+				w.translationCache[id] = out
 			}
-			w.translationCache[gmailID] = out
-			show(out)
+			w.showTranslatedConversation(msgs)
 		})
 	}()
+}
+
+// showTranslatedConversation renders the thread (newest first) from each
+// message's cached translation, like renderConversation but with translated
+// bodies. Main thread only.
+func (w *window) showTranslatedConversation(msgs []model.Message) {
+	w.translationBanner.SetTitle("Showing translation")
+	w.translationBanner.SetRevealed(true)
+	var b strings.Builder
+	blocked := 0
+	for i := len(msgs) - 1; i >= 0; i-- {
+		m := msgs[i]
+		body := model.MessageBody{HTML: w.translationCache[m.GmailID]}
+		sec, n := conversationSection(m, body, w.cleanHTML)
+		b.WriteString(sec)
+		blocked += n
+	}
+	w.setTrackerCount(blocked)
+	w.webview.LoadHtml(wrapHTML(b.String()), "about:blank")
 }
 
 // bodyHTMLFor returns the open message's HTML body for translation (sanitized),

@@ -128,7 +128,13 @@ it read-only: the body/recipients are prefilled and the draft's Gmail resource
 id is resolved (`Client.FindDraftID`) so Save updates that draft
 (`Drafts.Update`) and Send sends then removes it (`Drafts.Delete`) — never a
 duplicate.
-Translate / draft-reply stream into a window via the `ai` provider. Incoming
+Translate (`onTranslate`) renders an English translation of the whole open
+conversation in place (markup preserved, "Show original" reverts): every message
+is translated concurrently and cached per message id in `translationCache`
+(`showTranslatedConversation` rebuilds the stacked sections from the cache), so
+reverting, re-opening, or re-translating reuses cached results and an
+already-translated message isn't redone. Draft-reply streams into a compose
+window via the `ai` provider. Incoming
 attachments are extracted on body fetch (`ReplaceAttachments`) and shown as chips
 in the reader; clicking one downloads it (content-addressed under the cache dir)
 and opens it with `xdg-open`.
