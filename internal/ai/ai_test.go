@@ -292,3 +292,20 @@ func TestParseTranslatedSegments(t *testing.T) {
 		})
 	}
 }
+
+func TestCleanSubject(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"Quarterly report ready", "Quarterly report ready"},
+		{"Subject: Lunch on Friday", "Lunch on Friday"},
+		{"subject:  Trimmed  ", "Trimmed"},
+		{"\"Quoted subject\"", "Quoted subject"},
+		{"First line\nSecond line", "First line"},
+		{"  spaced out  ", "spaced out"},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := cleanSubject(c.in); got != c.want {
+			t.Errorf("cleanSubject(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}

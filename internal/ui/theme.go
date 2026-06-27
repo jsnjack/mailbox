@@ -21,10 +21,14 @@ var palmTreeSVG []byte
 //go:embed icons/mail-archive-symbolic.svg
 var mailArchiveSVG []byte
 
+//go:embed icons/sparkle-symbolic.svg
+var sparkleSVG []byte
+
 // bundledIcons maps each custom icon's name to its SVG bytes.
 var bundledIcons = map[string][]byte{
 	"palm-tree-symbolic":    palmTreeSVG,
 	"mail-archive-symbolic": mailArchiveSVG,
+	"sparkle-symbolic":      sparkleSVG,
 }
 
 // registerCustomIcons installs the bundled symbolic icons into a cache icon

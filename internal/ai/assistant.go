@@ -228,6 +228,40 @@ func (a *Assistant) DraftNew(ctx context.Context, subject, instruction string) (
 	return a.p.Stream(ctx, system, []Msg{{Role: RoleUser, Content: user}})
 }
 
+// GenerateSubject returns a concise subject line for the given email body. The
+// model is told to reply with only the subject; cleanSubject defends against a
+// stray "Subject:" prefix, surrounding quotes, or extra lines.
+func (a *Assistant) GenerateSubject(ctx context.Context, body string) (string, error) {
+	system := "You write a concise, specific email subject line for the email body the user provides. " +
+		"Reply with ONLY the subject line: a short noun phrase (ideally under 8 words), in the body's " +
+		"language, with no surrounding quotes, no 'Subject:' prefix, and no commentary."
+	ch, err := a.p.Stream(ctx, system, []Msg{{Role: RoleUser, Content: body}})
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	for c := range ch {
+		if c.Err != nil {
+			return "", c.Err
+		}
+		b.WriteString(c.Text)
+	}
+	return cleanSubject(b.String()), nil
+}
+
+// cleanSubject reduces a model reply to a single bare subject line.
+func cleanSubject(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(strings.ToLower(s), "subject:") {
+		s = strings.TrimSpace(s[len("subject:"):])
+	}
+	return strings.TrimSpace(strings.Trim(s, `"'`))
+}
+
 // DraftReply streams a reply drafted from the thread context. instruction is an
 // optional steer (e.g. "decline politely"); empty for a neutral reply.
 func (a *Assistant) DraftReply(ctx context.Context, threadContext, instruction string) (<-chan Chunk, error) {

@@ -90,6 +90,9 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 	status.SetXAlign(0)
 	status.SetVisible(false)
 
+	// One AI context for the window; cancelled when it closes (see below).
+	aiCtx, cancelAI := context.WithCancel(context.Background())
+
 	var attachments []model.OutgoingAttachment
 	attachRow := gtk.NewBox(gtk.OrientationHorizontal, 6)
 	attachRow.SetVisible(false)
@@ -132,7 +135,45 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 	box.Append(toRow)
 	box.Append(ccEntry)
 	box.Append(bccEntry)
-	box.Append(subjEntry)
+	// Subject row: the entry, plus an AI button that fills the subject in from the
+	// body (the user's own text, not the signature/quote).
+	if w.deps.Assistant != nil {
+		subjEntry.SetHExpand(true)
+		subjBtn := gtk.NewButtonFromIconName("sparkle-symbolic")
+		subjBtn.SetTooltipText("Generate a subject from the email (AI)")
+		subjBtn.AddCSSClass("flat")
+		subjBtn.SetVAlign(gtk.AlignCenter)
+		subjBtn.ConnectClicked(func() {
+			full := bodyText(buf)
+			body := strings.TrimSpace(full[:editableBoundary(full)])
+			if body == "" {
+				status.SetVisible(true)
+				status.SetText("Write the email first, then generate a subject")
+				return
+			}
+			subjBtn.SetSensitive(false)
+			status.SetVisible(true)
+			status.SetText("Generating subject…")
+			go func() {
+				subject, err := w.deps.Assistant.GenerateSubject(aiCtx, body)
+				dispatch.Main(func() {
+					subjBtn.SetSensitive(true)
+					if err != nil || subject == "" {
+						status.SetText("Couldn't generate a subject")
+						return
+					}
+					subjEntry.SetText(subject)
+					status.SetVisible(false)
+				})
+			}()
+		})
+		subjRow := gtk.NewBox(gtk.OrientationHorizontal, 6)
+		subjRow.Append(subjEntry)
+		subjRow.Append(subjBtn)
+		box.Append(subjRow)
+	} else {
+		box.Append(subjEntry)
+	}
 	box.Append(attachRow)
 	box.Append(scroller)
 	box.Append(status)
@@ -194,7 +235,6 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 	}
 	win.SetContent(tv)
 
-	aiCtx, cancelAI := context.WithCancel(context.Background())
 	// sent becomes true once the message is sent, saved as a draft, or the user
 	// confirms discarding it — so the close-request guard lets the window close.
 	sent := false
