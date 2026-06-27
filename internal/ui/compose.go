@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/diamondburned/gotk4-adwaita/pkg/adw"
 	coreglib "github.com/diamondburned/gotk4/pkg/core/glib"
@@ -418,10 +419,19 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 		grammarBtn := gtk.NewButtonFromIconName("tools-check-spelling-symbolic")
 		grammarBtn.SetTooltipText("Check spelling & grammar with AI")
 		grammarBtn.ConnectClicked(func() {
-			original := bodyText(buf)
+			// Proofread only the user's own writing: the selection if there is one,
+			// otherwise the text above the signature/quote. The signature and the
+			// quoted history are never sent to the AI or altered.
+			startIter, endIter := grammarRange(buf)
+			original := buf.Text(startIter, endIter, false)
 			if strings.TrimSpace(original) == "" {
 				return
 			}
+			// Anchor the range with marks so the exact span is replaced even if it
+			// streams back after an edit (left/right gravity keeps it bracketing the
+			// text). Other text — signature, quote — is left untouched.
+			startMark := buf.CreateMark("", startIter, true)
+			endMark := buf.CreateMark("", endIter, false)
 			grammarBtn.SetSensitive(false)
 			status.SetVisible(true)
 			status.SetText("Checking grammar…")
@@ -438,11 +448,15 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 				corrected := strings.TrimRight(acc.String(), " \t\r\n")
 				dispatch.Main(func() {
 					grammarBtn.SetSensitive(true)
+					defer func() { buf.DeleteMark(startMark); buf.DeleteMark(endMark) }()
 					if err != nil || strings.TrimSpace(corrected) == "" {
 						status.SetText("Grammar check failed")
 						return
 					}
-					buf.SetText(corrected)
+					si := buf.IterAtMark(startMark)
+					ei := buf.IterAtMark(endMark)
+					buf.Delete(si, ei)
+					buf.Insert(buf.IterAtMark(startMark), corrected)
 					status.SetVisible(false)
 				})
 			}()
@@ -737,6 +751,57 @@ func attachRecipientCompletion(entry *gtk.Entry, st *gtk.ListStore) {
 func bodyText(buf *gtk.TextBuffer) string {
 	start, end := buf.Bounds()
 	return buf.Text(start, end, false)
+}
+
+// grammarRange returns the iters bounding the text grammar-check should correct:
+// the current selection if any, otherwise from the start of the buffer to the
+// signature/quote boundary (so the signature and quoted reply history are left
+// out). The returned iters are valid until the buffer is mutated.
+func grammarRange(buf *gtk.TextBuffer) (*gtk.TextIter, *gtk.TextIter) {
+	if start, end, ok := buf.SelectionBounds(); ok {
+		return start, end
+	}
+	start, _ := buf.Bounds()
+	full := bodyText(buf)
+	boundary := utf8.RuneCountInString(full[:editableBoundary(full)]) // bytes → chars
+	return start, buf.IterAtOffset(boundary)
+}
+
+// editableBoundary returns the byte offset in a composed body where the
+// non-editable region (signature, then quoted history) begins — i.e. the
+// earliest of the RFC 3676 "-- " signature delimiter line, a quote attribution
+// ("On … wrote:") line, or the first ">"-quoted line. It returns len(text) when
+// the body is all the user's own writing. The markers are reliable because the
+// compose path generates them (composeBodyWithSignature, quoteOriginal).
+func editableBoundary(text string) int {
+	boundary := len(text)
+	mark := func(off int) {
+		if off < boundary {
+			boundary = off
+		}
+	}
+	off := 0
+	for _, line := range strings.SplitAfter(text, "\n") {
+		trimmed := strings.TrimRight(line, "\n")
+		switch {
+		case trimmed == "-- ": // signature delimiter
+			mark(off)
+		case strings.HasPrefix(trimmed, ">"): // quoted line
+			mark(off)
+		case strings.HasPrefix(trimmed, "On ") && strings.HasSuffix(strings.TrimRight(trimmed, " "), "wrote:"):
+			mark(off) // quote attribution
+		}
+		off += len(line)
+	}
+	// Back up over the blank-line separator before the marker so it stays with the
+	// preserved region — otherwise the corrected text (trailing newlines trimmed)
+	// would be glued directly onto the signature/quote.
+	if boundary < len(text) {
+		for boundary > 0 && text[boundary-1] == '\n' {
+			boundary--
+		}
+	}
+	return boundary
 }
 
 // ensureRePrefix prefixes "Re: " unless the subject already has one.
