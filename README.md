@@ -81,6 +81,8 @@ sudo dnf install ./rpmbuild/RPMS/x86_64/mailbox-*.rpm
 3. **Add your account** — `./bin/mailbox sync --account your@gmail.com --credentials ~/.config/mailbox/credentials.json`. This opens a browser for OAuth login, then syncs your mail. (`--credentials` is optional once the file is at the default path above.)
 4. **Launch** — `./bin/mailbox` to start the GUI.
 
+> **Why set up your own OAuth client?** Mailbox uses Gmail's *restricted* scopes (read/modify/send). Google only lets an app request those from arbitrary users after an annual paid security assessment (CASA), which this hobby project doesn't have. So instead of one published app for everyone, you run your own OAuth client. With a client in **Testing** mode you can add up to **100 Test users** — enough to share one client among yourself, family, or a small team (add each address under the consent screen's *Test users*); everyone authorizes their own Google account against it. Each person's token is theirs and stays in their own keyring.
+
 After the first sync you can just run `./bin/mailbox` — the refresh token is stored in the OS keyring and the config is persisted.
 
 ### Enable the AI features (optional)
