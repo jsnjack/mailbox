@@ -50,8 +50,15 @@ func ensureDesktopFile() {
 		}
 	}
 	dest := filepath.Join(userAppDir(), desktopFileName)
-	if fileExists(dest) {
-		return // already installed for this user
+	if existing, err := os.ReadFile(dest); err == nil {
+		// An entry already exists. Leave it alone unless it's one we wrote (carries
+		// our Comment) but predates the mailto registration — then refresh it so an
+		// older self-install still becomes the default mail handler. A user-edited
+		// entry (without our marker) is never touched.
+		if !isStaleOwnEntry(existing) {
+			return
+		}
+		slog.Info("ui: refreshing stale user desktop entry (adds mailto handler)", "path", dest)
 	}
 	exe, err := os.Executable()
 	if err != nil {
@@ -76,6 +83,16 @@ func ensureDesktopFile() {
 			slog.Debug("ui: update-desktop-database", "err", err)
 		}
 	}
+}
+
+// isStaleOwnEntry reports whether an existing desktop entry is one we previously
+// self-installed (it carries our Comment line) but lacks the mailto handler
+// registration — i.e. it should be refreshed. A user-customised entry without
+// our marker returns false so it is never overwritten.
+func isStaleOwnEntry(content []byte) bool {
+	s := string(content)
+	return strings.Contains(s, "Comment=A native, fast Gmail client") &&
+		!strings.Contains(s, "x-scheme-handler/mailto")
 }
 
 // userAppDir is the per-user applications directory (XDG_DATA_HOME aware).

@@ -47,6 +47,34 @@ func TestEnsureDesktopFile(t *testing.T) {
 		}
 	})
 
+	t.Run("refreshes a stale entry we wrote (adds mailto handler)", func(t *testing.T) {
+		dataHome := t.TempDir()
+		t.Setenv("XDG_DATA_HOME", dataHome)
+		t.Setenv("XDG_DATA_DIRS", t.TempDir())
+
+		userApps := filepath.Join(dataHome, "applications")
+		if err := os.MkdirAll(userApps, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		dest := filepath.Join(userApps, desktopFileName)
+		// An older self-installed entry: our Comment marker, no mailto registration.
+		old := "[Desktop Entry]\nType=Application\nName=Mailbox\n" +
+			"Comment=A native, fast Gmail client\nExec=/old/path/mailbox\n"
+		if err := os.WriteFile(dest, []byte(old), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		ensureDesktopFile()
+
+		b, err := os.ReadFile(dest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(b), "x-scheme-handler/mailto") {
+			t.Errorf("stale entry was not refreshed with the mailto handler; got:\n%s", b)
+		}
+	})
+
 	t.Run("does not clobber an existing user entry", func(t *testing.T) {
 		dataHome := t.TempDir()
 		t.Setenv("XDG_DATA_HOME", dataHome)
