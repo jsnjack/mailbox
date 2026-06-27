@@ -366,7 +366,7 @@ func (w *window) addShortcuts() {
 		case gdk.KEY_Escape:
 			w.goBack()
 		case '?':
-			w.openSettings()
+			w.showShortcuts()
 		default:
 			return false
 		}
