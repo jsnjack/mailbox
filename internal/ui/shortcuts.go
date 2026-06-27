@@ -54,7 +54,7 @@ func (w *window) showShortcuts() {
 	group("View", [][2]string{
 		{"Ctrl +  /  −", "Zoom in / out"},
 		{"Ctrl 0", "Reset zoom"},
-		{"?", "This shortcuts list"},
+		{"?  /  Ctrl ?", "This shortcuts list"},
 	})
 
 	scroller := gtk.NewScrolledWindow()

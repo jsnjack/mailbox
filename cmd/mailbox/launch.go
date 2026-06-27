@@ -53,7 +53,7 @@ func launchUI() error {
 		return fmt.Errorf("no account connected yet; run: mailbox sync --account <email> --credentials <client_secret.json>")
 	}
 
-	deps := ui.Deps{Store: st}
+	deps := ui.Deps{Store: st, Version: Version}
 	for _, a := range accounts {
 		deps.Accounts = append(deps.Accounts, ui.AccountInfo{ID: a.ID, Email: a.Email})
 	}

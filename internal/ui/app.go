@@ -97,6 +97,7 @@ type StatusStats struct {
 // nil (the UI then renders the cache read-only without live updates, on-demand
 // bodies, or message actions).
 type Deps struct {
+	Version       string // app version string, shown in the About dialog
 	Store         *store.Store
 	Hub           *syncer.Hub
 	Accounts      []AccountInfo

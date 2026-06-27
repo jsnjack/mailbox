@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/diamondburned/gotk4-adwaita/pkg/adw"
 	"github.com/diamondburned/gotk4/pkg/glib/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 	"github.com/diamondburned/gotk4/pkg/pango"
@@ -28,7 +29,7 @@ func (w *window) buildStatusBar() gtk.Widgetter {
 	bar.AddCSSClass("status-bar")
 	setMargins(bar, 10, 8, 2, 2)
 
-	w.statusSpinner = gtk.NewSpinner()
+	w.statusSpinner = adw.NewSpinner()
 	w.statusSpinner.SetVisible(false)
 
 	w.statusLabel = gtk.NewLabel("Idle")
@@ -159,8 +160,7 @@ func (w *window) onActivity(e activity.Event) {
 func (w *window) refreshStatusLabel() {
 	if len(w.statusActive) > 0 {
 		if w.activityTimer == 0 {
-			w.statusSpinner.SetVisible(true)
-			w.statusSpinner.Start()
+			w.statusSpinner.SetVisible(true) // AdwSpinner animates while visible
 			w.activityTimer = glib.TimeoutAdd(120, w.tickActivity)
 		}
 		w.paintActivity()
@@ -170,7 +170,6 @@ func (w *window) refreshStatusLabel() {
 		glib.SourceRemove(w.activityTimer)
 		w.activityTimer = 0
 	}
-	w.statusSpinner.Stop()
 	w.statusSpinner.SetVisible(false)
 	if w.lastSyncLabel != "" {
 		w.statusLabel.SetText(w.lastSyncLabel)

@@ -48,7 +48,7 @@ type window struct {
 
 	// Bottom status bar: activity-first (spinner + current op + live elapsed on
 	// the left); cumulative session stats + the log live in a popover.
-	statusSpinner    *gtk.Spinner
+	statusSpinner    *adw.Spinner
 	statusLabel      *gtk.Label
 	statusStatsLabel *gtk.Label           // session stats inside the popover
 	statusLogBox     *gtk.Box             // log lines (newest first) inside the popover
@@ -70,7 +70,7 @@ type window struct {
 	signature    string
 	labelBox     *gtk.ListBox
 	refreshBtn   *gtk.Button
-	syncSpinner  *gtk.Spinner             // shown in place of refreshBtn during a manual sync
+	syncSpinner  *adw.Spinner             // shown in place of refreshBtn during a manual sync
 	sidebar      []sidebarItem            // one entry per row in labelBox (incl. headings)
 	sidebarSig   string                   // signature of the rendered sidebar, to skip no-op rebuilds
 	sectionCache map[string]cachedSection // rendered message sections, reused across thread re-opens
@@ -215,6 +215,37 @@ func (w *window) registerActions() {
 	w.app.AddAction(act)
 }
 
+// registerAppMenuActions wires the primary-menu actions: Preferences (gated on
+// whether settings are wired) and About. (Keyboard Shortcuts is registered in
+// addShortcuts as win.show-help-overlay.)
+func (w *window) registerAppMenuActions() {
+	pref := gio.NewSimpleAction("preferences", nil)
+	pref.ConnectActivate(func(*glib.Variant) { w.openSettings() })
+	pref.SetEnabled(w.deps.AISettings != nil)
+	w.win.AddAction(pref)
+
+	about := gio.NewSimpleAction("about", nil)
+	about.ConnectActivate(func(*glib.Variant) { w.showAbout() })
+	w.win.AddAction(about)
+}
+
+// showAbout presents the standard Adwaita About dialog (app identity, version,
+// links). The icon name matches the app id so a real install shows the icon.
+func (w *window) showAbout() {
+	about := adw.NewAboutDialog()
+	about.SetApplicationName("Mailbox")
+	about.SetApplicationIcon("com.surfly.mailbox")
+	about.SetDeveloperName("Yauhen Shulitski")
+	if v := w.deps.Version; v != "" {
+		about.SetVersion(v)
+	}
+	about.SetComments("A native, fast Gmail client for Linux/GNOME.")
+	about.SetWebsite("https://github.com/jsnjack/mailbox")
+	about.SetIssueURL("https://github.com/jsnjack/mailbox/issues")
+	about.SetLicenseType(gtk.LicenseMITX11)
+	about.Present(w.win)
+}
+
 // openFromNotification focuses the window and opens the conversation containing
 // the message identified by target ("<accountID>|<gmailID>").
 func (w *window) openFromNotification(target string) {
@@ -307,6 +338,17 @@ func (w *window) build() {
 // out when a text field is focused so typing in search still works. Keyvals for
 // printable keys equal their ASCII rune.
 func (w *window) addShortcuts() {
+	// The cheat sheet is reachable three ways: the conventional
+	// win.show-help-overlay action (used by the primary menu), the GNOME-standard
+	// <Ctrl>? accelerator, and a bare "?" matching the app's single-key scheme.
+	// (GtkShortcutsWindow, the old standard surface, is deprecated since GTK 4.18,
+	// and AdwShortcutsDialog isn't in the pinned binding — so this stays a custom
+	// AdwDialog, which is the current recommendation.)
+	help := gio.NewSimpleAction("show-help-overlay", nil)
+	help.ConnectActivate(func(*glib.Variant) { w.showShortcuts() })
+	w.win.AddAction(help)
+	w.app.SetAccelsForAction("win.show-help-overlay", []string{"<Control>question"})
+
 	ec := gtk.NewEventControllerKey()
 	ec.SetPropagationPhase(gtk.PhaseCapture)
 	ec.ConnectKeyPressed(func(keyval, keycode uint, state gdk.ModifierType) bool {
@@ -589,16 +631,28 @@ func (w *window) buildSidebar() *adw.NavigationPage {
 	w.refreshBtn.ConnectClicked(w.onRefresh)
 	hb.PackEnd(w.refreshBtn)
 
-	w.syncSpinner = gtk.NewSpinner()
+	w.syncSpinner = adw.NewSpinner()
 	w.syncSpinner.SetTooltipText("Syncing…")
 	w.syncSpinner.SetVisible(false)
 	hb.PackEnd(w.syncSpinner)
 
-	prefsBtn := gtk.NewButtonFromIconName("emblem-system-symbolic")
-	prefsBtn.SetTooltipText("Preferences")
-	prefsBtn.SetSensitive(w.deps.AISettings != nil)
-	prefsBtn.ConnectClicked(w.openSettings)
-	hb.PackEnd(prefsBtn)
+	// Primary (hamburger) menu — the GNOME-standard home for Preferences,
+	// Keyboard Shortcuts and About, consolidating what used to be a lone gear.
+	w.registerAppMenuActions()
+	menu := gio.NewMenu()
+	pref := gio.NewMenu()
+	pref.Append("Preferences", "win.preferences")
+	menu.AppendSection("", pref)
+	about := gio.NewMenu()
+	about.Append("Keyboard Shortcuts", "win.show-help-overlay")
+	about.Append("About Mailbox", "win.about")
+	menu.AppendSection("", about)
+
+	primaryBtn := gtk.NewMenuButton()
+	primaryBtn.SetIconName("open-menu-symbolic")
+	primaryBtn.SetTooltipText("Main menu")
+	primaryBtn.SetMenuModel(menu)
+	hb.PackEnd(primaryBtn)
 
 	tv := adw.NewToolbarView()
 	tv.AddTopBar(hb)
@@ -1483,12 +1537,7 @@ func openExternal(target string) {
 // is in flight (and back when it finishes), giving the user visible feedback.
 func (w *window) setSyncing(on bool) {
 	w.refreshBtn.SetVisible(!on)
-	w.syncSpinner.SetVisible(on)
-	if on {
-		w.syncSpinner.Start()
-	} else {
-		w.syncSpinner.Stop()
-	}
+	w.syncSpinner.SetVisible(on) // AdwSpinner animates whenever it is visible
 }
 
 func (w *window) onThreadSelected() {
