@@ -127,10 +127,11 @@ type window struct {
 	labelsBtn      *gtk.MenuButton
 	translateBtn   *gtk.Button
 	draftBtn       *gtk.Button
-	overflowBtn    *gtk.MenuButton // star/unread/trash/images live here
-	readerMenuPop  *gtk.Popover    // overflow menu content (built lazily)
-	imagesEnabled  bool            // whether remote images are loaded in the reader
-	blockImages    bool            // global default: block remote images (Preferences)
+	overflowBtn    *gtk.MenuButton   // star/unread/trash/images live here (native menu model)
+	starAction     *gio.SimpleAction // stateful: the open message's Starred toggle
+	imagesAction   *gio.SimpleAction // stateful: the reader's remote-images toggle
+	imagesEnabled  bool              // whether remote images are loaded in the reader
+	blockImages    bool              // global default: block remote images (Preferences)
 
 	// AI inbox categorization: per-thread category cache (thread id → category),
 	// computed in the background for the inbox. inboxCategories gates it.
@@ -835,7 +836,7 @@ func (w *window) buildSelectionBar() {
 		w.refreshList(w.searchEntry.Text()) // re-bind checkboxes
 	})
 
-	archive := gtk.NewButtonFromIconName("folder-download-symbolic")
+	archive := gtk.NewButtonFromIconName("mail-archive-symbolic")
 	archive.SetTooltipText("Archive selected")
 	archive.ConnectClicked(func() { w.bulkApply("Archived", nil, []string{model.LabelInbox}) })
 
@@ -1401,6 +1402,7 @@ func (w *window) onThreadSelected() {
 }
 
 func (w *window) buildReader() *adw.NavigationPage {
+	w.registerReaderActions()
 	w.webview = webkit.NewWebView()
 	w.sectionCache = make(map[string]cachedSection)
 	settings := w.webview.Settings()
@@ -1495,7 +1497,7 @@ func (w *window) buildReader() *adw.NavigationPage {
 	w.replyAllBtn.ConnectClicked(w.onReplyAll)
 	w.replyAllBtn.SetPopover(replyPop)
 
-	w.archiveBtn = gtk.NewButtonFromIconName("folder-download-symbolic")
+	w.archiveBtn = gtk.NewButtonFromIconName("mail-archive-symbolic")
 	w.archiveBtn.SetTooltipText("Archive (a)")
 	w.archiveBtn.ConnectClicked(w.onArchive)
 
@@ -1529,10 +1531,14 @@ func (w *window) buildReader() *adw.NavigationPage {
 	w.overflowBtn = gtk.NewMenuButton()
 	w.overflowBtn.SetIconName("view-more-symbolic")
 	w.overflowBtn.SetTooltipText("More actions")
-	w.readerMenuPop = gtk.NewPopover()
-	w.overflowBtn.SetPopover(w.readerMenuPop)
-	w.overflowBtn.SetCreatePopupFunc(func(*gtk.MenuButton) {
-		w.readerMenuPop.SetChild(w.buildReaderMenu())
+	// A native menu model (standard GTK4): normal-weight rows, native checkmarks
+	// for the toggles, automatic separators. Rebuilt on each open so the dynamic
+	// items (spam/not-spam, delete-forever, find-from-sender) match the context,
+	// with the toggle states synced first.
+	w.overflowBtn.SetCreatePopupFunc(func(btn *gtk.MenuButton) {
+		w.starAction.SetState(glib.NewVariantBoolean(w.openMsg.IsStarred))
+		w.imagesAction.SetState(glib.NewVariantBoolean(w.imagesEnabled))
+		btn.SetPopover(gtk.NewPopoverMenuFromModel(w.buildReaderMenuModel()))
 	})
 
 	hb.PackStart(w.replyAllBtn)
@@ -2445,54 +2451,72 @@ func (w *window) buildLabelsMenu() gtk.Widgetter {
 	return box
 }
 
-// buildReaderMenu is the overflow popover for auxiliary reader actions: star,
-// mark-unread, trash, and the remote-images toggle. (Reply all, Reply, Forward,
-// Archive, Labels, Translate and Draft reply are dedicated header controls.)
-func (w *window) buildReaderMenu() gtk.Widgetter {
-	box := gtk.NewBox(gtk.OrientationVertical, 2)
-	setMargins(box, 6, 6, 6, 6)
-	box.SetSizeRequest(200, -1)
-
-	if w.deps.ModifyLabels != nil {
-		star := gtk.NewCheckButtonWithLabel("Starred")
-		star.SetActive(w.openMsg.IsStarred)
-		setMargins(star, 8, 8, 6, 6)
-		star.ConnectToggled(func() {
-			w.readerMenuPop.Popdown()
-			w.setStarred(star.Active())
-		})
-		box.Append(star)
-		box.Append(w.readerMenuItem("Mark as unread", w.onMarkUnread))
-		box.Append(w.readerMenuItem("Move to Inbox", w.onMoveToInbox))
-		if w.current == model.LabelSpam {
-			box.Append(w.readerMenuItem("Not spam", w.onNotSpam))
-		} else {
-			box.Append(w.readerMenuItem("Report spam", w.onReportSpam))
-		}
-		box.Append(w.readerMenuItem("Move to Trash", w.onTrash))
-		if w.deps.DeleteForever != nil && (w.current == model.LabelTrash || w.current == model.LabelSpam) {
-			box.Append(w.readerMenuItem("Delete forever", w.onDeleteForever))
-		}
-		box.Append(gtk.NewSeparator(gtk.OrientationHorizontal))
+// registerReaderActions registers the win.* actions backing the overflow menu,
+// so the menu can be a native GMenu model (standard GTK4 rendering) rather than
+// hand-built buttons. The non-toggle actions just call the existing handlers;
+// the two toggles are stateful booleans so the menu shows native checkmarks.
+func (w *window) registerReaderActions() {
+	add := func(name string, fn func()) {
+		act := gio.NewSimpleAction(name, nil)
+		act.ConnectActivate(func(*glib.Variant) { fn() })
+		w.win.AddAction(act)
 	}
+	add("reader-unread", w.onMarkUnread)
+	add("reader-move-inbox", w.onMoveToInbox)
+	add("reader-report-spam", w.onReportSpam)
+	add("reader-not-spam", w.onNotSpam)
+	add("reader-trash", w.onTrash)
+	add("reader-delete-forever", w.onDeleteForever)
+	add("reader-find-from", func() { w.searchFrom(w.openMsg.FromAddr) })
 
+	w.starAction = gio.NewSimpleActionStateful("reader-star", nil, glib.NewVariantBoolean(false))
+	w.starAction.ConnectChangeState(func(v *glib.Variant) {
+		w.starAction.SetState(v)
+		w.setStarred(v.Boolean())
+	})
+	w.win.AddAction(w.starAction)
+
+	w.imagesAction = gio.NewSimpleActionStateful("reader-images", nil, glib.NewVariantBoolean(true))
+	w.imagesAction.ConnectChangeState(func(v *glib.Variant) {
+		w.imagesAction.SetState(v)
+		w.setImagesEnabled(v.Boolean())
+	})
+	w.win.AddAction(w.imagesAction)
+}
+
+// buildReaderMenuModel builds the overflow menu for the current context: star,
+// mark-unread, move/spam/trash, optionally find-from-sender, and the remote-
+// images toggle. (Reply all, Reply, Forward, Archive, Labels, Translate and
+// Draft reply are dedicated header controls.) Unlabeled sections render as
+// native separators.
+func (w *window) buildReaderMenuModel() *gio.Menu {
+	menu := gio.NewMenu()
+	if w.deps.ModifyLabels != nil {
+		sec := gio.NewMenu()
+		sec.Append("Starred", "win.reader-star")
+		sec.Append("Mark as unread", "win.reader-unread")
+		sec.Append("Move to Inbox", "win.reader-move-inbox")
+		if w.current == model.LabelSpam {
+			sec.Append("Not spam", "win.reader-not-spam")
+		} else {
+			sec.Append("Report spam", "win.reader-report-spam")
+		}
+		sec.Append("Move to Trash", "win.reader-trash")
+		if w.deps.DeleteForever != nil && (w.current == model.LabelTrash || w.current == model.LabelSpam) {
+			sec.Append("Delete forever", "win.reader-delete-forever")
+		}
+		menu.AppendSection("", sec)
+	}
 	// Find all mail from this sender (Gmail server-side search understands from:).
 	if w.deps.SearchServer != nil && strings.TrimSpace(w.openMsg.FromAddr) != "" {
-		box.Append(w.readerMenuItem("Find emails from sender", func() {
-			w.searchFrom(w.openMsg.FromAddr)
-		}))
-		box.Append(gtk.NewSeparator(gtk.OrientationHorizontal))
+		sec := gio.NewMenu()
+		sec.Append("Find emails from sender", "win.reader-find-from")
+		menu.AppendSection("", sec)
 	}
-
-	img := gtk.NewCheckButtonWithLabel("Show remote images")
-	img.SetActive(w.imagesEnabled)
-	setMargins(img, 8, 8, 6, 6)
-	img.ConnectToggled(func() {
-		w.readerMenuPop.Popdown()
-		w.setImagesEnabled(img.Active())
-	})
-	box.Append(img)
-	return box
+	img := gio.NewMenu()
+	img.Append("Show remote images", "win.reader-images")
+	menu.AppendSection("", img)
+	return menu
 }
 
 // searchFrom shows all mail from an address using a Gmail server-side search
@@ -2507,12 +2531,6 @@ func (w *window) searchFrom(addr string) {
 	} else {
 		w.refreshList(q)
 	}
-}
-
-// readerMenuItem returns a flat menu-style row that closes the overflow popover
-// and runs fn when clicked.
-func (w *window) readerMenuItem(label string, fn func()) *gtk.Button {
-	return menuItemButton(w.readerMenuPop, label, fn)
 }
 
 // cleanHTML sanitizes email body HTML then strips tracking pixels and collapses

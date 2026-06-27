@@ -20,6 +20,15 @@ Move an item into a commit (and delete it here) when it's done.
   prepared statements for the hot queries would shave parse overhead. Low impact per
   the audit; do only if profiling shows it.
 
+## Icons
+
+- **Custom translate icon ("A文").** The translate action uses the stock
+  `accessories-character-map-symbolic` (a character grid — weak metaphor). A custom
+  "A文" glyph would be clearer. First attempt used a stroked SVG (`fill="none"`,
+  `stroke=…`) which GTK's *-symbolic recolor pipeline rendered as a tiny blob — it
+  needs **filled paths** (like `mail-archive-symbolic`/`palm-tree-symbolic`). Redo
+  "A" (with its counter) and "文" as filled outlines and render-test at 16px.
+
 ## Features (noticed while working, not requested yet)
 
 - Hover row actions (archive/star on row hover) in the thread list.

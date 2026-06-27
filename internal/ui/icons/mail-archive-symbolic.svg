@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="#2e3436">
+  <!-- lid -->
+  <rect x="1.5" y="2.5" width="13" height="3.2" rx="1"/>
+  <!-- body with a handle slot cut out (even-odd makes the inner rect a hole) -->
+  <path fill-rule="evenodd" d="M2.6 6.4 h10.8 v6 a1.1 1.1 0 0 1 -1.1 1.1 h-8.6 a1.1 1.1 0 0 1 -1.1 -1.1 z M6 8.4 h4 a0.7 0.7 0 0 1 0 1.4 h-4 a0.7 0.7 0 0 1 0 -1.4 z"/>
+</svg>

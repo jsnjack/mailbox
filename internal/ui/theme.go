@@ -10,14 +10,25 @@ import (
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 )
 
-// palmTreeSVG is a bundled symbolic icon (no palm tree exists in Adwaita); it is
-// written to a cache icon theme dir and registered at startup.
+// Bundled symbolic icons for concepts Adwaita doesn't cover well (a cheerful
+// empty-inbox palm tree; a proper archive box, since the stock archive action
+// reads as "download to folder"). They are written to a cache icon theme dir and
+// registered at startup so they can be used by name.
 //
 //go:embed icons/palm-tree-symbolic.svg
 var palmTreeSVG []byte
 
-// registerCustomIcons installs bundled symbolic icons (the palm tree) into a
-// cache icon theme that GTK searches, so they can be used by name. Best-effort.
+//go:embed icons/mail-archive-symbolic.svg
+var mailArchiveSVG []byte
+
+// bundledIcons maps each custom icon's name to its SVG bytes.
+var bundledIcons = map[string][]byte{
+	"palm-tree-symbolic":    palmTreeSVG,
+	"mail-archive-symbolic": mailArchiveSVG,
+}
+
+// registerCustomIcons installs the bundled symbolic icons into a cache icon
+// theme that GTK searches, so they can be used by name. Best-effort.
 func registerCustomIcons() {
 	display := gdk.DisplayGetDefault()
 	if display == nil {
@@ -33,9 +44,10 @@ func registerCustomIcons() {
 		slog.Warn("ui: icon dir", "err", err)
 		return
 	}
-	if err := os.WriteFile(filepath.Join(dir, "palm-tree-symbolic.svg"), palmTreeSVG, 0o644); err != nil {
-		slog.Warn("ui: write icon", "err", err)
-		return
+	for name, svg := range bundledIcons {
+		if err := os.WriteFile(filepath.Join(dir, name+".svg"), svg, 0o644); err != nil {
+			slog.Warn("ui: write icon", "name", name, "err", err)
+		}
 	}
 	gtk.IconThemeGetForDisplay(display).AddSearchPath(base)
 }
