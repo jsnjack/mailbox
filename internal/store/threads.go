@@ -84,7 +84,13 @@ func (s *Store) ListAllThreads(ctx context.Context, accountID int64, limit, offs
 		return nil, err
 	}
 
-	counts, err := s.threadCountsAll(ctx, accountID)
+	// Count only the threads actually being shown (a capped page), not every
+	// thread in the account.
+	ids := make([]string, len(latest))
+	for i, m := range latest {
+		ids[i] = m.ThreadID
+	}
+	counts, err := s.threadCountsForIDs(ctx, accountID, ids)
 	if err != nil {
 		return nil, err
 	}
@@ -154,15 +160,14 @@ func (s *Store) GetThreadSummary(ctx context.Context, accountID int64, threadID 
 
 // GetThreadSummaries returns a summary (latest message + total/unread counts)
 // for each given thread id, in the same order, skipping ids with no cached
-// message and de-duplicating repeats. It issues two queries per chunk of ids
-// rather than the two-per-thread that looping GetThreadSummary would — turning a
-// search of N hit threads from 2N round-trips into a small constant.
+// message and de-duplicating repeats. It batches the latest-message and count
+// lookups instead of the two-per-thread that looping GetThreadSummary would —
+// turning a search of N hit threads from 2N round-trips into a small constant.
 func (s *Store) GetThreadSummaries(ctx context.Context, accountID int64, threadIDs []string) ([]model.ThreadSummary, error) {
 	if len(threadIDs) == 0 {
 		return nil, nil
 	}
 	latest := make(map[string]model.Message, len(threadIDs))
-	counts := make(map[string]threadCount, len(threadIDs))
 
 	// Chunk the IN-list to stay well under SQLite's bound-variable ceiling.
 	const chunk = 500
@@ -172,17 +177,15 @@ func (s *Store) GetThreadSummaries(ctx context.Context, accountID int64, threadI
 			end = len(threadIDs)
 		}
 		ids := threadIDs[start:end]
-		ph := placeholders(len(ids))
 		args := make([]any, 0, len(ids)+1)
 		args = append(args, accountID)
 		for _, id := range ids {
 			args = append(args, id)
 		}
-
 		rows, err := s.reader.QueryContext(ctx, `
 			SELECT `+msgCols+`
 			FROM messages m
-			WHERE m.account_id = ? AND m.thread_id IN (`+ph+`) AND m.rowid = (
+			WHERE m.account_id = ? AND m.thread_id IN (`+placeholders(len(ids))+`) AND m.rowid = (
 				SELECT m2.rowid FROM messages m2
 				WHERE m2.account_id = m.account_id AND m2.thread_id = m.thread_id
 				ORDER BY m2.internal_date DESC, m2.rowid DESC
@@ -198,17 +201,11 @@ func (s *Store) GetThreadSummaries(ctx context.Context, accountID int64, threadI
 		for _, m := range msgs {
 			latest[m.ThreadID] = m
 		}
+	}
 
-		crows, err := s.reader.QueryContext(ctx, `
-			SELECT thread_id, COUNT(*), COALESCE(SUM(is_unread),0)
-			FROM messages WHERE account_id = ? AND thread_id IN (`+ph+`)
-			GROUP BY thread_id`, args...)
-		if err != nil {
-			return nil, fmt.Errorf("thread summaries (counts): %w", err)
-		}
-		if err := scanThreadCountsInto(crows, counts); err != nil {
-			return nil, err
-		}
+	counts, err := s.threadCountsForIDs(ctx, accountID, threadIDs)
+	if err != nil {
+		return nil, err
 	}
 
 	out := make([]model.ThreadSummary, 0, len(threadIDs))
@@ -253,18 +250,36 @@ func scanThreadCountsInto(rows *sql.Rows, out map[string]threadCount) error {
 	return rows.Err()
 }
 
-// threadCountsAll returns per-thread total/unread message counts across the
-// whole account (not label-scoped) — used by the "All Mail" folder.
-func (s *Store) threadCountsAll(ctx context.Context, accountID int64) (map[string]threadCount, error) {
-	rows, err := s.reader.QueryContext(ctx, `
-		SELECT thread_id, COUNT(*), COALESCE(SUM(is_unread),0)
-		FROM messages WHERE account_id = ?
-		GROUP BY thread_id`, accountID)
-	if err != nil {
-		return nil, fmt.Errorf("thread counts all: %w", err)
+// threadCountsForIDs returns per-thread total/unread message counts for the
+// given thread ids (all messages, not label-scoped), chunked to stay under the
+// bind-variable ceiling. Scoping to the displayed ids avoids a full-account scan
+// when the caller only shows a capped page of threads.
+func (s *Store) threadCountsForIDs(ctx context.Context, accountID int64, ids []string) (map[string]threadCount, error) {
+	out := make(map[string]threadCount, len(ids))
+	const chunk = 500
+	for start := 0; start < len(ids); start += chunk {
+		end := start + chunk
+		if end > len(ids) {
+			end = len(ids)
+		}
+		batch := ids[start:end]
+		args := make([]any, 0, len(batch)+1)
+		args = append(args, accountID)
+		for _, id := range batch {
+			args = append(args, id)
+		}
+		rows, err := s.reader.QueryContext(ctx, `
+			SELECT thread_id, COUNT(*), COALESCE(SUM(is_unread),0)
+			FROM messages WHERE account_id = ? AND thread_id IN (`+placeholders(len(batch))+`)
+			GROUP BY thread_id`, args...)
+		if err != nil {
+			return nil, fmt.Errorf("thread counts for ids: %w", err)
+		}
+		if err := scanThreadCountsInto(rows, out); err != nil {
+			return nil, err
+		}
 	}
-	out := make(map[string]threadCount)
-	return out, scanThreadCountsInto(rows, out)
+	return out, nil
 }
 
 func (s *Store) threadCounts(ctx context.Context, accountID int64, labelID string) (map[string]threadCount, error) {
