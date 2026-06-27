@@ -1648,6 +1648,9 @@ func menuItemButton(pop *gtk.Popover, label string, fn func()) *gtk.Button {
 	l.SetHExpand(true)
 	b.SetChild(l)
 	b.AddCSSClass("flat")
+	// Adwaita renders button labels heavier than native menu items; .menu-item
+	// resets the weight so hand-built popovers match GMenu rows.
+	b.AddCSSClass("menu-item")
 	b.ConnectClicked(func() {
 		pop.Popdown()
 		fn()
