@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // signaturePath is the file holding the user's default email signature (plain
@@ -95,16 +96,20 @@ func LoadAccountSignatures() (map[string]string, error) {
 	return m, nil
 }
 
-// SaveAccountSignature sets the signature for an account email and persists the
-// whole map. An explicit empty string is stored (and means "no signature for
-// this account"), distinct from never having set one (which falls back to the
-// global default).
+// SaveAccountSignature sets the per-account signature for an email and persists
+// the whole map. A blank signature removes the per-account override, so the
+// account falls back to the global default (SignatureFor) — i.e. "blank means
+// use the global signature".
 func SaveAccountSignature(email, sig string) error {
 	sigs, err := LoadAccountSignatures()
 	if err != nil {
 		return err
 	}
-	sigs[email] = sig
+	if strings.TrimSpace(sig) == "" {
+		delete(sigs, email)
+	} else {
+		sigs[email] = sig
+	}
 
 	dir, err := ConfigDir()
 	if err != nil {

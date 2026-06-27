@@ -259,22 +259,22 @@ func (w *window) openSettings() {
 		for email, view := range sigViews {
 			newSig := strings.TrimSpace(bodyText(view.Buffer()))
 			if newSig == sigSeeded[email] {
-				continue // unchanged → keep its existing value / global fallback
+				continue // unchanged → keep its override / global fallback
 			}
 			var err error
 			if email == "" {
 				err = config.SaveSignature(newSig) // no-account mode: global default
 			} else {
+				// Blank removes the per-account override (falls back to global).
 				err = config.SaveAccountSignature(email, newSig)
 			}
 			if err != nil {
 				slog.Warn("ui: save signature", "err", err, "account", email)
-				continue
-			}
-			if email == w.activeEmail {
-				w.signature = newSig
 			}
 		}
+		// Re-resolve the active account's effective signature (it may now fall back
+		// to the global default after a cleared override).
+		w.signature, _ = config.SignatureFor(w.activeEmail)
 	})
 	dialog.Present(w.win)
 }

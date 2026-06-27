@@ -56,12 +56,12 @@ func TestPerAccountSignature(t *testing.T) {
 		t.Fatalf("b@x.com = %q, want global fallback", s)
 	}
 
-	// An explicit empty per-account signature means "no signature", distinct from
-	// the global fallback.
-	if err := SaveAccountSignature("b@x.com", ""); err != nil {
-		t.Fatalf("SaveAccountSignature empty: %v", err)
+	// Clearing a per-account signature (blank) removes the override, so the
+	// account falls back to the global default again.
+	if err := SaveAccountSignature("a@x.com", ""); err != nil {
+		t.Fatalf("SaveAccountSignature clear: %v", err)
 	}
-	if s, _ := SignatureFor("b@x.com"); s != "" {
-		t.Fatalf("b@x.com after explicit empty = %q, want empty", s)
+	if s, _ := SignatureFor("a@x.com"); s != "global sig" {
+		t.Fatalf("a@x.com after clear = %q, want global fallback", s)
 	}
 }
