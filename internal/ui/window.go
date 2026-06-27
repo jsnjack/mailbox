@@ -2056,6 +2056,9 @@ func (w *window) renderConversation(msgs []model.Message) {
 		out := b.String()
 		verdict := parseAuthResults(latestAuth)
 		warnings := phishingWarnings(latest, latestHTML)
+		// Gather attachment rows here (off the main thread); the main thread only
+		// builds the chip widgets.
+		atts := w.threadAttachments(ctx, msgs)
 		slog.Debug("ui: renderConversation", "msgs", len(msgs), "fetched", fetched,
 			"trackers", blocked, "auth", verdict.level, "fetch", fetchDur, "sanitize", time.Since(sanitizeStart))
 		dispatch.Main(func() {
@@ -2066,7 +2069,7 @@ func (w *window) renderConversation(msgs []model.Message) {
 			w.setAuthBadge(verdict)
 			w.setCaution(warnings)
 			w.webview.LoadHtml(wrapHTML(out), "about:blank")
-			w.populateThreadAttachments(msgs)
+			w.showThreadAttachments(atts)
 		})
 	}()
 }
@@ -2103,34 +2106,50 @@ func conversationSection(m model.Message, body model.MessageBody, clean func(str
 
 // populateThreadAttachments shows chips for all attachments across the thread,
 // each opening via its own message.
-func (w *window) populateThreadAttachments(msgs []model.Message) {
-	for child := w.attachBox.FirstChild(); child != nil; child = w.attachBox.FirstChild() {
-		w.attachBox.Remove(child)
-	}
+// threadAttachment is one attachment plus the message it belongs to, gathered
+// off the main thread so widget construction is the only main-thread work.
+type threadAttachment struct {
+	att       model.Attachment
+	accountID int64
+	gmailID   string
+}
+
+// threadAttachments collects every attachment across the thread's messages. It
+// runs off the main thread (one DB query per message) and returns nil when
+// attachments can't be opened.
+func (w *window) threadAttachments(ctx context.Context, msgs []model.Message) []threadAttachment {
 	if w.deps.OpenAttach == nil {
-		w.attachBox.SetVisible(false)
-		return
+		return nil
 	}
-	any := false
+	var out []threadAttachment
 	for _, m := range msgs {
-		atts, err := w.deps.Store.ListAttachments(context.Background(), m.RowID)
+		atts, err := w.deps.Store.ListAttachments(ctx, m.RowID)
 		if err != nil {
 			slog.Warn("ui: list attachments", "id", m.GmailID, "err", err)
 			continue
 		}
-		gmailID := m.GmailID
-		accountID := m.AccountID
 		for _, a := range atts {
-			att := a
-			btn := gtk.NewButton()
-			btn.SetChild(attachmentChip(att))
-			btn.SetTooltipText(att.MimeType)
-			btn.ConnectClicked(func() { w.openAttachment(accountID, gmailID, att.ID) })
-			w.attachBox.Append(btn)
-			any = true
+			out = append(out, threadAttachment{att: a, accountID: m.AccountID, gmailID: m.GmailID})
 		}
 	}
-	w.attachBox.SetVisible(any)
+	return out
+}
+
+// showThreadAttachments rebuilds the attachment chip row from pre-gathered data.
+// Main-thread only (it touches widgets); it does no I/O.
+func (w *window) showThreadAttachments(atts []threadAttachment) {
+	for child := w.attachBox.FirstChild(); child != nil; child = w.attachBox.FirstChild() {
+		w.attachBox.Remove(child)
+	}
+	for _, ta := range atts {
+		ta := ta
+		btn := gtk.NewButton()
+		btn.SetChild(attachmentChip(ta.att))
+		btn.SetTooltipText(ta.att.MimeType)
+		btn.ConnectClicked(func() { w.openAttachment(ta.accountID, ta.gmailID, ta.att.ID) })
+		w.attachBox.Append(btn)
+	}
+	w.attachBox.SetVisible(len(atts) > 0)
 }
 
 func (w *window) openAttachment(accountID int64, gmailID string, attID int64) {
