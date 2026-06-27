@@ -1723,6 +1723,9 @@ func (w *window) buildReader() *adw.NavigationPage {
 	w.header = gtk.NewLabel("")
 	w.header.SetXAlign(0)
 	w.header.SetWrap(true)
+	// Let the user select & copy the subject and sender address from the header
+	// (the message body is in the WebView, which is already selectable).
+	w.header.SetSelectable(true)
 	setMargins(w.header, 12, 12, 8, 8)
 
 	w.attachBox = gtk.NewBox(gtk.OrientationHorizontal, 6)
