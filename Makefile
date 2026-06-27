@@ -2,10 +2,16 @@ BINARY  := mailbox
 PKG     := ./...
 VERSION := 0.0.0
 MONOVA  := $(shell which monova 2> /dev/null)
-PKGPATH := github.com/jsnjack/mailbox/cmd/mailbox
-LDFLAGS  = -ldflags="-X $(PKGPATH).Version=$(VERSION)"
+# version.go is package main, so the linker symbol is main.Version (not the full
+# import path — the import-path form silently no-ops and leaves Version="dev").
+LDFLAGS  = -ldflags="-X main.Version=$(VERSION)"
 # RPM needs a concrete version even before any git tag exists.
 RPMVERSION := $(shell monova 2>/dev/null || echo 0.0.0)
+
+# Release artifacts (binary tarball + RPM) land here.
+DIST   := dist
+ARCH   := $(shell go env GOARCH)
+RELDIR := $(BINARY)-$(RPMVERSION)-linux-$(ARCH)
 
 export PATH := $(PATH):$(shell go env GOPATH)/bin
 # This is a cgo/GTK app: it links against system GTK4/WebKit via pkg-config and
@@ -15,7 +21,7 @@ export CGO_ENABLED := 1
 version:
 ifdef MONOVA
 override VERSION = $(shell monova)
-override LDFLAGS = -ldflags="-X $(PKGPATH).Version=$(VERSION)"
+override LDFLAGS = -ldflags="-X main.Version=$(VERSION)"
 else
 $(info "Install monova with: grm install jsnjack/monova")
 endif
@@ -66,7 +72,30 @@ rpm: packaging/mailbox.spec build
 	    --define "appversion $(RPMVERSION)" packaging/mailbox.spec
 	@echo "==> RPM(s):"; find rpmbuild/RPMS -name '*.rpm' 2>/dev/null
 
-clean:
-	rm -rf bin/ rpmbuild/ $(BINARY)
+# release-artifacts builds the stamped binary, a portable binary tarball, and the
+# RPM into dist/. The binary links dynamically against system GTK4/WebKit, so the
+# tarball still needs those libraries present (the RPM declares them as Requires);
+# the tarball is a convenience, the RPM is the real install.
+release-artifacts: build rpm
+	rm -rf $(DIST)
+	mkdir -p $(DIST)/$(RELDIR)
+	cp bin/$(BINARY) packaging/com.jsnjack.mailbox.desktop packaging/com.jsnjack.mailbox.svg \
+	    LICENSE README.md $(DIST)/$(RELDIR)/
+	tar -C $(DIST) -czf $(DIST)/$(RELDIR).tar.gz $(RELDIR)
+	rm -rf $(DIST)/$(RELDIR)
+	@find rpmbuild/RPMS -name 'mailbox-$(RPMVERSION)-*.rpm' ! -name '*debug*' -exec cp {} $(DIST)/ \;
+	@echo "==> release artifacts in $(DIST)/:"; ls -1 $(DIST)
 
-.PHONY: version build run rpm test vet fmt lint check standards clean
+# release builds the artifacts, then creates a GitHub release tagged v<version>
+# (monova) and uploads the tarball + RPM. Requires an authenticated gh and an
+# 'origin' remote; run on a clean main at the commit you want to tag.
+release: release-artifacts
+	@command -v gh >/dev/null 2>&1 || { echo "gh (GitHub CLI) required: https://cli.github.com/"; exit 1; }
+	gh release create "v$(RPMVERSION)" $(DIST)/*.tar.gz $(DIST)/*.rpm \
+	    --title "$(BINARY) v$(RPMVERSION)" --generate-notes
+	@echo "==> published release v$(RPMVERSION)"
+
+clean:
+	rm -rf bin/ rpmbuild/ $(DIST) $(BINARY)
+
+.PHONY: version build run rpm test vet fmt lint check standards release release-artifacts clean

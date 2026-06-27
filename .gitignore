@@ -7,3 +7,4 @@ mailbox.db
 # OAuth client secrets — never commit
 credentials.json
 client_secret*.json
+dist/
