@@ -2339,16 +2339,19 @@ func (w *window) openDraftForEdit(threadID string) {
 // thread as stacked sections in the reader.
 func (w *window) renderConversation(msgs []model.Message) {
 	latest := msgs[len(msgs)-1]
-	sender := html.EscapeString(displayFrom(latest))
-	if addr := strings.TrimSpace(latest.FromAddr); addr != "" && !strings.EqualFold(addr, displayFrom(latest)) {
-		sender += " &lt;" + html.EscapeString(addr) + "&gt;"
+	// The pinned header is the thread title: subject plus a message count for a
+	// real conversation. Each message's sender/date/recipients live in its own
+	// section below (conversationSection), so the header no longer repeats the
+	// latest message's sender+date — that duplicated the newest section header.
+	subject := strings.TrimSpace(latest.Subject)
+	if subject == "" {
+		subject = "(no subject)"
 	}
-	meta := sender + " · " + latest.InternalDate.Format("Jan 2, 2006 15:04")
+	title := "<b>" + html.EscapeString(subject) + "</b>"
 	if len(msgs) > 1 {
-		meta += fmt.Sprintf(" · %d messages", len(msgs))
+		title += fmt.Sprintf("\n<span size=\"small\">%d messages</span>", len(msgs))
 	}
-	w.header.SetMarkup(fmt.Sprintf("<b>%s</b>\n<span size=\"small\">%s</span>",
-		html.EscapeString(latest.Subject), meta))
+	w.header.SetMarkup(title)
 	// No "Loading…" placeholder: the previous message stays put while bodies are
 	// fetched (the status bar reports progress), then loadReaderHTML swaps to the
 	// rendered thread behind the cover — so there's no blank/black flash.
