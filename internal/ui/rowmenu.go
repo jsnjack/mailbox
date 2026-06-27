@@ -4,20 +4,50 @@ import (
 	"context"
 
 	"github.com/diamondburned/gotk4/pkg/gdk/v4"
+	"github.com/diamondburned/gotk4/pkg/gio/v2"
+	glib "github.com/diamondburned/gotk4/pkg/glib/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 	"github.com/jsnjack/mailbox/internal/model"
 )
 
 // showRowMenu opens a right-click context menu for a thread row at (x,y) within
 // row, with quick label actions that operate on that thread without opening it
-// or entering selection mode.
+// or entering selection mode. It is a native GMenu model whose items target the
+// win.row-* actions (registered in registerListActions), carrying the thread id.
 func (w *window) showRowMenu(row gtk.Widgetter, threadID string, x, y float64) {
 	t, ok := w.threadByID[threadID]
 	if !ok || w.deps.ModifyLabels == nil {
 		return
 	}
+	tv := glib.NewVariantString(threadID)
+	menu := gio.NewMenu()
 
-	pop := gtk.NewPopover()
+	move := gio.NewMenu()
+	if w.current == model.LabelTrash || w.current == model.LabelSpam {
+		move.AppendItem(rowItem("Move to Inbox", "win.row-move-inbox", tv))
+	} else {
+		move.AppendItem(rowItem("Archive", "win.row-archive", tv))
+	}
+	menu.AppendSection("", move)
+
+	flags := gio.NewMenu()
+	if t.Latest.IsStarred {
+		flags.AppendItem(rowItem("Unstar", "win.row-unstar", tv))
+	} else {
+		flags.AppendItem(rowItem("Star", "win.row-star", tv))
+	}
+	if t.UnreadCount > 0 {
+		flags.AppendItem(rowItem("Mark as read", "win.row-mark-read", tv))
+	} else {
+		flags.AppendItem(rowItem("Mark as unread", "win.row-mark-unread", tv))
+	}
+	menu.AppendSection("", flags)
+
+	del := gio.NewMenu()
+	del.AppendItem(rowItem("Move to Trash", "win.row-trash", tv))
+	menu.AppendSection("", del)
+
+	pop := gtk.NewPopoverMenuFromModel(menu)
 	pop.SetParent(row)
 	pop.SetHasArrow(false)
 	rect := gdk.NewRectangle(int(x), int(y), 1, 1)
@@ -25,37 +55,14 @@ func (w *window) showRowMenu(row gtk.Widgetter, threadID string, x, y float64) {
 	// Detach from the row when dismissed so the recycled row isn't left parenting
 	// a stale popover.
 	pop.ConnectClosed(func() { pop.Unparent() })
-
-	box := gtk.NewBox(gtk.OrientationVertical, 2)
-	setMargins(box, 6, 6, 6, 6)
-	box.SetSizeRequest(180, -1)
-	add := func(label string, fn func()) { box.Append(menuItemButton(pop, label, fn)) }
-
-	if w.current == model.LabelTrash || w.current == model.LabelSpam {
-		add("Move to Inbox", func() {
-			w.threadModifyAll(threadID, "Moved to Inbox", []string{model.LabelInbox}, []string{model.LabelTrash, model.LabelSpam})
-		})
-	} else {
-		add("Archive", func() {
-			w.threadModifyAll(threadID, "Archived", nil, []string{model.LabelInbox})
-		})
-	}
-	if t.Latest.IsStarred {
-		add("Unstar", func() { w.applyLabels([]model.Message{t.Latest}, nil, []string{model.LabelStarred}, nil) })
-	} else {
-		add("Star", func() { w.applyLabels([]model.Message{t.Latest}, []string{model.LabelStarred}, nil, nil) })
-	}
-	if t.UnreadCount > 0 {
-		add("Mark as read", func() { w.threadModifyAll(threadID, "Marked as read", nil, []string{model.LabelUnread}) })
-	} else {
-		add("Mark as unread", func() { w.applyLabels([]model.Message{t.Latest}, []string{model.LabelUnread}, nil, nil) })
-	}
-	add("Move to Trash", func() {
-		w.threadModifyAll(threadID, "Moved to Trash", []string{model.LabelTrash}, []string{model.LabelInbox})
-	})
-
-	pop.SetChild(box)
 	pop.Popup()
+}
+
+// rowItem builds a menu item bound to a win.row-* action carrying the thread id.
+func rowItem(label, action string, target *glib.Variant) *gio.MenuItem {
+	item := gio.NewMenuItem(label, "")
+	item.SetActionAndTargetValue(action, target)
+	return item
 }
 
 // threadModifyAll applies a label delta to every message in a thread (loaded

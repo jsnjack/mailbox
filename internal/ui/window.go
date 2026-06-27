@@ -143,6 +143,7 @@ type window struct {
 	overflowBtn    *gtk.MenuButton   // star/unread/trash/images live here (native menu model)
 	starAction     *gio.SimpleAction // stateful: the open message's Starred toggle
 	imagesAction   *gio.SimpleAction // stateful: the reader's remote-images toggle
+	unreadAction   *gio.SimpleAction // stateful: the thread-list "show unread only" filter
 	imagesEnabled  bool              // whether remote images are loaded in the reader
 	blockImages    bool              // global default: block remote images (Preferences)
 
@@ -680,6 +681,7 @@ func (w *window) rebuildAccountSwitcher() {
 }
 
 func (w *window) buildThreadList() *adw.NavigationPage {
+	w.registerListActions()
 	w.threadByID = make(map[string]model.ThreadSummary)
 	w.rowSig = make(map[string]string)
 	w.threadModel = gtk.NewStringList(nil)
@@ -803,8 +805,12 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 	w.listMenuBtn = gtk.NewMenuButton()
 	w.listMenuBtn.SetIconName("view-more-symbolic")
 	w.listMenuBtn.SetTooltipText("View options")
+	// Native menu model: a check item for the unread filter, mark-all-read where
+	// it applies. Rebuilt per open (the folder gates mark-all-read), with the
+	// toggle state synced first.
 	w.listMenuBtn.SetCreatePopupFunc(func(btn *gtk.MenuButton) {
-		btn.SetPopover(w.buildListMenu())
+		w.unreadAction.SetState(glib.NewVariantBoolean(w.unreadOnly))
+		btn.SetPopover(gtk.NewPopoverMenuFromModel(w.buildListMenuModel()))
 	})
 	hb.PackEnd(w.listMenuBtn)
 
@@ -823,32 +829,77 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 	return adw.NewNavigationPage(tv, "Messages")
 }
 
-// buildListMenu is the thread-list overflow popover: the unread-only filter and
-// (where it applies) mark-all-read. Built fresh per open to reflect the current
-// filter state and folder.
-func (w *window) buildListMenu() *gtk.Popover {
-	pop := gtk.NewPopover()
-	box := gtk.NewBox(gtk.OrientationVertical, 2)
-	setMargins(box, 6, 6, 6, 6)
-	box.SetSizeRequest(190, -1)
-
-	unread := gtk.NewCheckButtonWithLabel("Show unread only")
-	unread.SetActive(w.unreadOnly)
-	setMargins(unread, 8, 8, 6, 6)
-	unread.ConnectToggled(func() {
-		w.unreadOnly = unread.Active()
+// registerListActions registers the win.* actions backing the thread-list
+// overflow menu and the per-row right-click menu, so both render as native
+// GMenu models. The row actions take the clicked row's thread id as a string
+// target, since one action serves whichever row was right-clicked.
+func (w *window) registerListActions() {
+	// Overflow: unread-only is a stateful toggle (native checkmark); mark-all-read
+	// is a plain action.
+	w.unreadAction = gio.NewSimpleActionStateful("list-unread-only", nil, glib.NewVariantBoolean(w.unreadOnly))
+	w.unreadAction.ConnectChangeState(func(v *glib.Variant) {
+		w.unreadAction.SetState(v)
+		w.unreadOnly = v.Boolean()
 		w.refreshList(w.searchEntry.Text())
 		w.saveViewState()
 	})
-	box.Append(unread)
+	w.win.AddAction(w.unreadAction)
 
+	markAll := gio.NewSimpleAction("list-mark-all-read", nil)
+	markAll.ConnectActivate(func(*glib.Variant) { w.onMarkAllRead() })
+	w.win.AddAction(markAll)
+
+	// Per-row context actions; each carries the row's thread id.
+	row := func(name string, fn func(threadID string)) {
+		act := gio.NewSimpleAction(name, glib.NewVariantType("s"))
+		act.ConnectActivate(func(p *glib.Variant) {
+			if p != nil {
+				fn(p.String())
+			}
+		})
+		w.win.AddAction(act)
+	}
+	row("row-archive", func(id string) { w.threadModifyAll(id, "Archived", nil, []string{model.LabelInbox}) })
+	row("row-move-inbox", func(id string) {
+		w.threadModifyAll(id, "Moved to Inbox", []string{model.LabelInbox}, []string{model.LabelTrash, model.LabelSpam})
+	})
+	row("row-trash", func(id string) {
+		w.threadModifyAll(id, "Moved to Trash", []string{model.LabelTrash}, []string{model.LabelInbox})
+	})
+	row("row-mark-read", func(id string) { w.threadModifyAll(id, "Marked as read", nil, []string{model.LabelUnread}) })
+	row("row-star", func(id string) {
+		w.rowLatest(id, func(m model.Message) { w.applyLabels([]model.Message{m}, []string{model.LabelStarred}, nil, nil) })
+	})
+	row("row-unstar", func(id string) {
+		w.rowLatest(id, func(m model.Message) { w.applyLabels([]model.Message{m}, nil, []string{model.LabelStarred}, nil) })
+	})
+	row("row-mark-unread", func(id string) {
+		w.rowLatest(id, func(m model.Message) { w.applyLabels([]model.Message{m}, []string{model.LabelUnread}, nil, nil) })
+	})
+}
+
+// rowLatest runs fn with the newest message of the given thread, if it is still
+// known in the list model (the row may have been recycled).
+func (w *window) rowLatest(threadID string, fn func(model.Message)) {
+	if t, ok := w.threadByID[threadID]; ok {
+		fn(t.Latest)
+	}
+}
+
+// buildListMenuModel is the thread-list overflow menu model: the unread-only
+// filter (a native check item) and, where it applies, mark-all-read. Rebuilt
+// per open so it reflects the current folder.
+func (w *window) buildListMenuModel() *gio.Menu {
+	menu := gio.NewMenu()
+	menu.Append("Show unread only", "win.list-unread-only")
 	// "Mark all read" is meaningful per folder, but not for the All Mail view
 	// (it spans every label and Gmail offers no such bulk op there).
 	if w.deps.MarkAllRead != nil && w.current != allMailID {
-		box.Append(menuItemButton(pop, "Mark all as read", w.onMarkAllRead))
+		sec := gio.NewMenu()
+		sec.Append("Mark all as read", "win.list-mark-all-read")
+		menu.AppendSection("", sec)
 	}
-	pop.SetChild(box)
-	return pop
+	return menu
 }
 
 func (w *window) onMarkAllRead() {
@@ -1572,20 +1623,17 @@ func (w *window) buildReader() *adw.NavigationPage {
 	hb := adw.NewHeaderBar()
 	hb.SetShowTitle(false) // "Reader" is redundant — drop it for a cleaner header
 
-	// Reply-all is the primary action; its dropdown offers Reply and Forward.
-	replyPop := gtk.NewPopover()
-	replyMenu := gtk.NewBox(gtk.OrientationVertical, 2)
-	setMargins(replyMenu, 6, 6, 6, 6)
-	replyMenu.SetSizeRequest(160, -1)
-	replyMenu.Append(menuItemButton(replyPop, "Reply", w.onReply))
-	replyMenu.Append(menuItemButton(replyPop, "Forward", w.onForward))
-	replyPop.SetChild(replyMenu)
+	// Reply-all is the primary action; its dropdown offers Reply and Forward as a
+	// native menu model (so the items show their accelerators and read normally).
+	replyMenu := gio.NewMenu()
+	replyMenu.Append("Reply", "win.reader-reply")
+	replyMenu.Append("Forward", "win.reader-forward")
 
 	w.replyAllBtn = adw.NewSplitButton()
 	w.replyAllBtn.SetIconName("mail-reply-all-symbolic")
 	w.replyAllBtn.SetTooltipText("Reply all (dropdown: Reply, Forward)")
 	w.replyAllBtn.ConnectClicked(w.onReplyAll)
-	w.replyAllBtn.SetPopover(replyPop)
+	w.replyAllBtn.SetMenuModel(replyMenu)
 
 	w.archiveBtn = gtk.NewButtonFromIconName("mail-archive-symbolic")
 	w.archiveBtn.SetTooltipText("Archive (a)")
@@ -1637,25 +1685,6 @@ func (w *window) buildReader() *adw.NavigationPage {
 	tv.AddTopBar(hb)
 	tv.SetContent(w.readerStack)
 	return adw.NewNavigationPage(tv, "Reader")
-}
-
-// menuItemButton returns a flat, full-width, left-aligned button styled like a
-// menu row; clicking it closes pop and runs fn.
-func menuItemButton(pop *gtk.Popover, label string, fn func()) *gtk.Button {
-	b := gtk.NewButton()
-	l := gtk.NewLabel(label)
-	l.SetXAlign(0)
-	l.SetHExpand(true)
-	b.SetChild(l)
-	b.AddCSSClass("flat")
-	// Adwaita renders button labels heavier than native menu items; .menu-item
-	// resets the weight so hand-built popovers match GMenu rows.
-	b.AddCSSClass("menu-item")
-	b.ConnectClicked(func() {
-		pop.Popdown()
-		fn()
-	})
-	return b
 }
 
 func (w *window) setActionsSensitive(on bool) {
@@ -2572,6 +2601,8 @@ func (w *window) registerReaderActions() {
 		act.ConnectActivate(func(*glib.Variant) { fn() })
 		w.win.AddAction(act)
 	}
+	add("reader-reply", w.onReply)
+	add("reader-forward", w.onForward)
 	add("reader-unread", w.onMarkUnread)
 	add("reader-move-inbox", w.onMoveToInbox)
 	add("reader-report-spam", w.onReportSpam)

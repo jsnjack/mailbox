@@ -97,11 +97,6 @@ const appCSS = `
 	color: @accent_color;
 }
 
-/* Hand-built popover rows (gtk.Button + label) inherit Adwaita's heavier
-   button label weight, which reads as "bold" next to native menu items.
-   Reset them to a normal menu-item weight. */
-.menu-item label { font-weight: normal; }
-
 /* Opaque cover shown over the message view while it loads, so WebKit's
    content-swap never flashes black through. White matches email content. */
 .reader-cover { background-color: #ffffff; }
