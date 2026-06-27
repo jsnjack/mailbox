@@ -66,7 +66,8 @@ func rowItem(label, action string, target *glib.Variant) *gio.MenuItem {
 }
 
 // threadModifyAll applies a label delta to every message in a thread (loaded
-// from the store), then toasts verb when non-empty.
+// from the store), then shows an undo toast (reversing the change) when verb is
+// non-empty — so a right-click archive/trash is as recoverable as the reader's.
 func (w *window) threadModifyAll(threadID, verb string, add, remove []string) {
 	msgs, err := w.deps.Store.ListThreadMessages(context.Background(), w.activeID, threadID)
 	if err != nil || len(msgs) == 0 {
@@ -74,6 +75,6 @@ func (w *window) threadModifyAll(threadID, verb string, add, remove []string) {
 	}
 	w.applyLabels(msgs, add, remove, nil)
 	if verb != "" {
-		w.toast(verb)
+		w.showUndoToast(verb, msgs, add, remove)
 	}
 }

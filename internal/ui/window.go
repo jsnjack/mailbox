@@ -1100,7 +1100,7 @@ func (w *window) bulkApply(verb string, add, remove []string) {
 		return
 	}
 	w.applyLabels(msgs, add, remove, nil)
-	w.toast(fmt.Sprintf("%s %d conversations", verb, n))
+	w.showUndoToast(fmt.Sprintf("%s %d conversations", verb, n), msgs, add, remove)
 }
 
 // onSearchAllMail runs a Gmail server-side search for the current query, caches

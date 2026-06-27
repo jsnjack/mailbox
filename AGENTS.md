@@ -198,7 +198,9 @@ mode so the debounced search-changed signal and 60s background refreshes don't
 clobber them with an empty local FTS pass. A selection-mode toggle
 turns rows into checkboxes with a bulk-action bar (Archive / Trash / Mark read),
 applying the change to every selected conversation in one batched `ModifyLabels`
-call (`bulkApply`). The AI-draft dialog offers on-demand quick replies
+call (`bulkApply`). Label changes from the bulk bar and the right-click row menu
+(`threadModifyAll`) show the same reversing "Undo" toast (`showUndoToast`) as the
+reader's archive/trash, so every archive/trash is recoverable. The AI-draft dialog offers on-demand quick replies
 (`SmartReplies`, behind a "Suggest quick replies" button).
 Compose supports attachments (a file picker adds them; `BuildMIME` emits
 multipart/mixed with base64 parts). Sending uses Undo Send: the compose closes
