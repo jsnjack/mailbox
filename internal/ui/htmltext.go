@@ -20,19 +20,29 @@ var trackerSrcPatterns = []string{
 	"/decode_serialized_blob", "/imp.gif", "/oo.gif",
 }
 
-// stripTrackers removes likely tracking pixels from (already-sanitized) email
-// HTML: <img> elements that are 1x1/tiny or whose src matches a known tracker
-// pattern. Real, visible images are kept, so images can load by default without
-// leaking that the message was opened. Returns the body's inner HTML and the
-// number of trackers removed.
-func stripTrackers(htmlStr string) (string, int) {
+// cleanEmailHTML performs the two structural passes a rendered email needs, in a
+// single parse + serialize of (already-sanitized) HTML:
+//
+//   - strips likely tracking pixels — <img> elements that are 1x1/tiny or whose
+//     src matches a known tracker pattern — so images can load by default without
+//     leaking that the message was opened (real, visible images are kept); and
+//   - wraps each top-level <blockquote> (a quoted reply history) in a native
+//     <details> disclosure so long quote chains collapse behind a "Show quoted
+//     text" toggle.
+//
+// It returns the body's inner HTML and the number of trackers removed. If neither
+// pass changed anything the input is returned verbatim, so a miss never alters
+// rendering and no re-serialization cost is paid. (Previously these were two
+// separate parse/walk/render passes; folding them halves the per-message cost.)
+func cleanEmailHTML(htmlStr string) (string, int) {
 	doc, err := html.Parse(strings.NewReader(htmlStr))
 	if err != nil {
 		return htmlStr, 0
 	}
 	removed := 0
-	var walk func(n *html.Node)
-	walk = func(n *html.Node) {
+	var quotes []*html.Node
+	var walk func(n *html.Node, inQuote bool)
+	walk = func(n *html.Node, inQuote bool) {
 		var next *html.Node
 		for c := n.FirstChild; c != nil; c = next {
 			next = c.NextSibling
@@ -41,13 +51,33 @@ func stripTrackers(htmlStr string) (string, int) {
 				removed++
 				continue
 			}
-			walk(c)
+			isBlockquote := c.Type == html.ElementNode && c.Data == "blockquote"
+			if isBlockquote && !inQuote {
+				quotes = append(quotes, c) // top-level only; nested are left inside
+			}
+			walk(c, inQuote || isBlockquote)
 		}
 	}
-	walk(doc)
-	if removed == 0 {
+	walk(doc, false)
+
+	if removed == 0 && len(quotes) == 0 {
 		return htmlStr, 0 // unchanged; avoid re-serializing
 	}
+	for _, bq := range quotes {
+		parent := bq.Parent
+		if parent == nil {
+			continue
+		}
+		details := &html.Node{Type: html.ElementNode, Data: "details"}
+		summary := &html.Node{Type: html.ElementNode, Data: "summary",
+			Attr: []html.Attribute{{Key: "style", Val: "cursor:pointer;color:#888;font-size:90%;margin:4px 0"}}}
+		summary.AppendChild(&html.Node{Type: html.TextNode, Data: "Show quoted text"})
+		parent.InsertBefore(details, bq)
+		parent.RemoveChild(bq)
+		details.AppendChild(summary)
+		details.AppendChild(bq)
+	}
+
 	body := findBody(doc)
 	if body == nil {
 		return htmlStr, removed
@@ -99,60 +129,6 @@ func tinyDim(v string) bool {
 	}
 	n, err := strconv.Atoi(v)
 	return err == nil && n <= 2
-}
-
-// collapseQuotes wraps each top-level <blockquote> (a quoted reply history) in a
-// native <details> disclosure, so long quote chains collapse behind a "Show
-// quoted text" toggle. It runs on already-sanitized HTML and adds only trusted
-// markup. If there are no blockquotes the input is returned unchanged — so a
-// miss never alters rendering. Nested blockquotes are left inside their parent.
-func collapseQuotes(htmlStr string) string {
-	doc, err := html.Parse(strings.NewReader(htmlStr))
-	if err != nil {
-		return htmlStr
-	}
-	var quotes []*html.Node
-	var walk func(n *html.Node, inQuote bool)
-	walk = func(n *html.Node, inQuote bool) {
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			isBlockquote := c.Type == html.ElementNode && c.Data == "blockquote"
-			if isBlockquote && !inQuote {
-				quotes = append(quotes, c)
-			}
-			walk(c, inQuote || isBlockquote)
-		}
-	}
-	walk(doc, false)
-	if len(quotes) == 0 {
-		return htmlStr // unchanged; avoid re-serializing
-	}
-
-	for _, bq := range quotes {
-		parent := bq.Parent
-		if parent == nil {
-			continue
-		}
-		details := &html.Node{Type: html.ElementNode, Data: "details"}
-		summary := &html.Node{Type: html.ElementNode, Data: "summary",
-			Attr: []html.Attribute{{Key: "style", Val: "cursor:pointer;color:#888;font-size:90%;margin:4px 0"}}}
-		summary.AppendChild(&html.Node{Type: html.TextNode, Data: "Show quoted text"})
-		parent.InsertBefore(details, bq)
-		parent.RemoveChild(bq)
-		details.AppendChild(summary)
-		details.AppendChild(bq)
-	}
-
-	body := findBody(doc)
-	if body == nil {
-		return htmlStr
-	}
-	var b strings.Builder
-	for c := body.FirstChild; c != nil; c = c.NextSibling {
-		if err := html.Render(&b, c); err != nil {
-			return htmlStr
-		}
-	}
-	return b.String()
 }
 
 // findBody returns the <body> element of a parsed document.

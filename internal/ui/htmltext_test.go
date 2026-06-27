@@ -47,13 +47,13 @@ func TestTranslateHTMLTextPreservesMarkup(t *testing.T) {
 	}
 }
 
-func TestStripTrackers(t *testing.T) {
+func TestCleanEmailHTMLStripsTrackers(t *testing.T) {
 	in := `<p>Hi</p>` +
 		`<img src="https://cdn.example.com/logo.png" width="200" height="50">` + // legit
 		`<img src="https://t.example.com/o.gif" width="1" height="1">` + // 1x1 pixel
 		`<img src="https://esp.example.com/wf/open?u=123">` + // tracker pattern
 		`<img src="https://x.example.com/p.gif" style="width:1px;height:1px">` // styled pixel
-	out, blocked := stripTrackers(in)
+	out, blocked := cleanEmailHTML(in)
 
 	if !strings.Contains(out, "logo.png") {
 		t.Fatalf("legit image was removed: %s", out)
@@ -66,33 +66,49 @@ func TestStripTrackers(t *testing.T) {
 	if blocked != 3 {
 		t.Fatalf("blocked count = %d, want 3", blocked)
 	}
-	// No trackers → returned unchanged, zero count.
+	// No trackers and no quotes → returned unchanged, zero count.
 	clean := `<p>Just text and a <img src="a.png" width="100" height="100"></p>`
-	if got, n := stripTrackers(clean); got != clean || n != 0 {
+	if got, n := cleanEmailHTML(clean); got != clean || n != 0 {
 		t.Fatalf("clean HTML changed: %q (n=%d)", got, n)
 	}
 }
 
-func TestCollapseQuotes(t *testing.T) {
+func TestCleanEmailHTMLCollapsesQuotes(t *testing.T) {
 	// A blockquote is wrapped in a <details> with a summary; its content survives.
 	in := `<p>My reply.</p><blockquote>On Mon, X wrote: original text</blockquote>`
-	out := collapseQuotes(in)
+	out, _ := cleanEmailHTML(in)
 	for _, frag := range []string{"<details>", "<summary", "Show quoted text", "original text", "My reply."} {
 		if !strings.Contains(out, frag) {
 			t.Fatalf("output missing %q:\n%s", frag, out)
 		}
 	}
 
-	// No blockquote → unchanged.
+	// No blockquote and no tracker → unchanged.
 	plain := `<p>Just a note, no quote.</p>`
-	if got := collapseQuotes(plain); got != plain {
-		t.Fatalf("plain HTML changed: %q", got)
+	if got, n := cleanEmailHTML(plain); got != plain || n != 0 {
+		t.Fatalf("plain HTML changed: %q (n=%d)", got, n)
 	}
 
 	// A nested blockquote is not double-wrapped (only one <details>).
 	nested := `<blockquote>outer <blockquote>inner</blockquote></blockquote>`
-	if n := strings.Count(collapseQuotes(nested), "<details>"); n != 1 {
-		t.Fatalf("nested blockquote produced %d <details>, want 1", n)
+	if out, _ := cleanEmailHTML(nested); strings.Count(out, "<details>") != 1 {
+		t.Fatalf("nested blockquote produced %d <details>, want 1", strings.Count(out, "<details>"))
+	}
+}
+
+func TestCleanEmailHTMLStripsAndCollapsesTogether(t *testing.T) {
+	// Both passes apply in one go: the tracker inside the quote is removed and the
+	// quote is collapsed.
+	in := `<p>Reply</p><blockquote>old <img src="https://t.example.com/o.gif" width="1" height="1"> text</blockquote>`
+	out, blocked := cleanEmailHTML(in)
+	if blocked != 1 {
+		t.Fatalf("blocked = %d, want 1", blocked)
+	}
+	if strings.Contains(out, "o.gif") {
+		t.Fatalf("tracker survived: %s", out)
+	}
+	if !strings.Contains(out, "<details>") || !strings.Contains(out, "old") {
+		t.Fatalf("quote not collapsed or content lost: %s", out)
 	}
 }
 

@@ -70,7 +70,7 @@ behind a toggle). The reader sanitizes with an email-tuned bluemonday policy
 script: a strict per-render CSP (`script-src` pinned to a nonce, `default-src
 'none'`) plus the sanitizer mean no email-supplied script can run or reach the
 network. Remote images load by default, but tracking pixels are stripped before
-render (`stripTrackers`: 1x1/tiny imgs, 1px-styled imgs, and known open-tracker
+render (`cleanEmailHTML`: 1x1/tiny imgs, 1px-styled imgs, and known open-tracker
 URL patterns) and the count is surfaced as a "🛡 N trackers blocked" indicator.
 A sender-authentication badge shows Gmail's SPF/DKIM/DMARC verdict
 (`ToBody` captures `Authentication-Results` into `raw_headers`; `parseAuthResults`
@@ -80,7 +80,7 @@ link text, compared at the registrable-domain level — no AI/network) surfaced 
 an amber caution line; a shield button additionally runs an on-demand AI
 phishing analysis (`AnalyzeEmail` — verdict + reasons, fed the auth/heuristic
 signals, shown in the shared AI card). A thread is rendered newest-message-first, with quoted reply history collapsed
-behind a native <details> "Show quoted text" toggle (`collapseQuotes`, no JS). An AI-summary button reveals a card
+behind a native <details> "Show quoted text" toggle (`cleanEmailHTML`, same single HTML pass as tracker stripping, no JS). An AI-summary button reveals a card
 pinned above the conversation that streams a bullet summary (`SummarizeThread`),
 cached by the thread's message-id fingerprint (`summaryKey`) so reopening is
 instant and a new reply auto-invalidates it. Message headers show the sender's
