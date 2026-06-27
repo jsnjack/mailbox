@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 
 	"github.com/jsnjack/mailbox/internal/ai"
 	"github.com/jsnjack/mailbox/internal/model"
@@ -17,6 +18,18 @@ import (
 
 // appID is the GTK/D-Bus application identifier.
 const appID = "com.surfly.mailbox"
+
+// applicationID is the id the GApplication registers under. A test sandbox can
+// override it via MAILBOX_APP_ID so it runs as a distinct instance alongside a
+// real one — same session bus (so the OS keyring still resolves OAuth tokens and
+// the AI key), just a different bus name, so launching it doesn't merely activate
+// the running app.
+func applicationID() string {
+	if id := os.Getenv("MAILBOX_APP_ID"); id != "" {
+		return id
+	}
+	return appID
+}
 
 // AccountInfo identifies a connected account for the switcher.
 type AccountInfo struct {

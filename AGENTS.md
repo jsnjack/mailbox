@@ -175,7 +175,14 @@ with `SetShowContent` driving navigation when collapsed. Single-key shortcuts
 (bubble-phase key controller, so text entries keep their input): j/k navigate
 threads, r reply, a archive, c compose, / focus search. Test hooks:
 `MAILBOX_OPEN_FIRST=1` opens the newest message on launch; `MAILBOX_WIN_SIZE=WxH`
-overrides the initial window size.
+overrides the initial window size; `MAILBOX_APP_ID` overrides the GApplication id
+so a sandbox instance runs alongside a real one instead of activating it.
+
+Verify GUI changes with `scripts/sandbox-run.sh` rather than launching the
+installed app: it copies the live DB + config into a temp dir, points the XDG
+dirs there, runs under Xvfb with a distinct `MAILBOX_APP_ID` on the real session
+bus (so the keyring still resolves OAuth tokens + the AI key), screenshots, and
+cleans up — live data, zero interference with a running instance.
 
 Dependency rule: `store`/`gmailapi`/`sync`/`auth`/`ai` MUST NOT import any GTK
 package (they are headless and unit-testable without a display). `ui` MUST NOT

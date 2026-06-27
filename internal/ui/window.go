@@ -33,7 +33,7 @@ import (
 )
 
 func newAdwApplication() *adw.Application {
-	return adw.NewApplication(appID, gio.ApplicationFlagsNone)
+	return adw.NewApplication(applicationID(), gio.ApplicationFlagsNone)
 }
 
 // window owns the widget tree and the currently displayed selection.
