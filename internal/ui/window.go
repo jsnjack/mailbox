@@ -709,6 +709,17 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 		// scroll-recycled row never looks "unchanged" to the next diff.
 		w.rowSig[id] = w.renderSig(id)
 		row := threadRow(w.threadByID[id], outgoing, w.categories[id])
+		// Right-click a row for quick actions (archive/star/read/trash) without
+		// opening it. A fresh row+gesture is created each bind, so the captured id
+		// always matches what's shown.
+		if !w.selectMode && w.deps.ModifyLabels != nil {
+			rc := gtk.NewGestureClick()
+			rc.SetButton(3) // secondary (right) button
+			rc.ConnectPressed(func(_ int, x, y float64) {
+				w.showRowMenu(row, id, x, y)
+			})
+			row.AddController(rc)
+		}
 		if !w.selectMode {
 			li.SetChild(row)
 			return

@@ -28,7 +28,6 @@ Move an item into a commit (and delete it here) when it's done.
 
 ## Features (noticed while working, not requested yet)
 
-- Hover row actions (archive/star on row hover) in the thread list.
 - Right-click context menu on a thread row (archive / star / mark-read / trash)
   without opening it or entering selection mode.
 - Per-account signature (currently one global signature).
