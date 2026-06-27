@@ -1470,10 +1470,14 @@ func (w *window) buildReader() *adw.NavigationPage {
 	box.Append(w.trackerLabel)
 	box.Append(w.webview)
 
-	empty := adw.NewStatusPage()
-	empty.SetIconName("mail-unread-symbolic")
-	empty.SetTitle("No message selected")
-	empty.SetDescription("Choose a message from the list to read it here.")
+	// The reader's empty state is just a centered, dimmed envelope — no text.
+	empty := gtk.NewImageFromIconName("mail-unread-symbolic")
+	empty.SetPixelSize(96)
+	empty.AddCSSClass("dim-label")
+	empty.SetHAlign(gtk.AlignCenter)
+	empty.SetVAlign(gtk.AlignCenter)
+	empty.SetHExpand(true)
+	empty.SetVExpand(true)
 
 	w.readerStack = gtk.NewStack()
 	w.readerStack.AddNamed(empty, "empty")
