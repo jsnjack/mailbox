@@ -85,16 +85,15 @@ type window struct {
 
 	// virtualized list grouped by conversation: a StringList of thread ids drives
 	// a ListView; the factory builds visible rows from threadByID.
-	threadModel  *gtk.StringList
-	threadSel    *gtk.SingleSelection
-	threadView   *gtk.ListView
-	threadStack  *gtk.Stack      // "list" vs "empty" placeholder
-	emptyPage    *adw.StatusPage // the "empty" placeholder (text set per context)
-	readerStack  *gtk.Stack      // "message" vs "empty" placeholder
-	readerCover  *gtk.Box        // opaque cover over the webview during a load (hides the swap flash)
-	markReadBtn  *gtk.Button
-	unreadToggle *gtk.ToggleButton // "show unread only" filter for the current view
-	unreadOnly   bool
+	threadModel *gtk.StringList
+	threadSel   *gtk.SingleSelection
+	threadView  *gtk.ListView
+	threadStack *gtk.Stack      // "list" vs "empty" placeholder
+	emptyPage   *adw.StatusPage // the "empty" placeholder (text set per context)
+	readerStack *gtk.Stack      // "message" vs "empty" placeholder
+	readerCover *gtk.Box        // opaque cover over the webview during a load (hides the swap flash)
+	listMenuBtn *gtk.MenuButton // thread-list overflow (unread-only filter + mark-all-read)
+	unreadOnly  bool
 	// multi-select triage: a selection mode with per-row checkboxes and a bulk
 	// action bar.
 	selectBtn         *gtk.ToggleButton
@@ -139,7 +138,6 @@ type window struct {
 	openMsg        model.Message
 	replyAllBtn    *adw.SplitButton // primary action; dropdown has Reply/Forward
 	archiveBtn     *gtk.Button
-	labelsBtn      *gtk.MenuButton
 	translateBtn   *gtk.Button
 	draftBtn       *gtk.Button
 	overflowBtn    *gtk.MenuButton   // star/unread/trash/images live here (native menu model)
@@ -468,7 +466,6 @@ func (w *window) present() {
 		}
 		if vs.UnreadOnly {
 			w.unreadOnly = true
-			w.unreadToggle.SetActive(true)
 		}
 		if vs.Zoom >= 0.5 && vs.Zoom <= 3.0 {
 			w.readerZoom = vs.Zoom
@@ -800,21 +797,16 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 	hb := adw.NewHeaderBar()
 	hb.SetShowTitle(false) // "Messages" is redundant — the pane is self-evident
 
-	w.unreadToggle = gtk.NewToggleButton()
-	w.unreadToggle.SetIconName("mail-unread-symbolic")
-	w.unreadToggle.SetTooltipText("Show unread only")
-	w.unreadToggle.ConnectToggled(func() {
-		w.unreadOnly = w.unreadToggle.Active()
-		w.refreshList(w.searchEntry.Text())
-		w.saveViewState()
+	// Infrequent list-scope actions (unread-only filter, mark-all-read) live in a
+	// small overflow menu rather than cluttering the header. Rebuilt per open so
+	// it reflects the current filter state and folder.
+	w.listMenuBtn = gtk.NewMenuButton()
+	w.listMenuBtn.SetIconName("view-more-symbolic")
+	w.listMenuBtn.SetTooltipText("View options")
+	w.listMenuBtn.SetCreatePopupFunc(func(btn *gtk.MenuButton) {
+		btn.SetPopover(w.buildListMenu())
 	})
-	hb.PackStart(w.unreadToggle)
-
-	w.markReadBtn = gtk.NewButtonFromIconName("mail-read-symbolic")
-	w.markReadBtn.SetTooltipText("Mark all as read")
-	w.markReadBtn.SetSensitive(w.deps.MarkAllRead != nil)
-	w.markReadBtn.ConnectClicked(w.onMarkAllRead)
-	hb.PackEnd(w.markReadBtn)
+	hb.PackEnd(w.listMenuBtn)
 
 	// Multi-select triage (only when label changes are possible).
 	if w.deps.ModifyLabels != nil {
@@ -829,6 +821,34 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 	tv.AddTopBar(hb)
 	tv.SetContent(content)
 	return adw.NewNavigationPage(tv, "Messages")
+}
+
+// buildListMenu is the thread-list overflow popover: the unread-only filter and
+// (where it applies) mark-all-read. Built fresh per open to reflect the current
+// filter state and folder.
+func (w *window) buildListMenu() *gtk.Popover {
+	pop := gtk.NewPopover()
+	box := gtk.NewBox(gtk.OrientationVertical, 2)
+	setMargins(box, 6, 6, 6, 6)
+	box.SetSizeRequest(190, -1)
+
+	unread := gtk.NewCheckButtonWithLabel("Show unread only")
+	unread.SetActive(w.unreadOnly)
+	setMargins(unread, 8, 8, 6, 6)
+	unread.ConnectToggled(func() {
+		w.unreadOnly = unread.Active()
+		w.refreshList(w.searchEntry.Text())
+		w.saveViewState()
+	})
+	box.Append(unread)
+
+	// "Mark all read" is meaningful per folder, but not for the All Mail view
+	// (it spans every label and Gmail offers no such bulk op there).
+	if w.deps.MarkAllRead != nil && w.current != allMailID {
+		box.Append(menuItemButton(pop, "Mark all as read", w.onMarkAllRead))
+	}
+	pop.SetChild(box)
+	return pop
 }
 
 func (w *window) onMarkAllRead() {
@@ -1571,15 +1591,6 @@ func (w *window) buildReader() *adw.NavigationPage {
 	w.archiveBtn.SetTooltipText("Archive (a)")
 	w.archiveBtn.ConnectClicked(w.onArchive)
 
-	w.labelsBtn = gtk.NewMenuButton()
-	w.labelsBtn.SetIconName("user-bookmarks-symbolic")
-	w.labelsBtn.SetTooltipText("Labels")
-	labelsPop := gtk.NewPopover()
-	w.labelsBtn.SetPopover(labelsPop)
-	w.labelsBtn.SetCreatePopupFunc(func(*gtk.MenuButton) {
-		labelsPop.SetChild(w.buildLabelsMenu())
-	})
-
 	// AI actions (only useful when an assistant is configured).
 	w.translateBtn = gtk.NewButtonFromIconName("translate-symbolic")
 	w.translateBtn.SetTooltipText("Translate to English (t)")
@@ -1614,7 +1625,6 @@ func (w *window) buildReader() *adw.NavigationPage {
 	hb.PackStart(w.replyAllBtn)
 	hb.PackStart(w.archiveBtn)
 	hb.PackEnd(w.overflowBtn)
-	hb.PackEnd(w.labelsBtn)
 	if w.deps.Assistant != nil {
 		hb.PackEnd(w.draftBtn)
 		hb.PackEnd(w.translateBtn)
@@ -1648,7 +1658,6 @@ func menuItemButton(pop *gtk.Popover, label string, fn func()) *gtk.Button {
 func (w *window) setActionsSensitive(on bool) {
 	canModify := on && w.deps.ModifyLabels != nil
 	w.archiveBtn.SetSensitive(canModify)
-	w.labelsBtn.SetSensitive(canModify)
 	w.replyAllBtn.SetSensitive(on && w.deps.Send != nil)
 	canAI := on && w.deps.Assistant != nil
 	w.translateBtn.SetSensitive(canAI)
@@ -1937,9 +1946,6 @@ func (w *window) clearReader() {
 
 func (w *window) selectLabel(labelID string) {
 	w.current = labelID
-	// "Mark all read" is meaningful per folder, but not for the All Mail view
-	// (it spans every label and Gmail offers no such bulk op there).
-	w.markReadBtn.SetSensitive(w.deps.MarkAllRead != nil && labelID != allMailID)
 	// The "empty folder" banner appears only in Trash/Spam.
 	if w.deps.EmptyFolder != nil && (labelID == model.LabelTrash || labelID == model.LabelSpam) {
 		name := "Trash"
@@ -2533,6 +2539,26 @@ func (w *window) buildLabelsMenu() gtk.Widgetter {
 	return box
 }
 
+// showLabelsDialog opens the label chooser (buildLabelsMenu) as a dialog. Labels
+// moved out of the reader header into the overflow menu (it's used rarely).
+func (w *window) showLabelsDialog() {
+	scroller := gtk.NewScrolledWindow()
+	scroller.SetPolicy(gtk.PolicyNever, gtk.PolicyAutomatic)
+	scroller.SetChild(w.buildLabelsMenu())
+	scroller.SetVExpand(true)
+
+	tv := adw.NewToolbarView()
+	tv.AddTopBar(adw.NewHeaderBar())
+	tv.SetContent(scroller)
+
+	dialog := adw.NewDialog()
+	dialog.SetTitle("Labels")
+	dialog.SetContentWidth(320)
+	dialog.SetContentHeight(400)
+	dialog.SetChild(tv)
+	dialog.Present(w.win)
+}
+
 // registerReaderActions registers the win.* actions backing the overflow menu,
 // so the menu can be a native GMenu model (standard GTK4 rendering) rather than
 // hand-built buttons. The non-toggle actions just call the existing handlers;
@@ -2549,6 +2575,7 @@ func (w *window) registerReaderActions() {
 	add("reader-not-spam", w.onNotSpam)
 	add("reader-trash", w.onTrash)
 	add("reader-delete-forever", w.onDeleteForever)
+	add("reader-labels", w.showLabelsDialog)
 	add("reader-find-from", func() { w.searchFrom(w.openMsg.FromAddr) })
 
 	w.starAction = gio.NewSimpleActionStateful("reader-star", nil, glib.NewVariantBoolean(false))
@@ -2567,8 +2594,8 @@ func (w *window) registerReaderActions() {
 }
 
 // buildReaderMenuModel builds the overflow menu for the current context: star,
-// mark-unread, move/spam/trash, optionally find-from-sender, and the remote-
-// images toggle. (Reply all, Reply, Forward, Archive, Labels, Translate and
+// mark-unread, move/spam/trash, labels, optionally find-from-sender, and the
+// remote-images toggle. (Reply all, Reply, Forward, Archive, Translate and
 // Draft reply are dedicated header controls.) Unlabeled sections render as
 // native separators.
 func (w *window) buildReaderMenuModel() *gio.Menu {
@@ -2588,6 +2615,10 @@ func (w *window) buildReaderMenuModel() *gio.Menu {
 			sec.Append("Delete forever", "win.reader-delete-forever")
 		}
 		menu.AppendSection("", sec)
+
+		lbl := gio.NewMenu()
+		lbl.Append("Labels…", "win.reader-labels")
+		menu.AppendSection("", lbl)
 	}
 	// Find all mail from this sender (Gmail server-side search understands from:).
 	if w.deps.SearchServer != nil && strings.TrimSpace(w.openMsg.FromAddr) != "" {
