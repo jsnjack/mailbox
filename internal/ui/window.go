@@ -57,6 +57,10 @@ type window struct {
 	activityTimer    glib.SourceHandle
 	lastSyncLabel    string // idle text once a sync has completed
 	accountBox       *gtk.ListBox
+	// accountHeader wraps the switcher list-box and its separator; it is hidden
+	// when no account is connected (zero-account first run) and revealed once the
+	// first account is added, so the switcher appears without a restart.
+	accountHeader *gtk.Box
 	// accountNames maps account email → user-assigned display name ("Home",
 	// "Work"); accountBadges maps account id → its unread-inbox count pill in the
 	// switcher, so badges can refresh in place when any account syncs.
@@ -66,6 +70,7 @@ type window struct {
 	// in Preferences); empty means none.
 	signature    string
 	labelBox     *gtk.ListBox
+	newBtn       *gtk.Button // "New message" — gated on having a connected account
 	refreshBtn   *gtk.Button
 	syncSpinner  *adw.Spinner             // shown in place of refreshBtn during a manual sync
 	sidebar      []sidebarItem            // one entry per row in labelBox (incl. headings)
@@ -598,42 +603,44 @@ func (w *window) buildSidebar() *adw.NavigationPage {
 	scroller.SetChild(w.labelBox)
 
 	box := gtk.NewBox(gtk.OrientationVertical, 0)
-	// Always use the account list-box (even for a single account) so the switcher
-	// can be refreshed in place when an account is added at runtime.
-	if len(w.deps.Accounts) >= 1 {
-		w.accountBox = gtk.NewListBox()
-		w.accountBox.AddCSSClass("navigation-sidebar")
-		for _, a := range w.deps.Accounts {
-			w.accountBox.Append(w.accountSwitcherRow(a))
-		}
-		w.accountBox.ConnectRowSelected(func(row *gtk.ListBoxRow) {
-			if row == nil {
-				return
-			}
-			if i := row.Index(); i >= 0 && i < len(w.deps.Accounts) {
-				w.setActiveAccount(w.deps.Accounts[i])
-			}
-		})
-		if r := w.accountBox.RowAtIndex(0); r != nil {
-			w.accountBox.SelectRow(r)
-		}
-		box.Append(w.accountBox)
-		box.Append(gtk.NewSeparator(gtk.OrientationHorizontal))
+	// Always build the account list-box (even for zero or one account) so the
+	// switcher can be populated and revealed in place when an account is added at
+	// runtime. accountHeader is hidden until at least one account is connected.
+	w.accountBox = gtk.NewListBox()
+	w.accountBox.AddCSSClass("navigation-sidebar")
+	for _, a := range w.deps.Accounts {
+		w.accountBox.Append(w.accountSwitcherRow(a))
 	}
+	w.accountBox.ConnectRowSelected(func(row *gtk.ListBoxRow) {
+		if row == nil {
+			return
+		}
+		if i := row.Index(); i >= 0 && i < len(w.deps.Accounts) {
+			w.setActiveAccount(w.deps.Accounts[i])
+		}
+	})
+	if r := w.accountBox.RowAtIndex(0); r != nil {
+		w.accountBox.SelectRow(r)
+	}
+	w.accountHeader = gtk.NewBox(gtk.OrientationVertical, 0)
+	w.accountHeader.Append(w.accountBox)
+	w.accountHeader.Append(gtk.NewSeparator(gtk.OrientationHorizontal))
+	w.accountHeader.SetVisible(len(w.deps.Accounts) >= 1)
+	box.Append(w.accountHeader)
 	box.Append(scroller)
 
 	hb := adw.NewHeaderBar()
-	newBtn := gtk.NewButtonFromIconName("mail-message-new-symbolic")
-	newBtn.SetTooltipText("New message")
-	newBtn.SetSensitive(w.deps.Send != nil)
-	newBtn.ConnectClicked(func() {
+	w.newBtn = gtk.NewButtonFromIconName("mail-message-new-symbolic")
+	w.newBtn.SetTooltipText("New message")
+	w.newBtn.SetSensitive(w.deps.Send != nil && len(w.deps.Accounts) > 0)
+	w.newBtn.ConnectClicked(func() {
 		w.openCompose(model.OutgoingMessage{}, "", "New message")
 	})
-	hb.PackStart(newBtn)
+	hb.PackStart(w.newBtn)
 
 	w.refreshBtn = gtk.NewButtonFromIconName("view-refresh-symbolic")
 	w.refreshBtn.SetTooltipText("Sync now")
-	w.refreshBtn.SetSensitive(w.deps.Sync != nil)
+	w.refreshBtn.SetSensitive(w.deps.Sync != nil && len(w.deps.Accounts) > 0)
 	w.refreshBtn.ConnectClicked(w.onRefresh)
 
 	w.syncSpinner = adw.NewSpinner()
@@ -742,6 +749,9 @@ func (w *window) rebuildAccountSwitcher() {
 			w.accountBox.SelectRow(r)
 		}
 	}
+	if w.accountHeader != nil {
+		w.accountHeader.SetVisible(len(w.deps.Accounts) >= 1)
+	}
 	w.refreshAccountUnread()
 }
 
@@ -754,9 +764,26 @@ func (w *window) addAccount(a AccountInfo) {
 			return // already present
 		}
 	}
+	first := len(w.deps.Accounts) == 0
 	w.deps.Accounts = append(w.deps.Accounts, a)
 	if w.accountBox != nil {
 		w.rebuildAccountSwitcher()
+	}
+	if first {
+		// Coming from a zero-account first run: enable compose/sync and switch the
+		// (until-now empty) UI to the new account so its mail loads. setActiveAccount
+		// no-ops if a.ID already matches, so force it from the sentinel id.
+		if w.newBtn != nil {
+			w.newBtn.SetSensitive(w.deps.Send != nil)
+		}
+		if w.refreshBtn != nil {
+			w.refreshBtn.SetSensitive(w.deps.Sync != nil)
+		}
+		w.activeID = 0
+		w.setActiveAccount(a)
+		if r := w.accountBox.RowAtIndex(0); r != nil {
+			w.accountBox.SelectRow(r)
+		}
 	}
 }
 
@@ -1379,6 +1406,18 @@ func (w *window) showThreads(sums []model.ThreadSummary) {
 	if len(sums) == 0 {
 		w.emptyPage.SetChild(nil)
 		switch {
+		case len(w.deps.Accounts) == 0:
+			w.emptyPage.SetIconName("mail-send-symbolic")
+			w.emptyPage.SetTitle("Welcome to Mailbox")
+			w.emptyPage.SetDescription("Connect an account to get started.")
+			if w.deps.AddIMAPAccount != nil {
+				btn := gtk.NewButtonWithLabel("Add account…")
+				btn.AddCSSClass("pill")
+				btn.AddCSSClass("suggested-action")
+				btn.SetHAlign(gtk.AlignCenter)
+				btn.ConnectClicked(func() { w.openAddAccount() })
+				w.emptyPage.SetChild(btn)
+			}
 		case strings.TrimSpace(w.searchEntry.Text()) != "":
 			q := strings.TrimSpace(w.searchEntry.Text())
 			w.emptyPage.SetIconName("edit-find-symbolic")

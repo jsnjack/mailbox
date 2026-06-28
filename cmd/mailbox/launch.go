@@ -37,9 +37,10 @@ const syncInterval = 60 * time.Second
 // when an expired history watermark forces a resync (see engine.Resync).
 const resyncBackfillLimit = 500
 
-// launchUI opens the store, picks the first connected account, optionally builds
-// a live Gmail client (when credentials are available), starts a background
-// incremental sync, and runs the GTK application.
+// launchUI opens the store, starts a background sync for each connected account
+// (building a live Gmail/IMAP backend when credentials are available), and runs
+// the GTK application. Zero accounts is fine — the app opens to a welcome empty
+// state from which the first account is connected via the Add account dialog.
 func launchUI(mailto string) error {
 	if err := config.EnsureDirs(); err != nil {
 		return err
@@ -59,10 +60,8 @@ func launchUI(mailto string) error {
 	if err != nil {
 		return err
 	}
-	if len(accounts) == 0 {
-		return fmt.Errorf("no account connected yet; run: mailbox sync --account <email> --credentials <client_secret.json>")
-	}
-
+	// Zero accounts is fine: the app opens to an empty state and the user connects
+	// their first account from the Add account dialog (Gmail or IMAP).
 	deps := ui.Deps{Store: st, Version: Version}
 	for _, a := range accounts {
 		deps.Accounts = append(deps.Accounts, ui.AccountInfo{ID: a.ID, Email: a.Email})
@@ -264,134 +263,133 @@ func launchUI(mailto string) error {
 		}
 	}
 
-	// Live features (change events + every operation hook) are wired whenever any
-	// account has a working backend — Gmail REST OR IMAP. Keying this on the Gmail
-	// `clients` map would leave an IMAP-only setup read-only and event-less.
-	if len(backends) > 0 {
-		deps.Hub = hub
-		clientFor := func(accountID int64) (backend.Backend, error) {
-			accountsMu.Lock()
-			b := backends[accountID]
-			accountsMu.Unlock()
-			if b != nil {
-				return b, nil
-			}
-			return nil, fmt.Errorf("account %d has no connected client", accountID)
+	// Operation hooks + change events are wired unconditionally — even with zero
+	// accounts — so the add-account dialog can connect the first account live.
+	// Each hook routes through clientFor, which errors gracefully until a backend
+	// exists for the account.
+	deps.Hub = hub
+	clientFor := func(accountID int64) (backend.Backend, error) {
+		accountsMu.Lock()
+		b := backends[accountID]
+		accountsMu.Unlock()
+		if b != nil {
+			return b, nil
 		}
-		deps.FetchBody = func(ctx context.Context, accountID int64, gmailID string) error {
-			c, err := clientFor(accountID)
-			if err != nil {
-				return err
-			}
-			done := act.Begin("fetch", "Fetching message")
-			err = engine.FetchBody(ctx, c, accountID, gmailID)
+		return nil, fmt.Errorf("account %d has no connected client", accountID)
+	}
+	deps.FetchBody = func(ctx context.Context, accountID int64, gmailID string) error {
+		c, err := clientFor(accountID)
+		if err != nil {
+			return err
+		}
+		done := act.Begin("fetch", "Fetching message")
+		err = engine.FetchBody(ctx, c, accountID, gmailID)
+		done(doneNote(err))
+		return err
+	}
+	deps.ModifyLabels = func(ctx context.Context, accountID int64, gmailIDs []string, add, remove []string) error {
+		c, err := clientFor(accountID)
+		if err != nil {
+			return err
+		}
+		return engine.ModifyLabelsBatch(ctx, c, accountID, gmailIDs, add, remove)
+	}
+	deps.Send = func(ctx context.Context, accountID int64, msg model.OutgoingMessage) error {
+		c, err := clientFor(accountID)
+		if err != nil {
+			return err
+		}
+		done := act.Begin("send", "Sending message")
+		err = engine.Send(ctx, c, accountID, msg)
+		done(doneNote(err))
+		return err
+	}
+	deps.SaveDraft = func(ctx context.Context, accountID int64, msg model.OutgoingMessage) error {
+		c, err := clientFor(accountID)
+		if err != nil {
+			return err
+		}
+		return engine.SaveDraft(ctx, c, accountID, msg)
+	}
+	deps.FindDraftID = func(ctx context.Context, accountID int64, gmailID string) (string, error) {
+		c, err := clientFor(accountID)
+		if err != nil {
+			return "", err
+		}
+		return c.FindDraftID(ctx, gmailID)
+	}
+	deps.OpenAttach = func(ctx context.Context, accountID int64, gmailID string, attID int64) (string, error) {
+		c, err := clientFor(accountID)
+		if err != nil {
+			return "", err
+		}
+		return engine.OpenAttachment(ctx, c, gmailID, attID)
+	}
+	deps.Sync = func(ctx context.Context, accountID int64) error {
+		c, err := clientFor(accountID)
+		if err != nil {
+			return err
+		}
+		_, err = engine.Incremental(ctx, c, accountID)
+		if errors.Is(err, syncer.ErrHistoryExpired) {
+			_, err = engine.Resync(ctx, c, accountID, resyncBackfillLimit)
+		}
+		return err
+	}
+	deps.SearchServer = func(ctx context.Context, accountID int64, query string, max int) ([]string, error) {
+		c, err := clientFor(accountID)
+		if err != nil {
+			return nil, err
+		}
+		done := act.Begin("search", "Searching all mail")
+		ids, err := engine.SearchServer(ctx, c, accountID, query, max)
+		if err != nil {
 			done(doneNote(err))
+		} else {
+			done(fmt.Sprintf("%d result(s)", len(ids)))
+		}
+		return ids, err
+	}
+	deps.MarkAllRead = func(ctx context.Context, accountID int64, labelID string) error {
+		c, err := clientFor(accountID)
+		if err != nil {
 			return err
 		}
-		deps.ModifyLabels = func(ctx context.Context, accountID int64, gmailIDs []string, add, remove []string) error {
-			c, err := clientFor(accountID)
-			if err != nil {
-				return err
-			}
-			return engine.ModifyLabelsBatch(ctx, c, accountID, gmailIDs, add, remove)
-		}
-		deps.Send = func(ctx context.Context, accountID int64, msg model.OutgoingMessage) error {
-			c, err := clientFor(accountID)
-			if err != nil {
-				return err
-			}
-			done := act.Begin("send", "Sending message")
-			err = engine.Send(ctx, c, accountID, msg)
-			done(doneNote(err))
+		return engine.MarkLabelRead(ctx, c, accountID, labelID)
+	}
+	deps.SweepOutbox = func(ctx context.Context, accountID int64) error {
+		c, err := clientFor(accountID)
+		if err != nil {
 			return err
 		}
-		deps.SaveDraft = func(ctx context.Context, accountID int64, msg model.OutgoingMessage) error {
-			c, err := clientFor(accountID)
-			if err != nil {
-				return err
-			}
-			return engine.SaveDraft(ctx, c, accountID, msg)
-		}
-		deps.FindDraftID = func(ctx context.Context, accountID int64, gmailID string) (string, error) {
-			c, err := clientFor(accountID)
-			if err != nil {
-				return "", err
-			}
-			return c.FindDraftID(ctx, gmailID)
-		}
-		deps.OpenAttach = func(ctx context.Context, accountID int64, gmailID string, attID int64) (string, error) {
-			c, err := clientFor(accountID)
-			if err != nil {
-				return "", err
-			}
-			return engine.OpenAttachment(ctx, c, gmailID, attID)
-		}
-		deps.Sync = func(ctx context.Context, accountID int64) error {
-			c, err := clientFor(accountID)
-			if err != nil {
-				return err
-			}
-			_, err = engine.Incremental(ctx, c, accountID)
-			if errors.Is(err, syncer.ErrHistoryExpired) {
-				_, err = engine.Resync(ctx, c, accountID, resyncBackfillLimit)
-			}
+		_, err = engine.SweepOutbox(ctx, c, accountID)
+		return err
+	}
+	deps.RetryOutbox = func(ctx context.Context, accountID, id int64) error {
+		c, err := clientFor(accountID)
+		if err != nil {
 			return err
 		}
-		deps.SearchServer = func(ctx context.Context, accountID int64, query string, max int) ([]string, error) {
-			c, err := clientFor(accountID)
-			if err != nil {
-				return nil, err
-			}
-			done := act.Begin("search", "Searching all mail")
-			ids, err := engine.SearchServer(ctx, c, accountID, query, max)
-			if err != nil {
-				done(doneNote(err))
-			} else {
-				done(fmt.Sprintf("%d result(s)", len(ids)))
-			}
-			return ids, err
-		}
-		deps.MarkAllRead = func(ctx context.Context, accountID int64, labelID string) error {
-			c, err := clientFor(accountID)
-			if err != nil {
-				return err
-			}
-			return engine.MarkLabelRead(ctx, c, accountID, labelID)
-		}
-		deps.SweepOutbox = func(ctx context.Context, accountID int64) error {
-			c, err := clientFor(accountID)
-			if err != nil {
-				return err
-			}
-			_, err = engine.SweepOutbox(ctx, c, accountID)
+		return engine.RetryOutbox(ctx, c, accountID, id)
+	}
+	// Discarding needs no Gmail client, so a stuck send can be cleared even
+	// when the account currently has no working connection.
+	deps.DiscardOutbox = func(ctx context.Context, accountID, id int64) error {
+		return engine.DiscardOutbox(ctx, accountID, id)
+	}
+	deps.DeleteForever = func(ctx context.Context, accountID int64, gmailIDs []string) error {
+		c, err := clientFor(accountID)
+		if err != nil {
 			return err
 		}
-		deps.RetryOutbox = func(ctx context.Context, accountID, id int64) error {
-			c, err := clientFor(accountID)
-			if err != nil {
-				return err
-			}
-			return engine.RetryOutbox(ctx, c, accountID, id)
+		return engine.DeletePermanently(ctx, c, accountID, gmailIDs)
+	}
+	deps.EmptyFolder = func(ctx context.Context, accountID int64, labelID string) (int, error) {
+		c, err := clientFor(accountID)
+		if err != nil {
+			return 0, err
 		}
-		// Discarding needs no Gmail client, so a stuck send can be cleared even
-		// when the account currently has no working connection.
-		deps.DiscardOutbox = func(ctx context.Context, accountID, id int64) error {
-			return engine.DiscardOutbox(ctx, accountID, id)
-		}
-		deps.DeleteForever = func(ctx context.Context, accountID int64, gmailIDs []string) error {
-			c, err := clientFor(accountID)
-			if err != nil {
-				return err
-			}
-			return engine.DeletePermanently(ctx, c, accountID, gmailIDs)
-		}
-		deps.EmptyFolder = func(ctx context.Context, accountID int64, labelID string) (int, error) {
-			c, err := clientFor(accountID)
-			if err != nil {
-				return 0, err
-			}
-			return engine.EmptyLabel(ctx, c, accountID, labelID)
-		}
+		return engine.EmptyLabel(ctx, c, accountID, labelID)
 	}
 
 	if asst, err := buildAssistant(); err != nil {

@@ -89,6 +89,9 @@ func (w *window) openAddAccount() {
 		oauthToken, oauthEmail, oauthDone = "", "", false
 		isOAuth := p.Auth == config.AuthGoogle || p.Auth == config.AuthMicrosoft || p.Auth == config.AuthGmailREST
 		passwordRow.SetVisible(!isOAuth)
+		// Gmail's native REST backend uses no IMAP/SMTP servers, so the Advanced
+		// section is meaningless for it.
+		advGroup.SetVisible(p.Auth != config.AuthGmailREST)
 		h := p.Hint
 		if p.URL != "" {
 			h += "  " + p.URL
