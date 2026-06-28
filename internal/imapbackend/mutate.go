@@ -85,7 +85,7 @@ func (b *Backend) ApplyLabels(ctx context.Context, ids []string, add, remove []s
 		dest := b.moveDest(add, remove)
 
 		for folder, g := range groupByFolder(ids) {
-			sel, err := c.selectMailbox(folder, false)
+			sel, err := c.reselect(folder, false) // fresh SELECT: a move is destructive
 			if err != nil {
 				return err
 			}
@@ -138,7 +138,7 @@ func (b *Backend) moveDest(add, remove []string) string {
 func (b *Backend) Delete(ctx context.Context, ids []string) error {
 	return b.withConn(func(c *conn) error {
 		for folder, g := range groupByFolder(ids) {
-			sel, err := c.selectMailbox(folder, false)
+			sel, err := c.reselect(folder, false) // fresh SELECT: EXPUNGE is irreversible
 			if err != nil {
 				return err
 			}

@@ -148,14 +148,11 @@ func (w *window) openAddAccount() {
 			status.SetText("Enter your email address.")
 			return
 		}
-		if p.Auth == config.AuthGmailREST {
-			status.SetText("For Gmail, run: mailbox sync --account " + acct.Email + " (or pick another provider).")
-			return
-		}
 		addBtn.SetSensitive(false)
 
-		// OAuth providers: sign in (browser) to obtain a refresh token, then add.
-		if p.Auth == config.AuthGoogle || p.Auth == config.AuthMicrosoft {
+		// OAuth providers (Gmail REST, Gmail-IMAP, Outlook): sign in via the
+		// browser to obtain a refresh token, then add.
+		if p.Auth == config.AuthGmailREST || p.Auth == config.AuthGoogle || p.Auth == config.AuthMicrosoft {
 			if oauthDone {
 				finish(acct, oauthToken)
 				return

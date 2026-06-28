@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapclient"
@@ -68,8 +69,9 @@ type Backend struct {
 	accountID int64
 	cred      Credential
 
-	sem  chan struct{} // bounds live connections to poolSize
-	idle chan *conn    // reusable idle connections
+	sem    chan struct{} // bounds live connections to poolSize
+	idle   chan *conn    // reusable idle connections
+	closed atomic.Bool   // set by Close so in-flight releases don't repool
 
 	folderMu      sync.Mutex        // guards the folder caches below
 	folderToLabel map[string]string // mailbox name → label id (special-use mapped)
@@ -130,6 +132,9 @@ func (b *Backend) dial(handler *imapclient.UnilateralDataHandler) (*imapclient.C
 // acquire takes a connection from the pool (reusing an idle one or dialing a new
 // one), blocking until a slot is free.
 func (b *Backend) acquire() (*conn, error) {
+	if b.closed.Load() {
+		return nil, fmt.Errorf("imap: backend closed")
+	}
 	b.sem <- struct{}{}
 	select {
 	case c := <-b.idle:
@@ -145,9 +150,10 @@ func (b *Backend) acquire() (*conn, error) {
 }
 
 // release returns a healthy connection to the pool, or closes a failed one (so
-// the next acquire re-dials).
+// the next acquire re-dials). A connection released after Close is closed too,
+// not leaked into a drained pool.
 func (b *Backend) release(c *conn, healthy bool) {
-	if healthy {
+	if healthy && !b.closed.Load() {
 		select {
 		case b.idle <- c:
 			<-b.sem
@@ -161,14 +167,17 @@ func (b *Backend) release(c *conn, healthy bool) {
 
 // withConn runs fn on a pooled connection. The connection is returned to the pool
 // on success and closed on any error (conservative — an error may have left it in
-// a bad state).
-func (b *Backend) withConn(fn func(*conn) error) error {
-	c, err := b.acquire()
-	if err != nil {
-		return err
+// a bad state). release runs via defer so a panic in fn still returns the pool
+// token (otherwise repeated panics would starve the pool and deadlock all I/O).
+func (b *Backend) withConn(fn func(*conn) error) (err error) {
+	c, aerr := b.acquire()
+	if aerr != nil {
+		return aerr
 	}
+	healthy := false
+	defer func() { b.release(c, healthy) }()
 	err = fn(c)
-	b.release(c, err == nil)
+	healthy = err == nil
 	return err
 }
 
@@ -188,9 +197,21 @@ func (c *conn) selectMailbox(mailbox string, condStore bool) (*imap.SelectData, 
 	return data, nil
 }
 
-// Close shuts down the idle connections in the pool. In-flight operations finish
-// and close their own connections on release.
+// reselect forces a fresh SELECT (bypassing the cache) so the current
+// UIDVALIDITY is observed. Destructive ops (move/delete) and the sync snapshot
+// use it — trusting a stale cached UIDVALIDITY could act on the wrong messages
+// after a server-side folder renumber.
+func (c *conn) reselect(mailbox string, condStore bool) (*imap.SelectData, error) {
+	c.selected, c.selData = "", nil
+	return c.selectMailbox(mailbox, condStore)
+}
+
+// Close shuts down the pool: it marks the backend closed (so in-flight operations
+// close their connection on release rather than returning it here) and drains the
+// idle connections. The dedicated IDLE connection from Watch is owned by that
+// goroutine and closes when its context is cancelled.
 func (b *Backend) Close() {
+	b.closed.Store(true)
 	for {
 		select {
 		case c := <-b.idle:
@@ -251,10 +272,14 @@ func (b *Backend) Labels(ctx context.Context) ([]model.Label, error) {
 // cache.
 func (b *Backend) ensureFolders(c *conn) error {
 	b.folderMu.Lock()
-	defer b.folderMu.Unlock()
-	if b.foldersLoaded {
+	loaded := b.foldersLoaded
+	b.folderMu.Unlock()
+	if loaded {
 		return nil
 	}
+	// LIST without the lock held so a slow round-trip doesn't block label lookups
+	// (labelFor is called per message during backfill). A rare concurrent double
+	// LIST is harmless — both compute the same maps and the last write wins.
 	data, err := c.cl.List("", "*", &imap.ListOptions{ReturnSpecialUse: true}).Collect()
 	if err != nil {
 		return fmt.Errorf("imap list: %w", err)
@@ -288,6 +313,11 @@ func (b *Backend) ensureFolders(c *conn) error {
 		}
 	}
 	sort.Strings(synced)
+	b.folderMu.Lock()
+	defer b.folderMu.Unlock()
+	if b.foldersLoaded { // lost a race with another LIST; keep the first result
+		return nil
+	}
 	b.folderToLabel, b.labelToFolder, b.labels, b.synced = folderToLabel, labelToFolder, labels, synced
 	b.archiveFolder = archive
 	b.foldersLoaded = true

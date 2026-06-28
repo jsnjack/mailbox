@@ -2,6 +2,7 @@ package imapbackend
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/emersion/go-imap/v2"
@@ -23,7 +24,7 @@ const idleRetry = 30 * time.Second
 func (b *Backend) Watch(ctx context.Context, onChange func()) {
 	for ctx.Err() == nil {
 		if err := b.idleOnce(ctx, onChange); err != nil && ctx.Err() == nil {
-			if err == errNoIdle {
+			if errors.Is(err, errNoIdle) {
 				return // server can't IDLE — leave it to the poll loop
 			}
 			select {

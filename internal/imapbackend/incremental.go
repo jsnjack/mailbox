@@ -93,14 +93,12 @@ func (b *Backend) folders(c *conn) ([]string, error) {
 // It forces a fresh SELECT (bypassing the conn's cache) so a UIDVALIDITY change
 // is observed every sync pass, then refreshes the cache.
 func (b *Backend) snapshot(c *conn, folder string) (folderState, []imap.UID, error) {
-	// Only request CONDSTORE when the server advertises it — sending the modifier
-	// to a server without it is a protocol error.
-	opts := &imap.SelectOptions{CondStore: c.cl.Caps().Has(imap.CapCondStore)}
-	sel, err := c.cl.Select(folder, opts).Wait()
+	// reselect forces a fresh SELECT so a UIDVALIDITY change is observed every
+	// pass; CONDSTORE is requested only when the server advertises it.
+	sel, err := c.reselect(folder, true)
 	if err != nil {
-		return folderState{}, nil, fmt.Errorf("imap select %q: %w", folder, err)
+		return folderState{}, nil, err
 	}
-	c.selected, c.selData = folder, sel
 	sd, err := c.cl.UIDSearch(&imap.SearchCriteria{}, nil).Wait()
 	if err != nil {
 		return folderState{}, nil, fmt.Errorf("imap uid search %q: %w", folder, err)

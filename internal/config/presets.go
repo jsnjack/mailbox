@@ -39,7 +39,14 @@ var Presets = []Preset{
 		IMAPHost: "imap.gmail.com", IMAPPort: 993, IMAPSecurity: "tls",
 		SMTPHost: "smtp.gmail.com", SMTPPort: 465, SMTPSecurity: "tls",
 		Auth: AuthGmailREST,
-		Hint: "Sign in with Google. Uses the native Gmail API (fastest); choose IMAP under Advanced if you prefer.",
+		Hint: "Sign in with Google — uses the native Gmail API (fastest, recommended).",
+	},
+	{
+		ID: "gmail-imap", Name: "Gmail (IMAP)",
+		IMAPHost: "imap.gmail.com", IMAPPort: 993, IMAPSecurity: "tls",
+		SMTPHost: "smtp.gmail.com", SMTPPort: 465, SMTPSecurity: "tls",
+		Auth: AuthGoogle,
+		Hint: "Gmail over IMAP — sign in with Google (full-mailbox access).",
 	},
 	{
 		ID: "outlook", Name: "Outlook / Office 365",

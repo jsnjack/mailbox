@@ -169,19 +169,38 @@ func launchUI(mailto string) error {
 		return err
 	}
 	deps.AddIMAPAccount = func(ctx context.Context, acct config.IMAPAccount, secret string) error {
-		if secret != "" {
-			if err := auth.SaveIMAPSecret(acct.Email, secret); err != nil {
+		if secret == "" {
+			return fmt.Errorf("no credentials to save")
+		}
+		// Gmail REST: native backend — store the refresh token under the Gmail
+		// keyring and a gmail-type account; no IMAP server config.
+		if acct.Auth == config.AuthGmailREST {
+			if err := auth.SaveRefreshToken(acct.Email, secret); err != nil {
 				return err
 			}
+			return upsertAccountKeepingCursor(ctx, st, acct.Email, model.AccountGmail)
+		}
+		// IMAP (password or OAuth).
+		if err := auth.SaveIMAPSecret(acct.Email, secret); err != nil {
+			return err
 		}
 		if err := config.SaveIMAPAccount(acct); err != nil {
 			return err
 		}
-		_, err := st.UpsertAccount(ctx, model.Account{Email: acct.Email, Type: model.AccountIMAP})
-		return err
+		return upsertAccountKeepingCursor(ctx, st, acct.Email, model.AccountIMAP)
 	}
 	deps.OAuthConnect = func(ctx context.Context, kind config.AuthKind) (string, error) {
 		switch kind {
+		case config.AuthGmailREST:
+			cc, err := auth.LoadClientConfig(credentialsPath())
+			if err != nil {
+				return "", err
+			}
+			tok, err := auth.Login(ctx, cc) // Gmail REST scopes
+			if err != nil {
+				return "", err
+			}
+			return tok.RefreshToken, nil
 		case config.AuthGoogle:
 			cc, err := auth.LoadClientConfig(credentialsPath())
 			if err != nil {
@@ -207,7 +226,10 @@ func launchUI(mailto string) error {
 		}
 	}
 
-	if len(clients) > 0 {
+	// Live features (change events + every operation hook) are wired whenever any
+	// account has a working backend — Gmail REST OR IMAP. Keying this on the Gmail
+	// `clients` map would leave an IMAP-only setup read-only and event-less.
+	if len(backends) > 0 {
 		deps.Hub = hub
 		clientFor := func(accountID int64) (backend.Backend, error) {
 			if b := backends[accountID]; b != nil {
@@ -395,6 +417,19 @@ func buildIMAPBackend(ctx context.Context, a model.Account) (backend.Backend, er
 		return nil, err
 	}
 	return imapbackend.New(imapConfigOf(cfg), a.ID, cred), nil
+}
+
+// upsertAccountKeepingCursor creates or updates an account by email without
+// blanking an existing one's sync cursor / backfill timestamp — re-adding an
+// account (e.g. to fix a password) must not trigger a needless full re-sync.
+func upsertAccountKeepingCursor(ctx context.Context, st *store.Store, email, accountType string) error {
+	acct := model.Account{Email: email, Type: accountType}
+	if existing, err := st.GetAccountByEmail(ctx, email); err == nil {
+		acct = existing // preserve cursor, backfilled_at, scopes, display name
+		acct.Type = accountType
+	}
+	_, err := st.UpsertAccount(ctx, acct)
+	return err
 }
 
 // usernameOf is the IMAP/SMTP login username (the email unless overridden).
