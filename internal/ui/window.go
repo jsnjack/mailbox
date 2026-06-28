@@ -232,7 +232,7 @@ func (w *window) registerAppMenuActions() {
 	w.win.AddAction(about)
 
 	addAcct := gio.NewSimpleAction("add-account", nil)
-	addAcct.ConnectActivate(func(*glib.Variant) { w.openAddAccount() })
+	addAcct.ConnectActivate(func(*glib.Variant) { w.openAddAccount(nil) })
 	addAcct.SetEnabled(w.deps.AddIMAPAccount != nil)
 	w.win.AddAction(addAcct)
 }
@@ -483,15 +483,41 @@ func (w *window) goBack() {
 
 // showConnectHelp explains how to enable live features when the app is running
 // read-only (no Gmail client could be built).
+// onReconnect re-authenticates the account whose sign-in expired by reopening the
+// add-account dialog prefilled for it (same email → cache preserved). When the
+// expired account can't be identified it falls back to the plain Add account
+// dialog, or to read-only guidance if account management isn't available.
+func (w *window) onReconnect() {
+	if w.deps.AddIMAPAccount == nil {
+		w.showConnectHelp()
+		return
+	}
+	var target AccountInfo
+	for _, a := range w.deps.Accounts {
+		if a.ID == w.authExpiredID {
+			target = a
+			break
+		}
+	}
+	if target.ID == 0 {
+		if len(w.deps.Accounts) == 1 {
+			target = w.deps.Accounts[0] // unambiguous
+		} else {
+			w.openAddAccount(nil)
+			return
+		}
+	}
+	w.reconnectAccount(target)
+}
+
+// showConnectHelp explains how to restore a read-only account when in-app
+// reconnect isn't available (no provider credentials configured).
 func (w *window) showConnectHelp() {
-	body := "Mailbox couldn't connect to Gmail, so it's showing the local cache " +
-		"read-only.\n\n" +
-		"1. Put your Google OAuth client secret at:\n" +
-		"   ~/.config/mailbox/credentials.json\n\n" +
-		"2. Connect the account (opens a browser to sign in):\n" +
-		"   mailbox sync --account you@gmail.com\n\n" +
-		"3. Restart Mailbox."
-	dialog := adw.NewAlertDialog("Not connected to Gmail", body)
+	body := "Mailbox can't reach this account's mail server, so it's showing the " +
+		"local cache read-only.\n\nReconnect it from the main menu → Add account…, " +
+		"using the same email address (your cached mail is kept). For Gmail you'll " +
+		"sign in again; for other providers, re-enter your app password."
+	dialog := adw.NewAlertDialog("Not connected", body)
 	dialog.AddResponse("ok", "Got it")
 	dialog.SetDefaultResponse("ok")
 	dialog.SetCloseResponse("ok")
@@ -760,9 +786,14 @@ func (w *window) rebuildAccountSwitcher() {
 // syncing (the launcher started it), so it shows up and is selectable without a
 // restart. Main-thread only.
 func (w *window) addAccount(a AccountInfo) {
+	if a.ID == w.authExpiredID {
+		// This was a reconnect of the expired account — it's syncing again.
+		w.authExpiredID = 0
+		w.authBanner.SetRevealed(false)
+	}
 	for _, e := range w.deps.Accounts {
 		if e.ID == a.ID {
-			return // already present
+			return // already present (a reconnect re-adds the same id)
 		}
 	}
 	first := len(w.deps.Accounts) == 0
@@ -947,9 +978,9 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 	// invalid_grant): the account can't recover without re-login, so say so
 	// instead of silently failing to sync.
 	w.authBanner = adw.NewBanner("")
-	w.authBanner.SetButtonLabel("How to reconnect")
+	w.authBanner.SetButtonLabel("Reconnect")
 	w.authBanner.SetRevealed(false)
-	w.authBanner.ConnectButtonClicked(w.showConnectHelp)
+	w.authBanner.ConnectButtonClicked(w.onReconnect)
 
 	content := gtk.NewBox(gtk.OrientationVertical, 0)
 	content.Append(w.readOnlyBanner)
@@ -1463,7 +1494,7 @@ func (w *window) showThreads(sums []model.ThreadSummary) {
 				btn.AddCSSClass("pill")
 				btn.AddCSSClass("suggested-action")
 				btn.SetHAlign(gtk.AlignCenter)
-				btn.ConnectClicked(func() { w.openAddAccount() })
+				btn.ConnectClicked(func() { w.openAddAccount(nil) })
 				w.emptyPage.SetChild(btn)
 			}
 		case strings.TrimSpace(w.searchEntry.Text()) != "":

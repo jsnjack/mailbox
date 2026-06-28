@@ -15,11 +15,20 @@ import (
 	"github.com/jsnjack/mailbox/internal/model"
 )
 
+// addAccountPrefill seeds the add-account dialog for a reconnect: the existing
+// account's email and the provider preset to preselect.
+type addAccountPrefill struct {
+	email     string
+	presetID  string // config preset id to preselect ("" = leave default)
+	reconnect bool   // re-authenticating an existing account (vs. adding a new one)
+}
+
 // openAddAccount presents the add-account dialog: pick a provider, fill in
 // credentials (a password/app password, or an OAuth sign-in), optionally tweak
-// the servers under Advanced, then Test & Add. A new account begins syncing on
-// the next launch.
-func (w *window) openAddAccount() {
+// the servers under Advanced, then Test & Add. The account begins syncing
+// immediately. When prefill is non-nil the dialog is seeded for reconnecting an
+// existing account (same email → its cache is preserved).
+func (w *window) openAddAccount(prefill *addAccountPrefill) {
 	if w.deps.AddIMAPAccount == nil {
 		w.toast("Adding accounts isn't available")
 		return
@@ -27,6 +36,9 @@ func (w *window) openAddAccount() {
 
 	dialog := adw.NewPreferencesDialog()
 	dialog.SetTitle("Add account")
+	if prefill != nil && prefill.reconnect {
+		dialog.SetTitle("Reconnect account")
+	}
 	page := adw.NewPreferencesPage()
 
 	// --- provider + identity ---
@@ -100,6 +112,15 @@ func (w *window) openAddAccount() {
 			h += "  " + p.URL
 		}
 		hint.SetText(h)
+	}
+	if prefill != nil {
+		emailRow.SetText(prefill.email)
+		for i, p := range config.Presets {
+			if p.ID == prefill.presetID {
+				providerRow.SetSelected(uint(i))
+				break
+			}
+		}
 	}
 	providerRow.Connect("notify::selected", applyPreset)
 	applyPreset()
@@ -240,6 +261,48 @@ func friendlyConnError(err error) string {
 		return "Couldn't establish a secure connection — the server's TLS certificate didn't verify."
 	default:
 		return err.Error()
+	}
+}
+
+// reconnectAccount reopens the add-account dialog seeded for re-authenticating an
+// existing account: its email and provider are prefilled, so the user only signs
+// in again (OAuth) or re-enters the app password. Re-adding the same email
+// preserves the account's cached mail (the sync cursor is kept).
+func (w *window) reconnectAccount(a AccountInfo) {
+	w.openAddAccount(&addAccountPrefill{
+		email:     a.Email,
+		presetID:  presetForReconnect(a),
+		reconnect: true,
+	})
+}
+
+// presetForReconnect picks the provider preset to preselect when reconnecting an
+// account. Gmail (REST) is unambiguous; for IMAP it reads the stored auth kind
+// and host to land on the right preset (falling back to Other).
+func presetForReconnect(a AccountInfo) string {
+	if a.Type != model.AccountIMAP {
+		return "gmail"
+	}
+	acct, ok, _ := config.LoadIMAPAccount(a.Email)
+	if !ok {
+		return ""
+	}
+	switch acct.Auth {
+	case config.AuthGoogle:
+		return "gmail-imap"
+	case config.AuthMicrosoft:
+		return "outlook"
+	}
+	host := strings.ToLower(acct.IMAPHost)
+	switch {
+	case strings.Contains(host, "yahoo"):
+		return "yahoo"
+	case strings.Contains(host, "icloud"), strings.Contains(host, "me.com"):
+		return "icloud"
+	case strings.Contains(host, "fastmail"):
+		return "fastmail"
+	default:
+		return "other"
 	}
 }
 
