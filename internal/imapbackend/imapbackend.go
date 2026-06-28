@@ -203,6 +203,13 @@ func (b *Backend) acquire() (*conn, error) {
 		return nil, fmt.Errorf("imap: backend closed")
 	}
 	b.sem <- struct{}{}
+	// Re-check after taking the slot: Close may have run between the check above
+	// and here. Without this, a teardown (stopAccount → Close) wouldn't be a
+	// barrier — we'd dial a fresh connection on an already-closed backend.
+	if b.closed.Load() {
+		<-b.sem
+		return nil, fmt.Errorf("imap: backend closed")
+	}
 	select {
 	case c := <-b.idle:
 		return c, nil

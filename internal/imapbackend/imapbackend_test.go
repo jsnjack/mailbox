@@ -440,6 +440,59 @@ func TestIMAPConcurrentFetch(t *testing.T) {
 	}
 }
 
+func TestIMAPCloseBarrier(t *testing.T) {
+	mem := imapmemserver.New()
+	user := imapmemserver.NewUser("alice@example.com", "secret")
+	if err := user.Create("INBOX", nil); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 8; i++ {
+		raw := fmt.Sprintf("From: bob@example.com\r\nSubject: m%d\r\nMessage-ID: <m%d@x>\r\n"+
+			"Date: Mon, 02 Jan 2006 15:04:05 -0700\r\nContent-Type: text/plain\r\n\r\nbody\r\n", i, i)
+		if _, err := user.Append("INBOX", bytes.NewReader([]byte(raw)), &imap.AppendOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mem.AddUser(user)
+	srv := imapserver.New(&imapserver.Options{
+		NewSession: func(*imapserver.Conn) (imapserver.Session, *imapserver.GreetingData, error) {
+			return mem.NewSession(), nil, nil
+		},
+		InsecureAuth: true,
+		Caps:         imap.CapSet{imap.CapIMAP4rev2: {}},
+	})
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close(); _ = ln.Close() })
+	h, p, _ := net.SplitHostPort(ln.Addr().String())
+	port, _ := strconv.Atoi(p)
+
+	b := New(Config{Host: h, Port: port, Security: SecurityNone, Username: "alice@example.com", Email: "alice@example.com"}, 4, PasswordAuth("alice@example.com", "secret"))
+	ctx := context.Background()
+	ids, err := b.SearchIDs(ctx, "", 0)
+	if err != nil || len(ids) == 0 {
+		t.Fatalf("SearchIDs: %v, %d ids", err, len(ids))
+	}
+
+	// Race fetches against a concurrent Close. Run with -race: must not panic, must
+	// not corrupt the semaphore, and once closed every acquire fails cleanly.
+	var wg sync.WaitGroup
+	for i := 0; i < 12; i++ {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			_, _ = b.FetchMetadata(ctx, id) // error after Close is expected, not a panic
+		}(ids[i%len(ids)])
+	}
+	b.Close()
+	wg.Wait()
+
+	// After Close the backend is a hard barrier: no new connection is dialed.
+	if _, err := b.FetchMetadata(ctx, ids[0]); err == nil {
+		t.Fatal("FetchMetadata succeeded after Close; expected a closed-backend error")
+	}
+}
+
 func TestIMAPWatchStopsOnCancel(t *testing.T) {
 	host, port := startMemServer(t)
 	b := New(Config{Host: host, Port: port, Security: SecurityNone, Username: "alice@example.com", Email: "alice@example.com"}, 1, PasswordAuth("alice@example.com", "secret"))

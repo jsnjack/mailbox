@@ -37,6 +37,19 @@ const syncInterval = 60 * time.Second
 // when an expired history watermark forces a resync (see engine.Resync).
 const resyncBackfillLimit = 500
 
+// stopGrace bounds how long stopAccount waits for an account's background
+// goroutines to exit before proceeding, so one wedged on a deadline-less network
+// read can't hang a remove/reconnect indefinitely.
+const stopGrace = 5 * time.Second
+
+// acctRuntime tracks a live account's background goroutines (sync, outbox sweep,
+// IMAP IDLE watch) so stopAccount can cancel them and wait for them to exit
+// before the account is torn down.
+type acctRuntime struct {
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
+}
+
 // launchUI opens the store, starts a background sync for each connected account
 // (building a live Gmail/IMAP backend when credentials are available), and runs
 // the GTK application. Zero accounts is fine — the app opens to a welcome empty
@@ -108,29 +121,43 @@ func launchUI(mailto string) error {
 	// provider-agnostic adapters the engine drives (Gmail today; IMAP later).
 	clients := make(map[int64]*gmailapi.Client)
 	backends := make(map[int64]backend.Backend)
-	// cancels holds each running account's sync-loop cancel, so it can be torn
-	// down on remove or replaced cleanly on reconnect.
-	cancels := make(map[int64]context.CancelFunc)
+	// running tracks each live account's sync goroutines so stopAccount can cancel
+	// them AND wait for them to actually exit before tearing the account down (so a
+	// follow-up DeleteAccount can't race an in-flight store write).
+	running := make(map[int64]*acctRuntime)
 	// accountsMu guards the three maps: startAccount/stopAccount write them from
 	// the add-account dialog's goroutine while clientFor/Stats read them from the
 	// UI thread.
 	var accountsMu sync.Mutex
 
-	// stopAccount tears down a running account's sync loop (+ IDLE watch) and closes
-	// its backend, removing it from the maps. Safe to call for an unknown id.
+	// stopAccount tears down a running account's sync loop (+ IDLE watch), closes
+	// its backend, and waits (bounded) for the goroutines to exit. Safe to call for
+	// an unknown id.
 	stopAccount := func(id int64) {
 		accountsMu.Lock()
-		cancel := cancels[id]
+		rt := running[id]
 		b := backends[id]
-		delete(cancels, id)
+		delete(running, id)
 		delete(backends, id)
 		delete(clients, id)
 		accountsMu.Unlock()
-		if cancel != nil {
-			cancel()
+		if rt != nil {
+			rt.cancel()
 		}
 		if c, ok := b.(interface{ Close() }); ok {
-			c.Close() // releases the IMAP connection pool; no-op for Gmail
+			c.Close() // releases the IMAP connection pool + idle conns; no-op for Gmail
+		}
+		if rt != nil {
+			// Wait for sync/sweep/watch to return so the caller (remove/reconnect)
+			// sees a quiesced account. Bounded, in case a goroutine is wedged on a
+			// network read with no deadline — then we proceed and accept the small
+			// residual window rather than hang.
+			done := make(chan struct{})
+			go func() { rt.wg.Wait(); close(done) }()
+			select {
+			case <-done:
+			case <-time.After(stopGrace):
+			}
 		}
 	}
 
@@ -146,26 +173,33 @@ func launchUI(mailto string) error {
 		}
 		stopAccount(a.ID)
 		actx, cancel := context.WithCancel(ctx)
+		rt := &acctRuntime{cancel: cancel}
 		accountsMu.Lock()
 		if client != nil { // Gmail REST exposes API stats; IMAP reports bytes via the backend
 			clients[a.ID] = client
 		}
 		backends[a.ID] = b
-		cancels[a.ID] = cancel
+		running[a.ID] = rt
 		accountsMu.Unlock()
 		// A wake channel lets a push notification (IMAP IDLE) trigger an immediate
-		// sync instead of waiting for the poll tick.
+		// sync instead of waiting for the poll tick. All Add()s happen here, before
+		// any goroutine can finish, so stopAccount's Wait can't race them.
 		wake := make(chan struct{}, 1)
 		if watcher, ok := b.(backend.Watcher); ok {
-			go watcher.Watch(actx, func() {
-				select {
-				case wake <- struct{}{}:
-				default: // a wake is already pending; coalesce
-				}
-			})
+			rt.wg.Add(1)
+			go func() {
+				defer rt.wg.Done()
+				watcher.Watch(actx, func() {
+					select {
+					case wake <- struct{}{}:
+					default: // a wake is already pending; coalesce
+					}
+				})
+			}()
 		}
-		go backgroundSync(actx, engine, act, b, a.ID, a.Email, wake)
-		go backgroundSweep(actx, engine, b, a.ID)
+		rt.wg.Add(2)
+		go func() { defer rt.wg.Done(); backgroundSync(actx, engine, act, b, a.ID, a.Email, wake) }()
+		go func() { defer rt.wg.Done(); backgroundSweep(actx, engine, b, a.ID) }()
 		return nil
 	}
 	for _, a := range accounts {
