@@ -39,6 +39,7 @@ internal/
   backend/           the provider-agnostic Backend interface the engine drives (domain-typed: model.Message/Label, opaque sync cursor) + BuildMIME (RFC 5322). No protocol specifics — Gmail today, IMAP planned.
   gmailapi/          wrapper over google.golang.org/api/gmail/v1 (semaphore, per-attempt quota budget, backoff honoring Retry-After; network errors retried for idempotent calls but not sends)
   gmailbackend/      implements backend.Backend over gmailapi.Client (owns the Gmail↔domain conversions + the history-walk → upsert/delete id set)
+  imapbackend/       implements backend.Backend over IMAP (emersion/go-imap v2): read path so far — connect/LOGIN, LIST folders→labels (special-use mapped), backfill (INBOX), FETCH envelope/flags + body (go-message). Message id = "imap:<uidvalidity>:<uid>:<mailbox>". Incremental (QRESYNC/CONDSTORE), mutations, SMTP send, XOAUTH2, and threading are still TODO. Single mutex-guarded connection (pooling = perf TODO).
   sync/              per-account sync workers (backfill ↔ incremental) + notify.Hub; the engine takes a backend.Backend, never a concrete client
   ai/                provider abstraction (OpenAI-compatible + Anthropic), streaming
   activity/          headless pub/sub of transient "what is the app doing" events (status bar)
@@ -253,7 +254,7 @@ there, and run under Xvfb (`GDK_BACKEND=x11 GSK_RENDERER=cairo`) with a distinct
 OAuth tokens + the AI key) but starts a fresh instance, so it never disturbs a
 running app. `MAILBOX_DEMO=1` hides the "read-only" banner for clean screenshots.
 
-Dependency rule: `store`/`backend`/`gmailapi`/`gmailbackend`/`sync`/`auth`/`ai`
+Dependency rule: `store`/`backend`/`gmailapi`/`gmailbackend`/`imapbackend`/`sync`/`auth`/`ai`
 MUST NOT import any GTK package (they are headless and unit-testable without a
 display). `ui` MUST NOT import `sync`/`gmailapi`/`ai` directly — inject interfaces
 and communicate via channels + `dispatch`. The sync engine MUST depend only on
