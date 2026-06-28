@@ -225,6 +225,67 @@ func TestIMAPIncremental(t *testing.T) {
 	}
 }
 
+func TestIMAPThreading(t *testing.T) {
+	mem := imapmemserver.New()
+	user := imapmemserver.NewUser("alice@example.com", "secret")
+	if err := user.Create("INBOX", nil); err != nil {
+		t.Fatal(err)
+	}
+	orig := "From: bob@example.com\r\nSubject: Plan\r\nMessage-ID: <a@x>\r\n" +
+		"Date: Mon, 02 Jan 2006 15:04:05 -0700\r\nContent-Type: text/plain\r\n\r\norig\r\n"
+	reply := "From: alice@example.com\r\nSubject: Re: Plan\r\nMessage-ID: <b@x>\r\n" +
+		"In-Reply-To: <a@x>\r\nReferences: <a@x>\r\n" +
+		"Date: Mon, 02 Jan 2006 16:04:05 -0700\r\nContent-Type: text/plain\r\n\r\nreply\r\n"
+	for _, raw := range []string{orig, reply} {
+		if _, err := user.Append("INBOX", bytes.NewReader([]byte(raw)), &imap.AppendOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mem.AddUser(user)
+
+	srv := imapserver.New(&imapserver.Options{
+		NewSession: func(*imapserver.Conn) (imapserver.Session, *imapserver.GreetingData, error) {
+			return mem.NewSession(), nil, nil
+		},
+		InsecureAuth: true,
+		Caps:         imap.CapSet{imap.CapIMAP4rev2: {}},
+	})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close(); _ = ln.Close() })
+	h, p, _ := net.SplitHostPort(ln.Addr().String())
+	port, _ := strconv.Atoi(p)
+
+	b := New(Config{Host: h, Port: port, Security: SecurityNone, Username: "alice@example.com", Email: "alice@example.com"}, 1, "secret")
+	t.Cleanup(b.Close)
+	ctx := context.Background()
+
+	ids, err := b.SearchIDs(ctx, "", 0)
+	if err != nil {
+		t.Fatalf("SearchIDs: %v", err)
+	}
+	if len(ids) != 2 {
+		t.Fatalf("want 2 messages, got %d", len(ids))
+	}
+	threads := map[string]bool{}
+	for _, id := range ids {
+		m, err := b.FetchMetadata(ctx, id)
+		if err != nil {
+			t.Fatalf("FetchMetadata: %v", err)
+		}
+		threads[m.ThreadID] = true
+	}
+	if len(threads) != 1 {
+		t.Fatalf("original and reply should share one thread; got %d distinct: %v", len(threads), threads)
+	}
+	if !threads["a@x"] {
+		t.Fatalf("thread root should be the original's Message-ID a@x; got %v", threads)
+	}
+}
+
 func TestCursorAndUIDCodec(t *testing.T) {
 	uids := []imap.UID{1, 2, 3, 5, 7, 8, 9, 100}
 	got := decodeUIDs(encodeUIDs(uids))

@@ -256,8 +256,14 @@ func (b *Backend) FetchMetadata(ctx context.Context, id string) (model.Message, 
 	if sel.UIDValidity != uidv {
 		return model.Message{}, fmt.Errorf("imap: stale id %q (uidvalidity %d != %d)", id, uidv, sel.UIDValidity)
 	}
+	// References isn't part of the IMAP ENVELOPE, so fetch that one header too —
+	// it carries the thread's ancestry (used to compute a stable thread root).
+	refSection := &imap.FetchItemBodySection{
+		Specifier: imap.PartSpecifierHeader, HeaderFields: []string{"References"}, Peek: true,
+	}
 	bufs, err := cl.Fetch(imap.UIDSetNum(uid), &imap.FetchOptions{
 		Envelope: true, Flags: true, InternalDate: true, RFC822Size: true, UID: true,
+		BodySection: []*imap.FetchItemBodySection{refSection},
 	}).Collect()
 	if err != nil {
 		b.reset()
@@ -266,7 +272,8 @@ func (b *Backend) FetchMetadata(ctx context.Context, id string) (model.Message, 
 	if len(bufs) == 0 {
 		return model.Message{}, fmt.Errorf("imap: uid %d not found in %q", uid, mailbox)
 	}
-	return b.toMessage(mailbox, uidv, bufs[0]), nil
+	refs := parseReferences(bufs[0].FindBodySection(refSection))
+	return b.toMessage(mailbox, uidv, bufs[0], refs), nil
 }
 
 // FetchBody fetches and parses a message's full body + attachment metadata.
@@ -349,12 +356,12 @@ func (b *Backend) FindDraftID(ctx context.Context, msgID string) (string, error)
 
 // toMessage converts a fetched message into the domain model. Caller holds mu
 // (it reads folderToLabel).
-func (b *Backend) toMessage(mailbox string, uidv uint32, buf *imapclient.FetchMessageBuffer) model.Message {
+func (b *Backend) toMessage(mailbox string, uidv uint32, buf *imapclient.FetchMessageBuffer, refs []string) model.Message {
 	id := msgID(mailbox, uidv, buf.UID)
 	m := model.Message{
 		AccountID:    b.accountID,
 		GmailID:      id,
-		ThreadID:     id, // single-message threads until threading (phase 3c)
+		ThreadID:     id, // overridden below once the reference chain is known
 		InternalDate: buf.InternalDate,
 		SizeEstimate: buf.RFC822Size,
 	}
@@ -362,6 +369,11 @@ func (b *Backend) toMessage(mailbox string, uidv uint32, buf *imapclient.FetchMe
 		m.Subject = env.Subject
 		m.RFC822MsgID = bracket(env.MessageID)
 		m.InReplyTo = bracketAll(env.InReplyTo)
+		m.References = bracketAll(refs)
+		// Group the conversation under the root ancestor's Message-ID (References
+		// is oldest-first), so every reply in a chain shares one thread id —
+		// across folders too (a sent reply files with the original it answers).
+		m.ThreadID = threadRoot(refs, env.InReplyTo, env.MessageID, id)
 		if len(env.From) > 0 {
 			m.FromName = env.From[0].Name
 			m.FromAddr = env.From[0].Addr()
@@ -535,6 +547,39 @@ func addrList(as []imap.Address) string {
 		}
 	}
 	return strings.Join(parts, ", ")
+}
+
+// parseReferences extracts the (bracket-stripped) message-ids from a raw
+// "References: <a@x> <b@y>" header section, oldest-first.
+func parseReferences(headerBytes []byte) []string {
+	s := string(headerBytes)
+	if i := strings.IndexByte(s, ':'); i >= 0 {
+		s = s[i+1:] // drop the "References:" name
+	}
+	var out []string
+	for _, tok := range strings.Fields(s) {
+		if id := strings.Trim(tok, "<>"); id != "" {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// threadRoot returns the conversation's root id: the oldest References ancestor
+// if any, else the immediate parent (In-Reply-To), else the message's own
+// Message-ID, else its provider id. All inputs are bracket-stripped so messages
+// in one chain resolve to the same root. fallback is the provider id.
+func threadRoot(refs, inReplyTo []string, messageID, fallback string) string {
+	if len(refs) > 0 {
+		return refs[0]
+	}
+	if len(inReplyTo) > 0 && inReplyTo[0] != "" {
+		return inReplyTo[0]
+	}
+	if messageID != "" {
+		return messageID
+	}
+	return fallback
 }
 
 // bracket restores the angle brackets go-imap strips from a Message-ID.
