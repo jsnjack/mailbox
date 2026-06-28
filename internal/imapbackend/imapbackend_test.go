@@ -130,6 +130,124 @@ func TestIMAPBackendReadPath(t *testing.T) {
 	}
 }
 
+func TestIMAPIncremental(t *testing.T) {
+	mem := imapmemserver.New()
+	user := imapmemserver.NewUser("alice@example.com", "secret")
+	if err := user.Create("INBOX", nil); err != nil {
+		t.Fatal(err)
+	}
+	appendMsg := func(mailbox, subject string) {
+		raw := "From: bob@example.com\r\nSubject: " + subject + "\r\n" +
+			"Date: Mon, 02 Jan 2006 15:04:05 -0700\r\nContent-Type: text/plain\r\n\r\nbody\r\n"
+		if _, err := user.Append(mailbox, bytes.NewReader([]byte(raw)), &imap.AppendOptions{}); err != nil {
+			t.Fatalf("append to %s: %v", mailbox, err)
+		}
+	}
+	appendMsg("INBOX", "first")
+	mem.AddUser(user)
+
+	srv := imapserver.New(&imapserver.Options{
+		NewSession: func(*imapserver.Conn) (imapserver.Session, *imapserver.GreetingData, error) {
+			return mem.NewSession(), nil, nil
+		},
+		InsecureAuth: true,
+		Caps:         imap.CapSet{imap.CapIMAP4rev2: {}},
+	})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close(); _ = ln.Close() })
+	h, p, _ := net.SplitHostPort(ln.Addr().String())
+	port, _ := strconv.Atoi(p)
+
+	b := New(Config{Host: h, Port: port, Security: SecurityNone, Username: "alice@example.com", Email: "alice@example.com"}, 1, "secret")
+	t.Cleanup(b.Close)
+	ctx := context.Background()
+
+	// Baseline cursor after "backfill" (one message present).
+	prof, err := b.Profile(ctx)
+	if err != nil {
+		t.Fatalf("Profile: %v", err)
+	}
+	if prof.Cursor == "" {
+		t.Fatal("Profile cursor is empty; want a seeded cursor")
+	}
+
+	// No changes yet.
+	up, del, cur1, err := b.Changes(ctx, prof.Cursor)
+	if err != nil {
+		t.Fatalf("Changes (steady): %v", err)
+	}
+	if len(up) != 0 || len(del) != 0 {
+		t.Fatalf("steady-state changes: ups=%v dels=%v, want none", up, del)
+	}
+
+	// A new message appears → one upsert, no deletes.
+	appendMsg("INBOX", "second")
+	up, del, cur2, err := b.Changes(ctx, cur1)
+	if err != nil {
+		t.Fatalf("Changes (new msg): %v", err)
+	}
+	if len(up) != 1 || len(del) != 0 {
+		t.Fatalf("after append: ups=%v dels=%v, want 1 up / 0 del", up, del)
+	}
+
+	// Vanished detection: feed a cursor that claims an extra (now-absent) UID.
+	c := decodeCursor(cur2)
+	st := c.Folders["INBOX"]
+	present := decodeUIDs(st.UIDs)
+	phantom := imap.UID(99999)
+	st.UIDs = encodeUIDs(append(append([]imap.UID{}, present...), phantom))
+	c.Folders["INBOX"] = st
+	up, del, _, err = b.Changes(ctx, c.encode())
+	if err != nil {
+		t.Fatalf("Changes (vanished): %v", err)
+	}
+	wantDel := msgID("INBOX", st.UIDValidity, phantom)
+	if len(up) != 0 || len(del) != 1 || del[0] != wantDel {
+		t.Fatalf("vanished: ups=%v dels=%v, want 0 up / [%s]", up, del, wantDel)
+	}
+
+	// UIDVALIDITY change → whole folder re-synced: old UIDs deleted, current upserted.
+	c2 := decodeCursor(cur2)
+	st2 := c2.Folders["INBOX"]
+	oldUIDs := decodeUIDs(st2.UIDs)
+	st2.UIDValidity++ // simulate a server-side validity bump
+	c2.Folders["INBOX"] = st2
+	up, del, _, err = b.Changes(ctx, c2.encode())
+	if err != nil {
+		t.Fatalf("Changes (uidvalidity): %v", err)
+	}
+	if len(del) != len(oldUIDs) || len(up) != len(present) {
+		t.Fatalf("uidvalidity reset: ups=%d dels=%d, want %d up / %d del", len(up), len(del), len(present), len(oldUIDs))
+	}
+}
+
+func TestCursorAndUIDCodec(t *testing.T) {
+	uids := []imap.UID{1, 2, 3, 5, 7, 8, 9, 100}
+	got := decodeUIDs(encodeUIDs(uids))
+	if len(got) != len(uids) {
+		t.Fatalf("uid codec: got %v, want %v", got, uids)
+	}
+	for i := range uids {
+		if got[i] != uids[i] {
+			t.Fatalf("uid codec mismatch at %d: %v vs %v", i, got, uids)
+		}
+	}
+	c := cursor{Folders: map[string]folderState{
+		"INBOX": {UIDValidity: 42, ModSeq: 1000, UIDs: encodeUIDs(uids)},
+	}}
+	rt := decodeCursor(c.encode())
+	if rt.Folders["INBOX"].UIDValidity != 42 || rt.Folders["INBOX"].ModSeq != 1000 {
+		t.Fatalf("cursor round-trip lost fields: %+v", rt.Folders["INBOX"])
+	}
+	if decodeCursor("").Folders == nil {
+		t.Fatal("empty cursor must yield a usable (non-nil) folder map")
+	}
+}
+
 func TestMsgIDRoundTrip(t *testing.T) {
 	cases := []struct {
 		mailbox string

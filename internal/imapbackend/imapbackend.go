@@ -57,6 +57,7 @@ type Backend struct {
 	cl            *imapclient.Client
 	selected      string            // currently SELECTed mailbox ("" = none)
 	folderToLabel map[string]string // mailbox name → label id (special-use mapped)
+	synced        []string          // mailboxes to sync, derived once from LIST
 }
 
 // New builds an IMAP backend. password authenticates with LOGIN/PLAIN; OAuth
@@ -138,15 +139,23 @@ func (b *Backend) Close() {
 
 // --- backend.Backend: read path ---
 
-// Profile verifies connectivity and returns the account address. The cursor is
-// empty until incremental sync (a later phase) defines its format.
+// Profile verifies connectivity and seeds the incremental-sync cursor with the
+// current state of every synced folder, so the first incremental diffs against
+// the post-backfill baseline (mail arriving during backfill is then caught as a
+// change rather than missed).
 func (b *Backend) Profile(ctx context.Context) (backend.Profile, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if _, err := b.conn(); err != nil {
+	cl, err := b.conn()
+	if err != nil {
 		return backend.Profile{}, err
 	}
-	return backend.Profile{Email: b.cfg.Email}, nil
+	cur, err := b.buildProfileCursor(cl)
+	if err != nil {
+		b.reset()
+		return backend.Profile{}, err
+	}
+	return backend.Profile{Email: b.cfg.Email, Cursor: cur}, nil
 }
 
 // Labels lists the server's folders as domain labels, mapping IMAP special-use
@@ -188,9 +197,9 @@ func (b *Backend) Labels(ctx context.Context) ([]model.Label, error) {
 	return out, nil
 }
 
-// SearchIDs lists message ids for backfill. Phase 3a backfills the INBOX only;
-// multi-folder backfill is a later sub-phase. query is ignored for now (server
-// search arrives with incremental). Newest-first = highest UID first.
+// SearchIDs lists message ids for backfill across all synced folders, newest
+// first within each (highest UID first), capped to max total. query is ignored
+// (provider search is a later addition).
 func (b *Backend) SearchIDs(ctx context.Context, query string, max int) ([]string, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -198,24 +207,31 @@ func (b *Backend) SearchIDs(ctx context.Context, query string, max int) ([]strin
 	if err != nil {
 		return nil, err
 	}
-	sel, err := b.selectMailbox(cl, "INBOX")
+	folders, err := b.folders(cl)
 	if err != nil {
 		b.reset()
 		return nil, err
 	}
-	sd, err := cl.UIDSearch(&imap.SearchCriteria{}, nil).Wait()
-	if err != nil {
-		b.reset()
-		return nil, fmt.Errorf("imap uid search: %w", err)
-	}
-	uids := sd.AllUIDs()
-	sort.Slice(uids, func(i, j int) bool { return uids[i] > uids[j] }) // newest first
-	if max > 0 && len(uids) > max {
-		uids = uids[:max]
-	}
-	ids := make([]string, len(uids))
-	for i, u := range uids {
-		ids[i] = msgID("INBOX", sel.UIDValidity, u)
+	var ids []string
+	for _, f := range folders {
+		sel, err := b.selectMailbox(cl, f)
+		if err != nil {
+			b.reset()
+			return nil, err
+		}
+		sd, err := cl.UIDSearch(&imap.SearchCriteria{}, nil).Wait()
+		if err != nil {
+			b.reset()
+			return nil, fmt.Errorf("imap uid search %q: %w", f, err)
+		}
+		uids := sd.AllUIDs()
+		sort.Slice(uids, func(i, j int) bool { return uids[i] > uids[j] }) // newest first
+		for _, u := range uids {
+			ids = append(ids, msgID(f, sel.UIDValidity, u))
+			if max > 0 && len(ids) >= max {
+				return ids, nil
+			}
+		}
 	}
 	return ids, nil
 }
@@ -289,11 +305,23 @@ func (b *Backend) FetchBody(ctx context.Context, id string) (model.MessageBody, 
 
 // --- backend.Backend: stubs for later phases ---
 
-// Changes is a no-op until incremental sync (phase 3b): it reports nothing
-// changed and keeps the cursor, so a background sync over an IMAP account is
-// harmless rather than erroring.
-func (b *Backend) Changes(ctx context.Context, cursor string) (upserts, deletes []string, next string, err error) {
-	return nil, nil, cursor, nil
+// Changes diffs every synced folder against the cursor (a per-folder UID-set +
+// modseq snapshot) and returns the message ids to upsert (new + flag-changed)
+// and delete (vanished), plus the next cursor. A UIDVALIDITY change re-syncs that
+// folder wholesale.
+func (b *Backend) Changes(ctx context.Context, cur string) (upserts, deletes []string, next string, err error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	cl, err := b.conn()
+	if err != nil {
+		return nil, nil, "", err
+	}
+	up, del, nextCur, err := b.computeChanges(cl, decodeCursor(cur))
+	if err != nil {
+		b.reset()
+		return nil, nil, "", err
+	}
+	return up, del, nextCur.encode(), nil
 }
 
 func (b *Backend) FetchAttachment(ctx context.Context, msgID, attID string) ([]byte, error) {

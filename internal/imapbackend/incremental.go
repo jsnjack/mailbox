@@ -1,0 +1,237 @@
+package imapbackend
+
+import (
+	"encoding/json"
+	"fmt"
+	"sort"
+	"strconv"
+	"strings"
+
+	"github.com/emersion/go-imap/v2"
+	"github.com/emersion/go-imap/v2/imapclient"
+)
+
+// folderState is the per-folder incremental-sync watermark: the UIDVALIDITY (so a
+// folder reset is detected), the CONDSTORE HIGHESTMODSEQ (so only flag-changed
+// messages are re-fetched, when the server supports it), and the full set of
+// UIDs present at the last sync (range-compressed) — diffing against the current
+// set yields new and vanished messages without QRESYNC.
+type folderState struct {
+	UIDValidity uint32 `json:"uidvalidity"`
+	ModSeq      uint64 `json:"modseq,omitempty"`
+	UIDs        string `json:"uids"` // imap.UIDSet.String() form, e.g. "1:5,7"
+}
+
+// cursor is the opaque sync watermark serialized into accounts.sync_cursor.
+type cursor struct {
+	Folders map[string]folderState `json:"folders"`
+}
+
+func decodeCursor(s string) cursor {
+	c := cursor{Folders: map[string]folderState{}}
+	if strings.TrimSpace(s) == "" {
+		return c
+	}
+	_ = json.Unmarshal([]byte(s), &c) // a corrupt cursor degrades to a full diff
+	if c.Folders == nil {
+		c.Folders = map[string]folderState{}
+	}
+	return c
+}
+
+func (c cursor) encode() string {
+	b, _ := json.Marshal(c)
+	return string(b)
+}
+
+// encodeUIDs range-compresses a UID list to the IMAP set form ("1:5,7,9:12").
+func encodeUIDs(uids []imap.UID) string {
+	var set imap.UIDSet
+	set.AddNum(uids...)
+	return set.String()
+}
+
+// decodeUIDs parses the IMAP set form back into a UID slice (ascending).
+func decodeUIDs(s string) []imap.UID {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	var out []imap.UID
+	for _, part := range strings.Split(s, ",") {
+		lo, hi, isRange := strings.Cut(part, ":")
+		l, err := strconv.ParseUint(strings.TrimSpace(lo), 10, 32)
+		if err != nil {
+			continue
+		}
+		if !isRange {
+			out = append(out, imap.UID(l))
+			continue
+		}
+		h, err := strconv.ParseUint(strings.TrimSpace(hi), 10, 32)
+		if err != nil {
+			continue
+		}
+		for u := l; u <= h; u++ {
+			out = append(out, imap.UID(u))
+		}
+	}
+	return out
+}
+
+// folders returns the mailboxes worth syncing, derived once from LIST: real,
+// selectable folders, excluding virtual/overlapping ones (\All — Gmail's "All
+// Mail" duplicates every message; \Flagged and \Important are saved-search
+// views). Caller holds mu.
+func (b *Backend) folders(cl *imapclient.Client) ([]string, error) {
+	if b.synced != nil {
+		return b.synced, nil
+	}
+	data, err := cl.List("", "*", &imap.ListOptions{ReturnSpecialUse: true}).Collect()
+	if err != nil {
+		return nil, fmt.Errorf("imap list: %w", err)
+	}
+	var out []string
+	for _, d := range data {
+		if hasAttr(d.Attrs, imap.MailboxAttrNonExistent) ||
+			hasAttr(d.Attrs, imap.MailboxAttrNoSelect) ||
+			hasAttr(d.Attrs, imap.MailboxAttrAll) ||
+			hasAttr(d.Attrs, imap.MailboxAttrFlagged) ||
+			hasAttr(d.Attrs, imap.MailboxAttrImportant) {
+			continue
+		}
+		out = append(out, d.Mailbox)
+	}
+	sort.Strings(out)
+	b.synced = out
+	return out, nil
+}
+
+// snapshot SELECTs a folder and captures its current state (UIDVALIDITY, modseq,
+// and full UID set). Caller holds mu.
+func (b *Backend) snapshot(cl *imapclient.Client, folder string) (folderState, []imap.UID, error) {
+	// Only request CONDSTORE when the server advertises it — sending the modifier
+	// to a server without it is a protocol error.
+	opts := &imap.SelectOptions{CondStore: cl.Caps().Has(imap.CapCondStore)}
+	sel, err := cl.Select(folder, opts).Wait()
+	if err != nil {
+		return folderState{}, nil, fmt.Errorf("imap select %q: %w", folder, err)
+	}
+	b.selected = folder
+	sd, err := cl.UIDSearch(&imap.SearchCriteria{}, nil).Wait()
+	if err != nil {
+		return folderState{}, nil, fmt.Errorf("imap uid search %q: %w", folder, err)
+	}
+	uids := sd.AllUIDs()
+	sort.Slice(uids, func(i, j int) bool { return uids[i] < uids[j] })
+	return folderState{UIDValidity: sel.UIDValidity, ModSeq: sel.HighestModSeq, UIDs: encodeUIDs(uids)}, uids, nil
+}
+
+// changedSince returns which of the current UIDs had their flags changed since
+// modseq (CONDSTORE). Empty when the server lacks CONDSTORE (modseq == 0) or
+// there are no messages. Caller holds mu and has the folder selected.
+func (b *Backend) changedSince(cl *imapclient.Client, modseq uint64, curUIDs []imap.UID) ([]imap.UID, error) {
+	if modseq == 0 || len(curUIDs) == 0 {
+		return nil, nil // no CONDSTORE: flag changes are picked up on a later re-fetch
+	}
+	var set imap.UIDSet
+	set.AddNum(curUIDs...)
+	bufs, err := cl.Fetch(set, &imap.FetchOptions{UID: true, ChangedSince: modseq}).Collect()
+	if err != nil {
+		return nil, nil // a server that rejects CHANGEDSINCE just yields no deltas
+	}
+	out := make([]imap.UID, 0, len(bufs))
+	for _, m := range bufs {
+		out = append(out, m.UID)
+	}
+	return out, nil
+}
+
+// buildProfileCursor captures the current state of all synced folders as the
+// initial cursor (used to seed an account before its first incremental). Caller
+// holds mu.
+func (b *Backend) buildProfileCursor(cl *imapclient.Client) (string, error) {
+	folders, err := b.folders(cl)
+	if err != nil {
+		return "", err
+	}
+	cur := cursor{Folders: make(map[string]folderState, len(folders))}
+	for _, f := range folders {
+		st, _, err := b.snapshot(cl, f)
+		if err != nil {
+			return "", err
+		}
+		cur.Folders[f] = st
+	}
+	return cur.encode(), nil
+}
+
+// computeChanges diffs every synced folder against the cursor and returns the
+// upserted/deleted message ids plus the next cursor. New = current\stored,
+// vanished = stored\current; a UIDVALIDITY change replaces the whole folder; flag
+// changes (CONDSTORE) are folded into upserts. Caller holds mu.
+func (b *Backend) computeChanges(cl *imapclient.Client, prev cursor) (upserts, deletes []string, next cursor, err error) {
+	folders, err := b.folders(cl)
+	if err != nil {
+		return nil, nil, cursor{}, err
+	}
+	next = cursor{Folders: make(map[string]folderState, len(folders))}
+	up := map[string]bool{} // dedup new + flag-changed
+	addUp := func(id string) {
+		if !up[id] {
+			up[id] = true
+			upserts = append(upserts, id)
+		}
+	}
+	for _, f := range folders {
+		st, curUIDs, serr := b.snapshot(cl, f)
+		if serr != nil {
+			return nil, nil, cursor{}, serr
+		}
+		next.Folders[f] = st
+		old := prev.Folders[f]
+
+		if old.UIDValidity != 0 && old.UIDValidity != st.UIDValidity {
+			// Folder reset: the old UIDs are meaningless now. Drop them and re-add all.
+			for _, u := range decodeUIDs(old.UIDs) {
+				deletes = append(deletes, msgID(f, old.UIDValidity, u))
+			}
+			for _, u := range curUIDs {
+				addUp(msgID(f, st.UIDValidity, u))
+			}
+			continue
+		}
+
+		oldSet := uidSet(decodeUIDs(old.UIDs))
+		curSet := uidSet(curUIDs)
+		for _, u := range curUIDs { // new = current \ stored
+			if !oldSet[u] {
+				addUp(msgID(f, st.UIDValidity, u))
+			}
+		}
+		for _, u := range decodeUIDs(old.UIDs) { // vanished = stored \ current
+			if !curSet[u] {
+				deletes = append(deletes, msgID(f, old.UIDValidity, u))
+			}
+		}
+		// Flag changes since the stored modseq (re-fetch to update read/star).
+		changed, cerr := b.changedSince(cl, old.ModSeq, curUIDs)
+		if cerr != nil {
+			return nil, nil, cursor{}, cerr
+		}
+		for _, u := range changed {
+			if curSet[u] { // ignore changes to messages that also vanished
+				addUp(msgID(f, st.UIDValidity, u))
+			}
+		}
+	}
+	return upserts, deletes, next, nil
+}
+
+func uidSet(uids []imap.UID) map[imap.UID]bool {
+	m := make(map[imap.UID]bool, len(uids))
+	for _, u := range uids {
+		m[u] = true
+	}
+	return m
+}
