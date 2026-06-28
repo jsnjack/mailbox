@@ -25,10 +25,6 @@ import (
 	"github.com/jsnjack/mailbox/internal/model"
 )
 
-// errNotImplemented marks Backend methods reserved for later phases (mutations,
-// send, drafts). They satisfy the interface without pretending to work.
-var errNotImplemented = errors.New("imap: not implemented yet")
-
 // Security selects the transport for the IMAP connection.
 type Security string
 
@@ -38,13 +34,18 @@ const (
 	SecurityNone     Security = "none"     // plaintext — tests/localhost only
 )
 
-// Config describes how to reach an IMAP server.
+// Config describes how to reach an IMAP server (and its SMTP submission server
+// for sending).
 type Config struct {
 	Host     string
 	Port     int
 	Security Security
 	Username string // usually the email address
-	Email    string // the account's address (for Profile)
+	Email    string // the account's address (for Profile + SMTP MAIL FROM)
+
+	SMTPHost     string
+	SMTPPort     int
+	SMTPSecurity Security
 }
 
 // Backend implements backend.Backend over one IMAP account.
@@ -57,7 +58,11 @@ type Backend struct {
 	cl            *imapclient.Client
 	selected      string            // currently SELECTed mailbox ("" = none)
 	folderToLabel map[string]string // mailbox name → label id (special-use mapped)
+	labelToFolder map[string]string // system label id → mailbox name (for moves)
+	archiveFolder string            // the \Archive mailbox, if any (for archive)
+	labels        []model.Label     // cached LIST → domain labels
 	synced        []string          // mailboxes to sync, derived once from LIST
+	foldersLoaded bool              // LIST done this connection
 }
 
 // New builds an IMAP backend. password authenticates with LOGIN/PLAIN; OAuth
@@ -115,6 +120,7 @@ func (b *Backend) reset() {
 	if b.cl != nil {
 		_ = b.cl.Close()
 		b.cl, b.selected = nil, ""
+		b.foldersLoaded = false // re-LIST after a reconnect
 	}
 }
 
@@ -169,32 +175,58 @@ func (b *Backend) Labels(ctx context.Context) ([]model.Label, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := b.ensureFolders(cl); err != nil {
+		return nil, err
+	}
+	return b.labels, nil
+}
+
+// ensureFolders runs LIST once per connection and derives, in one pass: the
+// domain label list, the folder→label and (system) label→folder maps, and the
+// syncable folder set (excluding \All/\Flagged/\Important virtuals so Gmail's
+// All Mail doesn't duplicate everything). Caller holds mu.
+func (b *Backend) ensureFolders(cl *imapclient.Client) error {
+	if b.foldersLoaded {
+		return nil
+	}
 	data, err := cl.List("", "*", &imap.ListOptions{ReturnSpecialUse: true}).Collect()
 	if err != nil {
 		b.reset()
-		return nil, fmt.Errorf("imap list: %w", err)
+		return fmt.Errorf("imap list: %w", err)
 	}
-	mapping := map[string]string{}
-	out := make([]model.Label, 0, len(data))
+	folderToLabel := map[string]string{}
+	labelToFolder := map[string]string{}
+	archive := ""
+	var labels []model.Label
+	var synced []string
 	for _, d := range data {
-		if hasAttr(d.Attrs, imap.MailboxAttrNonExistent) {
-			continue // a hierarchy node with no messages
+		if hasAttr(d.Attrs, imap.MailboxAttrNonExistent) || hasAttr(d.Attrs, imap.MailboxAttrNoSelect) {
+			continue
+		}
+		if hasAttr(d.Attrs, imap.MailboxAttrArchive) {
+			archive = d.Mailbox
 		}
 		id := folderLabelID(d)
-		mapping[d.Mailbox] = id
+		folderToLabel[d.Mailbox] = id
 		ltype := model.LabelUser
 		if isSystemLabel(id) {
 			ltype = model.LabelSystem
+			labelToFolder[id] = d.Mailbox
 		}
-		out = append(out, model.Label{
-			AccountID: b.accountID,
-			GmailID:   id,
-			Name:      displayName(d.Mailbox, d.Delim),
-			Type:      ltype,
+		labels = append(labels, model.Label{
+			AccountID: b.accountID, GmailID: id, Name: displayName(d.Mailbox, d.Delim), Type: ltype,
 		})
+		if !hasAttr(d.Attrs, imap.MailboxAttrAll) &&
+			!hasAttr(d.Attrs, imap.MailboxAttrFlagged) &&
+			!hasAttr(d.Attrs, imap.MailboxAttrImportant) {
+			synced = append(synced, d.Mailbox)
+		}
 	}
-	b.folderToLabel = mapping
-	return out, nil
+	sort.Strings(synced)
+	b.folderToLabel, b.labelToFolder, b.labels, b.synced = folderToLabel, labelToFolder, labels, synced
+	b.archiveFolder = archive
+	b.foldersLoaded = true
+	return nil
 }
 
 // SearchIDs lists message ids for backfill across all synced folders, newest
@@ -278,44 +310,52 @@ func (b *Backend) FetchMetadata(ctx context.Context, id string) (model.Message, 
 
 // FetchBody fetches and parses a message's full body + attachment metadata.
 func (b *Backend) FetchBody(ctx context.Context, id string) (model.MessageBody, []model.Attachment, error) {
-	mailbox, uidv, uid, err := parseMsgID(id)
+	raw, err := b.fetchRaw(id)
 	if err != nil {
 		return model.MessageBody{}, nil, err
+	}
+	return parseBody(raw)
+}
+
+// fetchRaw returns a message's full raw RFC 5322 bytes (BODY[], peeked so it
+// doesn't set \Seen). Shared by FetchBody and FetchAttachment.
+func (b *Backend) fetchRaw(id string) ([]byte, error) {
+	mailbox, uidv, uid, err := parseMsgID(id)
+	if err != nil {
+		return nil, err
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	cl, err := b.conn()
 	if err != nil {
-		return model.MessageBody{}, nil, err
+		return nil, err
 	}
 	sel, err := b.selectMailbox(cl, mailbox)
 	if err != nil {
 		b.reset()
-		return model.MessageBody{}, nil, err
+		return nil, err
 	}
 	if sel.UIDValidity != uidv {
-		return model.MessageBody{}, nil, fmt.Errorf("imap: stale id %q", id)
+		return nil, fmt.Errorf("imap: stale id %q", id)
 	}
-	section := &imap.FetchItemBodySection{Peek: true} // full message, don't set \Seen
+	section := &imap.FetchItemBodySection{Peek: true}
 	bufs, err := cl.Fetch(imap.UIDSetNum(uid), &imap.FetchOptions{
 		BodySection: []*imap.FetchItemBodySection{section},
 	}).Collect()
 	if err != nil {
 		b.reset()
-		return model.MessageBody{}, nil, fmt.Errorf("imap fetch body: %w", err)
+		return nil, fmt.Errorf("imap fetch body: %w", err)
 	}
 	if len(bufs) == 0 {
-		return model.MessageBody{}, nil, fmt.Errorf("imap: uid %d not found", uid)
+		return nil, fmt.Errorf("imap: uid %d not found", uid)
 	}
-	return parseBody(bufs[0].FindBodySection(section))
+	return bufs[0].FindBodySection(section), nil
 }
-
-// --- backend.Backend: stubs for later phases ---
 
 // Changes diffs every synced folder against the cursor (a per-folder UID-set +
 // modseq snapshot) and returns the message ids to upsert (new + flag-changed)
 // and delete (vanished), plus the next cursor. A UIDVALIDITY change re-syncs that
-// folder wholesale.
+// folder wholesale. (Mutations, send, and drafts live in mutate.go.)
 func (b *Backend) Changes(ctx context.Context, cur string) (upserts, deletes []string, next string, err error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -329,27 +369,6 @@ func (b *Backend) Changes(ctx context.Context, cur string) (upserts, deletes []s
 		return nil, nil, "", err
 	}
 	return up, del, nextCur.encode(), nil
-}
-
-func (b *Backend) FetchAttachment(ctx context.Context, msgID, attID string) ([]byte, error) {
-	return nil, errNotImplemented
-}
-func (b *Backend) ApplyLabels(ctx context.Context, ids []string, add, remove []string) error {
-	return errNotImplemented
-}
-func (b *Backend) Delete(ctx context.Context, ids []string) error { return errNotImplemented }
-func (b *Backend) Send(ctx context.Context, raw []byte, threadID string) (string, error) {
-	return "", errNotImplemented
-}
-func (b *Backend) SaveDraft(ctx context.Context, raw []byte, threadID string) (string, error) {
-	return "", errNotImplemented
-}
-func (b *Backend) UpdateDraft(ctx context.Context, draftID string, raw []byte, threadID string) (string, error) {
-	return "", errNotImplemented
-}
-func (b *Backend) DeleteDraft(ctx context.Context, draftID string) error { return errNotImplemented }
-func (b *Backend) FindDraftID(ctx context.Context, msgID string) (string, error) {
-	return "", errNotImplemented
 }
 
 // --- conversions / helpers ---
@@ -446,7 +465,12 @@ func parseBody(raw []byte) (model.MessageBody, []model.Attachment, error) {
 			filename, _ := h.Filename()
 			ct, _, _ := h.ContentType()
 			n, _ := io.Copy(io.Discard, part.Body)
-			atts = append(atts, model.Attachment{Filename: filename, MimeType: ct, SizeBytes: n})
+			// IMAP has no per-attachment id; use the ordinal so FetchAttachment can
+			// re-derive the part from a re-fetched body.
+			atts = append(atts, model.Attachment{
+				GmailAttID: strconv.Itoa(len(atts) + 1),
+				Filename:   filename, MimeType: ct, SizeBytes: n,
+			})
 		}
 	}
 	return body, atts, nil

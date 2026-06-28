@@ -309,6 +309,71 @@ func TestCursorAndUIDCodec(t *testing.T) {
 	}
 }
 
+func TestIMAPMutations(t *testing.T) {
+	host, port := startMemServer(t) // INBOX has one unread message
+	b := New(Config{Host: host, Port: port, Security: SecurityNone, Username: "alice@example.com", Email: "alice@example.com"}, 1, "secret")
+	t.Cleanup(b.Close)
+	ctx := context.Background()
+
+	ids, err := b.SearchIDs(ctx, "", 0)
+	if err != nil || len(ids) != 1 {
+		t.Fatalf("SearchIDs: %v, ids=%v", err, ids)
+	}
+	id := ids[0]
+
+	if m, _ := b.FetchMetadata(ctx, id); !m.IsUnread {
+		t.Fatal("message should start unread")
+	}
+
+	// Mark read (remove UNREAD → set \Seen).
+	if err := b.ApplyLabels(ctx, []string{id}, nil, []string{model.LabelUnread}); err != nil {
+		t.Fatalf("ApplyLabels mark-read: %v", err)
+	}
+	if m, _ := b.FetchMetadata(ctx, id); m.IsUnread {
+		t.Error("still unread after mark-read")
+	}
+
+	// Star (add STARRED → set \Flagged).
+	if err := b.ApplyLabels(ctx, []string{id}, []string{model.LabelStarred}, nil); err != nil {
+		t.Fatalf("ApplyLabels star: %v", err)
+	}
+	if m, _ := b.FetchMetadata(ctx, id); !m.IsStarred {
+		t.Error("not starred after star")
+	}
+
+	// Delete (\Deleted + EXPUNGE).
+	if err := b.Delete(ctx, []string{id}); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if ids2, _ := b.SearchIDs(ctx, "", 0); len(ids2) != 0 {
+		t.Errorf("after delete: %d messages remain, want 0", len(ids2))
+	}
+}
+
+func TestSMTPEnvelope(t *testing.T) {
+	raw := []byte("From: Me <me@x.com>\r\nTo: a@y.com, b@y.com\r\nCc: c@z.com\r\n" +
+		"Bcc: secret@w.com\r\nSubject: hi\r\n\r\nbody\r\n")
+	from, to, cleaned, err := smtpEnvelope(raw)
+	if err != nil {
+		t.Fatalf("smtpEnvelope: %v", err)
+	}
+	if from != "me@x.com" {
+		t.Errorf("from = %q, want me@x.com", from)
+	}
+	if len(to) != 4 {
+		t.Errorf("recipients = %v, want 4 (To+Cc+Bcc)", to)
+	}
+	if !contains(to, "secret@w.com") {
+		t.Error("bcc recipient missing from the RCPT list")
+	}
+	if bytes.Contains(bytes.ToLower(cleaned), []byte("bcc:")) {
+		t.Errorf("Bcc header not stripped from the transmitted message:\n%s", cleaned)
+	}
+	if !bytes.Contains(cleaned, []byte("To: a@y.com")) || !bytes.Contains(cleaned, []byte("\r\n\r\nbody")) {
+		t.Errorf("stripping Bcc damaged the message:\n%s", cleaned)
+	}
+}
+
 func TestMsgIDRoundTrip(t *testing.T) {
 	cases := []struct {
 		mailbox string

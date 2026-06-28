@@ -79,32 +79,12 @@ func decodeUIDs(s string) []imap.UID {
 	return out
 }
 
-// folders returns the mailboxes worth syncing, derived once from LIST: real,
-// selectable folders, excluding virtual/overlapping ones (\All — Gmail's "All
-// Mail" duplicates every message; \Flagged and \Important are saved-search
-// views). Caller holds mu.
+// folders returns the syncable mailboxes (see ensureFolders). Caller holds mu.
 func (b *Backend) folders(cl *imapclient.Client) ([]string, error) {
-	if b.synced != nil {
-		return b.synced, nil
+	if err := b.ensureFolders(cl); err != nil {
+		return nil, err
 	}
-	data, err := cl.List("", "*", &imap.ListOptions{ReturnSpecialUse: true}).Collect()
-	if err != nil {
-		return nil, fmt.Errorf("imap list: %w", err)
-	}
-	var out []string
-	for _, d := range data {
-		if hasAttr(d.Attrs, imap.MailboxAttrNonExistent) ||
-			hasAttr(d.Attrs, imap.MailboxAttrNoSelect) ||
-			hasAttr(d.Attrs, imap.MailboxAttrAll) ||
-			hasAttr(d.Attrs, imap.MailboxAttrFlagged) ||
-			hasAttr(d.Attrs, imap.MailboxAttrImportant) {
-			continue
-		}
-		out = append(out, d.Mailbox)
-	}
-	sort.Strings(out)
-	b.synced = out
-	return out, nil
+	return b.synced, nil
 }
 
 // snapshot SELECTs a folder and captures its current state (UIDVALIDITY, modseq,
