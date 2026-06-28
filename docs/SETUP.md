@@ -1,6 +1,6 @@
 # Setup
 
-How to build Mailbox, connect a Gmail account, and turn on the AI features.
+How to build Mailbox, connect accounts (Gmail and IMAP), and turn on the AI features.
 
 ## Build dependencies (Fedora)
 
@@ -23,7 +23,11 @@ make rpm
 sudo dnf install ./rpmbuild/RPMS/x86_64/mailbox-*.rpm
 ```
 
-## Connect a Gmail account
+## Connect your first account (Gmail)
+
+Mailbox needs one account to launch; connect it from the command line as below.
+Once the app is running, add any others — Gmail or IMAP — from **Add account…**
+in the main (☰) menu (see [Add more accounts](#add-more-accounts)).
 
 ### 1. Set up a Google OAuth client
 
@@ -61,6 +65,41 @@ file is at the default path above.)
 After the first sync you can just run `./bin/mailbox` — the refresh token is stored in the OS
 keyring and the config is persisted.
 
+## Add more accounts
+
+With Mailbox running, open the main (☰) menu → **Add account…**. Pick a provider, fill in the
+form, and click **Test & Add** — the account starts syncing right away (no restart) and appears
+in the sidebar switcher. The connection secret (app password or OAuth refresh token) goes to the
+OS keyring; per-account server settings are stored in `~/.local/share/mailbox/imap-accounts.json`.
+
+| Provider | How it connects |
+|---|---|
+| **Gmail** | Sign in with Google (native Gmail API — same as the CLI flow above). Needs `credentials.json`. |
+| **Gmail (IMAP)** | Sign in with Google; connects over IMAP/SMTP with the full-mailbox scope instead of the API. |
+| **Outlook / Office 365** | Sign in with Microsoft (OAuth). Requires an Azure app client id — see below. |
+| **Yahoo, iCloud, Fastmail** | Enter your email and an **app password** (not your normal password); the dialog links to where each provider creates one. |
+| **Other (IMAP)** | Enter the email, password, and IMAP/SMTP host/port/security under **Advanced**. |
+
+Most providers require an **app-specific password** rather than your account password (and may need
+IMAP enabled in their settings first):
+
+- **Yahoo** — [account security → app passwords](https://login.yahoo.com/account/security/app-passwords)
+- **iCloud** — [account.apple.com](https://account.apple.com/account/manage) → App-Specific Passwords
+- **Fastmail** — [Settings → Privacy & Security → app passwords](https://www.fastmail.com/settings/security/devicekeys)
+
+### Outlook / Office 365 (Azure app id)
+
+Outlook OAuth needs a public client id from an [Azure app registration](https://portal.azure.com)
+(Microsoft Entra ID → App registrations → New registration). Under **Authentication**, add a
+**Mobile and desktop applications** platform with a loopback redirect — Mailbox redirects to
+`http://127.0.0.1/callback` on a per-login port — and grant the delegated Graph/IMAP permissions
+`IMAP.AccessAsUser.All`, `SMTP.Send`, and `offline_access`. Then point Mailbox at the client id:
+
+```bash
+export MAILBOX_MS_CLIENT_ID=<your-application-client-id>
+./bin/mailbox
+```
+
 ## Enable the AI features (optional)
 
 The AI features stay dormant until a provider is configured. Set the provider/endpoint/model in
@@ -79,9 +118,11 @@ only in the OS keyring.
 |---|---|
 | Config | `~/.config/mailbox/config.toml` |
 | Database | `~/.local/share/mailbox/mailbox.db` |
-| OAuth credentials | `~/.config/mailbox/credentials.json` |
+| Gmail OAuth client | `~/.config/mailbox/credentials.json` |
+| IMAP account servers | `~/.local/share/mailbox/imap-accounts.json` |
+| Account secrets | OS keyring — Gmail tokens under `mailbox`, IMAP app passwords / OAuth tokens under `mailbox-imap` |
 | AI key | OS keyring (`mailbox set-ai-key`) |
 | Signature | `~/.config/mailbox/signature.txt` |
 
-AI provider can also be set via env vars: `MAILBOX_AI_PROVIDER`, `MAILBOX_AI_ENDPOINT`,
-`MAILBOX_AI_MODEL`, `MAILBOX_AI_KEY`.
+Env vars: AI provider — `MAILBOX_AI_PROVIDER`, `MAILBOX_AI_ENDPOINT`, `MAILBOX_AI_MODEL`,
+`MAILBOX_AI_KEY`; Outlook OAuth — `MAILBOX_MS_CLIENT_ID`.
