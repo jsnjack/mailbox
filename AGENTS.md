@@ -39,7 +39,7 @@ internal/
   backend/           the provider-agnostic Backend interface the engine drives (domain-typed: model.Message/Label, opaque sync cursor) + BuildMIME (RFC 5322). No protocol specifics — Gmail today, IMAP planned.
   gmailapi/          wrapper over google.golang.org/api/gmail/v1 (semaphore, per-attempt quota budget, backoff honoring Retry-After; network errors retried for idempotent calls but not sends)
   gmailbackend/      implements backend.Backend over gmailapi.Client (owns the Gmail↔domain conversions + the history-walk → upsert/delete id set)
-  imapbackend/       implements backend.Backend over IMAP (emersion/go-imap v2): connect/LOGIN, LIST folders→labels (special-use mapped), multi-folder backfill (skips \All/\Flagged/\Important virtuals), FETCH envelope/flags + body (go-message), and incremental sync. Message id = "imap:<uidvalidity>:<uid>:<mailbox>". Incremental (`Changes`) diffs a per-folder UID-set cursor (JSON in sync_cursor): new = current\stored, vanished = stored\current, UIDVALIDITY change re-syncs the folder; CONDSTORE `CHANGEDSINCE` adds flag-change detection when the server supports it (QRESYNC isn't exposed in go-imap beta.8, so deletions use the UID-set diff). Profile seeds the initial cursor. Mutations (flags/moves), delete, SMTP send + Sent APPEND, drafts, attachments, threading (References root), and XOAUTH2 (Gmail-mail/Outlook) are implemented. A small connection pool (`poolSize`, `withConn`) serves the engine's fan-out concurrently; `Watch` (optional `backend.Watcher`) holds a dedicated IDLE connection on INBOX and nudges the per-account sync loop's `wake` channel for near-real-time updates (falls back to the 60s poll when the server lacks IDLE).
+  imapbackend/       implements backend.Backend over IMAP (emersion/go-imap v2): connect/LOGIN, LIST folders→labels (special-use mapped), multi-folder backfill (skips \All/\Flagged/\Important virtuals), FETCH envelope/flags + body (go-message), and incremental sync. Message id = "imap:<uidvalidity>:<uid>:<mailbox>". Incremental (`Changes`) diffs a per-folder UID-set cursor (JSON in sync_cursor): new = current\stored, vanished = stored\current, UIDVALIDITY change re-syncs the folder; CONDSTORE `CHANGEDSINCE` adds flag-change detection when the server supports it (QRESYNC isn't exposed in go-imap beta.8, so deletions use the UID-set diff). Profile seeds the initial cursor. Mutations (flags/moves), delete, SMTP send + Sent APPEND, drafts, attachments, threading (References root), and XOAUTH2 (Gmail-mail/Outlook) are implemented. A small connection pool (`poolSize`, `withConn`) serves the engine's fan-out concurrently; `Watch` (optional `backend.Watcher`) holds a dedicated IDLE connection on INBOX and nudges the per-account sync loop's `wake` channel for near-real-time updates (falls back to the 60s poll when the server lacks IDLE). Connection setup uses a dial timeout + a login deadline (cleared afterward so pooled/IDLE reads aren't affected) so a wrong/unreachable host fails fast; a login credential rejection is classified (`AUTHENTICATIONFAILED` code + text fallback) and wrapped with `backend.ErrAuth` so the launcher surfaces the reconnect banner instead of retrying forever.
   sync/              per-account sync workers (backfill ↔ incremental) + notify.Hub; the engine takes a backend.Backend, never a concrete client
   ai/                provider abstraction (OpenAI-compatible + Anthropic), streaming
   activity/          headless pub/sub of transient "what is the app doing" events (status bar)
@@ -52,13 +52,27 @@ backend (first-class — `history.list`, server threads/search) or an IMAP backe
 (`imapbackend` over emersion/go-imap, with a password or XOAUTH2 credential) per
 account, and the engine drives whichever via `backend.Backend`. The UI tracks an
 active account (a switcher appears in the sidebar when more than one is
-connected) and routes every operation by account id. Accounts are added via the
+connected) and routes every operation by account id. The app launches even with
+**zero accounts** — it opens to a welcome empty state whose **Add account…**
+button connects the first one. Accounts are added via the
 primary menu's **Add account…** dialog (`openAddAccount`: provider presets →
 email + app password or OAuth sign-in → Test & Add; persists via
 `config.{SaveIMAPAccount}` + `auth.SaveIMAPSecret` + `store.UpsertAccount`) and,
-for Gmail REST, via `mailbox sync --account`. A freshly added account has no sync
-cursor, so `backgroundSync` does an initial labels+backfill (via `engine.Resync`)
-on the next launch before switching to incremental. Each switcher row shows the
+for Gmail REST, via `mailbox sync --account`. Add/remove/reconnect are all live
+— no restart: the launcher keeps a per-account `context.CancelFunc`, and
+`startAccount` (used at launch, add, and reconnect) stops any existing runtime
+for that id before starting, so a backend can be torn down or swapped cleanly. A
+freshly added account has no sync cursor, so `backgroundSync` does an initial
+labels+backfill (via `engine.Resync`) immediately before switching to
+incremental. An account is **removed** from Preferences → Accounts
+(`deps.RemoveAccount` → `stopAccount` + `store.DeleteAccount`, which clears the
+FTS rows then drops the account row so its messages/labels/threads cascade, +
+keyring secret + per-account config cleanup); the switcher collapses live and the
+active account falls back to a survivor or the welcome state. A revoked/expired
+credential (Gmail OAuth `invalid_grant`, or a rejected IMAP password classified
+as `backend.ErrAuth`) reveals the auth banner whose **Reconnect** button reopens
+the dialog prefilled for that account (`reconnectAccount`) — re-adding the same
+email keeps its cursor (cache preserved) and restarts its sync. Each switcher row shows the
 account's display name (email as a caption when named) and an unread-INBOX
 count pill;
 names are user-assigned in Preferences → Accounts (`config.{Load,Save}AccountName`,
