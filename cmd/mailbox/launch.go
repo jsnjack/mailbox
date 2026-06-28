@@ -16,6 +16,7 @@ import (
 	"github.com/jsnjack/mailbox/internal/config"
 	"github.com/jsnjack/mailbox/internal/gmailapi"
 	"github.com/jsnjack/mailbox/internal/gmailbackend"
+	"github.com/jsnjack/mailbox/internal/imapbackend"
 	"github.com/jsnjack/mailbox/internal/model"
 	"github.com/jsnjack/mailbox/internal/store"
 	"github.com/jsnjack/mailbox/internal/syncer"
@@ -107,13 +108,14 @@ func launchUI(mailto string) error {
 	clients := make(map[int64]*gmailapi.Client)
 	backends := make(map[int64]backend.Backend)
 	for _, a := range accounts {
-		client, err := buildClientForAccount(ctx, a.Email)
+		b, client, err := buildBackendForAccount(ctx, a)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "live features disabled for %s (%v)\n", a.Email, err)
 			continue
 		}
-		clients[a.ID] = client
-		b := gmailbackend.New(client, a.ID)
+		if client != nil { // Gmail REST accounts expose API stats; IMAP accounts don't
+			clients[a.ID] = client
+		}
 		backends[a.ID] = b
 		go backgroundSync(ctx, engine, act, b, a.ID, a.Email)
 		go backgroundSweep(ctx, engine, b, a.ID)
@@ -303,6 +305,87 @@ func buildAssistant() (*ai.Assistant, error) {
 	}
 	return ai.NewAssistant(p), nil
 }
+
+// buildBackendForAccount builds the right provider backend for an account based
+// on its type: the Gmail REST backend (also returning the raw client, for API
+// stats) or an IMAP backend (client is nil — IMAP reports no Gmail stats).
+func buildBackendForAccount(ctx context.Context, a model.Account) (backend.Backend, *gmailapi.Client, error) {
+	if a.Type == model.AccountIMAP {
+		b, err := buildIMAPBackend(ctx, a)
+		return b, nil, err
+	}
+	client, err := buildClientForAccount(ctx, a.Email)
+	if err != nil {
+		return nil, nil, err
+	}
+	return gmailbackend.New(client, a.ID), client, nil
+}
+
+// buildIMAPBackend assembles an IMAP backend from the stored connection config
+// and a credential (app password or OAuth token source).
+func buildIMAPBackend(ctx context.Context, a model.Account) (backend.Backend, error) {
+	cfg, ok, err := config.LoadIMAPAccount(a.Email)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, fmt.Errorf("no IMAP config for %s", a.Email)
+	}
+	username := cfg.Username
+	if username == "" {
+		username = a.Email
+	}
+	cred, err := buildIMAPCredential(ctx, a.Email, username, cfg)
+	if err != nil {
+		return nil, err
+	}
+	icfg := imapbackend.Config{
+		Host: cfg.IMAPHost, Port: cfg.IMAPPort, Security: imapbackend.Security(cfg.IMAPSecurity),
+		Username: username, Email: a.Email,
+		SMTPHost: cfg.SMTPHost, SMTPPort: cfg.SMTPPort, SMTPSecurity: imapbackend.Security(cfg.SMTPSecurity),
+	}
+	return imapbackend.New(icfg, a.ID, cred), nil
+}
+
+// buildIMAPCredential picks the credential flow recorded for the account: a
+// keyring app password, or an auto-refreshing OAuth token source (Gmail-mail or
+// Microsoft).
+func buildIMAPCredential(ctx context.Context, email, username string, cfg config.IMAPAccount) (imapbackend.Credential, error) {
+	switch cfg.Auth {
+	case config.AuthPassword:
+		pw, err := auth.LoadIMAPSecret(email)
+		if err != nil {
+			return nil, err
+		}
+		return imapbackend.PasswordAuth(username, pw), nil
+	case config.AuthGoogle:
+		cc, err := auth.LoadClientConfig(credentialsPath())
+		if err != nil {
+			return nil, err
+		}
+		ts, err := auth.GoogleMailTokenSource(ctx, cc, email, time.Time{})
+		if err != nil {
+			return nil, err
+		}
+		return imapbackend.OAuthAuth(username, ts), nil
+	case config.AuthMicrosoft:
+		clientID := microsoftClientID()
+		if clientID == "" {
+			return nil, fmt.Errorf("no Microsoft OAuth client id (set MAILBOX_MS_CLIENT_ID)")
+		}
+		ts, err := auth.MicrosoftTokenSource(ctx, clientID, email, time.Time{})
+		if err != nil {
+			return nil, err
+		}
+		return imapbackend.OAuthAuth(username, ts), nil
+	default:
+		return nil, fmt.Errorf("unknown auth kind %q for %s", cfg.Auth, email)
+	}
+}
+
+// microsoftClientID is the Azure app registration's public client id used for
+// Outlook/Office 365 OAuth (a SETUP step, like the Google credentials).
+func microsoftClientID() string { return os.Getenv("MAILBOX_MS_CLIENT_ID") }
 
 // buildClientForAccount builds a Gmail client from the keyring refresh token and
 // the OAuth client credentials. It never opens a browser; an account must have

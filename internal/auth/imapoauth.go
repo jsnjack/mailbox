@@ -84,3 +84,29 @@ func GoogleMailTokenSource(ctx context.Context, cc ClientConfig, email string, e
 func MicrosoftTokenSource(ctx context.Context, clientID, email string, expiry time.Time) (oauth2.TokenSource, error) {
 	return OAuthTokenSourceFor(ctx, microsoftConfig(clientID), IMAPKeyringService, email, expiry)
 }
+
+// SaveIMAPSecret stores an IMAP account's secret (an app password, or an OAuth
+// refresh token) in the keyring under IMAPKeyringService, keyed by email.
+func SaveIMAPSecret(email, secret string) error {
+	if err := keyring.Set(IMAPKeyringService, email, secret); err != nil {
+		return fmt.Errorf("save imap secret for %q: %w", email, err)
+	}
+	return nil
+}
+
+// LoadIMAPSecret reads an IMAP account's secret from the keyring.
+func LoadIMAPSecret(email string) (string, error) {
+	s, err := keyring.Get(IMAPKeyringService, email)
+	if err != nil {
+		return "", fmt.Errorf("load imap secret for %q: %w", email, err)
+	}
+	return s, nil
+}
+
+// DeleteIMAPSecret removes an IMAP account's secret from the keyring.
+func DeleteIMAPSecret(email string) error {
+	if err := keyring.Delete(IMAPKeyringService, email); err != nil {
+		return fmt.Errorf("delete imap secret for %q: %w", email, err)
+	}
+	return nil
+}
