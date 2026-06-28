@@ -22,6 +22,7 @@ import (
 	"github.com/jsnjack/mailbox/internal/syncer"
 	"github.com/jsnjack/mailbox/internal/ui"
 	"github.com/zalando/go-keyring"
+	"golang.org/x/oauth2"
 )
 
 // aiKeyringService is the keyring collection for the AI provider API key.
@@ -189,40 +190,40 @@ func launchUI(mailto string) error {
 		}
 		return upsertAccountKeepingCursor(ctx, st, acct.Email, model.AccountIMAP)
 	}
-	deps.OAuthConnect = func(ctx context.Context, kind config.AuthKind) (string, error) {
+	deps.OAuthConnect = func(ctx context.Context, kind config.AuthKind) (string, string, error) {
 		switch kind {
 		case config.AuthGmailREST:
 			cc, err := auth.LoadClientConfig(credentialsPath())
 			if err != nil {
-				return "", err
+				return "", "", err
 			}
 			tok, err := auth.Login(ctx, cc) // Gmail REST scopes
 			if err != nil {
-				return "", err
+				return "", "", err
 			}
-			return tok.RefreshToken, nil
+			return gmailVerifiedEmail(ctx, tok), tok.RefreshToken, nil
 		case config.AuthGoogle:
 			cc, err := auth.LoadClientConfig(credentialsPath())
 			if err != nil {
-				return "", err
+				return "", "", err
 			}
 			tok, err := auth.LoginGoogleMail(ctx, cc)
 			if err != nil {
-				return "", err
+				return "", "", err
 			}
-			return tok.RefreshToken, nil
+			return gmailVerifiedEmail(ctx, tok), tok.RefreshToken, nil
 		case config.AuthMicrosoft:
 			id := microsoftClientID()
 			if id == "" {
-				return "", fmt.Errorf("set MAILBOX_MS_CLIENT_ID to connect Outlook")
+				return "", "", fmt.Errorf("set MAILBOX_MS_CLIENT_ID to connect Outlook")
 			}
 			tok, err := auth.LoginMicrosoft(ctx, id)
 			if err != nil {
-				return "", err
+				return "", "", err
 			}
-			return tok.RefreshToken, nil
+			return "", tok.RefreshToken, nil // Microsoft: keep the typed address
 		default:
-			return "", fmt.Errorf("provider does not use OAuth")
+			return "", "", fmt.Errorf("provider does not use OAuth")
 		}
 	}
 
@@ -488,6 +489,24 @@ func buildIMAPCredential(ctx context.Context, email, username string, cfg config
 // microsoftClientID is the Azure app registration's public client id used for
 // Outlook/Office 365 OAuth (a SETUP step, like the Google credentials).
 func microsoftClientID() string { return os.Getenv("MAILBOX_MS_CLIENT_ID") }
+
+// gmailVerifiedEmail reads the signed-in Gmail account's address from its profile
+// so the account is keyed by the address the user actually authenticated as, not
+// whatever was typed. Best-effort: returns "" on failure (the caller then keeps
+// the typed address).
+func gmailVerifiedEmail(ctx context.Context, tok *oauth2.Token) string {
+	srv, err := gmailapi.NewService(ctx, oauth2.StaticTokenSource(tok), &gmailapi.Stats{})
+	if err != nil {
+		slog.Warn("verify gmail email: service", "err", err)
+		return ""
+	}
+	prof, err := gmailapi.NewClient(srv).GetProfile(ctx)
+	if err != nil {
+		slog.Warn("verify gmail email: profile", "err", err)
+		return ""
+	}
+	return prof.EmailAddress
+}
 
 // buildClientForAccount builds a Gmail client from the keyring refresh token and
 // the OAuth client credentials. It never opens a browser; an account must have

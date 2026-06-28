@@ -75,6 +75,7 @@ func (w *window) openAddAccount() {
 	// step that yields a refresh token.
 	var (
 		oauthToken string
+		oauthEmail string // verified address from sign-in (Gmail), if any
 		oauthDone  bool
 	)
 	current := func() config.Preset { return config.Presets[providerRow.Selected()] }
@@ -85,7 +86,7 @@ func (w *window) openAddAccount() {
 		imapPort.SetText(itoa(p.IMAPPort))
 		smtpHost.SetText(p.SMTPHost)
 		smtpPort.SetText(itoa(p.SMTPPort))
-		oauthToken, oauthDone = "", false
+		oauthToken, oauthEmail, oauthDone = "", "", false
 		isOAuth := p.Auth == config.AuthGoogle || p.Auth == config.AuthMicrosoft || p.Auth == config.AuthGmailREST
 		passwordRow.SetVisible(!isOAuth)
 		h := p.Hint
@@ -154,19 +155,27 @@ func (w *window) openAddAccount() {
 		// browser to obtain a refresh token, then add.
 		if p.Auth == config.AuthGmailREST || p.Auth == config.AuthGoogle || p.Auth == config.AuthMicrosoft {
 			if oauthDone {
+				if oauthEmail != "" {
+					acct.Email, acct.Username = oauthEmail, oauthEmail
+				}
 				finish(acct, oauthToken)
 				return
 			}
 			status.SetText("Opening your browser to sign in…")
 			go func() {
-				tok, err := w.deps.OAuthConnect(context.Background(), p.Auth)
+				email, tok, err := w.deps.OAuthConnect(context.Background(), p.Auth)
 				dispatch.Main(func() {
 					if err != nil {
 						status.SetText("Sign-in failed: " + err.Error())
 						addBtn.SetSensitive(true)
 						return
 					}
-					oauthToken, oauthDone = tok, true
+					// Prefer the address actually signed in (Gmail reports it via the
+					// profile) over whatever was typed.
+					if email != "" {
+						acct.Email, acct.Username = email, email
+					}
+					oauthToken, oauthEmail, oauthDone = tok, email, true
 					finish(acct, tok)
 				})
 			}()
