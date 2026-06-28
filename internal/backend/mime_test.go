@@ -1,4 +1,4 @@
-package gmailapi
+package backend
 
 import (
 	"strings"

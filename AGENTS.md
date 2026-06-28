@@ -36,8 +36,10 @@ internal/
   dispatch/          THE main-thread bridge: Main(fn) → glib.IdleAdd
   store/             SQLite layer (schema, FTS5, queries) — modernc.org/sqlite
   auth/              OAuth2 installed-app loopback + keyring-backed token source (auto-refresh, rotated-token write-back, IsAuthError detects a revoked/expired refresh token)
-  gmailapi/          wrapper over google.golang.org/api/gmail/v1 (semaphore, per-attempt quota budget, backoff honoring Retry-After; network errors retried for idempotent calls but not sends; MIME)
-  sync/              per-account sync workers (backfill ↔ incremental) + notify.Hub
+  backend/           the provider-agnostic Backend interface the engine drives (domain-typed: model.Message/Label, opaque sync cursor) + BuildMIME (RFC 5322). No protocol specifics — Gmail today, IMAP planned.
+  gmailapi/          wrapper over google.golang.org/api/gmail/v1 (semaphore, per-attempt quota budget, backoff honoring Retry-After; network errors retried for idempotent calls but not sends)
+  gmailbackend/      implements backend.Backend over gmailapi.Client (owns the Gmail↔domain conversions + the history-walk → upsert/delete id set)
+  sync/              per-account sync workers (backfill ↔ incremental) + notify.Hub; the engine takes a backend.Backend, never a concrete client
   ai/                provider abstraction (OpenAI-compatible + Anthropic), streaming
   activity/          headless pub/sub of transient "what is the app doing" events (status bar)
   ui/                all GTK/adw/webkit widget code (3-pane shell, list, reader, actions)
@@ -251,10 +253,12 @@ there, and run under Xvfb (`GDK_BACKEND=x11 GSK_RENDERER=cairo`) with a distinct
 OAuth tokens + the AI key) but starts a fresh instance, so it never disturbs a
 running app. `MAILBOX_DEMO=1` hides the "read-only" banner for clean screenshots.
 
-Dependency rule: `store`/`gmailapi`/`sync`/`auth`/`ai` MUST NOT import any GTK
-package (they are headless and unit-testable without a display). `ui` MUST NOT
-import `sync`/`gmailapi`/`ai` directly — inject interfaces and communicate via
-channels + `dispatch`.
+Dependency rule: `store`/`backend`/`gmailapi`/`gmailbackend`/`sync`/`auth`/`ai`
+MUST NOT import any GTK package (they are headless and unit-testable without a
+display). `ui` MUST NOT import `sync`/`gmailapi`/`ai` directly — inject interfaces
+and communicate via channels + `dispatch`. The sync engine MUST depend only on
+`backend.Backend`, never a concrete provider client, so new providers (IMAP) drop
+in without touching the engine.
 
 ---
 

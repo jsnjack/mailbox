@@ -13,8 +13,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jsnjack/mailbox/internal/backend"
 	"github.com/jsnjack/mailbox/internal/config"
-	"github.com/jsnjack/mailbox/internal/gmailapi"
 	"github.com/jsnjack/mailbox/internal/model"
 	"github.com/jsnjack/mailbox/internal/store"
 )
@@ -58,13 +58,13 @@ func (e *Engine) NotifyAuthExpired(accountID int64) {
 }
 
 // SyncLabels refreshes the account's label set from Gmail.
-func (e *Engine) SyncLabels(ctx context.Context, c *gmailapi.Client, accountID int64) (int, error) {
-	labels, err := c.ListLabels(ctx)
+func (e *Engine) SyncLabels(ctx context.Context, b backend.Backend, accountID int64) (int, error) {
+	labels, err := b.Labels(ctx)
 	if err != nil {
 		return 0, err
 	}
 	for _, l := range labels {
-		if err := e.Store.UpsertLabel(ctx, gmailapi.ToLabel(accountID, l)); err != nil {
+		if err := e.Store.UpsertLabel(ctx, l); err != nil {
 			return 0, err
 		}
 	}
@@ -75,8 +75,8 @@ func (e *Engine) SyncLabels(ctx context.Context, c *gmailapi.Client, accountID i
 // Backfill lists message ids matching query (empty = all), newest first up to
 // max (0 = all), fetches each message's metadata concurrently, and upserts it.
 // Individual fetch failures are logged and skipped; it returns the number stored.
-func (e *Engine) Backfill(ctx context.Context, c *gmailapi.Client, accountID int64, query string, max int) (int, error) {
-	ids, err := c.ListMessageIDs(ctx, query, max)
+func (e *Engine) Backfill(ctx context.Context, b backend.Backend, accountID int64, query string, max int) (int, error) {
+	ids, err := b.SearchIDs(ctx, query, max)
 	if err != nil {
 		return 0, fmt.Errorf("list message ids: %w", err)
 	}
@@ -102,12 +102,12 @@ func (e *Engine) Backfill(ctx context.Context, c *gmailapi.Client, accountID int
 		go func() {
 			defer wg.Done()
 			for id := range idCh {
-				msg, err := c.GetMessageMetadata(ctx, id)
+				msg, err := b.FetchMetadata(ctx, id)
 				if err != nil {
 					slog.Default().Warn("backfill: fetch metadata", "id", id, "err", err)
 					continue
 				}
-				resCh <- gmailapi.ToMessage(accountID, msg)
+				resCh <- msg
 			}
 		}()
 	}
@@ -167,8 +167,8 @@ func (e *Engine) Backfill(ctx context.Context, c *gmailapi.Client, accountID int
 // caches the matching messages' metadata that isn't already local, and returns
 // the matching message ids (Gmail's relevance order). This lets the user find
 // mail beyond the local cache.
-func (e *Engine) SearchServer(ctx context.Context, c *gmailapi.Client, accountID int64, query string, max int) ([]string, error) {
-	ids, err := c.ListMessageIDs(ctx, query, max)
+func (e *Engine) SearchServer(ctx context.Context, b backend.Backend, accountID int64, query string, max int) ([]string, error) {
+	ids, err := b.SearchIDs(ctx, query, max)
 	if err != nil {
 		return nil, fmt.Errorf("search list ids: %w", err)
 	}
@@ -177,12 +177,12 @@ func (e *Engine) SearchServer(ctx context.Context, c *gmailapi.Client, accountID
 		if _, err := e.Store.GetMessage(ctx, accountID, id); err == nil {
 			continue // already cached
 		}
-		msg, err := c.GetMessageMetadata(ctx, id)
+		msg, err := b.FetchMetadata(ctx, id)
 		if err != nil {
 			slog.Default().Warn("search: fetch metadata", "id", id, "err", err)
 			continue
 		}
-		fetched = append(fetched, gmailapi.ToMessage(accountID, msg))
+		fetched = append(fetched, msg)
 	}
 	if len(fetched) > 0 {
 		if err := e.Store.UpsertMessages(ctx, fetched); err != nil {
@@ -195,11 +195,11 @@ func (e *Engine) SearchServer(ctx context.Context, c *gmailapi.Client, accountID
 
 // DeletePermanently removes messages for good (server batchDelete + local
 // delete). Used for "Delete forever" from Trash/Spam; cannot be undone.
-func (e *Engine) DeletePermanently(ctx context.Context, c *gmailapi.Client, accountID int64, gmailIDs []string) error {
+func (e *Engine) DeletePermanently(ctx context.Context, b backend.Backend, accountID int64, gmailIDs []string) error {
 	if len(gmailIDs) == 0 {
 		return nil
 	}
-	if err := c.BatchDelete(ctx, gmailIDs); err != nil {
+	if err := b.Delete(ctx, gmailIDs); err != nil {
 		return fmt.Errorf("delete permanently: %w", err)
 	}
 	for _, id := range gmailIDs {
@@ -214,7 +214,7 @@ func (e *Engine) DeletePermanently(ctx context.Context, c *gmailapi.Client, acco
 // EmptyLabel permanently deletes every message in Trash or Spam (server-side
 // list + batchDelete + local delete), returning how many were removed. Used by
 // "Empty Trash/Spam"; cannot be undone.
-func (e *Engine) EmptyLabel(ctx context.Context, c *gmailapi.Client, accountID int64, labelID string) (int, error) {
+func (e *Engine) EmptyLabel(ctx context.Context, b backend.Backend, accountID int64, labelID string) (int, error) {
 	var query string
 	switch labelID {
 	case model.LabelTrash:
@@ -224,14 +224,14 @@ func (e *Engine) EmptyLabel(ctx context.Context, c *gmailapi.Client, accountID i
 	default:
 		return 0, fmt.Errorf("can only empty Trash or Spam")
 	}
-	ids, err := c.ListMessageIDs(ctx, query, 0)
+	ids, err := b.SearchIDs(ctx, query, 0)
 	if err != nil {
 		return 0, fmt.Errorf("empty %s: list: %w", labelID, err)
 	}
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	if err := c.BatchDelete(ctx, ids); err != nil {
+	if err := b.Delete(ctx, ids); err != nil {
 		return 0, fmt.Errorf("empty %s: delete: %w", labelID, err)
 	}
 	for _, id := range ids {
@@ -244,14 +244,14 @@ func (e *Engine) EmptyLabel(ctx context.Context, c *gmailapi.Client, accountID i
 }
 
 // FetchBody downloads a message's full body and caches it, marking it fetched.
-func (e *Engine) FetchBody(ctx context.Context, c *gmailapi.Client, accountID int64, gmailID string) error {
+func (e *Engine) FetchBody(ctx context.Context, b backend.Backend, accountID int64, gmailID string) error {
 	start := time.Now()
 	m, err := e.Store.GetMessage(ctx, accountID, gmailID)
 	if err != nil {
 		return err
 	}
 	netStart := time.Now()
-	full, err := c.GetMessageFull(ctx, gmailID)
+	body, atts, err := b.FetchBody(ctx, gmailID)
 	if err != nil {
 		return err
 	}
@@ -259,12 +259,11 @@ func (e *Engine) FetchBody(ctx context.Context, c *gmailapi.Client, accountID in
 	defer func() {
 		slog.Default().Debug("engine: FetchBody", "id", gmailID, "network", netDur, "total", time.Since(start))
 	}()
-	body := gmailapi.ToBody(full)
 	body.MessageRowID = m.RowID
 	if err := e.Store.UpsertBody(ctx, body); err != nil {
 		return err
 	}
-	if err := e.Store.ReplaceAttachments(ctx, m.RowID, gmailapi.AttachmentsFromMessage(full)); err != nil {
+	if err := e.Store.ReplaceAttachments(ctx, m.RowID, atts); err != nil {
 		slog.Default().Warn("store attachments", "id", gmailID, "err", err)
 	}
 	e.publish(Change{Kind: MessageUpserted, AccountID: accountID, GmailID: gmailID})
@@ -274,7 +273,7 @@ func (e *Engine) FetchBody(ctx context.Context, c *gmailapi.Client, accountID in
 // OpenAttachment ensures an attachment's bytes are cached on disk (downloading
 // them if needed) and returns the local file path. The file is content-addressed
 // by SHA-256 under the attachment cache directory.
-func (e *Engine) OpenAttachment(ctx context.Context, c *gmailapi.Client, gmailID string, attID int64) (string, error) {
+func (e *Engine) OpenAttachment(ctx context.Context, b backend.Backend, gmailID string, attID int64) (string, error) {
 	a, err := e.Store.GetAttachmentByID(ctx, attID)
 	if err != nil {
 		return "", err
@@ -284,7 +283,7 @@ func (e *Engine) OpenAttachment(ctx context.Context, c *gmailapi.Client, gmailID
 			return a.DiskPath, nil
 		}
 	}
-	data, err := c.GetAttachment(ctx, gmailID, a.GmailAttID)
+	data, err := b.FetchAttachment(ctx, gmailID, a.GmailAttID)
 	if err != nil {
 		return "", err
 	}
@@ -315,22 +314,22 @@ const maxOutboxAttempts = 5
 // failure it queues the message to the outbox for the background sweeper to
 // retry, and returns the error so the caller can inform the user. After a
 // successful send the message arrives in the local cache via incremental sync.
-func (e *Engine) Send(ctx context.Context, c *gmailapi.Client, accountID int64, msg model.OutgoingMessage) error {
+func (e *Engine) Send(ctx context.Context, b backend.Backend, accountID int64, msg model.OutgoingMessage) error {
 	if strings.TrimSpace(msg.To) == "" {
 		return fmt.Errorf("message has no recipient")
 	}
-	raw, err := gmailapi.BuildMIME(msg)
+	raw, err := backend.BuildMIME(msg)
 	if err != nil {
 		return err
 	}
-	if _, err := c.Send(ctx, raw, msg.ThreadID); err != nil {
+	if _, err := b.Send(ctx, raw, msg.ThreadID); err != nil {
 		if qerr := e.Store.EnqueueOutbox(ctx, accountID, msg.ThreadID, raw); qerr != nil {
 			return fmt.Errorf("send failed (%v) and could not queue: %w", err, qerr)
 		}
 		// The message left the drafts for the outbox; drop the source draft so it
 		// doesn't linger and duplicate the queued send.
 		if msg.DraftID != "" {
-			if derr := c.DeleteDraft(ctx, msg.DraftID); derr != nil {
+			if derr := b.DeleteDraft(ctx, msg.DraftID); derr != nil {
 				slog.Default().Warn("send: delete source draft after queue", "id", msg.DraftID, "err", derr)
 			}
 		}
@@ -339,7 +338,7 @@ func (e *Engine) Send(ctx context.Context, c *gmailapi.Client, accountID int64, 
 	}
 	// Sending an edited draft creates a new message; remove the original draft.
 	if msg.DraftID != "" {
-		if err := c.DeleteDraft(ctx, msg.DraftID); err != nil {
+		if err := b.DeleteDraft(ctx, msg.DraftID); err != nil {
 			slog.Default().Warn("send: delete source draft", "id", msg.DraftID, "err", err)
 		}
 	}
@@ -349,12 +348,12 @@ func (e *Engine) Send(ctx context.Context, c *gmailapi.Client, accountID int64, 
 // RetryOutbox requeues a single outbox item (clearing its failed state and
 // attempt count) and immediately attempts to send everything sendable for the
 // account — used by the user's manual "retry" action.
-func (e *Engine) RetryOutbox(ctx context.Context, c *gmailapi.Client, accountID, id int64) error {
+func (e *Engine) RetryOutbox(ctx context.Context, b backend.Backend, accountID, id int64) error {
 	if err := e.Store.RequeueOutbox(ctx, id); err != nil {
 		return err
 	}
 	e.publish(Change{Kind: SendStateChanged, AccountID: accountID})
-	_, err := e.SweepOutbox(ctx, c, accountID)
+	_, err := e.SweepOutbox(ctx, b, accountID)
 	return err
 }
 
@@ -370,16 +369,16 @@ func (e *Engine) DiscardOutbox(ctx context.Context, accountID, id int64) error {
 // SaveDraft builds an outgoing message and stores it as a Gmail draft. When the
 // message carries an existing DraftID it updates that draft in place rather than
 // creating a new one (so editing a draft doesn't leave a duplicate).
-func (e *Engine) SaveDraft(ctx context.Context, c *gmailapi.Client, accountID int64, msg model.OutgoingMessage) error {
-	raw, err := gmailapi.BuildMIME(msg)
+func (e *Engine) SaveDraft(ctx context.Context, b backend.Backend, accountID int64, msg model.OutgoingMessage) error {
+	raw, err := backend.BuildMIME(msg)
 	if err != nil {
 		return err
 	}
 	if msg.DraftID != "" {
-		_, err = c.UpdateDraft(ctx, msg.DraftID, raw, msg.ThreadID)
+		_, err = b.UpdateDraft(ctx, msg.DraftID, raw, msg.ThreadID)
 		return err
 	}
-	if _, err := c.SaveDraft(ctx, raw, msg.ThreadID); err != nil {
+	if _, err := b.SaveDraft(ctx, raw, msg.ThreadID); err != nil {
 		return err
 	}
 	return nil
@@ -387,14 +386,14 @@ func (e *Engine) SaveDraft(ctx context.Context, c *gmailapi.Client, accountID in
 
 // SweepOutbox retries queued/failed messages for an account, returning how many
 // were sent. It is run periodically in the background.
-func (e *Engine) SweepOutbox(ctx context.Context, c *gmailapi.Client, accountID int64) (int, error) {
+func (e *Engine) SweepOutbox(ctx context.Context, b backend.Backend, accountID int64) (int, error) {
 	items, err := e.Store.ListSendableOutbox(ctx, accountID, maxOutboxAttempts)
 	if err != nil {
 		return 0, err
 	}
 	sent := 0
 	for _, it := range items {
-		if _, err := c.Send(ctx, it.RFC822, it.ThreadID); err != nil {
+		if _, err := b.Send(ctx, it.RFC822, it.ThreadID); err != nil {
 			if mErr := e.Store.MarkOutboxFailed(ctx, it.ID, err.Error()); mErr != nil {
 				return sent, mErr
 			}
@@ -415,7 +414,7 @@ func (e *Engine) SweepOutbox(ctx context.Context, c *gmailapi.Client, accountID 
 // then mirrors the change to Gmail in one BatchModify call. This keeps archiving
 // or marking a whole conversation to O(1) network round-trips and one UI refresh
 // instead of one per message. Next incremental sync reconciles any divergence.
-func (e *Engine) ModifyLabelsBatch(ctx context.Context, c *gmailapi.Client, accountID int64, gmailIDs []string, add, remove []string) error {
+func (e *Engine) ModifyLabelsBatch(ctx context.Context, b backend.Backend, accountID int64, gmailIDs []string, add, remove []string) error {
 	if len(gmailIDs) == 0 {
 		return nil
 	}
@@ -434,10 +433,10 @@ func (e *Engine) ModifyLabelsBatch(ctx context.Context, c *gmailapi.Client, acco
 	// change instead of waiting on the round-trip (e.g. unstarring should leave the
 	// Starred folder at once). A failure is logged; the next incremental sync
 	// reconciles any divergence.
-	if c != nil {
+	if b != nil {
 		go func() {
-			if err := c.BatchModify(context.Background(), gmailIDs, add, remove); err != nil {
-				slog.Default().Warn("modify labels: mirror to gmail", "n", len(gmailIDs), "err", err)
+			if err := b.ApplyLabels(context.Background(), gmailIDs, add, remove); err != nil {
+				slog.Default().Warn("modify labels: mirror to provider", "n", len(gmailIDs), "err", err)
 			}
 		}()
 	}
@@ -446,7 +445,7 @@ func (e *Engine) ModifyLabelsBatch(ctx context.Context, c *gmailapi.Client, acco
 
 // MarkLabelRead marks every unread message in a label as read: optimistically
 // in the store, then mirrored to Gmail with a single batch call.
-func (e *Engine) MarkLabelRead(ctx context.Context, c *gmailapi.Client, accountID int64, labelID string) error {
+func (e *Engine) MarkLabelRead(ctx context.Context, b backend.Backend, accountID int64, labelID string) error {
 	defer func(start time.Time) {
 		slog.Default().Debug("engine: MarkLabelRead", "label", labelID, "dur", time.Since(start))
 	}(time.Now())
@@ -461,18 +460,18 @@ func (e *Engine) MarkLabelRead(ctx context.Context, c *gmailapi.Client, accountI
 		return fmt.Errorf("mark label read: %w", err)
 	}
 	e.publish(Change{Kind: LabelsSynced, AccountID: accountID})
-	if c != nil {
-		if err := c.BatchModify(ctx, ids, nil, []string{model.LabelUnread}); err != nil {
+	if b != nil {
+		if err := b.ApplyLabels(ctx, ids, nil, []string{model.LabelUnread}); err != nil {
 			return fmt.Errorf("mark label read on server: %w", err)
 		}
 	}
 	return nil
 }
 
-// Incremental applies Gmail history since the account's stored watermark:
+// Incremental applies provider changes since the account's stored cursor:
 // additions and label changes are re-fetched and upserted, deletions removed.
-// It returns ErrHistoryExpired if the watermark is too old to use.
-func (e *Engine) Incremental(ctx context.Context, c *gmailapi.Client, accountID int64) (int, error) {
+// It returns ErrHistoryExpired if the cursor is too old to use.
+func (e *Engine) Incremental(ctx context.Context, b backend.Backend, accountID int64) (int, error) {
 	defer func(start time.Time) {
 		slog.Default().Debug("engine: Incremental", "account", accountID, "dur", time.Since(start))
 	}(time.Now())
@@ -481,69 +480,35 @@ func (e *Engine) Incremental(ctx context.Context, c *gmailapi.Client, accountID 
 		return 0, err
 	}
 	if acc.LastHistoryID == "" {
-		return 0, fmt.Errorf("account %d has no history watermark; backfill first", accountID)
+		return 0, fmt.Errorf("account %d has no sync cursor; backfill first", accountID)
 	}
 
-	records, newest, err := c.ListHistory(ctx, acc.LastHistoryID)
+	upserts, deletes, next, err := b.Changes(ctx, acc.LastHistoryID)
 	if err != nil {
-		if gmailapi.IsHistoryExpired(err) {
+		if errors.Is(err, backend.ErrCursorExpired) {
 			return 0, ErrHistoryExpired
 		}
 		return 0, err
 	}
 
-	refetch := make(map[string]bool)
-	deletes := make(map[string]bool)
-	for _, r := range records {
-		for _, x := range r.MessagesAdded {
-			if x.Message != nil {
-				refetch[x.Message.Id] = true
-			}
-		}
-		for _, x := range r.LabelsAdded {
-			if x.Message != nil {
-				refetch[x.Message.Id] = true
-			}
-		}
-		for _, x := range r.LabelsRemoved {
-			if x.Message != nil {
-				refetch[x.Message.Id] = true
-			}
-		}
-		for _, x := range r.MessagesDeleted {
-			if x.Message != nil {
-				deletes[x.Message.Id] = true
-				delete(refetch, x.Message.Id)
-			}
-		}
-	}
-
 	changed := 0
 	if len(deletes) > 0 {
-		delIDs := make([]string, 0, len(deletes))
-		for id := range deletes {
-			delIDs = append(delIDs, id)
-		}
-		if err := e.Store.DeleteMessages(ctx, accountID, delIDs); err != nil {
+		if err := e.Store.DeleteMessages(ctx, accountID, deletes); err != nil {
 			return changed, err
 		}
 		// One event per id so per-message consumers still see each deletion; the
 		// UI coalesces the resulting refresh.
-		for _, id := range delIDs {
+		for _, id := range deletes {
 			e.publish(Change{Kind: MessageDeleted, AccountID: accountID, GmailID: id})
 		}
-		changed += len(delIDs)
+		changed += len(deletes)
 	}
 
 	// Fetch all changed messages concurrently, write them in one transaction,
 	// then publish a per-id event so new-mail notifications (which need the id)
 	// still fire. Concurrency makes catching up a burst of external changes
 	// (e.g. a bulk archive done on another device) N/workers round-trips, not N.
-	refetchIDs := make([]string, 0, len(refetch))
-	for id := range refetch {
-		refetchIDs = append(refetchIDs, id)
-	}
-	msgs, fetchedIDs := e.fetchMetadataConcurrent(ctx, c, accountID, refetchIDs)
+	msgs, fetchedIDs := e.fetchMetadataConcurrent(ctx, b, upserts)
 	if len(msgs) > 0 {
 		if err := e.Store.UpsertMessages(ctx, msgs); err != nil {
 			return changed, err
@@ -554,7 +519,7 @@ func (e *Engine) Incremental(ctx context.Context, c *gmailapi.Client, accountID 
 		changed += len(msgs)
 	}
 
-	if err := e.Store.SetLastHistoryID(ctx, accountID, newest); err != nil {
+	if err := e.Store.SetLastHistoryID(ctx, accountID, next); err != nil {
 		return changed, err
 	}
 	return changed, nil
@@ -573,13 +538,13 @@ func (e *Engine) Incremental(ctx context.Context, c *gmailapi.Client, accountID 
 // never advances past un-fetched history). Deletions made while the watermark was
 // expired aren't reconciled — incremental handles deletions going forward, and a
 // full-mailbox id diff isn't worth its cost here.
-func (e *Engine) Resync(ctx context.Context, c *gmailapi.Client, accountID int64, max int) (int, error) {
-	prof, err := c.GetProfile(ctx)
+func (e *Engine) Resync(ctx context.Context, b backend.Backend, accountID int64, max int) (int, error) {
+	prof, err := b.Profile(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("resync: profile: %w", err)
 	}
-	watermark := fmt.Sprintf("%d", prof.HistoryId)
-	n, err := e.Backfill(ctx, c, accountID, "", max)
+	watermark := prof.Cursor
+	n, err := e.Backfill(ctx, b, accountID, "", max)
 	if err != nil {
 		return n, fmt.Errorf("resync: backfill: %w", err)
 	}
@@ -594,7 +559,7 @@ func (e *Engine) Resync(ctx context.Context, c *gmailapi.Client, accountID int64
 // order, skipping ids that fail to fetch (a message can vanish between the
 // history record and the fetch). Each goroutine writes its own slot, so there is
 // no shared-state contention.
-func (e *Engine) fetchMetadataConcurrent(ctx context.Context, c *gmailapi.Client, accountID int64, ids []string) ([]model.Message, []string) {
+func (e *Engine) fetchMetadataConcurrent(ctx context.Context, b backend.Backend, ids []string) ([]model.Message, []string) {
 	type slot struct {
 		msg model.Message
 		ok  bool
@@ -608,12 +573,12 @@ func (e *Engine) fetchMetadataConcurrent(ctx context.Context, c *gmailapi.Client
 		go func(i int, id string) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			msg, err := c.GetMessageMetadata(ctx, id)
+			msg, err := b.FetchMetadata(ctx, id)
 			if err != nil {
 				slog.Default().Warn("incremental: fetch metadata", "id", id, "err", err)
 				return
 			}
-			slots[i] = slot{msg: gmailapi.ToMessage(accountID, msg), ok: true}
+			slots[i] = slot{msg: msg, ok: true}
 		}(i, id)
 	}
 	wg.Wait()

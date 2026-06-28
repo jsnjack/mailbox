@@ -12,8 +12,10 @@ import (
 	"github.com/jsnjack/mailbox/internal/activity"
 	"github.com/jsnjack/mailbox/internal/ai"
 	"github.com/jsnjack/mailbox/internal/auth"
+	"github.com/jsnjack/mailbox/internal/backend"
 	"github.com/jsnjack/mailbox/internal/config"
 	"github.com/jsnjack/mailbox/internal/gmailapi"
+	"github.com/jsnjack/mailbox/internal/gmailbackend"
 	"github.com/jsnjack/mailbox/internal/model"
 	"github.com/jsnjack/mailbox/internal/store"
 	"github.com/jsnjack/mailbox/internal/syncer"
@@ -100,7 +102,10 @@ func launchUI(mailto string) error {
 	// rendered read-only). Operations are routed by account id.
 	hub := syncer.NewHub()
 	engine := syncer.NewEngine(st, hub)
+	// clients keeps the raw Gmail clients for their API stats; backends holds the
+	// provider-agnostic adapters the engine drives (Gmail today; IMAP later).
 	clients := make(map[int64]*gmailapi.Client)
+	backends := make(map[int64]backend.Backend)
 	for _, a := range accounts {
 		client, err := buildClientForAccount(ctx, a.Email)
 		if err != nil {
@@ -108,8 +113,10 @@ func launchUI(mailto string) error {
 			continue
 		}
 		clients[a.ID] = client
-		go backgroundSync(ctx, engine, act, client, a.ID, a.Email)
-		go backgroundSweep(ctx, engine, client, a.ID)
+		b := gmailbackend.New(client, a.ID)
+		backends[a.ID] = b
+		go backgroundSync(ctx, engine, act, b, a.ID, a.Email)
+		go backgroundSweep(ctx, engine, b, a.ID)
 	}
 
 	// Cumulative metrics for the status bar: cache sizes + per-account API stats.
@@ -141,9 +148,9 @@ func launchUI(mailto string) error {
 
 	if len(clients) > 0 {
 		deps.Hub = hub
-		clientFor := func(accountID int64) (*gmailapi.Client, error) {
-			if c := clients[accountID]; c != nil {
-				return c, nil
+		clientFor := func(accountID int64) (backend.Backend, error) {
+			if b := backends[accountID]; b != nil {
+				return b, nil
 			}
 			return nil, fmt.Errorf("account %d has no connected client", accountID)
 		}
@@ -327,11 +334,11 @@ func buildClientForAccount(ctx context.Context, email string) (*gmailapi.Client,
 const sweepInterval = 45 * time.Second
 
 // backgroundSweep retries queued outbox messages on a timer.
-func backgroundSweep(ctx context.Context, engine *syncer.Engine, client *gmailapi.Client, accountID int64) {
+func backgroundSweep(ctx context.Context, engine *syncer.Engine, b backend.Backend, accountID int64) {
 	ticker := time.NewTicker(sweepInterval)
 	defer ticker.Stop()
 	for {
-		if _, err := engine.SweepOutbox(ctx, client, accountID); err != nil {
+		if _, err := engine.SweepOutbox(ctx, b, accountID); err != nil {
 			fmt.Fprintf(os.Stderr, "outbox sweep: %v\n", err)
 		}
 		select {
@@ -344,17 +351,17 @@ func backgroundSweep(ctx context.Context, engine *syncer.Engine, client *gmailap
 
 // backgroundSync runs an incremental sync immediately and then on a timer,
 // reporting each pass to the activity hub for the status bar.
-func backgroundSync(ctx context.Context, engine *syncer.Engine, act *activity.Hub, client *gmailapi.Client, accountID int64, email string) {
+func backgroundSync(ctx context.Context, engine *syncer.Engine, act *activity.Hub, b backend.Backend, accountID int64, email string) {
 	ticker := time.NewTicker(syncInterval)
 	defer ticker.Stop()
 	for {
 		done := act.Begin("sync", "Syncing "+email)
-		n, err := engine.Incremental(ctx, client, accountID)
+		n, err := engine.Incremental(ctx, b, accountID)
 		if errors.Is(err, syncer.ErrHistoryExpired) {
-			// Watermark too old (offline past Gmail's history window). Recover by
+			// Cursor too old (offline past the provider's change window). Recover by
 			// re-backfilling and resetting it, else incremental fails forever.
-			fmt.Fprintf(os.Stderr, "background sync: history expired for %s, resyncing\n", email)
-			n, err = engine.Resync(ctx, client, accountID, resyncBackfillLimit)
+			fmt.Fprintf(os.Stderr, "background sync: cursor expired for %s, resyncing\n", email)
+			n, err = engine.Resync(ctx, b, accountID, resyncBackfillLimit)
 		}
 		if err != nil {
 			if auth.IsAuthError(err) {

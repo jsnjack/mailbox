@@ -9,6 +9,7 @@ import (
 	"github.com/jsnjack/mailbox/internal/auth"
 	"github.com/jsnjack/mailbox/internal/config"
 	"github.com/jsnjack/mailbox/internal/gmailapi"
+	"github.com/jsnjack/mailbox/internal/gmailbackend"
 	"github.com/jsnjack/mailbox/internal/model"
 	"github.com/jsnjack/mailbox/internal/store"
 	"github.com/jsnjack/mailbox/internal/syncer"
@@ -81,8 +82,9 @@ func runSync(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Account %s (id=%d) — server total=%d, historyId=%d\n", email, accID, prof.MessagesTotal, prof.HistoryId)
 
 	engine := syncer.NewEngine(st, nil)
+	b := gmailbackend.New(client, accID)
 
-	nLabels, err := engine.SyncLabels(ctx, client, accID)
+	nLabels, err := engine.SyncLabels(ctx, b, accID)
 	if err != nil {
 		return fmt.Errorf("sync labels: %w", err)
 	}
@@ -90,7 +92,7 @@ func runSync(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Backfilling newest %d messages...\n", syncLimit)
 	start := time.Now()
-	n, err := engine.Backfill(ctx, client, accID, "", syncLimit)
+	n, err := engine.Backfill(ctx, b, accID, "", syncLimit)
 	if err != nil {
 		return fmt.Errorf("backfill: %w", err)
 	}
@@ -116,7 +118,7 @@ func runSync(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  %s %-32s | %s\n", flag, truncate(m.FromAddr, 32), truncate(m.Subject, 60))
 	}
 
-	changed, err := engine.Incremental(ctx, client, accID)
+	changed, err := engine.Incremental(ctx, b, accID)
 	if err != nil && !errors.Is(err, syncer.ErrHistoryExpired) {
 		return fmt.Errorf("incremental: %w", err)
 	}
