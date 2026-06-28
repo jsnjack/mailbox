@@ -26,16 +26,25 @@ const (
 	LabelDraft     = "DRAFT"
 )
 
-// Account is a connected Gmail account. The OAuth refresh token is never stored
-// here — it lives in the OS keyring, keyed by Email.
+// Account types: which backend an account syncs through.
+const (
+	AccountGmail = "gmail" // Gmail REST API
+	AccountIMAP  = "imap"  // generic IMAP/SMTP
+)
+
+// Account is a connected mail account. Secrets (OAuth refresh token or IMAP
+// password) are never stored here — they live in the OS keyring, keyed by Email.
 type Account struct {
-	ID            int64
-	Email         string
-	DisplayName   string
-	TokenExpiry   time.Time
-	Scopes        []string
-	LastHistoryID string // Gmail historyId watermark for incremental sync
-	BackfilledAt  time.Time
+	ID          int64
+	Email       string
+	DisplayName string
+	Type        string // backend: AccountGmail | AccountIMAP (empty treated as Gmail)
+	TokenExpiry time.Time
+	Scopes      []string
+	// SyncCursor is the opaque incremental-sync watermark: a Gmail historyId, or
+	// an IMAP per-folder UIDVALIDITY/MODSEQ summary. The provider interprets it.
+	SyncCursor   string
+	BackfilledAt time.Time
 }
 
 // Label is a Gmail label scoped to an account.

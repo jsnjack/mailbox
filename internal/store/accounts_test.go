@@ -26,12 +26,13 @@ func TestUpsertAccount(t *testing.T) {
 		{
 			name: "full",
 			account: model.Account{
-				Email:         "b@example.com",
-				DisplayName:   "Bee",
-				TokenExpiry:   time.Unix(1_700_000_000, 0),
-				Scopes:        []string{"https://mail.google.com/", "openid"},
-				LastHistoryID: "12345",
-				BackfilledAt:  time.Unix(1_700_000_100, 0),
+				Email:        "b@example.com",
+				DisplayName:  "Bee",
+				Type:         model.AccountIMAP,
+				TokenExpiry:  time.Unix(1_700_000_000, 0),
+				Scopes:       []string{"https://mail.google.com/", "openid"},
+				SyncCursor:   "12345",
+				BackfilledAt: time.Unix(1_700_000_100, 0),
 			},
 		},
 	}
@@ -52,8 +53,16 @@ func TestUpsertAccount(t *testing.T) {
 			if got.Email != tc.account.Email || got.DisplayName != tc.account.DisplayName {
 				t.Fatalf("got %+v, want email/name to match %+v", got, tc.account)
 			}
-			if got.LastHistoryID != tc.account.LastHistoryID {
-				t.Fatalf("history id: got %q, want %q", got.LastHistoryID, tc.account.LastHistoryID)
+			if got.SyncCursor != tc.account.SyncCursor {
+				t.Fatalf("sync cursor: got %q, want %q", got.SyncCursor, tc.account.SyncCursor)
+			}
+			// An unset type defaults to Gmail; an explicit type round-trips.
+			wantType := tc.account.Type
+			if wantType == "" {
+				wantType = model.AccountGmail
+			}
+			if got.Type != wantType {
+				t.Fatalf("account type: got %q, want %q", got.Type, wantType)
 			}
 			if len(got.Scopes) != len(tc.account.Scopes) {
 				t.Fatalf("scopes: got %v, want %v", got.Scopes, tc.account.Scopes)
@@ -102,8 +111,8 @@ func TestSetWatermarks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
-	if err := s.SetLastHistoryID(ctx, id, "99999"); err != nil {
-		t.Fatalf("SetLastHistoryID: %v", err)
+	if err := s.SetSyncCursor(ctx, id, "99999"); err != nil {
+		t.Fatalf("SetSyncCursor: %v", err)
 	}
 	now := time.Unix(1_700_001_000, 0)
 	if err := s.SetBackfilledAt(ctx, id, now); err != nil {
@@ -113,8 +122,8 @@ func TestSetWatermarks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if got.LastHistoryID != "99999" {
-		t.Fatalf("history id: got %q", got.LastHistoryID)
+	if got.SyncCursor != "99999" {
+		t.Fatalf("sync cursor: got %q", got.SyncCursor)
 	}
 	if !got.BackfilledAt.Equal(now) {
 		t.Fatalf("backfilled_at: got %v, want %v", got.BackfilledAt, now)

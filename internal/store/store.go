@@ -69,17 +69,27 @@ func (s *Store) Close() error {
 	return errors.Join(s.reader.Close(), s.writer.Close())
 }
 
-// migrate applies column additions that `CREATE TABLE IF NOT EXISTS` cannot make
-// to a pre-existing table (it is a no-op when the table already exists). Each
-// ALTER is idempotent: re-adding an existing column ("duplicate column name")
-// is treated as already-applied, so this is safe to run on every open.
+// migrate applies schema changes that `CREATE TABLE IF NOT EXISTS` cannot make to
+// a pre-existing table (it is a no-op on a fresh DB, where schema.sql already has
+// the final shape). Each statement is idempotent: a column that already exists
+// ("duplicate column name") or a rename whose source column is already gone ("no
+// such column" — fresh DB or a prior migrate) means the step is already applied,
+// so the error is ignored. Safe to run on every open.
 func migrate(db *sql.DB) error {
 	stmts := []string{
 		`ALTER TABLE messages ADD COLUMN reply_to TEXT`,
+		// Multi-provider groundwork: tag each account with its backend, and rename
+		// the Gmail-specific historyId watermark to an opaque cursor (IMAP stores a
+		// per-folder UIDVALIDITY/MODSEQ summary here instead).
+		`ALTER TABLE accounts ADD COLUMN account_type TEXT NOT NULL DEFAULT 'gmail'`,
+		`ALTER TABLE accounts RENAME COLUMN last_history_id TO sync_cursor`,
 	}
 	for _, s := range stmts {
-		if _, err := db.Exec(s); err != nil &&
-			!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+		if _, err := db.Exec(s); err != nil {
+			msg := strings.ToLower(err.Error())
+			if strings.Contains(msg, "duplicate column") || strings.Contains(msg, "no such column") {
+				continue // already applied on a prior open (or fresh DB)
+			}
 			return fmt.Errorf("%s: %w", s, err)
 		}
 	}

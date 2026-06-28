@@ -24,18 +24,23 @@ func (s *Store) UpsertAccount(ctx context.Context, a model.Account) (int64, erro
 	if !a.BackfilledAt.IsZero() {
 		backfilled = a.BackfilledAt.Unix()
 	}
+	atype := a.Type
+	if atype == "" {
+		atype = model.AccountGmail
+	}
 	var id int64
 	err := s.writer.QueryRowContext(ctx, `
-		INSERT INTO accounts (email, display_name, token_expiry, scopes, last_history_id, backfilled_at)
-		VALUES (?, ?, ?, ?, ?, ?)
+		INSERT INTO accounts (email, display_name, account_type, token_expiry, scopes, sync_cursor, backfilled_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(email) DO UPDATE SET
-			display_name    = excluded.display_name,
-			token_expiry    = excluded.token_expiry,
-			scopes          = excluded.scopes,
-			last_history_id = excluded.last_history_id,
-			backfilled_at   = excluded.backfilled_at
+			display_name = excluded.display_name,
+			account_type = excluded.account_type,
+			token_expiry = excluded.token_expiry,
+			scopes       = excluded.scopes,
+			sync_cursor  = excluded.sync_cursor,
+			backfilled_at = excluded.backfilled_at
 		RETURNING id`,
-		a.Email, a.DisplayName, expiry, strings.Join(a.Scopes, " "), a.LastHistoryID, backfilled,
+		a.Email, a.DisplayName, atype, expiry, strings.Join(a.Scopes, " "), a.SyncCursor, backfilled,
 	).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("upsert account %q: %w", a.Email, err)
@@ -46,7 +51,7 @@ func (s *Store) UpsertAccount(ctx context.Context, a model.Account) (int64, erro
 // GetAccountByEmail returns the account with the given email, or ErrNotFound.
 func (s *Store) GetAccountByEmail(ctx context.Context, email string) (model.Account, error) {
 	row := s.reader.QueryRowContext(ctx, `
-		SELECT id, email, display_name, token_expiry, scopes, last_history_id, backfilled_at
+		SELECT id, email, display_name, account_type, token_expiry, scopes, sync_cursor, backfilled_at
 		FROM accounts WHERE email = ?`, email)
 	a, err := scanAccount(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -61,7 +66,7 @@ func (s *Store) GetAccountByEmail(ctx context.Context, email string) (model.Acco
 // GetAccountByID returns the account with the given local id, or ErrNotFound.
 func (s *Store) GetAccountByID(ctx context.Context, id int64) (model.Account, error) {
 	row := s.reader.QueryRowContext(ctx, `
-		SELECT id, email, display_name, token_expiry, scopes, last_history_id, backfilled_at
+		SELECT id, email, display_name, account_type, token_expiry, scopes, sync_cursor, backfilled_at
 		FROM accounts WHERE id = ?`, id)
 	a, err := scanAccount(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -76,7 +81,7 @@ func (s *Store) GetAccountByID(ctx context.Context, id int64) (model.Account, er
 // ListAccounts returns all connected accounts ordered by id.
 func (s *Store) ListAccounts(ctx context.Context) ([]model.Account, error) {
 	rows, err := s.reader.QueryContext(ctx, `
-		SELECT id, email, display_name, token_expiry, scopes, last_history_id, backfilled_at
+		SELECT id, email, display_name, account_type, token_expiry, scopes, sync_cursor, backfilled_at
 		FROM accounts ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("list accounts: %w", err)
@@ -94,11 +99,11 @@ func (s *Store) ListAccounts(ctx context.Context) ([]model.Account, error) {
 	return out, rows.Err()
 }
 
-// SetLastHistoryID updates the incremental-sync watermark for an account.
-func (s *Store) SetLastHistoryID(ctx context.Context, accountID int64, historyID string) error {
+// SetSyncCursor updates the opaque incremental-sync cursor for an account.
+func (s *Store) SetSyncCursor(ctx context.Context, accountID int64, cursor string) error {
 	if _, err := s.writer.ExecContext(ctx,
-		`UPDATE accounts SET last_history_id = ? WHERE id = ?`, historyID, accountID); err != nil {
-		return fmt.Errorf("set last_history_id: %w", err)
+		`UPDATE accounts SET sync_cursor = ? WHERE id = ?`, cursor, accountID); err != nil {
+		return fmt.Errorf("set sync_cursor: %w", err)
 	}
 	return nil
 }
@@ -124,13 +129,18 @@ func scanAccount(sc rowScanner) (model.Account, error) {
 		backfilled sql.NullInt64
 		scopes     sql.NullString
 		display    sql.NullString
-		history    sql.NullString
+		atype      sql.NullString
+		cursor     sql.NullString
 	)
-	if err := sc.Scan(&a.ID, &a.Email, &display, &expiry, &scopes, &history, &backfilled); err != nil {
+	if err := sc.Scan(&a.ID, &a.Email, &display, &atype, &expiry, &scopes, &cursor, &backfilled); err != nil {
 		return model.Account{}, err
 	}
 	a.DisplayName = display.String
-	a.LastHistoryID = history.String
+	a.Type = atype.String
+	if a.Type == "" {
+		a.Type = model.AccountGmail
+	}
+	a.SyncCursor = cursor.String
 	if scopes.Valid && scopes.String != "" {
 		a.Scopes = strings.Fields(scopes.String)
 	}

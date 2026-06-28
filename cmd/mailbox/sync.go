@@ -73,8 +73,9 @@ func runSync(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	accID, err := st.UpsertAccount(ctx, model.Account{
-		Email:         email,
-		LastHistoryID: fmt.Sprintf("%d", prof.HistoryId),
+		Email:      email,
+		Type:       model.AccountGmail,
+		SyncCursor: fmt.Sprintf("%d", prof.HistoryId),
 	})
 	if err != nil {
 		return err

@@ -8,9 +8,10 @@ CREATE TABLE IF NOT EXISTS accounts (
   id              INTEGER PRIMARY KEY,
   email           TEXT NOT NULL UNIQUE,
   display_name    TEXT,
+  account_type    TEXT NOT NULL DEFAULT 'gmail', -- backend: 'gmail' | 'imap'
   token_expiry    INTEGER,            -- unix seconds of the current access token
   scopes          TEXT,              -- space-joined granted scopes
-  last_history_id TEXT,              -- Gmail historyId watermark for incremental sync
+  sync_cursor     TEXT,              -- opaque incremental-sync cursor (Gmail historyId; IMAP per-folder state)
   backfilled_at   INTEGER,           -- unix seconds; NULL until initial backfill done
   created_at      INTEGER NOT NULL DEFAULT (unixepoch())
 );

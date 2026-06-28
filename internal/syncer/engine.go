@@ -479,11 +479,11 @@ func (e *Engine) Incremental(ctx context.Context, b backend.Backend, accountID i
 	if err != nil {
 		return 0, err
 	}
-	if acc.LastHistoryID == "" {
+	if acc.SyncCursor == "" {
 		return 0, fmt.Errorf("account %d has no sync cursor; backfill first", accountID)
 	}
 
-	upserts, deletes, next, err := b.Changes(ctx, acc.LastHistoryID)
+	upserts, deletes, next, err := b.Changes(ctx, acc.SyncCursor)
 	if err != nil {
 		if errors.Is(err, backend.ErrCursorExpired) {
 			return 0, ErrHistoryExpired
@@ -519,7 +519,7 @@ func (e *Engine) Incremental(ctx context.Context, b backend.Backend, accountID i
 		changed += len(msgs)
 	}
 
-	if err := e.Store.SetLastHistoryID(ctx, accountID, next); err != nil {
+	if err := e.Store.SetSyncCursor(ctx, accountID, next); err != nil {
 		return changed, err
 	}
 	return changed, nil
@@ -548,8 +548,8 @@ func (e *Engine) Resync(ctx context.Context, b backend.Backend, accountID int64,
 	if err != nil {
 		return n, fmt.Errorf("resync: backfill: %w", err)
 	}
-	if err := e.Store.SetLastHistoryID(ctx, accountID, watermark); err != nil {
-		return n, fmt.Errorf("resync: set watermark: %w", err)
+	if err := e.Store.SetSyncCursor(ctx, accountID, watermark); err != nil {
+		return n, fmt.Errorf("resync: set cursor: %w", err)
 	}
 	return n, nil
 }
