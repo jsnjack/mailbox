@@ -103,6 +103,50 @@ func TestGetAccountNotFound(t *testing.T) {
 	}
 }
 
+func TestDeleteAccount(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	keep, err := s.UpsertAccount(ctx, model.Account{Email: "keep@example.com"})
+	if err != nil {
+		t.Fatalf("upsert keep: %v", err)
+	}
+	drop, err := s.UpsertAccount(ctx, model.Account{Email: "drop@example.com"})
+	if err != nil {
+		t.Fatalf("upsert drop: %v", err)
+	}
+	msgs := []model.Message{
+		{AccountID: keep, GmailID: "k1", ThreadID: "kt", InternalDate: time.Unix(100, 0), Subject: "keeper alpha", Labels: []string{"INBOX"}},
+		{AccountID: drop, GmailID: "d1", ThreadID: "dt", InternalDate: time.Unix(200, 0), Subject: "dropme alpha", Labels: []string{"INBOX"}},
+	}
+	if err := s.UpsertMessages(ctx, msgs); err != nil {
+		t.Fatalf("UpsertMessages: %v", err)
+	}
+
+	if err := s.DeleteAccount(ctx, drop); err != nil {
+		t.Fatalf("DeleteAccount: %v", err)
+	}
+
+	// The account row is gone.
+	if _, err := s.GetAccountByID(ctx, drop); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetAccountByID(drop): got %v, want ErrNotFound", err)
+	}
+	// Its messages cascaded away, and its FTS rows with them (no orphan hits).
+	if got, _ := s.ListByLabel(ctx, drop, "INBOX", 50, 0); len(got) != 0 {
+		t.Fatalf("dropped account still has %d messages", len(got))
+	}
+	if hits, _ := s.Search(ctx, drop, "dropme", 50); len(hits) != 0 {
+		t.Fatalf("dropped account still has %d FTS hits", len(hits))
+	}
+	// The other account is untouched (rows and FTS intact).
+	if got, _ := s.ListByLabel(ctx, keep, "INBOX", 50, 0); len(got) != 1 {
+		t.Fatalf("kept account has %d messages, want 1", len(got))
+	}
+	if hits, _ := s.Search(ctx, keep, "keeper", 50); len(hits) != 1 {
+		t.Fatalf("kept account has %d FTS hits, want 1", len(hits))
+	}
+}
+
 func TestSetWatermarks(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()

@@ -108,6 +108,24 @@ func (s *Store) SetSyncCursor(ctx context.Context, accountID int64, cursor strin
 	return nil
 }
 
+// DeleteAccount removes an account and all of its cached data. The account row's
+// ON DELETE CASCADE drops the messages, labels, threads, outbox, and per-message
+// AI tables; the FTS index is not a foreign-key child, so its rows are cleared
+// explicitly first (else they orphan and corrupt search).
+func (s *Store) DeleteAccount(ctx context.Context, accountID int64) error {
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM messages_fts WHERE rowid IN (SELECT rowid FROM messages WHERE account_id = ?)`,
+			accountID); err != nil {
+			return fmt.Errorf("delete fts rows: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM accounts WHERE id = ?`, accountID); err != nil {
+			return fmt.Errorf("delete account %d: %w", accountID, err)
+		}
+		return nil
+	})
+}
+
 // SetBackfilledAt marks the account's initial backfill as complete at t.
 func (s *Store) SetBackfilledAt(ctx context.Context, accountID int64, t time.Time) error {
 	if _, err := s.writer.ExecContext(ctx,

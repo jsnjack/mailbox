@@ -107,6 +107,7 @@ type window struct {
 	outboxBanner      *adw.Banner // revealed when sends are queued/failed
 	emptyFolderBanner *adw.Banner // revealed in Trash/Spam to empty them permanently
 	authBanner        *adw.Banner // revealed when an account's sign-in expired/was revoked
+	authExpiredID     int64       // the account the auth banner's Reconnect targets (0 = none/unknown)
 	searchEntry       *gtk.SearchEntry
 	suppressSearch    bool   // guards SetText from firing a search during label switch
 	serverSearch      bool   // current search is a Gmail server-side search, not local FTS
@@ -781,6 +782,53 @@ func (w *window) addAccount(a AccountInfo) {
 		}
 		w.activeID = 0
 		w.setActiveAccount(a)
+		if r := w.accountBox.RowAtIndex(0); r != nil {
+			w.accountBox.SelectRow(r)
+		}
+	}
+}
+
+// removeAccountFromUI drops a just-removed account from the switcher and, when it
+// was the active one, switches to another account (or the zero-account welcome
+// state if it was the last). Main-thread only; the backend teardown + data delete
+// already happened in deps.RemoveAccount.
+func (w *window) removeAccountFromUI(id int64) {
+	idx := -1
+	for i, a := range w.deps.Accounts {
+		if a.ID == id {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return
+	}
+	wasActive := w.activeID == id
+	w.deps.Accounts = append(w.deps.Accounts[:idx], w.deps.Accounts[idx+1:]...)
+	w.rebuildAccountSwitcher() // re-renders rows + hides the header when none remain
+	if id == w.authExpiredID {
+		w.authExpiredID = 0
+		w.authBanner.SetRevealed(false)
+	}
+	if len(w.deps.Accounts) == 0 {
+		// Back to a clean first-run state.
+		w.activeID, w.activeEmail = 0, ""
+		if w.newBtn != nil {
+			w.newBtn.SetSensitive(false)
+		}
+		if w.refreshBtn != nil {
+			w.refreshBtn.SetSensitive(false)
+		}
+		w.clearReader()
+		w.loadLabels()
+		w.selectLabel(model.LabelInbox)
+		return
+	}
+	if wasActive {
+		// Switch to the first remaining account (setActiveAccount no-ops when the id
+		// already matches, so clear it first).
+		w.activeID = 0
+		w.setActiveAccount(w.deps.Accounts[0])
 		if r := w.accountBox.RowAtIndex(0); r != nil {
 			w.accountBox.SelectRow(r)
 		}
@@ -3759,6 +3807,7 @@ func (w *window) onChange(c syncer.Change) {
 				break
 			}
 		}
+		w.authExpiredID = c.AccountID // the Reconnect button re-authenticates this one
 		if email != "" {
 			w.authBanner.SetTitle("Sign-in expired for " + email + " — reconnect to keep syncing")
 		} else {

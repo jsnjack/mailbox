@@ -39,6 +39,9 @@ func applicationID() string {
 type AccountInfo struct {
 	ID    int64
 	Email string
+	// Type is the account_type ("gmail" or "imap"); it lets the UI preselect the
+	// right provider when reconnecting and word the remove confirmation.
+	Type string
 }
 
 // All operations are account-routed: the caller passes the account id so the
@@ -144,9 +147,13 @@ type Deps struct {
 	// the typed address. Nil when no Gmail credentials are configured.
 	TestIMAPAccount func(ctx context.Context, acct config.IMAPAccount, password string) error
 	// AddIMAPAccount persists and immediately starts syncing the account, returning
-	// its id so the UI can add it to the switcher (no restart needed).
+	// its id so the UI can add it to the switcher (no restart needed). Re-adding an
+	// existing account (same email) reconnects it in place, preserving its cache.
 	AddIMAPAccount func(ctx context.Context, acct config.IMAPAccount, secret string) (accountID int64, err error)
 	OAuthConnect   func(ctx context.Context, kind config.AuthKind) (email, refreshToken string, err error)
+	// RemoveAccount stops the account's sync, deletes its cached data, and clears
+	// its stored secret + per-account config. Nil when account management is off.
+	RemoveAccount func(ctx context.Context, accountID int64) error
 }
 
 // Run launches the GTK application and blocks until the window is closed. mailto,

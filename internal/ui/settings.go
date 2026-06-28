@@ -88,15 +88,31 @@ func (w *window) openSettings() {
 		group.SetHeaderSuffix(testBtn)
 	}
 
-	// One naming field per connected account ("Home", "Work", …).
+	// One naming field per connected account ("Home", "Work", …), each with a
+	// Remove button (when account management is wired).
 	nameRows := map[string]*adw.EntryRow{}
 	acctGroup := adw.NewPreferencesGroup()
 	acctGroup.SetTitle("Accounts")
 	acctGroup.SetDescription("Give each account a name (e.g. Home, Work) — shown in the sidebar. Leave blank to use the email.")
 	for _, a := range w.deps.Accounts {
+		a := a
 		r := adw.NewEntryRow()
 		r.SetTitle(a.Email)
 		r.SetText(w.accountNames[a.Email])
+		if w.deps.RemoveAccount != nil {
+			rm := gtk.NewButtonFromIconName("user-trash-symbolic")
+			rm.SetTooltipText("Remove account")
+			rm.AddCSSClass("flat")
+			rm.SetVAlign(gtk.AlignCenter)
+			rm.ConnectClicked(func() {
+				w.confirmRemoveAccount(a, func() {
+					acctGroup.Remove(r)
+					delete(nameRows, a.Email)
+					delete(w.accountNames, a.Email)
+				})
+			})
+			r.AddSuffix(rm)
+		}
 		acctGroup.Add(r)
 		nameRows[a.Email] = r
 	}
@@ -319,4 +335,41 @@ func (w *window) applyAccountNames(rows map[string]*adw.EntryRow) {
 	if changed {
 		w.rebuildAccountSwitcher()
 	}
+}
+
+// confirmRemoveAccount asks for confirmation, then removes the account (stopping
+// its sync and deleting its local cache + secret) and updates the UI. onRemoved
+// runs on success to drop the account's row from the open Preferences dialog.
+func (w *window) confirmRemoveAccount(a AccountInfo, onRemoved func()) {
+	if w.deps.RemoveAccount == nil {
+		return
+	}
+	body := "Remove " + a.Email + " from Mailbox? Its cached mail will be deleted " +
+		"from this device and it will stop syncing. Mail on the server is not affected."
+	dialog := adw.NewAlertDialog("Remove account?", body)
+	dialog.AddResponse("cancel", "Cancel")
+	dialog.AddResponse("remove", "Remove")
+	dialog.SetResponseAppearance("remove", adw.ResponseDestructive)
+	dialog.SetDefaultResponse("cancel")
+	dialog.SetCloseResponse("cancel")
+	dialog.ConnectResponse(func(resp string) {
+		if resp != "remove" {
+			return
+		}
+		go func() {
+			err := w.deps.RemoveAccount(context.Background(), a.ID)
+			dispatch.Main(func() {
+				if err != nil {
+					w.toast("Couldn't remove account: " + err.Error())
+					return
+				}
+				w.removeAccountFromUI(a.ID)
+				if onRemoved != nil {
+					onRemoved()
+				}
+				w.toast("Removed " + a.Email)
+			})
+		}()
+	})
+	dialog.Present(w.win)
 }

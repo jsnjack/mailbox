@@ -12,6 +12,7 @@ import (
 	"github.com/jsnjack/mailbox/internal/backend"
 	"github.com/jsnjack/mailbox/internal/config"
 	"github.com/jsnjack/mailbox/internal/dispatch"
+	"github.com/jsnjack/mailbox/internal/model"
 )
 
 // openAddAccount presents the add-account dialog: pick a provider, fill in
@@ -143,7 +144,11 @@ func (w *window) openAddAccount() {
 					return
 				}
 				dialog.Close()
-				w.addAccount(AccountInfo{ID: id, Email: acct.Email})
+				atype := model.AccountIMAP
+				if acct.Auth == config.AuthGmailREST {
+					atype = model.AccountGmail
+				}
+				w.addAccount(AccountInfo{ID: id, Email: acct.Email, Type: atype})
 				w.toast("Account added — syncing " + acct.Email)
 			})
 		}()

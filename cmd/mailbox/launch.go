@@ -64,7 +64,7 @@ func launchUI(mailto string) error {
 	// their first account from the Add account dialog (Gmail or IMAP).
 	deps := ui.Deps{Store: st, Version: Version}
 	for _, a := range accounts {
-		deps.Accounts = append(deps.Accounts, ui.AccountInfo{ID: a.ID, Email: a.Email})
+		deps.Accounts = append(deps.Accounts, ui.AccountInfo{ID: a.ID, Email: a.Email, Type: a.Type})
 	}
 
 	// Activity hub feeds the status bar (Stats, below, feeds its metrics).
@@ -108,37 +108,64 @@ func launchUI(mailto string) error {
 	// provider-agnostic adapters the engine drives (Gmail today; IMAP later).
 	clients := make(map[int64]*gmailapi.Client)
 	backends := make(map[int64]backend.Backend)
-	// accountsMu guards both maps: startAccount writes them from the add-account
-	// dialog's goroutine while clientFor/Stats read them from the UI thread.
+	// cancels holds each running account's sync-loop cancel, so it can be torn
+	// down on remove or replaced cleanly on reconnect.
+	cancels := make(map[int64]context.CancelFunc)
+	// accountsMu guards the three maps: startAccount/stopAccount write them from
+	// the add-account dialog's goroutine while clientFor/Stats read them from the
+	// UI thread.
 	var accountsMu sync.Mutex
 
+	// stopAccount tears down a running account's sync loop (+ IDLE watch) and closes
+	// its backend, removing it from the maps. Safe to call for an unknown id.
+	stopAccount := func(id int64) {
+		accountsMu.Lock()
+		cancel := cancels[id]
+		b := backends[id]
+		delete(cancels, id)
+		delete(backends, id)
+		delete(clients, id)
+		accountsMu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+		if c, ok := b.(interface{ Close() }); ok {
+			c.Close() // releases the IMAP connection pool; no-op for Gmail
+		}
+	}
+
 	// startAccount builds an account's backend, registers it, and starts its
-	// background sync/sweep (+ IMAP IDLE watch). Used at launch and when the dialog
-	// adds an account, so a new account begins syncing immediately — no restart.
+	// background sync/sweep (+ IMAP IDLE watch). Used at launch, when the dialog
+	// adds an account (so it syncs immediately — no restart), and on reconnect. Any
+	// existing runtime for the same id is stopped first, so a reconnect swaps in the
+	// fresh credential without leaking the old sync loop.
 	startAccount := func(a model.Account) error {
 		b, client, err := buildBackendForAccount(ctx, a)
 		if err != nil {
-			return err
+			return err // leave any existing runtime untouched on a failed rebuild
 		}
+		stopAccount(a.ID)
+		actx, cancel := context.WithCancel(ctx)
 		accountsMu.Lock()
 		if client != nil { // Gmail REST exposes API stats; IMAP reports bytes via the backend
 			clients[a.ID] = client
 		}
 		backends[a.ID] = b
+		cancels[a.ID] = cancel
 		accountsMu.Unlock()
 		// A wake channel lets a push notification (IMAP IDLE) trigger an immediate
 		// sync instead of waiting for the poll tick.
 		wake := make(chan struct{}, 1)
 		if watcher, ok := b.(backend.Watcher); ok {
-			go watcher.Watch(ctx, func() {
+			go watcher.Watch(actx, func() {
 				select {
 				case wake <- struct{}{}:
 				default: // a wake is already pending; coalesce
 				}
 			})
 		}
-		go backgroundSync(ctx, engine, act, b, a.ID, a.Email, wake)
-		go backgroundSweep(ctx, engine, b, a.ID)
+		go backgroundSync(actx, engine, act, b, a.ID, a.Email, wake)
+		go backgroundSweep(actx, engine, b, a.ID)
 		return nil
 	}
 	for _, a := range accounts {
@@ -225,6 +252,26 @@ func launchUI(mailto string) error {
 			return saved.ID, fmt.Errorf("account saved but could not start syncing: %w", err)
 		}
 		return saved.ID, nil
+	}
+	deps.RemoveAccount = func(ctx context.Context, accountID int64) error {
+		acc, err := st.GetAccountByID(ctx, accountID)
+		if err != nil {
+			return fmt.Errorf("look up account: %w", err)
+		}
+		stopAccount(accountID)
+		if err := st.DeleteAccount(ctx, accountID); err != nil {
+			return fmt.Errorf("delete cached data: %w", err)
+		}
+		// Best-effort secret + per-account config cleanup; a missing entry is fine.
+		if acc.Type == model.AccountGmail {
+			_ = auth.DeleteRefreshToken(acc.Email)
+		} else {
+			_ = auth.DeleteIMAPSecret(acc.Email)
+			_ = config.DeleteIMAPAccount(acc.Email)
+		}
+		_ = config.SaveAccountName(acc.Email, "")      // blank removes the name entry
+		_ = config.SaveAccountSignature(acc.Email, "") // blank removes the override
+		return nil
 	}
 	deps.OAuthConnect = func(ctx context.Context, kind config.AuthKind) (string, string, error) {
 		switch kind {
