@@ -623,9 +623,9 @@ func backgroundSync(ctx context.Context, engine *syncer.Engine, act *activity.Hu
 			}
 		}
 		if err != nil {
-			if auth.IsAuthError(err) {
-				// Revoked/expired refresh token — can't recover without re-login;
-				// tell the UI so it can prompt the user to reconnect.
+			if auth.IsAuthError(err) || errors.Is(err, backend.ErrAuth) {
+				// Revoked/expired OAuth token, or a rejected IMAP password — can't
+				// recover without re-auth; tell the UI to prompt a reconnect.
 				engine.NotifyAuthExpired(accountID)
 			}
 			done("error: " + err.Error())

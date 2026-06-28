@@ -2,12 +2,14 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 
 	"github.com/diamondburned/gotk4-adwaita/pkg/adw"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
+	"github.com/jsnjack/mailbox/internal/backend"
 	"github.com/jsnjack/mailbox/internal/config"
 	"github.com/jsnjack/mailbox/internal/dispatch"
 )
@@ -136,7 +138,7 @@ func (w *window) openAddAccount() {
 			id, err := w.deps.AddIMAPAccount(context.Background(), acct, secret)
 			dispatch.Main(func() {
 				if err != nil {
-					status.SetText("Couldn't add account: " + err.Error())
+					status.SetText("Couldn't add account: " + friendlyConnError(err))
 					addBtn.SetSensitive(true)
 					return
 				}
@@ -198,7 +200,7 @@ func (w *window) openAddAccount() {
 			err := w.deps.TestIMAPAccount(context.Background(), acct, pw)
 			dispatch.Main(func() {
 				if err != nil {
-					status.SetText("Connection failed: " + err.Error())
+					status.SetText("Connection failed: " + friendlyConnError(err))
 					addBtn.SetSensitive(true)
 					return
 				}
@@ -208,6 +210,32 @@ func (w *window) openAddAccount() {
 	})
 
 	dialog.Present(w.win)
+}
+
+// friendlyConnError turns a raw connection error into a plain-language message
+// for the add-account dialog. It recognizes the common failure modes (bad
+// credentials, wrong host, refused/timed-out connection, TLS) and otherwise
+// falls back to the underlying error.
+func friendlyConnError(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, backend.ErrAuth) {
+		return "The username or password was rejected. Most providers require an app password, not your normal account password — see the link above."
+	}
+	low := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(low, "no such host"), strings.Contains(low, "server misbehaving"):
+		return "Couldn't find that server — check the IMAP/SMTP host name."
+	case strings.Contains(low, "connection refused"):
+		return "The server refused the connection — check the host and port."
+	case strings.Contains(low, "timeout"), strings.Contains(low, "i/o timeout"), strings.Contains(low, "deadline exceeded"):
+		return "The connection timed out — check the host, port, and your network."
+	case strings.Contains(low, "certificate"), strings.Contains(low, "x509"), strings.Contains(low, "tls"):
+		return "Couldn't establish a secure connection — the server's TLS certificate didn't verify."
+	default:
+		return err.Error()
+	}
 }
 
 func entryRow(title string) *adw.EntryRow {

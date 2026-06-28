@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapclient"
@@ -53,6 +54,15 @@ type Config struct {
 // connection), so the engine's fan-out (backfill, incremental metadata fetch) is
 // served by a small pool rather than serialized on one connection.
 const poolSize = 4
+
+// dialTimeout/loginTimeout bound connection setup so a wrong or unreachable host
+// fails fast (e.g. in the Test & Add dialog) instead of hanging on the OS TCP
+// timeout. The deadline is cleared after login, so a minutes-long IDLE read on a
+// pooled connection is unaffected.
+const (
+	dialTimeout  = 30 * time.Second
+	loginTimeout = 30 * time.Second
+)
 
 // conn is one pooled IMAP connection plus the mailbox it currently has SELECTed
 // (cached so a fan-out of fetches against the same folder skips re-SELECTing).
@@ -112,18 +122,21 @@ func (b *Backend) dial(handler *imapclient.UnilateralDataHandler) (*imapclient.C
 	// implicit TLS on 993).
 	var (
 		cl  *imapclient.Client
+		raw net.Conn // the conn we own (TLS/None) — nil for STARTTLS (library-dialed)
 		err error
 	)
 	switch b.cfg.Security {
 	case SecurityTLS:
-		var raw net.Conn
-		if raw, err = net.Dial("tcp", addr); err == nil {
-			cl = imapclient.New(tls.Client(&countingConn{Conn: raw, stats: b.stats}, tlsCfg), opts)
+		var tcp net.Conn
+		if tcp, err = net.DialTimeout("tcp", addr, dialTimeout); err == nil {
+			raw = &countingConn{Conn: tcp, stats: b.stats}
+			cl = imapclient.New(tls.Client(raw, tlsCfg), opts)
 		}
 	case SecurityNone:
-		var raw net.Conn
-		if raw, err = net.Dial("tcp", addr); err == nil {
-			cl = imapclient.New(&countingConn{Conn: raw, stats: b.stats}, opts)
+		var tcp net.Conn
+		if tcp, err = net.DialTimeout("tcp", addr, dialTimeout); err == nil {
+			raw = &countingConn{Conn: tcp, stats: b.stats}
+			cl = imapclient.New(raw, opts)
 		}
 	case SecuritySTARTTLS:
 		cl, err = imapclient.DialStartTLS(addr, opts)
@@ -133,11 +146,54 @@ func (b *Backend) dial(handler *imapclient.UnilateralDataHandler) (*imapclient.C
 	if err != nil {
 		return nil, fmt.Errorf("imap dial %s: %w", addr, err)
 	}
-	if err := b.cred.imapLogin(cl); err != nil {
+	// Bound login (greeting + LOGIN/AUTHENTICATE) with a deadline, then clear it so
+	// long-lived pooled/IDLE reads aren't affected.
+	if raw != nil {
+		_ = raw.SetDeadline(time.Now().Add(loginTimeout))
+	}
+	loginErr := b.cred.imapLogin(cl)
+	if raw != nil {
+		_ = raw.SetDeadline(time.Time{})
+	}
+	if loginErr != nil {
 		_ = cl.Close()
-		return nil, fmt.Errorf("imap login: %w", err)
+		return nil, loginError(loginErr)
 	}
 	return cl, nil
+}
+
+// loginError wraps an IMAP login failure, tagging credential rejections with
+// backend.ErrAuth so the launcher can prompt the user to reconnect rather than
+// retrying a doomed login every sync tick.
+func loginError(err error) error {
+	if isAuthFailure(err) {
+		return fmt.Errorf("imap login: %w: %v", backend.ErrAuth, err)
+	}
+	return fmt.Errorf("imap login: %w", err)
+}
+
+// isAuthFailure reports whether an IMAP error is a credential rejection. It
+// prefers the structured AUTHENTICATIONFAILED response code, falling back to the
+// text for the many servers that return a bare "NO" with a human-readable reason.
+func isAuthFailure(err error) bool {
+	var ie *imap.Error
+	if errors.As(err, &ie) && ie.Code == imap.ResponseCodeAuthenticationFailed {
+		return true
+	}
+	low := strings.ToLower(err.Error())
+	for _, s := range []string{
+		"authenticationfailed",
+		"authentication failed",
+		"authentication unsuccessful",
+		"invalid credentials",
+		"login failed",
+		"username and password not accepted",
+	} {
+		if strings.Contains(low, s) {
+			return true
+		}
+	}
+	return false
 }
 
 // acquire takes a connection from the pool (reusing an idle one or dialing a new

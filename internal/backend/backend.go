@@ -17,6 +17,13 @@ import (
 // changed. The caller recovers with a full resync.
 var ErrCursorExpired = errors.New("sync cursor expired; full resync required")
 
+// ErrAuth means the account's credentials were rejected (a revoked/expired
+// token, or a wrong IMAP password) — sync can't recover without the user
+// re-authenticating. Backends wrap their auth failures with it so the launcher
+// can surface a "reconnect" prompt instead of retrying forever. (Gmail's OAuth
+// invalid_grant is detected separately by auth.IsAuthError.)
+var ErrAuth = errors.New("authentication failed; reconnect required")
+
 // Profile identifies the connected account and seeds incremental sync.
 type Profile struct {
 	Email  string

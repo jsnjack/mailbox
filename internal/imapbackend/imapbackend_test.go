@@ -3,6 +3,7 @@ package imapbackend
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -14,6 +15,7 @@ import (
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapserver"
 	"github.com/emersion/go-imap/v2/imapserver/imapmemserver"
+	"github.com/jsnjack/mailbox/internal/backend"
 	"github.com/jsnjack/mailbox/internal/model"
 )
 
@@ -476,6 +478,29 @@ func TestMsgIDRoundTrip(t *testing.T) {
 	}
 	if _, _, _, err := parseMsgID("gmail-style-id"); err == nil {
 		t.Error("expected error for a non-imap id")
+	}
+}
+
+func TestLoginErrorClassification(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		auth bool // expect it to be tagged backend.ErrAuth
+	}{
+		{"response code", &imap.Error{Code: imap.ResponseCodeAuthenticationFailed, Text: "bad"}, true},
+		{"bare NO text", fmt.Errorf("imap: NO [AUTHENTICATIONFAILED] Invalid credentials"), true},
+		{"gmail wording", fmt.Errorf("Username and password not accepted"), true},
+		{"outlook wording", fmt.Errorf("LOGIN failed."), true},
+		{"network error", fmt.Errorf("dial tcp: i/o timeout"), false},
+		{"server busy", fmt.Errorf("imap: NO server unavailable"), false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := errors.Is(loginError(c.err), backend.ErrAuth)
+			if got != c.auth {
+				t.Errorf("loginError(%v): errors.Is ErrAuth = %v, want %v", c.err, got, c.auth)
+			}
+		})
 	}
 }
 
