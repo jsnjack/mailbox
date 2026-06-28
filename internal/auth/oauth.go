@@ -58,11 +58,21 @@ func randomState() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
-// Login runs the installed-app loopback OAuth flow: it starts a local server on
-// a random loopback port, opens the system browser to Google's consent page,
-// captures the authorization code on the callback, and exchanges it (with PKCE)
-// for a token. AccessTypeOffline + consent prompt guarantee a refresh token.
+// Login runs the installed-app loopback OAuth flow for the Gmail REST scopes:
+// it starts a local server on a random loopback port, opens the system browser
+// to Google's consent page, captures the authorization code on the callback, and
+// exchanges it (with PKCE) for a token. AccessTypeOffline + consent prompt
+// guarantee a refresh token.
 func Login(ctx context.Context, cc ClientConfig) (*oauth2.Token, error) {
+	return loginWithConfig(ctx, oauthConfig(cc, ""),
+		oauth2.AccessTypeOffline, oauth2.SetAuthURLParam("prompt", "consent"))
+}
+
+// loginWithConfig runs the generic loopback+PKCE flow for any provider's
+// oauth2.Config (Google REST/IMAP, Microsoft). The RedirectURL is filled in with
+// the chosen loopback port. authOpts are extra AuthCodeURL options (offline
+// access, consent prompt).
+func loginWithConfig(ctx context.Context, conf *oauth2.Config, authOpts ...oauth2.AuthCodeOption) (*oauth2.Token, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, fmt.Errorf("listen on loopback: %w", err)
@@ -70,18 +80,15 @@ func Login(ctx context.Context, cc ClientConfig) (*oauth2.Token, error) {
 	defer func() { _ = ln.Close() }()
 
 	port := ln.Addr().(*net.TCPAddr).Port
-	conf := oauthConfig(cc, fmt.Sprintf("http://127.0.0.1:%d/callback", port))
+	conf.RedirectURL = fmt.Sprintf("http://127.0.0.1:%d/callback", port)
 
 	state, err := randomState()
 	if err != nil {
 		return nil, err
 	}
 	verifier := oauth2.GenerateVerifier()
-	authURL := conf.AuthCodeURL(state,
-		oauth2.AccessTypeOffline,
-		oauth2.S256ChallengeOption(verifier),
-		oauth2.SetAuthURLParam("prompt", "consent"),
-	)
+	opts := append([]oauth2.AuthCodeOption{oauth2.S256ChallengeOption(verifier)}, authOpts...)
+	authURL := conf.AuthCodeURL(state, opts...)
 
 	type result struct {
 		code string

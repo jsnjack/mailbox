@@ -62,7 +62,7 @@ func TestIMAPBackendReadPath(t *testing.T) {
 	b := New(Config{
 		Host: host, Port: port, Security: SecurityNone,
 		Username: "alice@example.com", Email: "alice@example.com",
-	}, 1, "secret")
+	}, 1, PasswordAuth("alice@example.com", "secret"))
 	t.Cleanup(b.Close)
 	ctx := context.Background()
 
@@ -162,7 +162,7 @@ func TestIMAPIncremental(t *testing.T) {
 	h, p, _ := net.SplitHostPort(ln.Addr().String())
 	port, _ := strconv.Atoi(p)
 
-	b := New(Config{Host: h, Port: port, Security: SecurityNone, Username: "alice@example.com", Email: "alice@example.com"}, 1, "secret")
+	b := New(Config{Host: h, Port: port, Security: SecurityNone, Username: "alice@example.com", Email: "alice@example.com"}, 1, PasswordAuth("alice@example.com", "secret"))
 	t.Cleanup(b.Close)
 	ctx := context.Background()
 
@@ -259,7 +259,7 @@ func TestIMAPThreading(t *testing.T) {
 	h, p, _ := net.SplitHostPort(ln.Addr().String())
 	port, _ := strconv.Atoi(p)
 
-	b := New(Config{Host: h, Port: port, Security: SecurityNone, Username: "alice@example.com", Email: "alice@example.com"}, 1, "secret")
+	b := New(Config{Host: h, Port: port, Security: SecurityNone, Username: "alice@example.com", Email: "alice@example.com"}, 1, PasswordAuth("alice@example.com", "secret"))
 	t.Cleanup(b.Close)
 	ctx := context.Background()
 
@@ -311,7 +311,7 @@ func TestCursorAndUIDCodec(t *testing.T) {
 
 func TestIMAPMutations(t *testing.T) {
 	host, port := startMemServer(t) // INBOX has one unread message
-	b := New(Config{Host: host, Port: port, Security: SecurityNone, Username: "alice@example.com", Email: "alice@example.com"}, 1, "secret")
+	b := New(Config{Host: host, Port: port, Security: SecurityNone, Username: "alice@example.com", Email: "alice@example.com"}, 1, PasswordAuth("alice@example.com", "secret"))
 	t.Cleanup(b.Close)
 	ctx := context.Background()
 

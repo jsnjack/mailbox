@@ -68,16 +68,18 @@ func TokenSource(ctx context.Context, cc ClientConfig, email string, expiry time
 	}
 	conf := oauthConfig(cc, "") // redirect is unused for refresh
 	seed := &oauth2.Token{RefreshToken: rt, Expiry: expiry}
-	base := &persistingTokenSource{email: email, last: rt, src: conf.TokenSource(ctx, seed)}
+	base := &persistingTokenSource{service: keyringService, email: email, last: rt, src: conf.TokenSource(ctx, seed)}
 	return oauth2.ReuseTokenSource(seed, base), nil
 }
 
-// persistingTokenSource writes a rotated refresh token back to the keyring so
-// the new value survives restarts. Google occasionally rotates refresh tokens.
+// persistingTokenSource writes a rotated refresh token back to the keyring
+// (under service, keyed by email) so the new value survives restarts. Google and
+// Microsoft both rotate refresh tokens.
 type persistingTokenSource struct {
-	email string
-	last  string
-	src   oauth2.TokenSource
+	service string
+	email   string
+	last    string
+	src     oauth2.TokenSource
 }
 
 // Token delegates to the wrapped source and persists any changed refresh token.
@@ -87,8 +89,8 @@ func (p *persistingTokenSource) Token() (*oauth2.Token, error) {
 		return nil, fmt.Errorf("refresh token for %q: %w", p.email, err)
 	}
 	if tok.RefreshToken != "" && tok.RefreshToken != p.last {
-		if err := SaveRefreshToken(p.email, tok.RefreshToken); err != nil {
-			return nil, err
+		if err := keyring.Set(p.service, p.email, tok.RefreshToken); err != nil {
+			return nil, fmt.Errorf("persist rotated token for %q: %w", p.email, err)
 		}
 		p.last = tok.RefreshToken
 	}

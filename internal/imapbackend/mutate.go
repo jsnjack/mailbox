@@ -15,7 +15,6 @@ import (
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapclient"
 	gomail "github.com/emersion/go-message/mail"
-	"github.com/emersion/go-sasl"
 	"github.com/emersion/go-smtp"
 	"github.com/jsnjack/mailbox/internal/model"
 )
@@ -268,19 +267,17 @@ func (b *Backend) smtpSend(from string, to []string, msg []byte) error {
 		return fmt.Errorf("smtp dial %s: %w", addr, err)
 	}
 	defer func() { _ = c.Close() }()
-	if err := c.Auth(b.smtpAuth()); err != nil {
+	sc, err := b.cred.smtpSASL()
+	if err != nil {
+		return err
+	}
+	if err := c.Auth(sc); err != nil {
 		return fmt.Errorf("smtp auth: %w", err)
 	}
 	if err := c.SendMail(from, to, bytes.NewReader(msg)); err != nil {
 		return fmt.Errorf("smtp send: %w", err)
 	}
 	return nil
-}
-
-// smtpAuth is the SASL mechanism for SMTP. PLAIN with the stored password today;
-// XOAUTH2 is wired in a later phase.
-func (b *Backend) smtpAuth() sasl.Client {
-	return sasl.NewPlainClient("", b.cfg.Username, b.password)
 }
 
 // appendToSent files a sent message in the Sent folder (best-effort).

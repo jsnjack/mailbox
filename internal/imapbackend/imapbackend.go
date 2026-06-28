@@ -52,7 +52,7 @@ type Config struct {
 type Backend struct {
 	cfg       Config
 	accountID int64
-	password  string
+	cred      Credential
 
 	mu            sync.Mutex
 	cl            *imapclient.Client
@@ -65,10 +65,10 @@ type Backend struct {
 	foldersLoaded bool              // LIST done this connection
 }
 
-// New builds an IMAP backend. password authenticates with LOGIN/PLAIN; OAuth
-// (XOAUTH2) is wired in a later phase via a separate credential path.
-func New(cfg Config, accountID int64, password string) *Backend {
-	return &Backend{cfg: cfg, accountID: accountID, password: password, folderToLabel: map[string]string{}}
+// New builds an IMAP backend. cred authenticates both the IMAP and SMTP
+// connections (PasswordAuth or OAuthAuth).
+func New(cfg Config, accountID int64, cred Credential) *Backend {
+	return &Backend{cfg: cfg, accountID: accountID, cred: cred, folderToLabel: map[string]string{}}
 }
 
 var _ backend.Backend = (*Backend)(nil)
@@ -95,7 +95,7 @@ func (b *Backend) dial() (*imapclient.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("imap dial %s: %w", addr, err)
 	}
-	if err := cl.Login(b.cfg.Username, b.password).Wait(); err != nil {
+	if err := b.cred.imapLogin(cl); err != nil {
 		_ = cl.Close()
 		return nil, fmt.Errorf("imap login: %w", err)
 	}
