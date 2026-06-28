@@ -14,6 +14,7 @@ import (
 	"github.com/diamondburned/gotk4/pkg/gio/v2"
 	"github.com/jsnjack/mailbox/internal/activity"
 	"github.com/jsnjack/mailbox/internal/ai"
+	"github.com/jsnjack/mailbox/internal/config"
 	"github.com/jsnjack/mailbox/internal/model"
 	"github.com/jsnjack/mailbox/internal/store"
 	"github.com/jsnjack/mailbox/internal/syncer"
@@ -132,6 +133,16 @@ type Deps struct {
 	// TestAISettings validates the given AI settings (plus the stored key) with a
 	// tiny live request; nil result means the connection works.
 	TestAISettings func(ctx context.Context, provider, endpoint, model string) error
+
+	// IMAP account management, for the add-account dialog. TestIMAPAccount
+	// validates a connection (login + folder list) with the given settings and
+	// password. AddIMAPAccount persists the account (config + keyring secret +
+	// account row); it begins syncing on the next launch. OAuthConnect runs the
+	// browser OAuth flow for an OAuth provider and returns the refresh token to
+	// store as the secret. Nil when no Gmail credentials are configured.
+	TestIMAPAccount func(ctx context.Context, acct config.IMAPAccount, password string) error
+	AddIMAPAccount  func(ctx context.Context, acct config.IMAPAccount, secret string) error
+	OAuthConnect    func(ctx context.Context, kind config.AuthKind) (refreshToken string, err error)
 }
 
 // Run launches the GTK application and blocks until the window is closed. mailto,

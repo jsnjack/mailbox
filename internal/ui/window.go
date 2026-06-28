@@ -224,6 +224,11 @@ func (w *window) registerAppMenuActions() {
 	about := gio.NewSimpleAction("about", nil)
 	about.ConnectActivate(func(*glib.Variant) { w.showAbout() })
 	w.win.AddAction(about)
+
+	addAcct := gio.NewSimpleAction("add-account", nil)
+	addAcct.ConnectActivate(func(*glib.Variant) { w.openAddAccount() })
+	addAcct.SetEnabled(w.deps.AddIMAPAccount != nil)
+	w.win.AddAction(addAcct)
 }
 
 // showAbout presents the standard Adwaita About dialog (app identity, version,
@@ -643,6 +648,9 @@ func (w *window) buildSidebar() *adw.NavigationPage {
 	// Keyboard Shortcuts and About, consolidating what used to be a lone gear.
 	w.registerAppMenuActions()
 	menu := gio.NewMenu()
+	acct := gio.NewMenu()
+	acct.Append("Add account…", "win.add-account")
+	menu.AppendSection("", acct)
 	pref := gio.NewMenu()
 	pref.Append("Preferences", "win.preferences")
 	menu.AppendSection("", pref)

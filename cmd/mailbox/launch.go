@@ -148,6 +148,54 @@ func launchUI(mailto string) error {
 		return s
 	}
 
+	// Add-account dialog hooks — wired unconditionally so an account can be added
+	// even from a zero-account first run. A newly added IMAP account is picked up
+	// (and backfilled) on the next launch.
+	deps.TestIMAPAccount = func(ctx context.Context, acct config.IMAPAccount, password string) error {
+		b := imapbackend.New(imapConfigOf(acct), 0, imapbackend.PasswordAuth(usernameOf(acct), password))
+		defer b.Close()
+		_, err := b.Profile(ctx) // connects, logs in, lists folders
+		return err
+	}
+	deps.AddIMAPAccount = func(ctx context.Context, acct config.IMAPAccount, secret string) error {
+		if secret != "" {
+			if err := auth.SaveIMAPSecret(acct.Email, secret); err != nil {
+				return err
+			}
+		}
+		if err := config.SaveIMAPAccount(acct); err != nil {
+			return err
+		}
+		_, err := st.UpsertAccount(ctx, model.Account{Email: acct.Email, Type: model.AccountIMAP})
+		return err
+	}
+	deps.OAuthConnect = func(ctx context.Context, kind config.AuthKind) (string, error) {
+		switch kind {
+		case config.AuthGoogle:
+			cc, err := auth.LoadClientConfig(credentialsPath())
+			if err != nil {
+				return "", err
+			}
+			tok, err := auth.LoginGoogleMail(ctx, cc)
+			if err != nil {
+				return "", err
+			}
+			return tok.RefreshToken, nil
+		case config.AuthMicrosoft:
+			id := microsoftClientID()
+			if id == "" {
+				return "", fmt.Errorf("set MAILBOX_MS_CLIENT_ID to connect Outlook")
+			}
+			tok, err := auth.LoginMicrosoft(ctx, id)
+			if err != nil {
+				return "", err
+			}
+			return tok.RefreshToken, nil
+		default:
+			return "", fmt.Errorf("provider does not use OAuth")
+		}
+	}
+
 	if len(clients) > 0 {
 		deps.Hub = hub
 		clientFor := func(accountID int64) (backend.Backend, error) {
@@ -331,20 +379,28 @@ func buildIMAPBackend(ctx context.Context, a model.Account) (backend.Backend, er
 	if !ok {
 		return nil, fmt.Errorf("no IMAP config for %s", a.Email)
 	}
-	username := cfg.Username
-	if username == "" {
-		username = a.Email
-	}
-	cred, err := buildIMAPCredential(ctx, a.Email, username, cfg)
+	cred, err := buildIMAPCredential(ctx, a.Email, usernameOf(cfg), cfg)
 	if err != nil {
 		return nil, err
 	}
-	icfg := imapbackend.Config{
-		Host: cfg.IMAPHost, Port: cfg.IMAPPort, Security: imapbackend.Security(cfg.IMAPSecurity),
-		Username: username, Email: a.Email,
-		SMTPHost: cfg.SMTPHost, SMTPPort: cfg.SMTPPort, SMTPSecurity: imapbackend.Security(cfg.SMTPSecurity),
+	return imapbackend.New(imapConfigOf(cfg), a.ID, cred), nil
+}
+
+// usernameOf is the IMAP/SMTP login username (the email unless overridden).
+func usernameOf(a config.IMAPAccount) string {
+	if a.Username != "" {
+		return a.Username
 	}
-	return imapbackend.New(icfg, a.ID, cred), nil
+	return a.Email
+}
+
+// imapConfigOf maps the persisted account config to the backend's Config.
+func imapConfigOf(a config.IMAPAccount) imapbackend.Config {
+	return imapbackend.Config{
+		Host: a.IMAPHost, Port: a.IMAPPort, Security: imapbackend.Security(a.IMAPSecurity),
+		Username: usernameOf(a), Email: a.Email,
+		SMTPHost: a.SMTPHost, SMTPPort: a.SMTPPort, SMTPSecurity: imapbackend.Security(a.SMTPSecurity),
+	}
 }
 
 // buildIMAPCredential picks the credential flow recorded for the account: a
@@ -439,12 +495,29 @@ func backgroundSync(ctx context.Context, engine *syncer.Engine, act *activity.Hu
 	defer ticker.Stop()
 	for {
 		done := act.Begin("sync", "Syncing "+email)
-		n, err := engine.Incremental(ctx, b, accountID)
-		if errors.Is(err, syncer.ErrHistoryExpired) {
-			// Cursor too old (offline past the provider's change window). Recover by
-			// re-backfilling and resetting it, else incremental fails forever.
-			fmt.Fprintf(os.Stderr, "background sync: cursor expired for %s, resyncing\n", email)
+		var (
+			n   int
+			err error
+		)
+		if acc, aerr := engine.Store.GetAccountByID(ctx, accountID); aerr == nil && acc.SyncCursor == "" {
+			// Never backfilled (a freshly added IMAP account, or a Gmail account
+			// connected without the headless `sync`): do the initial labels +
+			// backfill, which seeds the cursor.
+			if _, lerr := engine.SyncLabels(ctx, b, accountID); lerr != nil {
+				fmt.Fprintf(os.Stderr, "initial label sync for %s: %v\n", email, lerr)
+			}
 			n, err = engine.Resync(ctx, b, accountID, resyncBackfillLimit)
+			if err == nil {
+				_ = engine.Store.SetBackfilledAt(ctx, accountID, time.Now())
+			}
+		} else {
+			n, err = engine.Incremental(ctx, b, accountID)
+			if errors.Is(err, syncer.ErrHistoryExpired) {
+				// Cursor too old (offline past the provider's change window). Recover
+				// by re-backfilling and resetting it, else incremental fails forever.
+				fmt.Fprintf(os.Stderr, "background sync: cursor expired for %s, resyncing\n", email)
+				n, err = engine.Resync(ctx, b, accountID, resyncBackfillLimit)
+			}
 		}
 		if err != nil {
 			if auth.IsAuthError(err) {

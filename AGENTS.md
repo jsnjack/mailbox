@@ -46,10 +46,19 @@ internal/
   ui/                all GTK/adw/webkit widget code (3-pane shell, list, reader, actions)
 ```
 
-Multi-account: the launcher builds one Gmail client per connected account and
-syncs each; the UI tracks an active account (a switcher appears in the sidebar
-when more than one is connected) and routes every operation by account id. New
-accounts are added via `mailbox sync --account`. Each switcher row shows the
+Multi-account, multi-provider: `accounts.account_type` ('gmail'|'imap') selects
+the backend; the launcher's `buildBackendForAccount` builds the Gmail REST
+backend (first-class — `history.list`, server threads/search) or an IMAP backend
+(`imapbackend` over emersion/go-imap, with a password or XOAUTH2 credential) per
+account, and the engine drives whichever via `backend.Backend`. The UI tracks an
+active account (a switcher appears in the sidebar when more than one is
+connected) and routes every operation by account id. Accounts are added via the
+primary menu's **Add account…** dialog (`openAddAccount`: provider presets →
+email + app password or OAuth sign-in → Test & Add; persists via
+`config.{SaveIMAPAccount}` + `auth.SaveIMAPSecret` + `store.UpsertAccount`) and,
+for Gmail REST, via `mailbox sync --account`. A freshly added account has no sync
+cursor, so `backgroundSync` does an initial labels+backfill (via `engine.Resync`)
+on the next launch before switching to incremental. Each switcher row shows the
 account's display name (email as a caption when named) and an unread-INBOX
 count pill;
 names are user-assigned in Preferences → Accounts (`config.{Load,Save}AccountName`,
