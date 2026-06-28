@@ -598,7 +598,9 @@ func (w *window) buildSidebar() *adw.NavigationPage {
 	scroller.SetChild(w.labelBox)
 
 	box := gtk.NewBox(gtk.OrientationVertical, 0)
-	if len(w.deps.Accounts) > 1 {
+	// Always use the account list-box (even for a single account) so the switcher
+	// can be refreshed in place when an account is added at runtime.
+	if len(w.deps.Accounts) >= 1 {
 		w.accountBox = gtk.NewListBox()
 		w.accountBox.AddCSSClass("navigation-sidebar")
 		for _, a := range w.deps.Accounts {
@@ -616,12 +618,6 @@ func (w *window) buildSidebar() *adw.NavigationPage {
 			w.accountBox.SelectRow(r)
 		}
 		box.Append(w.accountBox)
-		box.Append(gtk.NewSeparator(gtk.OrientationHorizontal))
-	} else if len(w.deps.Accounts) == 1 {
-		a := w.deps.Accounts[0]
-		row := w.accountSwitcherRow(a)
-		row.SetMarginTop(6)
-		box.Append(row)
 		box.Append(gtk.NewSeparator(gtk.OrientationHorizontal))
 	}
 	box.Append(scroller)
@@ -747,6 +743,21 @@ func (w *window) rebuildAccountSwitcher() {
 		}
 	}
 	w.refreshAccountUnread()
+}
+
+// addAccount registers a just-added account in the switcher live — it's already
+// syncing (the launcher started it), so it shows up and is selectable without a
+// restart. Main-thread only.
+func (w *window) addAccount(a AccountInfo) {
+	for _, e := range w.deps.Accounts {
+		if e.ID == a.ID {
+			return // already present
+		}
+	}
+	w.deps.Accounts = append(w.deps.Accounts, a)
+	if w.accountBox != nil {
+		w.rebuildAccountSwitcher()
+	}
 }
 
 func (w *window) buildThreadList() *adw.NavigationPage {

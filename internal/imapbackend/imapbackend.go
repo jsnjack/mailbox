@@ -72,6 +72,7 @@ type Backend struct {
 	sem    chan struct{} // bounds live connections to poolSize
 	idle   chan *conn    // reusable idle connections
 	closed atomic.Bool   // set by Close so in-flight releases don't repool
+	stats  *Stats        // wire bytes transferred (IMAP + SMTP)
 
 	folderMu      sync.Mutex        // guards the folder caches below
 	folderToLabel map[string]string // mailbox name → label id (special-use mapped)
@@ -89,6 +90,7 @@ func New(cfg Config, accountID int64, cred Credential) *Backend {
 		cfg: cfg, accountID: accountID, cred: cred,
 		sem:           make(chan struct{}, poolSize),
 		idle:          make(chan *conn, poolSize),
+		stats:         &Stats{},
 		folderToLabel: map[string]string{},
 	}
 }
@@ -101,21 +103,30 @@ var _ backend.Backend = (*Backend)(nil)
 // unsolicited server data (used by Watch for IDLE).
 func (b *Backend) dial(handler *imapclient.UnilateralDataHandler) (*imapclient.Client, error) {
 	addr := net.JoinHostPort(b.cfg.Host, strconv.Itoa(b.cfg.Port))
-	opts := &imapclient.Options{
-		TLSConfig:             &tls.Config{ServerName: b.cfg.Host},
-		UnilateralDataHandler: handler,
-	}
+	tlsCfg := &tls.Config{ServerName: b.cfg.Host}
+	opts := &imapclient.Options{TLSConfig: tlsCfg, UnilateralDataHandler: handler}
+
+	// Dial the raw TCP conn ourselves and wrap it in a byte counter (below TLS, so
+	// it counts wire bytes), then build the client over it. STARTTLS falls back to
+	// the library's dial (uncounted — uncommon for IMAP, which is almost always
+	// implicit TLS on 993).
 	var (
 		cl  *imapclient.Client
 		err error
 	)
 	switch b.cfg.Security {
 	case SecurityTLS:
-		cl, err = imapclient.DialTLS(addr, opts)
+		var raw net.Conn
+		if raw, err = net.Dial("tcp", addr); err == nil {
+			cl = imapclient.New(tls.Client(&countingConn{Conn: raw, stats: b.stats}, tlsCfg), opts)
+		}
+	case SecurityNone:
+		var raw net.Conn
+		if raw, err = net.Dial("tcp", addr); err == nil {
+			cl = imapclient.New(&countingConn{Conn: raw, stats: b.stats}, opts)
+		}
 	case SecuritySTARTTLS:
 		cl, err = imapclient.DialStartTLS(addr, opts)
-	case SecurityNone:
-		cl, err = imapclient.DialInsecure(addr, opts)
 	default:
 		return nil, fmt.Errorf("imap: unknown security %q", b.cfg.Security)
 	}

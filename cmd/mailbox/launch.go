@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/jsnjack/mailbox/internal/activity"
@@ -108,16 +109,24 @@ func launchUI(mailto string) error {
 	// provider-agnostic adapters the engine drives (Gmail today; IMAP later).
 	clients := make(map[int64]*gmailapi.Client)
 	backends := make(map[int64]backend.Backend)
-	for _, a := range accounts {
+	// accountsMu guards both maps: startAccount writes them from the add-account
+	// dialog's goroutine while clientFor/Stats read them from the UI thread.
+	var accountsMu sync.Mutex
+
+	// startAccount builds an account's backend, registers it, and starts its
+	// background sync/sweep (+ IMAP IDLE watch). Used at launch and when the dialog
+	// adds an account, so a new account begins syncing immediately — no restart.
+	startAccount := func(a model.Account) error {
 		b, client, err := buildBackendForAccount(ctx, a)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "live features disabled for %s (%v)\n", a.Email, err)
-			continue
+			return err
 		}
-		if client != nil { // Gmail REST accounts expose API stats; IMAP accounts don't
+		accountsMu.Lock()
+		if client != nil { // Gmail REST exposes API stats; IMAP reports bytes via the backend
 			clients[a.ID] = client
 		}
 		backends[a.ID] = b
+		accountsMu.Unlock()
 		// A wake channel lets a push notification (IMAP IDLE) trigger an immediate
 		// sync instead of waiting for the poll tick.
 		wake := make(chan struct{}, 1)
@@ -131,6 +140,12 @@ func launchUI(mailto string) error {
 		}
 		go backgroundSync(ctx, engine, act, b, a.ID, a.Email, wake)
 		go backgroundSweep(ctx, engine, b, a.ID)
+		return nil
+	}
+	for _, a := range accounts {
+		if err := startAccount(a); err != nil {
+			fmt.Fprintf(os.Stderr, "live features disabled for %s (%v)\n", a.Email, err)
+		}
 	}
 
 	// Cumulative metrics for the status bar: cache sizes + per-account API stats.
@@ -143,6 +158,7 @@ func launchUI(mailto string) error {
 		if n, err := st.Count(context.Background()); err == nil {
 			s.Messages = n
 		}
+		accountsMu.Lock()
 		for _, c := range clients {
 			cs := c.Stats()
 			s.Requests += cs.Requests
@@ -150,6 +166,15 @@ func launchUI(mailto string) error {
 			s.BytesIn += cs.BytesIn
 			s.BytesOut += cs.BytesOut
 		}
+		// IMAP backends report wire bytes (no Gmail-style request/quota counters).
+		for _, b := range backends {
+			if r, ok := b.(interface{ Transferred() (int64, int64) }); ok {
+				in, out := r.Transferred()
+				s.BytesIn += in
+				s.BytesOut += out
+			}
+		}
+		accountsMu.Unlock()
 		// Include AI provider traffic so "data transferred" reflects all network
 		// activity, not just Gmail.
 		if deps.Assistant != nil {
@@ -169,26 +194,38 @@ func launchUI(mailto string) error {
 		_, err := b.Profile(ctx) // connects, logs in, lists folders
 		return err
 	}
-	deps.AddIMAPAccount = func(ctx context.Context, acct config.IMAPAccount, secret string) error {
+	deps.AddIMAPAccount = func(ctx context.Context, acct config.IMAPAccount, secret string) (int64, error) {
 		if secret == "" {
-			return fmt.Errorf("no credentials to save")
+			return 0, fmt.Errorf("no credentials to save")
 		}
-		// Gmail REST: native backend — store the refresh token under the Gmail
-		// keyring and a gmail-type account; no IMAP server config.
+		atype := model.AccountIMAP
 		if acct.Auth == config.AuthGmailREST {
+			// Gmail REST: native backend — token under the Gmail keyring, a
+			// gmail-type account, no IMAP server config.
 			if err := auth.SaveRefreshToken(acct.Email, secret); err != nil {
-				return err
+				return 0, err
 			}
-			return upsertAccountKeepingCursor(ctx, st, acct.Email, model.AccountGmail)
+			atype = model.AccountGmail
+		} else {
+			if err := auth.SaveIMAPSecret(acct.Email, secret); err != nil {
+				return 0, err
+			}
+			if err := config.SaveIMAPAccount(acct); err != nil {
+				return 0, err
+			}
 		}
-		// IMAP (password or OAuth).
-		if err := auth.SaveIMAPSecret(acct.Email, secret); err != nil {
-			return err
+		if err := upsertAccountKeepingCursor(ctx, st, acct.Email, atype); err != nil {
+			return 0, err
 		}
-		if err := config.SaveIMAPAccount(acct); err != nil {
-			return err
+		saved, err := st.GetAccountByEmail(ctx, acct.Email)
+		if err != nil {
+			return 0, err
 		}
-		return upsertAccountKeepingCursor(ctx, st, acct.Email, model.AccountIMAP)
+		// Start syncing it now — no restart needed.
+		if err := startAccount(saved); err != nil {
+			return saved.ID, fmt.Errorf("account saved but could not start syncing: %w", err)
+		}
+		return saved.ID, nil
 	}
 	deps.OAuthConnect = func(ctx context.Context, kind config.AuthKind) (string, string, error) {
 		switch kind {
@@ -233,7 +270,10 @@ func launchUI(mailto string) error {
 	if len(backends) > 0 {
 		deps.Hub = hub
 		clientFor := func(accountID int64) (backend.Backend, error) {
-			if b := backends[accountID]; b != nil {
+			accountsMu.Lock()
+			b := backends[accountID]
+			accountsMu.Unlock()
+			if b != nil {
 				return b, nil
 			}
 			return nil, fmt.Errorf("account %d has no connected client", accountID)

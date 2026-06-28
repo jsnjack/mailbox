@@ -243,22 +243,28 @@ func stripHeader(raw []byte, name string) []byte {
 func (b *Backend) smtpSend(from string, to []string, msg []byte) error {
 	addr := net.JoinHostPort(b.cfg.SMTPHost, strconv.Itoa(b.cfg.SMTPPort))
 	tlsCfg := &tls.Config{ServerName: b.cfg.SMTPHost}
-	var (
-		c   *smtp.Client
-		err error
-	)
+	// Dial raw + count (below TLS), then build the SMTP client over the wrapped
+	// conn so SMTP traffic is included in the byte stats.
+	raw, err := net.Dial("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("smtp dial %s: %w", addr, err)
+	}
+	cc := &countingConn{Conn: raw, stats: b.stats}
+	var c *smtp.Client
 	switch b.cfg.SMTPSecurity {
 	case SecurityTLS:
-		c, err = smtp.DialTLS(addr, tlsCfg)
+		c = smtp.NewClient(tls.Client(cc, tlsCfg))
 	case SecuritySTARTTLS:
-		c, err = smtp.DialStartTLS(addr, tlsCfg)
+		c, err = smtp.NewClientStartTLS(cc, tlsCfg)
 	case SecurityNone:
-		c, err = smtp.Dial(addr)
+		c = smtp.NewClient(cc)
 	default:
+		_ = raw.Close()
 		return fmt.Errorf("imap: unknown smtp security %q", b.cfg.SMTPSecurity)
 	}
 	if err != nil {
-		return fmt.Errorf("smtp dial %s: %w", addr, err)
+		_ = raw.Close()
+		return fmt.Errorf("smtp connect %s: %w", addr, err)
 	}
 	defer func() { _ = c.Close() }()
 	sc, err := b.cred.smtpSASL()

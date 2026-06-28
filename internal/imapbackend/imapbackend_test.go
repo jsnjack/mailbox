@@ -131,6 +131,12 @@ func TestIMAPBackendReadPath(t *testing.T) {
 	if len(atts) != 0 {
 		t.Errorf("expected no attachments, got %d", len(atts))
 	}
+
+	// Byte stats are counted across the IMAP traffic above.
+	in, out := b.Transferred()
+	if in == 0 || out == 0 {
+		t.Errorf("byte stats not counted: in=%d out=%d", in, out)
+	}
 }
 
 func TestIMAPIncremental(t *testing.T) {

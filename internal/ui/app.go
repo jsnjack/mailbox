@@ -143,8 +143,10 @@ type Deps struct {
 	// supply it (Gmail, from the profile) — empty otherwise, so the caller keeps
 	// the typed address. Nil when no Gmail credentials are configured.
 	TestIMAPAccount func(ctx context.Context, acct config.IMAPAccount, password string) error
-	AddIMAPAccount  func(ctx context.Context, acct config.IMAPAccount, secret string) error
-	OAuthConnect    func(ctx context.Context, kind config.AuthKind) (email, refreshToken string, err error)
+	// AddIMAPAccount persists and immediately starts syncing the account, returning
+	// its id so the UI can add it to the switcher (no restart needed).
+	AddIMAPAccount func(ctx context.Context, acct config.IMAPAccount, secret string) (accountID int64, err error)
+	OAuthConnect   func(ctx context.Context, kind config.AuthKind) (email, refreshToken string, err error)
 }
 
 // Run launches the GTK application and blocks until the window is closed. mailto,

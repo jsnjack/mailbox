@@ -127,10 +127,10 @@ func (w *window) openAddAccount() {
 		}, p
 	}
 
-	// finish persists the account and closes.
+	// finish persists + starts the account, registers it in the switcher, and closes.
 	finish := func(acct config.IMAPAccount, secret string) {
 		go func() {
-			err := w.deps.AddIMAPAccount(context.Background(), acct, secret)
+			id, err := w.deps.AddIMAPAccount(context.Background(), acct, secret)
 			dispatch.Main(func() {
 				if err != nil {
 					status.SetText("Couldn't add account: " + err.Error())
@@ -138,7 +138,8 @@ func (w *window) openAddAccount() {
 					return
 				}
 				dialog.Close()
-				w.toast("Account added — restart mailbox to start syncing it")
+				w.addAccount(AccountInfo{ID: id, Email: acct.Email})
+				w.toast("Account added — syncing " + acct.Email)
 			})
 		}()
 	}
