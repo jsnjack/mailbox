@@ -117,7 +117,18 @@ func launchUI(mailto string) error {
 			clients[a.ID] = client
 		}
 		backends[a.ID] = b
-		go backgroundSync(ctx, engine, act, b, a.ID, a.Email)
+		// A wake channel lets a push notification (IMAP IDLE) trigger an immediate
+		// sync instead of waiting for the poll tick.
+		wake := make(chan struct{}, 1)
+		if watcher, ok := b.(backend.Watcher); ok {
+			go watcher.Watch(ctx, func() {
+				select {
+				case wake <- struct{}{}:
+				default: // a wake is already pending; coalesce
+				}
+			})
+		}
+		go backgroundSync(ctx, engine, act, b, a.ID, a.Email, wake)
 		go backgroundSweep(ctx, engine, b, a.ID)
 	}
 
@@ -490,7 +501,7 @@ func backgroundSweep(ctx context.Context, engine *syncer.Engine, b backend.Backe
 
 // backgroundSync runs an incremental sync immediately and then on a timer,
 // reporting each pass to the activity hub for the status bar.
-func backgroundSync(ctx context.Context, engine *syncer.Engine, act *activity.Hub, b backend.Backend, accountID int64, email string) {
+func backgroundSync(ctx context.Context, engine *syncer.Engine, act *activity.Hub, b backend.Backend, accountID int64, email string, wake <-chan struct{}) {
 	ticker := time.NewTicker(syncInterval)
 	defer ticker.Stop()
 	for {
@@ -536,6 +547,7 @@ func backgroundSync(ctx context.Context, engine *syncer.Engine, act *activity.Hu
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+		case <-wake: // a push notification (IMAP IDLE) — sync now
 		}
 	}
 }

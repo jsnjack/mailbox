@@ -23,6 +23,18 @@ type Profile struct {
 	Cursor string // opaque incremental-sync watermark (Gmail: historyId)
 }
 
+// Watcher is an optional Backend capability: a provider that can push change
+// notifications (IMAP IDLE) implements it so the app reacts in near-real-time
+// instead of waiting for the next poll. Providers without it (Gmail REST) are
+// driven purely by the poll loop.
+type Watcher interface {
+	// Watch blocks until ctx is cancelled, calling onChange whenever the server
+	// signals new or changed mail. onChange must be cheap and non-blocking (it
+	// just nudges the sync loop). It returns when ctx is done or the provider
+	// can't watch (the caller then relies on polling).
+	Watch(ctx context.Context, onChange func())
+}
+
 // Backend is one account's mail provider. Every id is a provider message id
 // (a Gmail message id today). Implementations must be safe for concurrent use —
 // the engine fans out fetches across goroutines.

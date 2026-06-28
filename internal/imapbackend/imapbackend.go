@@ -48,36 +48,61 @@ type Config struct {
 	SMTPSecurity Security
 }
 
-// Backend implements backend.Backend over one IMAP account.
+// poolSize bounds concurrent IMAP connections. IMAP is stateful (one SELECT per
+// connection), so the engine's fan-out (backfill, incremental metadata fetch) is
+// served by a small pool rather than serialized on one connection.
+const poolSize = 4
+
+// conn is one pooled IMAP connection plus the mailbox it currently has SELECTed
+// (cached so a fan-out of fetches against the same folder skips re-SELECTing).
+type conn struct {
+	cl       *imapclient.Client
+	selected string
+	selData  *imap.SelectData
+}
+
+// Backend implements backend.Backend over one IMAP account, with a small
+// connection pool for concurrency.
 type Backend struct {
 	cfg       Config
 	accountID int64
 	cred      Credential
 
-	mu            sync.Mutex
-	cl            *imapclient.Client
-	selected      string            // currently SELECTed mailbox ("" = none)
+	sem  chan struct{} // bounds live connections to poolSize
+	idle chan *conn    // reusable idle connections
+
+	folderMu      sync.Mutex        // guards the folder caches below
 	folderToLabel map[string]string // mailbox name → label id (special-use mapped)
 	labelToFolder map[string]string // system label id → mailbox name (for moves)
 	archiveFolder string            // the \Archive mailbox, if any (for archive)
 	labels        []model.Label     // cached LIST → domain labels
 	synced        []string          // mailboxes to sync, derived once from LIST
-	foldersLoaded bool              // LIST done this connection
+	foldersLoaded bool              // LIST done
 }
 
 // New builds an IMAP backend. cred authenticates both the IMAP and SMTP
 // connections (PasswordAuth or OAuthAuth).
 func New(cfg Config, accountID int64, cred Credential) *Backend {
-	return &Backend{cfg: cfg, accountID: accountID, cred: cred, folderToLabel: map[string]string{}}
+	return &Backend{
+		cfg: cfg, accountID: accountID, cred: cred,
+		sem:           make(chan struct{}, poolSize),
+		idle:          make(chan *conn, poolSize),
+		folderToLabel: map[string]string{},
+	}
 }
 
 var _ backend.Backend = (*Backend)(nil)
 
-// --- connection management (caller holds mu) ---
+// --- connection pool ---
 
-func (b *Backend) dial() (*imapclient.Client, error) {
+// dial opens and logs in a new connection. handler, when non-nil, receives
+// unsolicited server data (used by Watch for IDLE).
+func (b *Backend) dial(handler *imapclient.UnilateralDataHandler) (*imapclient.Client, error) {
 	addr := net.JoinHostPort(b.cfg.Host, strconv.Itoa(b.cfg.Port))
-	opts := &imapclient.Options{TLSConfig: &tls.Config{ServerName: b.cfg.Host}}
+	opts := &imapclient.Options{
+		TLSConfig:             &tls.Config{ServerName: b.cfg.Host},
+		UnilateralDataHandler: handler,
+	}
 	var (
 		cl  *imapclient.Client
 		err error
@@ -88,7 +113,7 @@ func (b *Backend) dial() (*imapclient.Client, error) {
 	case SecuritySTARTTLS:
 		cl, err = imapclient.DialStartTLS(addr, opts)
 	case SecurityNone:
-		cl, err = imapclient.DialInsecure(addr, nil)
+		cl, err = imapclient.DialInsecure(addr, opts)
 	default:
 		return nil, fmt.Errorf("imap: unknown security %q", b.cfg.Security)
 	}
@@ -102,45 +127,89 @@ func (b *Backend) dial() (*imapclient.Client, error) {
 	return cl, nil
 }
 
-// conn returns a live, logged-in client, dialing on first use.
-func (b *Backend) conn() (*imapclient.Client, error) {
-	if b.cl != nil {
-		return b.cl, nil
+// acquire takes a connection from the pool (reusing an idle one or dialing a new
+// one), blocking until a slot is free.
+func (b *Backend) acquire() (*conn, error) {
+	b.sem <- struct{}{}
+	select {
+	case c := <-b.idle:
+		return c, nil
+	default:
 	}
-	cl, err := b.dial()
+	cl, err := b.dial(nil)
 	if err != nil {
+		<-b.sem
 		return nil, err
 	}
-	b.cl, b.selected = cl, ""
-	return cl, nil
+	return &conn{cl: cl}, nil
 }
 
-// reset drops the connection after an error so the next op reconnects cleanly.
-func (b *Backend) reset() {
-	if b.cl != nil {
-		_ = b.cl.Close()
-		b.cl, b.selected = nil, ""
-		b.foldersLoaded = false // re-LIST after a reconnect
+// release returns a healthy connection to the pool, or closes a failed one (so
+// the next acquire re-dials).
+func (b *Backend) release(c *conn, healthy bool) {
+	if healthy {
+		select {
+		case b.idle <- c:
+			<-b.sem
+			return
+		default:
+		}
 	}
+	_ = c.cl.Close()
+	<-b.sem
 }
 
-// selectMailbox SELECTs mailbox (idempotent on the already-selected box would
-// still reset state, so re-SELECT only when changing) and returns its status —
-// callers need UIDVALIDITY to build/verify message ids.
-func (b *Backend) selectMailbox(cl *imapclient.Client, mailbox string) (*imap.SelectData, error) {
-	data, err := cl.Select(mailbox, nil).Wait()
+// withConn runs fn on a pooled connection. The connection is returned to the pool
+// on success and closed on any error (conservative — an error may have left it in
+// a bad state).
+func (b *Backend) withConn(fn func(*conn) error) error {
+	c, err := b.acquire()
+	if err != nil {
+		return err
+	}
+	err = fn(c)
+	b.release(c, err == nil)
+	return err
+}
+
+// selectMailbox SELECTs mailbox on this connection (skipping a redundant SELECT
+// when it's already current) and returns its status. condStore requests
+// CONDSTORE when the server supports it.
+func (c *conn) selectMailbox(mailbox string, condStore bool) (*imap.SelectData, error) {
+	if c.selected == mailbox && c.selData != nil {
+		return c.selData, nil
+	}
+	opts := &imap.SelectOptions{CondStore: condStore && c.cl.Caps().Has(imap.CapCondStore)}
+	data, err := c.cl.Select(mailbox, opts).Wait()
 	if err != nil {
 		return nil, fmt.Errorf("imap select %q: %w", mailbox, err)
 	}
-	b.selected = mailbox
+	c.selected, c.selData = mailbox, data
 	return data, nil
 }
 
-// Close releases the connection.
+// Close shuts down the idle connections in the pool. In-flight operations finish
+// and close their own connections on release.
 func (b *Backend) Close() {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.reset()
+	for {
+		select {
+		case c := <-b.idle:
+			_ = c.cl.Close()
+		default:
+			return
+		}
+	}
+}
+
+// labelFor returns the label id a mailbox maps to (folder caches are guarded
+// because fan-out fetches read them concurrently with Labels populating them).
+func (b *Backend) labelFor(mailbox string) string {
+	b.folderMu.Lock()
+	defer b.folderMu.Unlock()
+	if id := b.folderToLabel[mailbox]; id != "" {
+		return id
+	}
+	return labelForMailbox(mailbox)
 }
 
 // --- backend.Backend: read path ---
@@ -150,15 +219,13 @@ func (b *Backend) Close() {
 // the post-backfill baseline (mail arriving during backfill is then caught as a
 // change rather than missed).
 func (b *Backend) Profile(ctx context.Context) (backend.Profile, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	cl, err := b.conn()
+	var cur string
+	err := b.withConn(func(c *conn) error {
+		var e error
+		cur, e = b.buildProfileCursor(c)
+		return e
+	})
 	if err != nil {
-		return backend.Profile{}, err
-	}
-	cur, err := b.buildProfileCursor(cl)
-	if err != nil {
-		b.reset()
 		return backend.Profile{}, err
 	}
 	return backend.Profile{Email: b.cfg.Email, Cursor: cur}, nil
@@ -169,29 +236,27 @@ func (b *Backend) Profile(ctx context.Context) (backend.Profile, error) {
 // ids so the existing folder views work. It also records the mailbox→label
 // mapping for FetchMetadata.
 func (b *Backend) Labels(ctx context.Context) ([]model.Label, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	cl, err := b.conn()
-	if err != nil {
+	if err := b.withConn(b.ensureFolders); err != nil {
 		return nil, err
 	}
-	if err := b.ensureFolders(cl); err != nil {
-		return nil, err
-	}
+	b.folderMu.Lock()
+	defer b.folderMu.Unlock()
 	return b.labels, nil
 }
 
-// ensureFolders runs LIST once per connection and derives, in one pass: the
-// domain label list, the folder→label and (system) label→folder maps, and the
-// syncable folder set (excluding \All/\Flagged/\Important virtuals so Gmail's
-// All Mail doesn't duplicate everything). Caller holds mu.
-func (b *Backend) ensureFolders(cl *imapclient.Client) error {
+// ensureFolders runs LIST once and derives, in one pass: the domain label list,
+// the folder→label and (system) label→folder maps, and the syncable folder set
+// (excluding \All/\Flagged/\Important virtuals so Gmail's All Mail doesn't
+// duplicate everything). Idempotent; guarded so fan-out readers see a consistent
+// cache.
+func (b *Backend) ensureFolders(c *conn) error {
+	b.folderMu.Lock()
+	defer b.folderMu.Unlock()
 	if b.foldersLoaded {
 		return nil
 	}
-	data, err := cl.List("", "*", &imap.ListOptions{ReturnSpecialUse: true}).Collect()
+	data, err := c.cl.List("", "*", &imap.ListOptions{ReturnSpecialUse: true}).Collect()
 	if err != nil {
-		b.reset()
 		return fmt.Errorf("imap list: %w", err)
 	}
 	folderToLabel := map[string]string{}
@@ -233,39 +298,33 @@ func (b *Backend) ensureFolders(cl *imapclient.Client) error {
 // first within each (highest UID first), capped to max total. query is ignored
 // (provider search is a later addition).
 func (b *Backend) SearchIDs(ctx context.Context, query string, max int) ([]string, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	cl, err := b.conn()
-	if err != nil {
-		return nil, err
-	}
-	folders, err := b.folders(cl)
-	if err != nil {
-		b.reset()
-		return nil, err
-	}
 	var ids []string
-	for _, f := range folders {
-		sel, err := b.selectMailbox(cl, f)
+	err := b.withConn(func(c *conn) error {
+		folders, err := b.folders(c)
 		if err != nil {
-			b.reset()
-			return nil, err
+			return err
 		}
-		sd, err := cl.UIDSearch(&imap.SearchCriteria{}, nil).Wait()
-		if err != nil {
-			b.reset()
-			return nil, fmt.Errorf("imap uid search %q: %w", f, err)
-		}
-		uids := sd.AllUIDs()
-		sort.Slice(uids, func(i, j int) bool { return uids[i] > uids[j] }) // newest first
-		for _, u := range uids {
-			ids = append(ids, msgID(f, sel.UIDValidity, u))
-			if max > 0 && len(ids) >= max {
-				return ids, nil
+		for _, f := range folders {
+			sel, err := c.selectMailbox(f, false)
+			if err != nil {
+				return err
+			}
+			sd, err := c.cl.UIDSearch(&imap.SearchCriteria{}, nil).Wait()
+			if err != nil {
+				return fmt.Errorf("imap uid search %q: %w", f, err)
+			}
+			uids := sd.AllUIDs()
+			sort.Slice(uids, func(i, j int) bool { return uids[i] > uids[j] }) // newest first
+			for _, u := range uids {
+				ids = append(ids, msgID(f, sel.UIDValidity, u))
+				if max > 0 && len(ids) >= max {
+					return nil
+				}
 			}
 		}
-	}
-	return ids, nil
+		return nil
+	})
+	return ids, err
 }
 
 // FetchMetadata fetches one message's envelope + flags and converts it.
@@ -274,38 +333,35 @@ func (b *Backend) FetchMetadata(ctx context.Context, id string) (model.Message, 
 	if err != nil {
 		return model.Message{}, err
 	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	cl, err := b.conn()
-	if err != nil {
-		return model.Message{}, err
-	}
-	sel, err := b.selectMailbox(cl, mailbox)
-	if err != nil {
-		b.reset()
-		return model.Message{}, err
-	}
-	if sel.UIDValidity != uidv {
-		return model.Message{}, fmt.Errorf("imap: stale id %q (uidvalidity %d != %d)", id, uidv, sel.UIDValidity)
-	}
-	// References isn't part of the IMAP ENVELOPE, so fetch that one header too —
-	// it carries the thread's ancestry (used to compute a stable thread root).
-	refSection := &imap.FetchItemBodySection{
-		Specifier: imap.PartSpecifierHeader, HeaderFields: []string{"References"}, Peek: true,
-	}
-	bufs, err := cl.Fetch(imap.UIDSetNum(uid), &imap.FetchOptions{
-		Envelope: true, Flags: true, InternalDate: true, RFC822Size: true, UID: true,
-		BodySection: []*imap.FetchItemBodySection{refSection},
-	}).Collect()
-	if err != nil {
-		b.reset()
-		return model.Message{}, fmt.Errorf("imap fetch metadata: %w", err)
-	}
-	if len(bufs) == 0 {
-		return model.Message{}, fmt.Errorf("imap: uid %d not found in %q", uid, mailbox)
-	}
-	refs := parseReferences(bufs[0].FindBodySection(refSection))
-	return b.toMessage(mailbox, uidv, bufs[0], refs), nil
+	var out model.Message
+	err = b.withConn(func(c *conn) error {
+		sel, err := c.selectMailbox(mailbox, false)
+		if err != nil {
+			return err
+		}
+		if sel.UIDValidity != uidv {
+			return fmt.Errorf("imap: stale id %q (uidvalidity %d != %d)", id, uidv, sel.UIDValidity)
+		}
+		// References isn't part of the IMAP ENVELOPE, so fetch that one header too
+		// — it carries the thread's ancestry (used to compute a stable thread root).
+		refSection := &imap.FetchItemBodySection{
+			Specifier: imap.PartSpecifierHeader, HeaderFields: []string{"References"}, Peek: true,
+		}
+		bufs, err := c.cl.Fetch(imap.UIDSetNum(uid), &imap.FetchOptions{
+			Envelope: true, Flags: true, InternalDate: true, RFC822Size: true, UID: true,
+			BodySection: []*imap.FetchItemBodySection{refSection},
+		}).Collect()
+		if err != nil {
+			return fmt.Errorf("imap fetch metadata: %w", err)
+		}
+		if len(bufs) == 0 {
+			return fmt.Errorf("imap: uid %d not found in %q", uid, mailbox)
+		}
+		refs := parseReferences(bufs[0].FindBodySection(refSection))
+		out = b.toMessage(mailbox, uidv, bufs[0], refs)
+		return nil
+	})
+	return out, err
 }
 
 // FetchBody fetches and parses a message's full body + attachment metadata.
@@ -324,32 +380,29 @@ func (b *Backend) fetchRaw(id string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	cl, err := b.conn()
-	if err != nil {
-		return nil, err
-	}
-	sel, err := b.selectMailbox(cl, mailbox)
-	if err != nil {
-		b.reset()
-		return nil, err
-	}
-	if sel.UIDValidity != uidv {
-		return nil, fmt.Errorf("imap: stale id %q", id)
-	}
-	section := &imap.FetchItemBodySection{Peek: true}
-	bufs, err := cl.Fetch(imap.UIDSetNum(uid), &imap.FetchOptions{
-		BodySection: []*imap.FetchItemBodySection{section},
-	}).Collect()
-	if err != nil {
-		b.reset()
-		return nil, fmt.Errorf("imap fetch body: %w", err)
-	}
-	if len(bufs) == 0 {
-		return nil, fmt.Errorf("imap: uid %d not found", uid)
-	}
-	return bufs[0].FindBodySection(section), nil
+	var raw []byte
+	err = b.withConn(func(c *conn) error {
+		sel, err := c.selectMailbox(mailbox, false)
+		if err != nil {
+			return err
+		}
+		if sel.UIDValidity != uidv {
+			return fmt.Errorf("imap: stale id %q", id)
+		}
+		section := &imap.FetchItemBodySection{Peek: true}
+		bufs, err := c.cl.Fetch(imap.UIDSetNum(uid), &imap.FetchOptions{
+			BodySection: []*imap.FetchItemBodySection{section},
+		}).Collect()
+		if err != nil {
+			return fmt.Errorf("imap fetch body: %w", err)
+		}
+		if len(bufs) == 0 {
+			return fmt.Errorf("imap: uid %d not found", uid)
+		}
+		raw = bufs[0].FindBodySection(section)
+		return nil
+	})
+	return raw, err
 }
 
 // Changes diffs every synced folder against the cursor (a per-folder UID-set +
@@ -357,18 +410,16 @@ func (b *Backend) fetchRaw(id string) ([]byte, error) {
 // and delete (vanished), plus the next cursor. A UIDVALIDITY change re-syncs that
 // folder wholesale. (Mutations, send, and drafts live in mutate.go.)
 func (b *Backend) Changes(ctx context.Context, cur string) (upserts, deletes []string, next string, err error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	cl, err := b.conn()
+	var nextCur cursor
+	err = b.withConn(func(c *conn) error {
+		var e error
+		upserts, deletes, nextCur, e = b.computeChanges(c, decodeCursor(cur))
+		return e
+	})
 	if err != nil {
 		return nil, nil, "", err
 	}
-	up, del, nextCur, err := b.computeChanges(cl, decodeCursor(cur))
-	if err != nil {
-		b.reset()
-		return nil, nil, "", err
-	}
-	return up, del, nextCur.encode(), nil
+	return upserts, deletes, nextCur.encode(), nil
 }
 
 // --- conversions / helpers ---
@@ -418,11 +469,7 @@ func (b *Backend) toMessage(mailbox string, uidv uint32, buf *imapclient.FetchMe
 	m.IsUnread = !seen
 	m.IsStarred = flagged
 
-	label := b.folderToLabel[mailbox]
-	if label == "" {
-		label = labelForMailbox(mailbox)
-	}
-	m.Labels = []string{label}
+	m.Labels = []string{b.labelFor(mailbox)}
 	if m.IsUnread {
 		m.Labels = append(m.Labels, model.LabelUnread)
 	}

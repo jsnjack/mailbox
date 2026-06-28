@@ -79,26 +79,29 @@ func decodeUIDs(s string) []imap.UID {
 	return out
 }
 
-// folders returns the syncable mailboxes (see ensureFolders). Caller holds mu.
-func (b *Backend) folders(cl *imapclient.Client) ([]string, error) {
-	if err := b.ensureFolders(cl); err != nil {
+// folders returns the syncable mailboxes (see ensureFolders).
+func (b *Backend) folders(c *conn) ([]string, error) {
+	if err := b.ensureFolders(c); err != nil {
 		return nil, err
 	}
+	b.folderMu.Lock()
+	defer b.folderMu.Unlock()
 	return b.synced, nil
 }
 
-// snapshot SELECTs a folder and captures its current state (UIDVALIDITY, modseq,
-// and full UID set). Caller holds mu.
-func (b *Backend) snapshot(cl *imapclient.Client, folder string) (folderState, []imap.UID, error) {
+// snapshot captures a folder's current state (UIDVALIDITY, modseq, full UID set).
+// It forces a fresh SELECT (bypassing the conn's cache) so a UIDVALIDITY change
+// is observed every sync pass, then refreshes the cache.
+func (b *Backend) snapshot(c *conn, folder string) (folderState, []imap.UID, error) {
 	// Only request CONDSTORE when the server advertises it — sending the modifier
 	// to a server without it is a protocol error.
-	opts := &imap.SelectOptions{CondStore: cl.Caps().Has(imap.CapCondStore)}
-	sel, err := cl.Select(folder, opts).Wait()
+	opts := &imap.SelectOptions{CondStore: c.cl.Caps().Has(imap.CapCondStore)}
+	sel, err := c.cl.Select(folder, opts).Wait()
 	if err != nil {
 		return folderState{}, nil, fmt.Errorf("imap select %q: %w", folder, err)
 	}
-	b.selected = folder
-	sd, err := cl.UIDSearch(&imap.SearchCriteria{}, nil).Wait()
+	c.selected, c.selData = folder, sel
+	sd, err := c.cl.UIDSearch(&imap.SearchCriteria{}, nil).Wait()
 	if err != nil {
 		return folderState{}, nil, fmt.Errorf("imap uid search %q: %w", folder, err)
 	}
@@ -109,7 +112,7 @@ func (b *Backend) snapshot(cl *imapclient.Client, folder string) (folderState, [
 
 // changedSince returns which of the current UIDs had their flags changed since
 // modseq (CONDSTORE). Empty when the server lacks CONDSTORE (modseq == 0) or
-// there are no messages. Caller holds mu and has the folder selected.
+// there are no messages. The folder must already be selected on cl.
 func (b *Backend) changedSince(cl *imapclient.Client, modseq uint64, curUIDs []imap.UID) ([]imap.UID, error) {
 	if modseq == 0 || len(curUIDs) == 0 {
 		return nil, nil // no CONDSTORE: flag changes are picked up on a later re-fetch
@@ -128,16 +131,15 @@ func (b *Backend) changedSince(cl *imapclient.Client, modseq uint64, curUIDs []i
 }
 
 // buildProfileCursor captures the current state of all synced folders as the
-// initial cursor (used to seed an account before its first incremental). Caller
-// holds mu.
-func (b *Backend) buildProfileCursor(cl *imapclient.Client) (string, error) {
-	folders, err := b.folders(cl)
+// initial cursor (used to seed an account before its first incremental).
+func (b *Backend) buildProfileCursor(c *conn) (string, error) {
+	folders, err := b.folders(c)
 	if err != nil {
 		return "", err
 	}
 	cur := cursor{Folders: make(map[string]folderState, len(folders))}
 	for _, f := range folders {
-		st, _, err := b.snapshot(cl, f)
+		st, _, err := b.snapshot(c, f)
 		if err != nil {
 			return "", err
 		}
@@ -150,8 +152,8 @@ func (b *Backend) buildProfileCursor(cl *imapclient.Client) (string, error) {
 // upserted/deleted message ids plus the next cursor. New = current\stored,
 // vanished = stored\current; a UIDVALIDITY change replaces the whole folder; flag
 // changes (CONDSTORE) are folded into upserts. Caller holds mu.
-func (b *Backend) computeChanges(cl *imapclient.Client, prev cursor) (upserts, deletes []string, next cursor, err error) {
-	folders, err := b.folders(cl)
+func (b *Backend) computeChanges(c *conn, prev cursor) (upserts, deletes []string, next cursor, err error) {
+	folders, err := b.folders(c)
 	if err != nil {
 		return nil, nil, cursor{}, err
 	}
@@ -164,7 +166,7 @@ func (b *Backend) computeChanges(cl *imapclient.Client, prev cursor) (upserts, d
 		}
 	}
 	for _, f := range folders {
-		st, curUIDs, serr := b.snapshot(cl, f)
+		st, curUIDs, serr := b.snapshot(c, f)
 		if serr != nil {
 			return nil, nil, cursor{}, serr
 		}
@@ -195,7 +197,7 @@ func (b *Backend) computeChanges(cl *imapclient.Client, prev cursor) (upserts, d
 			}
 		}
 		// Flag changes since the stored modseq (re-fetch to update read/star).
-		changed, cerr := b.changedSince(cl, old.ModSeq, curUIDs)
+		changed, cerr := b.changedSince(c.cl, old.ModSeq, curUIDs)
 		if cerr != nil {
 			return nil, nil, cursor{}, cerr
 		}

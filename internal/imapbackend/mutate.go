@@ -63,109 +63,103 @@ func uidSetOf(uids []imap.UID) imap.UIDSet {
 // changes a message's UID, so the optimistic local change is reconciled by the
 // next incremental (old id vanishes from the source, new id appears in dest).
 func (b *Backend) ApplyLabels(ctx context.Context, ids []string, add, remove []string) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	cl, err := b.conn()
-	if err != nil {
-		return err
-	}
-	if err := b.ensureFolders(cl); err != nil {
-		return err
-	}
-
-	var addFlags, delFlags []imap.Flag
-	if has(remove, model.LabelUnread) {
-		addFlags = append(addFlags, imap.FlagSeen) // mark read
-	}
-	if has(add, model.LabelUnread) {
-		delFlags = append(delFlags, imap.FlagSeen) // mark unread
-	}
-	if has(add, model.LabelStarred) {
-		addFlags = append(addFlags, imap.FlagFlagged)
-	}
-	if has(remove, model.LabelStarred) {
-		delFlags = append(delFlags, imap.FlagFlagged)
-	}
-
-	dest := ""
-	switch {
-	case has(add, model.LabelTrash):
-		dest = b.labelToFolder[model.LabelTrash]
-	case has(add, model.LabelSpam):
-		dest = b.labelToFolder[model.LabelSpam]
-	case has(add, model.LabelInbox):
-		if dest = b.labelToFolder[model.LabelInbox]; dest == "" {
-			dest = "INBOX"
-		}
-	case has(remove, model.LabelInbox):
-		dest = b.archiveFolder // archive; "" = no Archive folder → leave in place
-	}
-
-	for folder, g := range groupByFolder(ids) {
-		sel, err := b.selectMailbox(cl, folder)
-		if err != nil {
-			b.reset()
+	return b.withConn(func(c *conn) error {
+		if err := b.ensureFolders(c); err != nil {
 			return err
 		}
-		if sel.UIDValidity != g.uidv {
-			continue // stale ids; the next incremental reconciles
+
+		var addFlags, delFlags []imap.Flag
+		if has(remove, model.LabelUnread) {
+			addFlags = append(addFlags, imap.FlagSeen) // mark read
 		}
-		set := uidSetOf(g.uids)
-		if len(addFlags) > 0 {
-			if err := cl.Store(set, &imap.StoreFlags{Op: imap.StoreFlagsAdd, Flags: addFlags}, nil).Close(); err != nil {
-				b.reset()
-				return fmt.Errorf("imap store +flags: %w", err)
+		if has(add, model.LabelUnread) {
+			delFlags = append(delFlags, imap.FlagSeen) // mark unread
+		}
+		if has(add, model.LabelStarred) {
+			addFlags = append(addFlags, imap.FlagFlagged)
+		}
+		if has(remove, model.LabelStarred) {
+			delFlags = append(delFlags, imap.FlagFlagged)
+		}
+
+		dest := b.moveDest(add, remove)
+
+		for folder, g := range groupByFolder(ids) {
+			sel, err := c.selectMailbox(folder, false)
+			if err != nil {
+				return err
+			}
+			if sel.UIDValidity != g.uidv {
+				continue // stale ids; the next incremental reconciles
+			}
+			set := uidSetOf(g.uids)
+			if len(addFlags) > 0 {
+				if err := c.cl.Store(set, &imap.StoreFlags{Op: imap.StoreFlagsAdd, Flags: addFlags}, nil).Close(); err != nil {
+					return fmt.Errorf("imap store +flags: %w", err)
+				}
+			}
+			if len(delFlags) > 0 {
+				if err := c.cl.Store(set, &imap.StoreFlags{Op: imap.StoreFlagsDel, Flags: delFlags}, nil).Close(); err != nil {
+					return fmt.Errorf("imap store -flags: %w", err)
+				}
+			}
+			if dest != "" && dest != folder {
+				if _, err := c.cl.Move(set, dest).Wait(); err != nil {
+					return fmt.Errorf("imap move to %q: %w", dest, err)
+				}
 			}
 		}
-		if len(delFlags) > 0 {
-			if err := cl.Store(set, &imap.StoreFlags{Op: imap.StoreFlagsDel, Flags: delFlags}, nil).Close(); err != nil {
-				b.reset()
-				return fmt.Errorf("imap store -flags: %w", err)
-			}
+		return nil
+	})
+}
+
+// moveDest resolves the destination folder for a label change (trash/spam/inbox/
+// archive), reading the folder maps under the guard. "" means no move.
+func (b *Backend) moveDest(add, remove []string) string {
+	b.folderMu.Lock()
+	defer b.folderMu.Unlock()
+	switch {
+	case has(add, model.LabelTrash):
+		return b.labelToFolder[model.LabelTrash]
+	case has(add, model.LabelSpam):
+		return b.labelToFolder[model.LabelSpam]
+	case has(add, model.LabelInbox):
+		if d := b.labelToFolder[model.LabelInbox]; d != "" {
+			return d
 		}
-		if dest != "" && dest != folder {
-			if _, err := cl.Move(set, dest).Wait(); err != nil {
-				b.reset()
-				return fmt.Errorf("imap move to %q: %w", dest, err)
-			}
-		}
+		return "INBOX"
+	case has(remove, model.LabelInbox):
+		return b.archiveFolder // archive; "" = no Archive folder → leave in place
 	}
-	return nil
+	return ""
 }
 
 // Delete permanently removes messages: \Deleted + EXPUNGE per folder.
 func (b *Backend) Delete(ctx context.Context, ids []string) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	cl, err := b.conn()
-	if err != nil {
-		return err
-	}
-	for folder, g := range groupByFolder(ids) {
-		sel, err := b.selectMailbox(cl, folder)
-		if err != nil {
-			b.reset()
-			return err
+	return b.withConn(func(c *conn) error {
+		for folder, g := range groupByFolder(ids) {
+			sel, err := c.selectMailbox(folder, false)
+			if err != nil {
+				return err
+			}
+			if sel.UIDValidity != g.uidv {
+				continue
+			}
+			set := uidSetOf(g.uids)
+			if err := c.cl.Store(set, &imap.StoreFlags{Op: imap.StoreFlagsAdd, Flags: []imap.Flag{imap.FlagDeleted}}, nil).Close(); err != nil {
+				return fmt.Errorf("imap store \\Deleted: %w", err)
+			}
+			if err := expunge(c.cl, set); err != nil {
+				return err
+			}
 		}
-		if sel.UIDValidity != g.uidv {
-			continue
-		}
-		set := uidSetOf(g.uids)
-		if err := cl.Store(set, &imap.StoreFlags{Op: imap.StoreFlagsAdd, Flags: []imap.Flag{imap.FlagDeleted}}, nil).Close(); err != nil {
-			b.reset()
-			return fmt.Errorf("imap store \\Deleted: %w", err)
-		}
-		if err := b.expunge(cl, set); err != nil {
-			b.reset()
-			return err
-		}
-	}
-	return nil
+		return nil
+	})
 }
 
 // expunge removes \Deleted messages — by UID (UIDPLUS) so only the targeted ones
 // go, else a plain EXPUNGE of the folder's \Deleted set.
-func (b *Backend) expunge(cl *imapclient.Client, set imap.UIDSet) error {
+func expunge(cl *imapclient.Client, set imap.UIDSet) error {
 	if cl.Caps().Has(imap.CapUIDPlus) {
 		if _, err := cl.UIDExpunge(set).Collect(); err != nil {
 			return fmt.Errorf("imap uid expunge: %w", err)
@@ -282,22 +276,22 @@ func (b *Backend) smtpSend(from string, to []string, msg []byte) error {
 
 // appendToSent files a sent message in the Sent folder (best-effort).
 func (b *Backend) appendToSent(msg []byte) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	cl, err := b.conn()
-	if err != nil {
-		return
-	}
-	if err := b.ensureFolders(cl); err != nil {
-		return
-	}
-	if sent := b.labelToFolder[model.LabelSent]; sent != "" {
-		_, _ = b.appendLocked(cl, sent, msg, imap.FlagSeen)
-	}
+	_ = b.withConn(func(c *conn) error {
+		if err := b.ensureFolders(c); err != nil {
+			return err
+		}
+		b.folderMu.Lock()
+		sent := b.labelToFolder[model.LabelSent]
+		b.folderMu.Unlock()
+		if sent != "" {
+			_, _ = appendMessage(c.cl, sent, msg, imap.FlagSeen)
+		}
+		return nil
+	})
 }
 
-// appendLocked APPENDs msg to a mailbox with the given flags. Caller holds mu.
-func (b *Backend) appendLocked(cl *imapclient.Client, mailbox string, msg []byte, flags ...imap.Flag) (*imap.AppendData, error) {
+// appendMessage APPENDs msg to a mailbox with the given flags.
+func appendMessage(cl *imapclient.Client, mailbox string, msg []byte, flags ...imap.Flag) (*imap.AppendData, error) {
 	cmd := cl.Append(mailbox, int64(len(msg)), &imap.AppendOptions{Flags: flags})
 	if _, err := cmd.Write(msg); err != nil {
 		_ = cmd.Close()
@@ -312,28 +306,27 @@ func (b *Backend) appendLocked(cl *imapclient.Client, mailbox string, msg []byte
 // SaveDraft APPENDs raw to the Drafts folder (with \Draft) and returns the new
 // draft's provider id (empty when the server lacks UIDPLUS, so no stable id).
 func (b *Backend) SaveDraft(ctx context.Context, raw []byte, threadID string) (string, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	cl, err := b.conn()
-	if err != nil {
-		return "", err
-	}
-	if err := b.ensureFolders(cl); err != nil {
-		return "", err
-	}
-	drafts := b.labelToFolder[model.LabelDraft]
-	if drafts == "" {
-		return "", fmt.Errorf("imap: no Drafts folder")
-	}
-	ad, err := b.appendLocked(cl, drafts, raw, imap.FlagDraft)
-	if err != nil {
-		b.reset()
-		return "", fmt.Errorf("imap append draft: %w", err)
-	}
-	if ad == nil || ad.UID == 0 {
-		return "", nil
-	}
-	return msgID(drafts, ad.UIDValidity, ad.UID), nil
+	var draftID string
+	err := b.withConn(func(c *conn) error {
+		if err := b.ensureFolders(c); err != nil {
+			return err
+		}
+		b.folderMu.Lock()
+		drafts := b.labelToFolder[model.LabelDraft]
+		b.folderMu.Unlock()
+		if drafts == "" {
+			return fmt.Errorf("imap: no Drafts folder")
+		}
+		ad, err := appendMessage(c.cl, drafts, raw, imap.FlagDraft)
+		if err != nil {
+			return fmt.Errorf("imap append draft: %w", err)
+		}
+		if ad != nil && ad.UID != 0 {
+			draftID = msgID(drafts, ad.UIDValidity, ad.UID)
+		}
+		return nil
+	})
+	return draftID, err
 }
 
 // UpdateDraft replaces an existing draft: IMAP has no in-place edit, so delete
