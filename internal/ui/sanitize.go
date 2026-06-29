@@ -1,6 +1,26 @@
 package ui
 
-import "github.com/microcosm-cc/bluemonday"
+import (
+	"github.com/aymerick/douceur/inliner"
+	"github.com/microcosm-cc/bluemonday"
+)
+
+// inlineEmailCSS resolves an email's <style> rules into per-element style
+// attributes before sanitizing. The sanitizer strips <style> blocks (they can't
+// be safely validated), so newsletters that lay out via classes — Checkly's
+// monitoring grid uses .d-flex/.bar/widths defined only in <style> — would
+// otherwise collapse. Inlining moves those declarations onto the elements, where
+// the sanitizer keeps the safe ones (display/width/background/…), and confines
+// each email's styles to its own elements (no cross-message bleed in a thread).
+// Media-query/pseudo rules that can't be inlined are dropped — fine for the
+// fixed-width reader. Falls back to the original HTML if inlining fails.
+func inlineEmailCSS(htmlStr string) string {
+	out, err := inliner.Inline(htmlStr)
+	if err != nil {
+		return htmlStr
+	}
+	return out
+}
 
 // emailPolicy returns an HTML sanitizer tuned for rendering real email. It keeps
 // UGCPolicy's safety guarantees (no <script>, no on* event handlers, only safe

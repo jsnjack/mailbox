@@ -127,10 +127,10 @@ type window struct {
 	afterPopulate func()
 
 	header       *gtk.Label
-	attachBox    *gtk.Box   // chips for the open message's attachments
-	trackerLabel *gtk.Label // "N trackers blocked" indicator
-	authLabel    *gtk.Label // sender authentication (SPF/DKIM/DMARC) badge
-	cautionLabel *gtk.Label // anti-phishing heuristic warnings
+	attachBox    *gtk.FlowBox // chips for the open message's attachments (wraps, never forces width)
+	trackerLabel *gtk.Label   // "N trackers blocked" indicator
+	authLabel    *gtk.Label   // sender authentication (SPF/DKIM/DMARC) badge
+	cautionLabel *gtk.Label   // anti-phishing heuristic warnings
 	webview      *webkit.WebView
 	readerZoom   float64 // reader message zoom (Ctrl +/-/0), persisted
 	sanitizer    *bluemonday.Policy
@@ -1862,7 +1862,15 @@ func (w *window) buildReader() *adw.NavigationPage {
 	w.header.SetSelectable(true)
 	setMargins(w.header, 12, 12, 8, 8)
 
-	w.attachBox = gtk.NewBox(gtk.OrientationHorizontal, 6)
+	// A FlowBox wraps chips to additional rows instead of a single horizontal row,
+	// whose summed width could otherwise force the reader pane — and the whole
+	// window — wider than the screen (long attachment filenames pushed the window
+	// controls off-screen). Each chip's label also ellipsizes (see attachmentChip).
+	w.attachBox = gtk.NewFlowBox()
+	w.attachBox.SetSelectionMode(gtk.SelectionNone)
+	w.attachBox.SetColumnSpacing(6)
+	w.attachBox.SetRowSpacing(6)
+	w.attachBox.SetHomogeneous(false)
 	setMargins(w.attachBox, 12, 12, 0, 8)
 	w.attachBox.SetVisible(false)
 
@@ -2728,6 +2736,7 @@ func (w *window) threadAttachments(ctx context.Context, msgs []model.Message) []
 		return nil
 	}
 	var out []threadAttachment
+	seen := make(map[string]bool)
 	for _, m := range msgs {
 		atts, err := w.deps.Store.ListAttachments(ctx, m.RowID)
 		if err != nil {
@@ -2735,6 +2744,16 @@ func (w *window) threadAttachments(ctx context.Context, msgs []model.Message) []
 			continue
 		}
 		for _, a := range atts {
+			// The same file is usually carried by every message in a reply chain;
+			// show it once. Key on content hash when known, else name+size.
+			key := a.SHA256
+			if key == "" {
+				key = fmt.Sprintf("%s\x00%d", a.Filename, a.SizeBytes)
+			}
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
 			out = append(out, threadAttachment{att: a, accountID: m.AccountID, gmailID: m.GmailID})
 		}
 	}
@@ -2776,7 +2795,12 @@ func (w *window) openAttachment(accountID int64, gmailID string, attID int64) {
 func attachmentChip(a model.Attachment) *gtk.Box {
 	box := gtk.NewBox(gtk.OrientationHorizontal, 4)
 	box.Append(gtk.NewImageFromIconName("mail-attachment-symbolic"))
-	box.Append(gtk.NewLabel(a.Filename))
+	name := gtk.NewLabel(a.Filename)
+	// Ellipsize in the middle so the extension stays visible, and bound the width
+	// so one long filename can't blow out the chip (and the reader pane).
+	name.SetEllipsize(pango.EllipsizeMiddle)
+	name.SetMaxWidthChars(28)
+	box.Append(name)
 	return box
 }
 
@@ -3073,7 +3097,7 @@ func (w *window) searchFrom(addr string) {
 // quoted history in one pass, returning the cleaned HTML and how many trackers
 // were removed.
 func (w *window) cleanHTML(h string) (string, int) {
-	return cleanEmailHTML(w.sanitizer.Sanitize(h))
+	return cleanEmailHTML(w.sanitizer.Sanitize(inlineEmailCSS(h)))
 }
 
 // setTrackerCount shows "N trackers blocked" in the reader (hidden when none).
