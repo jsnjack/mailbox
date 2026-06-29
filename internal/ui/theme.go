@@ -112,6 +112,12 @@ const appCSS = `
 	background-color: alpha(@accent_color, 0.15);
 	color: @accent_color;
 }
+/* "Replied": you had the last word — a calm "done" green, distinct from the
+   accent used for the actionable "Needs reply". */
+.cat-replied {
+	background-color: alpha(@success_color, 0.15);
+	color: @success_color;
+}
 
 /* Opaque cover shown over the message view while it loads, so WebKit's
    content-swap never flashes black through. White matches email content. */

@@ -4233,11 +4233,11 @@ func countBadge(n int) *gtk.Label {
 func threadRow(t model.ThreadSummary, outgoing bool, category string) *gtk.Box {
 	m := t.Latest
 	unread := t.UnreadCount > 0
-	// "Needs reply" means it needs YOUR reply; once you've had the last word the
-	// reply marker says it's handled, so drop the now-stale tag. Other tags
-	// (Discount, Receipt, …) are informational and stay.
-	if category == "Needs reply" && t.RepliedByMe && !outgoing {
-		category = ""
+	// Once you've had the last word the conversation is handled, so show a
+	// "Replied" tag in place of the content category (Needs reply / Discount / …).
+	// Skipped in Sent/Drafts, where the last message is always yours.
+	if t.RepliedByMe && !outgoing {
+		category = "Replied"
 	}
 
 	box := gtk.NewBox(gtk.OrientationVertical, 2)
@@ -4272,14 +4272,6 @@ func threadRow(t model.ThreadSummary, outgoing bool, category string) *gtk.Box {
 		clip.AddCSSClass("dim-label")
 		top.Append(clip)
 	}
-	// You had the last word — a reply marker signals the conversation is handled
-	// and needs no further reply. Redundant in Sent/Drafts, where it's always you.
-	if t.RepliedByMe && !outgoing {
-		rep := gtk.NewImageFromIconName("mail-replied-symbolic")
-		rep.AddCSSClass("dim-label")
-		rep.SetTooltipText("You replied")
-		top.Append(rep)
-	}
 	if m.IsStarred {
 		top.Append(gtk.NewImageFromIconName("starred-symbolic"))
 	}
@@ -4307,8 +4299,11 @@ func threadRow(t model.ThreadSummary, outgoing bool, category string) *gtk.Box {
 	if category != "" {
 		tag := gtk.NewLabel(category)
 		tag.AddCSSClass("cat-tag")
-		if category == "Needs reply" {
+		switch category {
+		case "Needs reply":
 			tag.AddCSSClass("cat-needsreply")
+		case "Replied":
+			tag.AddCSSClass("cat-replied")
 		}
 		tag.SetVAlign(gtk.AlignCenter)
 		subjRow := gtk.NewBox(gtk.OrientationHorizontal, 6)
