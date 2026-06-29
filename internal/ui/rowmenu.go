@@ -43,6 +43,14 @@ func (w *window) showRowMenu(row gtk.Widgetter, threadID string, x, y float64) {
 	}
 	menu.AppendSection("", flags)
 
+	// Re-categorize this one conversation — only where categories apply (the
+	// inbox, with AI on and the toggle enabled).
+	if w.inboxCategories && w.deps.Assistant != nil && w.current == model.LabelInbox {
+		cat := gio.NewMenu()
+		cat.AppendItem(rowItem("Re-categorize", "win.row-recategorize", tv))
+		menu.AppendSection("", cat)
+	}
+
 	del := gio.NewMenu()
 	del.AppendItem(rowItem("Move to Trash", "win.row-trash", tv))
 	menu.AppendSection("", del)

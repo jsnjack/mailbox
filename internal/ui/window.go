@@ -1080,6 +1080,33 @@ func (w *window) registerListActions() {
 	row("row-mark-unread", func(id string) {
 		w.rowLatest(id, func(m model.Message) { w.applyLabels([]model.Message{m}, []string{model.LabelUnread}, nil, nil) })
 	})
+	row("row-recategorize", func(id string) { w.recategorizeThread(id) })
+}
+
+// recategorizeThread re-runs AI categorization for a single conversation: it
+// drops the thread's cached tag (in memory + the persisted entry for its latest
+// message) so the next pass re-classifies it, then triggers that pass.
+func (w *window) recategorizeThread(threadID string) {
+	t, ok := w.threadByID[threadID]
+	if !ok || w.deps.Assistant == nil {
+		return
+	}
+	msgID := t.Latest.GmailID
+	delete(w.categories, threadID)
+	delete(w.categorizedMsg, threadID)
+	acctID := w.activeID
+	go func() {
+		if err := w.deps.Store.ClearMessageCategory(context.Background(), acctID, msgID); err != nil {
+			slog.Warn("ui: clear message category", "id", msgID, "err", err)
+		}
+		dispatch.Main(func() {
+			if w.activeID != acctID {
+				return
+			}
+			w.refreshList(w.searchEntry.Text()) // drop the stale tag, then re-classify
+			w.categorizeInbox()
+		})
+	}()
 }
 
 // rowLatest runs fn with the newest message of the given thread, if it is still
@@ -4238,6 +4265,14 @@ func threadRow(t model.ThreadSummary, outgoing bool, category string) *gtk.Box {
 		clip := gtk.NewImageFromIconName("mail-attachment-symbolic")
 		clip.AddCSSClass("dim-label")
 		top.Append(clip)
+	}
+	// You had the last word — a reply marker signals the conversation is handled
+	// and needs no further reply. Redundant in Sent/Drafts, where it's always you.
+	if t.RepliedByMe && !outgoing {
+		rep := gtk.NewImageFromIconName("mail-replied-symbolic")
+		rep.AddCSSClass("dim-label")
+		rep.SetTooltipText("You replied")
+		top.Append(rep)
 	}
 	if m.IsStarred {
 		top.Append(gtk.NewImageFromIconName("starred-symbolic"))

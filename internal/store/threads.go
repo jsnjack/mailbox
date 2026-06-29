@@ -52,6 +52,9 @@ func (s *Store) ListThreadsByLabel(ctx context.Context, accountID int64, labelID
 			ThreadID: m.ThreadID, Latest: m, Count: c.total, UnreadCount: c.unread,
 		})
 	}
+	if err := s.markRepliedByMe(ctx, accountID, out); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
@@ -101,6 +104,9 @@ func (s *Store) ListAllThreads(ctx context.Context, accountID int64, limit, offs
 		out = append(out, model.ThreadSummary{
 			ThreadID: m.ThreadID, Latest: m, Count: c.total, UnreadCount: c.unread,
 		})
+	}
+	if err := s.markRepliedByMe(ctx, accountID, out); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
@@ -222,6 +228,9 @@ func (s *Store) GetThreadSummaries(ctx context.Context, accountID int64, threadI
 		c := counts[id]
 		out = append(out, model.ThreadSummary{ThreadID: id, Latest: m, Count: c.total, UnreadCount: c.unread})
 	}
+	if err := s.markRepliedByMe(ctx, accountID, out); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
@@ -276,6 +285,73 @@ func (s *Store) threadCountsForIDs(ctx context.Context, accountID int64, ids []s
 			return nil, fmt.Errorf("thread counts for ids: %w", err)
 		}
 		if err := scanThreadCountsInto(rows, out); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// markRepliedByMe sets RepliedByMe on each summary whose thread's most recent
+// message was sent by this account (its newest message carries SENT).
+func (s *Store) markRepliedByMe(ctx context.Context, accountID int64, sums []model.ThreadSummary) error {
+	if len(sums) == 0 {
+		return nil
+	}
+	ids := make([]string, len(sums))
+	for i := range sums {
+		ids[i] = sums[i].ThreadID
+	}
+	replied, err := s.threadsRepliedByMe(ctx, accountID, ids)
+	if err != nil {
+		return err
+	}
+	for i := range sums {
+		sums[i].RepliedByMe = replied[sums[i].ThreadID]
+	}
+	return nil
+}
+
+// threadsRepliedByMe returns the subset of threadIDs whose most recent message
+// (any label) carries the SENT label — i.e. this account had the last word.
+func (s *Store) threadsRepliedByMe(ctx context.Context, accountID int64, ids []string) (map[string]bool, error) {
+	out := make(map[string]bool, len(ids))
+	const chunk = 500
+	for start := 0; start < len(ids); start += chunk {
+		end := start + chunk
+		if end > len(ids) {
+			end = len(ids)
+		}
+		batch := ids[start:end]
+		args := make([]any, 0, len(batch)+2)
+		args = append(args, model.LabelSent, accountID)
+		for _, id := range batch {
+			args = append(args, id)
+		}
+		rows, err := s.reader.QueryContext(ctx, `
+			SELECT m.thread_id
+			FROM messages m
+			JOIN message_labels ml ON ml.message_rowid = m.rowid AND ml.label_id = ?
+			WHERE m.account_id = ? AND m.thread_id IN (`+placeholders(len(batch))+`)
+			  AND m.rowid = (
+				SELECT m2.rowid FROM messages m2
+				WHERE m2.account_id = m.account_id AND m2.thread_id = m.thread_id
+				ORDER BY m2.internal_date DESC, m2.rowid DESC LIMIT 1
+			  )`, args...)
+		if err != nil {
+			return nil, fmt.Errorf("threads replied-by-me: %w", err)
+		}
+		err = func() error {
+			defer func() { _ = rows.Close() }()
+			for rows.Next() {
+				var tid string
+				if err := rows.Scan(&tid); err != nil {
+					return err
+				}
+				out[tid] = true
+			}
+			return rows.Err()
+		}()
+		if err != nil {
 			return nil, err
 		}
 	}

@@ -101,6 +101,9 @@ type ThreadSummary struct {
 	Latest      Message
 	Count       int
 	UnreadCount int
+	// RepliedByMe is true when the thread's most recent message (any label) was
+	// sent by this account — i.e. you had the last word, so it needs no reply.
+	RepliedByMe bool
 }
 
 // MessageBody holds the lazily-fetched body parts of a message.

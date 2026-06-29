@@ -164,6 +164,41 @@ func TestListAllThreads(t *testing.T) {
 	}
 }
 
+func TestRepliedByMe(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	acc := seedAccount(t, s)
+
+	msgs := []model.Message{
+		// Thread A: received, then my reply (SENT) is newest → replied.
+		{AccountID: acc, GmailID: "a1", ThreadID: "A", InternalDate: time.Unix(100, 0), Subject: "ping", Labels: []string{"INBOX"}},
+		{AccountID: acc, GmailID: "a2", ThreadID: "A", InternalDate: time.Unix(300, 0), Subject: "re: ping", Labels: []string{"SENT"}},
+		// Thread B: my reply, then a newer received message → not replied.
+		{AccountID: acc, GmailID: "b1", ThreadID: "B", InternalDate: time.Unix(100, 0), Subject: "hi", Labels: []string{"SENT"}},
+		{AccountID: acc, GmailID: "b2", ThreadID: "B", InternalDate: time.Unix(300, 0), Subject: "re: hi", Labels: []string{"INBOX"}},
+	}
+	for _, m := range msgs {
+		if _, err := s.UpsertMessage(ctx, m); err != nil {
+			t.Fatalf("upsert %s: %v", m.GmailID, err)
+		}
+	}
+
+	threads, err := s.ListThreadsByLabel(ctx, acc, "INBOX", 50, 0)
+	if err != nil {
+		t.Fatalf("ListThreadsByLabel: %v", err)
+	}
+	got := map[string]bool{}
+	for _, th := range threads {
+		got[th.ThreadID] = th.RepliedByMe
+	}
+	if !got["A"] {
+		t.Errorf("thread A: RepliedByMe = false, want true (my SENT reply is newest)")
+	}
+	if got["B"] {
+		t.Errorf("thread B: RepliedByMe = true, want false (a received message is newest)")
+	}
+}
+
 func TestListThreadsByLabelTiesAndNullDates(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
