@@ -29,35 +29,37 @@ func TestEmailPolicyPreservesStyling(t *testing.T) {
 	}
 }
 
-// TestInlineEmailCSSSurvivesSanitize covers the Checkly-style regression: a
-// newsletter whose layout lives in <style> classes (not inline) collapsed to
-// nothing because the sanitizer strips <style>. Inlining first moves those
-// declarations onto the elements, where the sanitizer keeps the safe ones.
-func TestInlineEmailCSSSurvivesSanitize(t *testing.T) {
-	in := `<html><head><style>` +
-		`.grid{display:flex;gap:8px}` +
-		`.dot{display:inline-block;width:16px;height:16px;background:#fbbf24}` +
-		`</style></head><body>` +
-		`<div class="grid"><span class="dot">a</span><span class="dot">b</span></div>` +
-		`</body></html>`
-
-	// Without inlining, the class-based layout is lost (sanitizer drops <style>).
-	bare := emailPolicy().Sanitize(in)
-	if strings.Contains(bare, "display:flex") {
-		t.Fatalf("precondition wrong: <style> survived bare sanitize:\n%s", bare)
+// TestEmailPolicyKeepsClass: class is presentational and must survive so a
+// message's scoped <style> can target its elements (the Checkly grid regression).
+func TestEmailPolicyKeepsClass(t *testing.T) {
+	out := emailPolicy().Sanitize(`<div class="bar grid">x</div>`)
+	if !strings.Contains(out, `class="bar grid"`) {
+		t.Errorf("class stripped: %s", out)
 	}
+}
 
-	// With inlining, the layout-critical declarations land on the elements and
-	// survive sanitization. (Normalize spacing — the inliner emits "prop: value".)
-	out := strings.ReplaceAll(emailPolicy().Sanitize(inlineEmailCSS(in)), " ", "")
-	for _, want := range []string{"display:flex", "display:inline-block", "width:16px", "#fbbf24"} {
+// TestScopeCSS covers the Checkly-style regression: a newsletter whose layout
+// lives in <style> classes collapsed because the sanitizer drops <style>. We
+// re-add it scoped to the message wrapper; scopeCSS must prefix selectors, map
+// page-level selectors to the wrapper, and keep @media blocks.
+func TestScopeCSS(t *testing.T) {
+	in := `body{margin:0} .bar{height:0;background:#aaa} ` +
+		`.top .weekday .bar{margin-top:auto} ` +
+		`@media (min-width:480px){.col{width:50%}}`
+	out := scopeCSS(in, ".m1")
+
+	for _, want := range []string{".m1 .bar", ".m1 .top .weekday .bar", ".m1 .col", "@media"} {
 		if !strings.Contains(out, want) {
-			t.Errorf("inlined style missing %q in:\n%s", want, out)
+			t.Errorf("scoped CSS missing %q in:\n%s", want, out)
 		}
 	}
-	// The raw <style> block itself is still gone (only inlined attrs remain).
-	if strings.Contains(out, "<style") {
-		t.Errorf("<style> block should not survive sanitize:\n%s", out)
+	// A bare `body` selector maps to the wrapper itself, never `.m1 body`.
+	if strings.Contains(out, ".m1 body") {
+		t.Errorf("body should map to the wrapper, not descend into it:\n%s", out)
+	}
+	// Unparseable / breakout CSS yields no styles rather than corrupting output.
+	if got := scopeCSS(`x{}</style><script>`, ".m1"); got != "" {
+		t.Errorf("breakout CSS should be rejected, got %q", got)
 	}
 }
 

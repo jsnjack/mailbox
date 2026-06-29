@@ -2095,7 +2095,58 @@ func (w *window) onForward() {
 		Subject: ensureFwdPrefix(m.Subject),
 		Body:    quoteOriginal(m, w.bodyTextFor(m)),
 	}
-	w.openCompose(init, "", "Forward")
+	// A forward carries the original's attachments. Gather them off the main thread
+	// (a download may be needed), then open the compose; forwardAttachments returns
+	// nil fast when there are none, so an attachment-less forward still opens
+	// promptly. (We consult the attachments table directly — the has_attachments
+	// metadata flag isn't reliably set.)
+	if w.deps.OpenAttach == nil {
+		w.openCompose(init, "", "Forward")
+		return
+	}
+	go func() {
+		atts := w.forwardAttachments(context.Background(), m)
+		dispatch.Main(func() {
+			init.Attachments = atts
+			w.openCompose(init, "", "Forward")
+		})
+	}()
+}
+
+// forwardAttachments downloads (caching) the original message's attachments and
+// returns them as outgoing parts, de-duplicated — the same file is often carried
+// by several messages in a chain, and a single message can list a part twice;
+// matching on content hash (else name+size) attaches each only once.
+func (w *window) forwardAttachments(ctx context.Context, m model.Message) []model.OutgoingAttachment {
+	atts, err := w.deps.Store.ListAttachments(ctx, m.RowID)
+	if err != nil {
+		slog.Warn("ui: forward list attachments", "id", m.GmailID, "err", err)
+		return nil
+	}
+	var out []model.OutgoingAttachment
+	seen := make(map[string]bool)
+	for _, a := range atts {
+		key := a.SHA256
+		if key == "" {
+			key = fmt.Sprintf("%s\x00%d", a.Filename, a.SizeBytes)
+		}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		path, err := w.deps.OpenAttach(ctx, m.AccountID, m.GmailID, a.ID)
+		if err != nil {
+			slog.Warn("ui: forward fetch attachment", "att", a.Filename, "err", err)
+			continue
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			slog.Warn("ui: forward read attachment", "path", path, "err", err)
+			continue
+		}
+		out = append(out, model.OutgoingAttachment{Filename: a.Filename, MimeType: a.MimeType, Data: data})
+	}
+	return out
 }
 
 // loadLabels rebuilds the sidebar: the curated standard folders first (only those
@@ -3097,7 +3148,20 @@ func (w *window) searchFrom(addr string) {
 // quoted history in one pass, returning the cleaned HTML and how many trackers
 // were removed.
 func (w *window) cleanHTML(h string) (string, int) {
-	return cleanEmailHTML(w.sanitizer.Sanitize(inlineEmailCSS(h)))
+	clean, n := cleanEmailHTML(w.sanitizer.Sanitize(h))
+	// The sanitizer strips <style>; re-add it scoped to a unique wrapper so an
+	// email's class-based layout renders (with its own cascade intact) without
+	// bleeding onto other messages in the thread or the reader chrome.
+	css := extractStyleCSS(h)
+	if strings.TrimSpace(css) == "" {
+		return clean, n
+	}
+	scope := "mbx-" + randNonce()[:12]
+	scoped := scopeCSS(css, "."+scope)
+	if scoped == "" {
+		return clean, n
+	}
+	return `<div class="` + scope + `"><style>` + scoped + `</style>` + clean + `</div>`, n
 }
 
 // setTrackerCount shows "N trackers blocked" in the reader (hidden when none).
