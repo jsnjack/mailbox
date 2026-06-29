@@ -117,8 +117,9 @@ type window struct {
 	rowSig            map[string]string // last-rendered signature per row, to detect in-place changes
 
 	// coalesce refreshes triggered by bursts of sync change events.
-	refreshPending     bool
-	refreshListPending bool
+	refreshPending       bool
+	refreshListPending   bool
+	refreshThreadPending bool // re-render the open conversation on the next refresh
 	// refreshGen increments on every list query; an async query whose result
 	// arrives after a newer one was issued is discarded (last request wins).
 	refreshGen uint64
@@ -153,7 +154,11 @@ type window struct {
 
 	// AI inbox categorization: per-thread category cache (thread id → category),
 	// computed in the background for the inbox. inboxCategories gates it.
+	// categorizedMsg records the latest message id each thread's category was
+	// computed for, so a thread is re-categorized when a new message arrives (e.g.
+	// a "Needs reply" thread that gets a discount reply becomes "Discount").
 	categories      map[string]string
+	categorizedMsg  map[string]string
 	categorizing    bool
 	inboxCategories bool
 
@@ -189,6 +194,7 @@ func newWindow(app *adw.Application, deps Deps) *window {
 		readerZoom:       1.0,
 		selected:         map[string]bool{},
 		categories:       map[string]string{},
+		categorizedMsg:   map[string]string{},
 	}
 	w.accountNames, _ = config.LoadAccountNames()
 	if p, err := config.LoadPrefs(); err == nil {
@@ -1125,6 +1131,7 @@ func (w *window) onRecategorize() {
 				return // account switched while clearing
 			}
 			w.categories = map[string]string{}
+			w.categorizedMsg = map[string]string{}
 			// Re-populating the list runs categorizeInbox afresh (no cache to skip).
 			w.refreshList(w.searchEntry.Text())
 		})
@@ -1626,10 +1633,13 @@ func (w *window) categorizeInbox() {
 	// background and marshals UI updates through dispatch.
 	var cands []categoryCand
 	for id, t := range w.threadByID {
-		if _, done := w.categories[id]; done {
+		m := t.Latest
+		// Skip only when the category was computed for the current latest message;
+		// a newer message (a reply, a follow-up) makes the thread a candidate again
+		// so its tag reflects the latest content.
+		if w.categorizedMsg[id] == m.GmailID {
 			continue
 		}
-		m := t.Latest
 		cands = append(cands, categoryCand{
 			threadID: id,
 			msgID:    m.GmailID,
@@ -1668,6 +1678,7 @@ func (w *window) categorizeInbox() {
 			for _, c := range cands {
 				if cat, ok := cached[c.msgID]; ok {
 					w.categories[c.threadID] = cat
+					w.categorizedMsg[c.threadID] = c.msgID
 				}
 			}
 			w.refreshList(w.searchEntry.Text()) // show seeded tags immediately
@@ -1698,6 +1709,7 @@ func (w *window) categorizeInbox() {
 					break
 				}
 				results := make(map[string]string, len(chunk)) // threadID → category
+				forMsg := make(map[string]string, len(chunk))  // threadID → categorized msg id
 				for i, c := range chunk {
 					if i >= len(cats) {
 						break
@@ -1707,6 +1719,7 @@ func (w *window) categorizeInbox() {
 						slog.Warn("ui: persist category", "err", err)
 					}
 					results[c.threadID] = cat
+					forMsg[c.threadID] = c.msgID
 				}
 				dispatch.Main(func() {
 					if w.activeID != acctID {
@@ -1714,6 +1727,7 @@ func (w *window) categorizeInbox() {
 					}
 					for id, cat := range results {
 						w.categories[id] = cat
+						w.categorizedMsg[id] = forMsg[id]
 					}
 				})
 			}
@@ -4044,6 +4058,11 @@ func (w *window) onChange(c syncer.Change) {
 	case syncer.MessageUpserted, syncer.MessageDeleted:
 		w.invalidateSection(c.GmailID) // a re-synced message must re-render
 		if c.AccountID == w.activeID {
+			// A change to the open conversation (a reply you sent, or a synced
+			// message) re-renders it so the new message shows without re-opening.
+			if c.ThreadID != "" && c.ThreadID == w.openThreadID {
+				w.refreshThreadPending = true
+			}
 			w.scheduleRefresh(true) // loadLabels (inside) refreshes pills + title
 		} else {
 			w.refreshAccountUnread() // a sibling account's unread count changed
@@ -4106,12 +4125,34 @@ func (w *window) scheduleRefresh(withList bool) {
 	dispatch.Main(func() {
 		w.refreshPending = false
 		list := w.refreshListPending
+		thread := w.refreshThreadPending
 		w.refreshListPending = false
+		w.refreshThreadPending = false
 		w.loadLabels()
 		if list {
 			w.liveRefreshList()
 		}
+		if thread {
+			w.refreshOpenThread()
+		}
 	})
+}
+
+// refreshOpenThread re-queries the open conversation and re-renders it, so a
+// newly stored message — a reply you just sent, or one pulled in by sync —
+// appears without re-opening the thread. A no-op when nothing is open. Unlike
+// showThread it doesn't mark-read, reset translation, or change navigation.
+func (w *window) refreshOpenThread() {
+	if w.openThreadID == "" {
+		return
+	}
+	msgs, err := w.deps.Store.ListThreadMessages(context.Background(), w.activeID, w.openThreadID)
+	if err != nil || len(msgs) == 0 {
+		return
+	}
+	w.openThreadMsgs = msgs
+	w.openMsg = msgs[len(msgs)-1] // newest, for reply/forward/star/unread
+	w.renderConversation(msgs)
 }
 
 func (w *window) notifyNewMail(accountID int64, m model.Message) {

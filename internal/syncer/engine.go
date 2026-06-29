@@ -322,7 +322,8 @@ func (e *Engine) Send(ctx context.Context, b backend.Backend, accountID int64, m
 	if err != nil {
 		return err
 	}
-	if _, err := b.Send(ctx, raw, msg.ThreadID); err != nil {
+	sentID, err := b.Send(ctx, raw, msg.ThreadID)
+	if err != nil {
 		if qerr := e.Store.EnqueueOutbox(ctx, accountID, msg.ThreadID, raw); qerr != nil {
 			return fmt.Errorf("send failed (%v) and could not queue: %w", err, qerr)
 		}
@@ -342,7 +343,30 @@ func (e *Engine) Send(ctx context.Context, b backend.Backend, accountID int64, m
 			slog.Default().Warn("send: delete source draft", "id", msg.DraftID, "err", err)
 		}
 	}
+	// Reflect the sent message in the local cache so it joins the conversation
+	// immediately, rather than only after the next incremental sync.
+	e.storeSentMessage(ctx, b, accountID, sentID)
 	return nil
+}
+
+// storeSentMessage fetches a just-sent message's metadata and upserts it, then
+// publishes a MessageUpserted carrying its thread id so the UI can drop it into
+// the open conversation. Best-effort: the next sync would reconcile it anyway,
+// so failures only delay its appearance, they don't lose it.
+func (e *Engine) storeSentMessage(ctx context.Context, b backend.Backend, accountID int64, id string) {
+	if id == "" {
+		return
+	}
+	m, err := b.FetchMetadata(ctx, id)
+	if err != nil {
+		slog.Default().Warn("send: fetch sent message", "id", id, "err", err)
+		return
+	}
+	if err := e.Store.UpsertMessages(ctx, []model.Message{m}); err != nil {
+		slog.Default().Warn("send: store sent message", "id", id, "err", err)
+		return
+	}
+	e.publish(Change{Kind: MessageUpserted, AccountID: accountID, GmailID: id, ThreadID: m.ThreadID})
 }
 
 // RetryOutbox requeues a single outbox item (clearing its failed state and
@@ -513,8 +537,12 @@ func (e *Engine) Incremental(ctx context.Context, b backend.Backend, accountID i
 		if err := e.Store.UpsertMessages(ctx, msgs); err != nil {
 			return changed, err
 		}
-		for _, id := range fetchedIDs {
-			e.publish(Change{Kind: MessageUpserted, AccountID: accountID, GmailID: id})
+		for i, id := range fetchedIDs {
+			tid := ""
+			if i < len(msgs) {
+				tid = msgs[i].ThreadID // msgs and fetchedIDs are parallel
+			}
+			e.publish(Change{Kind: MessageUpserted, AccountID: accountID, GmailID: id, ThreadID: tid})
 		}
 		changed += len(msgs)
 	}

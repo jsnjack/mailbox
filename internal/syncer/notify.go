@@ -32,7 +32,10 @@ type Change struct {
 	Kind      ChangeKind
 	AccountID int64
 	GmailID   string
-	Count     int
+	// ThreadID, when set on a MessageUpserted, lets the UI re-render the open
+	// conversation if the change belongs to it (a sent reply, or a synced message).
+	ThreadID string
+	Count    int
 }
 
 // Hub is a fan-out publish/subscribe bus for sync changes.
