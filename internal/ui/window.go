@@ -1630,9 +1630,9 @@ func (w *window) renderSig(id string) string {
 			sel = "s"
 		}
 	}
-	return fmt.Sprintf("%s\x1f%d\x1f%d\x1f%s\x1f%s\x1f%s\x1f%d\x1f%t\x1f%t\x1f%s",
+	return fmt.Sprintf("%s\x1f%d\x1f%d\x1f%s\x1f%s\x1f%s\x1f%d\x1f%t\x1f%t\x1f%t\x1f%s",
 		sel, t.UnreadCount, t.Count, w.categories[id], who, m.Subject,
-		m.InternalDate.Unix(), m.HasAttachments, m.IsStarred, m.Snippet)
+		m.InternalDate.Unix(), m.HasAttachments, m.IsStarred, t.RepliedByMe, m.Snippet)
 }
 
 // maxCategorize bounds how many of the newest inbox threads are auto-categorized,
@@ -4233,6 +4233,12 @@ func countBadge(n int) *gtk.Label {
 func threadRow(t model.ThreadSummary, outgoing bool, category string) *gtk.Box {
 	m := t.Latest
 	unread := t.UnreadCount > 0
+	// "Needs reply" means it needs YOUR reply; once you've had the last word the
+	// reply marker says it's handled, so drop the now-stale tag. Other tags
+	// (Discount, Receipt, …) are informational and stay.
+	if category == "Needs reply" && t.RepliedByMe && !outgoing {
+		category = ""
+	}
 
 	box := gtk.NewBox(gtk.OrientationVertical, 2)
 	setMargins(box, 12, 12, 6, 6)
