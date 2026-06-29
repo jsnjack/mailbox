@@ -141,6 +141,7 @@ type window struct {
 	openThreadMsgs []model.Message
 	openMsg        model.Message
 	replyAllBtn    *adw.SplitButton // primary action; dropdown has Reply/Forward
+	aiReplyBtn     *gtk.MenuButton  // AI reply: popover of suggestions + intents
 	archiveBtn     *gtk.Button
 	translateBtn   *gtk.Button
 	overflowBtn    *gtk.MenuButton   // star/unread/trash/images live here (native menu model)
@@ -1968,6 +1969,15 @@ func (w *window) buildReader() *adw.NavigationPage {
 	w.summaryBtn.SetTooltipText("Summarize thread with AI")
 	w.summaryBtn.ConnectClicked(w.onSummarize)
 
+	// AI reply: a popover of AI-suggested quick replies plus reply intents. The
+	// popover is rebuilt per open (fresh suggestions for the current message).
+	w.aiReplyBtn = gtk.NewMenuButton()
+	w.aiReplyBtn.SetIconName("sparkle-symbolic")
+	w.aiReplyBtn.SetTooltipText("AI reply")
+	w.aiReplyBtn.SetCreatePopupFunc(func(btn *gtk.MenuButton) {
+		btn.SetPopover(w.buildAIReplyPopover())
+	})
+
 	// Secondary actions (phishing analysis, star, mark-unread, trash, images) live
 	// in the overflow — analysis is on-demand and rare, so it doesn't earn a slot.
 	w.overflowBtn = gtk.NewMenuButton()
@@ -1984,6 +1994,9 @@ func (w *window) buildReader() *adw.NavigationPage {
 	})
 
 	hb.PackStart(w.replyAllBtn)
+	if w.deps.Assistant != nil {
+		hb.PackStart(w.aiReplyBtn)
+	}
 	hb.PackStart(w.archiveBtn)
 	hb.PackEnd(w.overflowBtn)
 	if w.deps.Assistant != nil {
@@ -2006,6 +2019,9 @@ func (w *window) setActionsSensitive(on bool) {
 	w.translateBtn.SetSensitive(canAI)
 	if w.summaryBtn != nil {
 		w.summaryBtn.SetSensitive(canAI)
+	}
+	if w.aiReplyBtn != nil {
+		w.aiReplyBtn.SetSensitive(canAI && w.deps.Send != nil)
 	}
 	// The overflow menu builds its own items conditionally; enable it whenever a
 	// message is open.
@@ -2044,12 +2060,23 @@ func (w *window) onReply() {
 }
 
 func (w *window) onReplyAll() {
-	m := w.openMsg
-	if m.GmailID == "" {
+	init, aiContext, ok := w.replyAllInit()
+	if !ok {
 		return
 	}
+	w.openCompose(init, aiContext, "Reply all")
+}
+
+// replyAllInit builds the reply-all prefill (recipients, subject, quoted body,
+// threading headers) and the AI thread context for the open message. ok is false
+// when no message is open. Shared by onReplyAll and the AI-reply popover.
+func (w *window) replyAllInit() (init model.OutgoingMessage, aiContext string, ok bool) {
+	m := w.openMsg
+	if m.GmailID == "" {
+		return model.OutgoingMessage{}, "", false
+	}
 	to, cc := replyAllRecipients(m, w.activeEmail)
-	init := model.OutgoingMessage{
+	return model.OutgoingMessage{
 		To:         to,
 		Cc:         cc,
 		Subject:    ensureRePrefix(m.Subject),
@@ -2057,8 +2084,123 @@ func (w *window) onReplyAll() {
 		InReplyTo:  m.RFC822MsgID,
 		References: strings.TrimSpace(m.References + " " + m.RFC822MsgID),
 		ThreadID:   m.ThreadID,
+	}, w.threadContextFor(m), true
+}
+
+// aiReply opens a reply compose for the open message with an AI action applied
+// (a chosen quick reply, an intent to auto-draft, or the AI-draft dialog).
+func (w *window) aiReply(auto composeAutoAI) {
+	init, aiContext, ok := w.replyAllInit()
+	if !ok {
+		return
 	}
-	w.openCompose(init, w.threadContextFor(m), "Reply all")
+	w.openCompose(init, aiContext, "Reply", auto)
+}
+
+// buildAIReplyPopover builds the reader's AI-reply popover: AI-suggested quick
+// replies at the top (fetched async; tap → compose prefilled with that reply) and
+// reply intents below (tap → AI drafts a full reply in that direction). Rebuilt
+// on each open so suggestions match the current message.
+func (w *window) buildAIReplyPopover() *gtk.Popover {
+	pop := gtk.NewPopover()
+	box := gtk.NewBox(gtk.OrientationVertical, 4)
+	box.SetSizeRequest(300, -1)
+	setMargins(box, 8, 8, 8, 8)
+
+	_, threadContext, ok := w.replyAllInit()
+	if !ok || w.deps.Assistant == nil {
+		box.Append(aiPopLabel("Open a message to reply."))
+		pop.SetChild(box)
+		return pop
+	}
+
+	// AI-suggested quick replies (one call per open; results stream in).
+	box.Append(aiPopLabel("Suggested replies"))
+	sug := gtk.NewBox(gtk.OrientationVertical, 4)
+	box.Append(sug)
+	spinner := adw.NewSpinner()
+	spinner.SetHAlign(gtk.AlignStart)
+	spinner.SetSizeRequest(20, 20)
+	sug.Append(spinner)
+	done := w.aiActivity("Suggesting replies")
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		replies, err := w.deps.Assistant.SmartReplies(ctx, threadContext)
+		dispatch.Main(func() {
+			done(doneErr(err))
+			for c := sug.FirstChild(); c != nil; c = sug.FirstChild() {
+				sug.Remove(c)
+			}
+			if err != nil {
+				slog.Warn("ui: ai-reply suggestions", "err", err)
+			}
+			if err != nil || len(replies) == 0 {
+				sug.Append(aiPopLabel("No suggestions"))
+				return
+			}
+			for _, r := range replies {
+				text := strings.TrimSpace(r)
+				if text == "" {
+					continue
+				}
+				row := aiPopRow(text, true)
+				row.ConnectClicked(func() {
+					pop.Popdown()
+					w.aiReply(composeAutoAI{quickReply: text})
+				})
+				sug.Append(row)
+			}
+		})
+	}()
+
+	box.Append(gtk.NewSeparator(gtk.OrientationHorizontal))
+	box.Append(aiPopLabel("Write a reply that…"))
+	for _, p := range replyPresets() {
+		instr := p.instruction
+		row := aiPopRow("↳ "+p.label, false)
+		row.ConnectClicked(func() {
+			pop.Popdown()
+			w.aiReply(composeAutoAI{instruction: instr})
+		})
+		box.Append(row)
+	}
+	custom := aiPopRow("✎ Custom instruction…", false)
+	custom.ConnectClicked(func() {
+		pop.Popdown()
+		w.aiReply(composeAutoAI{openDialog: true})
+	})
+	box.Append(custom)
+
+	pop.SetChild(box)
+	return pop
+}
+
+// aiPopLabel is a dim caption used as a section heading in the AI-reply popover.
+func aiPopLabel(text string) *gtk.Label {
+	l := gtk.NewLabel(text)
+	l.SetXAlign(0)
+	l.AddCSSClass("dim-label")
+	l.AddCSSClass("caption")
+	return l
+}
+
+// aiPopRow is a flat, left-aligned popover row button; wrap shows long text over
+// multiple lines (suggestions), else it ellipsizes (intents).
+func aiPopRow(text string, wrap bool) *gtk.Button {
+	l := gtk.NewLabel(text)
+	l.SetXAlign(0)
+	l.SetHExpand(true)
+	if wrap {
+		l.SetWrap(true)
+		l.SetWrapMode(pango.WrapWordChar)
+	} else {
+		l.SetEllipsize(pango.EllipsizeEnd)
+	}
+	b := gtk.NewButton()
+	b.SetChild(l)
+	b.AddCSSClass("flat")
+	return b
 }
 
 // replyAllRecipients computes To (original sender + original To) and Cc (original

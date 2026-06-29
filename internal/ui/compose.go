@@ -26,10 +26,10 @@ import (
 // openCompose opens a compose window prefilled from init. aiContext, when
 // non-empty and an assistant is configured, enables an "AI draft" button that
 // streams a drafted reply into the body. title labels the window.
-func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string) {
+func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string, auto ...composeAutoAI) {
 	// Fresh composes/replies/forwards get the default signature; an existing
 	// draft or a reopened (undone) message already contains its body verbatim.
-	w.openComposeOpts(init, aiContext, title, init.DraftID == "")
+	w.openComposeOpts(init, aiContext, title, init.DraftID == "", auto...)
 }
 
 // composeFromMailto opens a compose window prefilled from a mailto: URI (clicked
@@ -44,7 +44,42 @@ func (w *window) composeFromMailto(uri string) {
 	w.openCompose(msg, "", "New message")
 }
 
-func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title string, addSignature bool) {
+// composeAutoAI optionally drives the AI on a freshly opened compose, used by the
+// reader's AI-reply popover: prefill the body with a chosen quick reply, auto-run
+// a draft for an instruction, or open the AI-draft dialog. At most one applies.
+type composeAutoAI struct {
+	quickReply  string // prefill the body with this ready reply (above the quote)
+	instruction string // auto-run an AI draft guided by this instruction
+	openDialog  bool   // open the AI-draft dialog immediately
+}
+
+// aiPreset is a one-tap reply/compose direction: a short label and the
+// instruction handed to the AI to draft a full message.
+type aiPreset struct{ label, instruction string }
+
+// replyPresets / newMsgPresets are the canned AI directions, shared by the
+// AI-draft dialog and the reader's AI-reply popover so they stay in step.
+func replyPresets() []aiPreset {
+	return []aiPreset{
+		{"Accept / agree", "Accept and agree."},
+		{"Politely decline", "Politely decline."},
+		{"Thank them", "Thank the sender."},
+		{"Ask for more details", "Ask for more details or clarification."},
+		{"Propose a new time", "Propose a different time."},
+		{"I'll follow up later", "Say I will follow up later."},
+	}
+}
+
+func newMsgPresets() []aiPreset {
+	return []aiPreset{
+		{"Request a meeting", "Request a meeting and propose a couple of times."},
+		{"Introduce myself", "Introduce myself and explain why I'm reaching out."},
+		{"Follow up", "Write a polite follow-up."},
+		{"Make a request", "Politely ask for something."},
+	}
+}
+
+func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title string, addSignature bool, auto ...composeAutoAI) {
 	if w.deps.Send == nil {
 		return
 	}
@@ -414,6 +449,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 	}
 
 	var startAIDraft func()
+	var runDraft func(string)
 	if w.deps.Assistant != nil {
 		// A reply/forward has thread context; a new message is drafted from the
 		// user's instruction (and the subject) alone.
@@ -426,7 +462,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 		}
 		// runDraft streams a draft guided by instruction (may be empty) into the
 		// body, above whatever was already there (quote/signature), which is kept.
-		runDraft := func(instruction string) {
+		runDraft = func(instruction string) {
 			aiBtn.SetSensitive(false)
 			quote := init.Body
 			subject := strings.TrimSpace(subjEntry.Text())
@@ -576,6 +612,21 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 	default:
 		toEntry.GrabFocus() // new message / forward: pick the recipient first
 	}
+
+	// AI-reply popover entry points: prefill a chosen quick reply, auto-draft from
+	// an instruction, or open the AI-draft dialog — once the window is up.
+	if len(auto) > 0 {
+		a := auto[0]
+		switch {
+		case a.quickReply != "":
+			buf.SetText(a.quickReply + init.Body) // chosen reply above the signature/quote
+			bodyView.GrabFocus()
+		case a.instruction != "" && runDraft != nil:
+			runDraft(a.instruction)
+		case a.openDialog && startAIDraft != nil:
+			startAIDraft()
+		}
+	}
 }
 
 // askAIIntent presents AI reply assistance in one place: ready-to-send quick
@@ -587,23 +638,11 @@ func (w *window) askAIIntent(parent gtk.Widgetter, isReply bool, threadContext s
 	dialog.SetContentWidth(440)
 	dialog.SetFollowsContentSize(true)
 
-	presets := []struct{ label, instruction string }{
-		{"Accept / agree", "Accept and agree."},
-		{"Politely decline", "Politely decline."},
-		{"Thank them", "Thank the sender."},
-		{"Ask for more details", "Ask for more details or clarification."},
-		{"I'll follow up later", "Say I will follow up later."},
-		{"Confirm availability", "Confirm that I'm available."},
-	}
+	presets := replyPresets()
 	title := "Draft reply with AI"
 	hintText := "Pick a tone or describe what to say; the AI drafts the reply."
 	if !isReply {
-		presets = []struct{ label, instruction string }{
-			{"Request a meeting", "Request a meeting and propose a couple of times."},
-			{"Introduce myself", "Introduce myself and explain why I'm reaching out."},
-			{"Follow up", "Write a polite follow-up."},
-			{"Make a request", "Politely ask for something."},
-		}
+		presets = newMsgPresets()
 		title = "Draft email with AI"
 		hintText = "Describe what the email should say; the AI writes it."
 	}
@@ -706,15 +745,26 @@ func (w *window) askAIIntent(parent gtk.Widgetter, isReply bool, threadContext s
 
 	box.Append(gtk.NewSeparator(gtk.OrientationHorizontal))
 
-	entry := gtk.NewEntry()
-	entry.SetPlaceholderText("Or describe what to say…")
-	entry.SetHExpand(true)
-	box.Append(entry)
+	// Multiline free-text instruction: a longer brief ("decline but offer next
+	// week, keep it warm") drafts a better reply than a single line allows.
+	entry := gtk.NewTextView()
+	entry.SetWrapMode(gtk.WrapWordChar)
+	entry.SetAcceptsTab(false) // Tab moves focus to Generate rather than inserting a tab
+	entry.SetLeftMargin(6)
+	entry.SetRightMargin(6)
+	entry.SetTopMargin(6)
+	entry.SetBottomMargin(6)
+	entryScroller := gtk.NewScrolledWindow()
+	entryScroller.SetPolicy(gtk.PolicyNever, gtk.PolicyAutomatic)
+	entryScroller.SetMinContentHeight(64)
+	entryScroller.SetChild(entry)
+	entryScroller.AddCSSClass("card")
+	box.Append(entryScroller)
 
 	gen := gtk.NewButtonWithLabel("Generate")
 	gen.AddCSSClass("suggested-action")
 	gen.SetHAlign(gtk.AlignEnd)
-	gen.ConnectClicked(func() { choose(strings.TrimSpace(entry.Text())) })
+	gen.ConnectClicked(func() { choose(strings.TrimSpace(bodyText(entry.Buffer()))) })
 	box.Append(gen)
 
 	dialog.SetChild(box)
