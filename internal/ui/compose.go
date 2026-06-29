@@ -493,6 +493,12 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 				})
 				dispatch.Main(func() {
 					done("")
+					// Models often add a sign-off despite being told not to; when a
+					// signature already follows, strip the model's so the reply isn't
+					// double-signed. (Done on the final text only, not mid-stream.)
+					if omitSig {
+						final = stripTrailingSignoff(final)
+					}
 					buf.SetText(final + quote)
 					aiBtn.SetSensitive(true)
 				})
@@ -777,6 +783,47 @@ func (w *window) askAIIntent(parent gtk.Widgetter, isReply bool, threadContext s
 // any quote, as a plain sign-off (e.g. "Best,\nYauhen") with no "-- " delimiter:
 // that delimiter is a formal-signature convention Gmail/Outlook don't honor, so
 // for a short sign-off it just shows up as a stray "--" line. Empty → unchanged.
+// signoffPhrases are common email closings. A line that equals one of these
+// (case-insensitive, trailing punctuation/space ignored) begins a sign-off
+// block. Kept as exact whole-line matches so ordinary body text that merely
+// starts with "Thanks" or "Best" isn't mistaken for a closing.
+var signoffPhrases = map[string]bool{
+	"best": true, "best regards": true, "all the best": true, "regards": true,
+	"kind regards": true, "warm regards": true, "warmest regards": true, "warmly": true,
+	"thanks": true, "thank you": true, "thanks again": true, "many thanks": true, "with thanks": true,
+	"cheers": true, "sincerely": true, "sincerely yours": true, "yours": true,
+	"yours sincerely": true, "yours truly": true, "yours faithfully": true,
+	"take care": true, "talk soon": true, "speak soon": true, "cordially": true,
+	"respectfully": true, "with appreciation": true, "with gratitude": true,
+}
+
+// stripTrailingSignoff removes a closing sign-off block (a salutation line like
+// "Best regards," plus the name/title lines beneath it) from the end of an
+// AI-drafted body, so the configured signature isn't duplicated. It's
+// conservative: it only cuts when one of the last few non-empty lines is exactly
+// a known closing, leaving normal body text untouched.
+func stripTrailingSignoff(body string) string {
+	trimmed := strings.TrimRight(body, " \t\r\n")
+	lines := strings.Split(trimmed, "\n")
+	seen := 0
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		seen++
+		key := strings.ToLower(strings.TrimRight(line, " ,.!"))
+		if signoffPhrases[key] {
+			// Cut from the salutation line onward (the salutation + name/title).
+			return strings.TrimRight(strings.Join(lines[:i], "\n"), " \t\r\n")
+		}
+		if seen >= 4 {
+			break // a real sign-off sits at the very end, not deep in the body
+		}
+	}
+	return trimmed
+}
+
 func composeBodyWithSignature(quote, sig string) string {
 	sig = strings.TrimRight(sig, " \t\r\n")
 	if sig == "" {

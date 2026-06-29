@@ -6,6 +6,55 @@ import (
 	"github.com/jsnjack/mailbox/internal/model"
 )
 
+func TestStripTrailingSignoff(t *testing.T) {
+	tests := []struct {
+		name, in, want string
+	}{
+		{
+			"best regards + name",
+			"Thank you for processing this. I accept the code.\n\nBest regards,\nYauhen",
+			"Thank you for processing this. I accept the code.",
+		},
+		{
+			"salutation + name + title",
+			"Sounds good, see you then.\n\nKind regards,\nYauhen Shulitski\nSoftware Engineer",
+			"Sounds good, see you then.",
+		},
+		{
+			"bare thanks, no name",
+			"Got it, will do.\n\nThanks!",
+			"Got it, will do.",
+		},
+		{
+			"no sign-off is left untouched",
+			"Here are the details you asked for. Let me know if that works.",
+			"Here are the details you asked for. Let me know if that works.",
+		},
+		{
+			"thanks mid-sentence is not a sign-off",
+			"Thank you for the quick turnaround on this.\n\nThe report looks complete.",
+			"Thank you for the quick turnaround on this.\n\nThe report looks complete.",
+		},
+		{
+			"closing-word as sentence start is not stripped",
+			"Best of luck with the launch — let me know how it goes.",
+			"Best of luck with the launch — let me know how it goes.",
+		},
+		{
+			"sign-off deep in body (>4 lines from end) is left alone",
+			"Best,\nMe\n\nActually, one more thing:\nline a\nline b\nline c",
+			"Best,\nMe\n\nActually, one more thing:\nline a\nline b\nline c",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := stripTrailingSignoff(tc.in); got != tc.want {
+				t.Errorf("stripTrailingSignoff:\n got: %q\nwant: %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestEditableBoundary(t *testing.T) {
 	tests := []struct {
 		name string
