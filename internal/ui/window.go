@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"html"
@@ -162,6 +163,16 @@ type window struct {
 	categories     map[string]string
 	categorizedMsg map[string]string
 	categorizing   bool
+	// categorizeFP / categorizeAt debounce categorizeInbox against the same
+	// candidate set: every list refresh re-enters it (showThreads calls it), and
+	// the cache-seed refresh it issues re-enters it again. When the candidate set
+	// is unchanged and was attempted within aiRetryCooldown — the steady state when
+	// the LLM is down and nothing can be classified — re-running would spin a tight
+	// zero-delay loop. The debounce caps a retry of an unchanged set to once per
+	// cooldown; any real change (a new message, a classified thread) shifts the
+	// fingerprint and runs immediately.
+	categorizeFP string
+	categorizeAt time.Time
 	// inlineRefetched guards the one-time re-fetch of a message whose body
 	// references inline (cid:) images that older extraction didn't capture.
 	inlineRefetched map[string]bool
@@ -1807,6 +1818,17 @@ func (w *window) categorizeInbox() {
 	if len(cands) == 0 {
 		return
 	}
+	// Debounce an unchanged candidate set (see categorizeFP). showThreads re-enters
+	// here on every refresh — including the cache-seed refresh this call issues — so
+	// without this an unclassifiable set (the LLM is down, or a prior pass resolved
+	// nothing) would re-run with no delay and peg the CPU. A real change shifts the
+	// fingerprint and runs at once; an unchanged set retries at most once per cooldown.
+	fp := candidatesFP(cands)
+	if fp == w.categorizeFP && time.Since(w.categorizeAt) < aiRetryCooldown {
+		return
+	}
+	w.categorizeFP = fp
+	w.categorizeAt = time.Now()
 	w.categorizing = true
 	acctID := w.activeID
 	// Back off the AI classification (not the free cache seeding) while the
@@ -1856,8 +1878,15 @@ func (w *window) categorizeInbox() {
 			todo = todo[:maxCategorize]
 		}
 		var firstErr error
+		assigned := 0 // categories the AI actually stored this pass
 		if len(todo) > 0 {
 			done := w.aiActivity(fmt.Sprintf("Categorizing %d threads", len(todo)))
+			// Bound the whole pass so a hung/unreachable provider can't hold the
+			// spinner (and the categorizing flag) for the client's full 120s; on
+			// timeout Categorize errors out, the provider is flagged failing, and the
+			// cooldown takes over instead of stalling every refresh.
+			aiCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+			defer cancel()
 			for start := 0; start < len(todo); start += 20 {
 				end := start + 20
 				if end > len(todo) {
@@ -1868,7 +1897,7 @@ func (w *window) categorizeInbox() {
 				for i, c := range chunk {
 					ctxs[i] = c.ctx
 				}
-				cats, err := w.deps.Assistant.Categorize(ctx, ctxs)
+				cats, err := w.deps.Assistant.Categorize(aiCtx, ctxs)
 				if err != nil {
 					firstErr = err
 					slog.Warn("ui: categorize inbox", "err", err)
@@ -1886,6 +1915,7 @@ func (w *window) categorizeInbox() {
 					}
 					results[c.threadID] = cat
 					forMsg[c.threadID] = c.msgID
+					assigned++
 				}
 				dispatch.Main(func() {
 					if w.activeID != acctID {
@@ -1901,9 +1931,31 @@ func (w *window) categorizeInbox() {
 		}
 		dispatch.Main(func() {
 			w.categorizing = false
-			w.refreshList(w.searchEntry.Text()) // re-bind rows to show the tags
+			// Only re-bind (which re-enters categorizeInbox via showThreads, kicking
+			// off the next capped pass) when the AI actually classified something. If
+			// the provider is down — skipAI, or every chunk errored — no categories
+			// were assigned, so the candidates remain candidates; re-firing would spin
+			// a tight zero-delay loop (no AI call to pace it) and peg the CPU. The
+			// free cache seed above already refreshed the list, so nothing is lost.
+			// The next external trigger (a sync refresh) retries once the cooldown lapses.
+			if assigned > 0 {
+				w.refreshList(w.searchEntry.Text()) // re-bind rows to show the tags
+			}
 		})
 	}()
+}
+
+// candidatesFP fingerprints a candidate set by its sorted message ids, so the
+// same set hashes identically regardless of map-iteration order. Used to debounce
+// categorizeInbox against re-running an unchanged set (see categorizeFP).
+func candidatesFP(cands []categoryCand) string {
+	ids := make([]string, len(cands))
+	for i, c := range cands {
+		ids[i] = c.msgID
+	}
+	sort.Strings(ids)
+	sum := sha256.Sum256([]byte(strings.Join(ids, "\x00")))
+	return hex.EncodeToString(sum[:])
 }
 
 // normalizeCategory maps a model's reply to one of the known categories, or ""
