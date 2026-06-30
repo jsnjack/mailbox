@@ -87,6 +87,36 @@ func extractBody(part *gmail.MessagePart) (text, html string) {
 	return text, html
 }
 
+// ExternalBodyParts returns the attachment ids of the first text/plain and
+// text/html parts whose bytes Gmail did NOT inline (Data empty, AttachmentId
+// set). Gmail externalizes large part bodies this way, so a big HTML body (e.g.
+// a Dependabot weekly digest) is fetched separately rather than dropped, which
+// would otherwise render the message text-only. Empty when bodies are inline.
+func ExternalBodyParts(m *gmail.Message) (textAttID, htmlAttID string) {
+	if m == nil {
+		return "", ""
+	}
+	var walk func(p *gmail.MessagePart)
+	walk = func(p *gmail.MessagePart) {
+		if p == nil {
+			return
+		}
+		if len(p.Parts) == 0 && p.Body != nil && p.Body.AttachmentId != "" && p.Body.Data == "" {
+			switch {
+			case strings.HasPrefix(p.MimeType, "text/plain") && textAttID == "":
+				textAttID = p.Body.AttachmentId
+			case strings.HasPrefix(p.MimeType, "text/html") && htmlAttID == "":
+				htmlAttID = p.Body.AttachmentId
+			}
+		}
+		for _, c := range p.Parts {
+			walk(c)
+		}
+	}
+	walk(m.Payload)
+	return textAttID, htmlAttID
+}
+
 // hasAttachments reports whether any MIME part is a named attachment.
 func hasAttachments(part *gmail.MessagePart) bool {
 	if part == nil {

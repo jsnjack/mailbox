@@ -68,7 +68,23 @@ func (b *Backend) FetchBody(ctx context.Context, id string) (model.MessageBody, 
 	if err != nil {
 		return model.MessageBody{}, nil, err
 	}
-	return gmailapi.ToBody(full), gmailapi.AttachmentsFromMessage(full), nil
+	body := gmailapi.ToBody(full)
+	// Gmail serves a large part body (e.g. a 1 MB HTML newsletter) via an
+	// attachment id rather than inline; fetch it so the message renders as HTML
+	// instead of falling back to its text/plain alternative.
+	if textAtt, htmlAtt := gmailapi.ExternalBodyParts(full); textAtt != "" || htmlAtt != "" {
+		if body.HTML == "" && htmlAtt != "" {
+			if data, e := b.c.GetAttachment(ctx, id, htmlAtt); e == nil {
+				body.HTML = string(data)
+			}
+		}
+		if body.Text == "" && textAtt != "" {
+			if data, e := b.c.GetAttachment(ctx, id, textAtt); e == nil {
+				body.Text = string(data)
+			}
+		}
+	}
+	return body, gmailapi.AttachmentsFromMessage(full), nil
 }
 
 // FetchAttachment downloads one attachment's decoded bytes.

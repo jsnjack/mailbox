@@ -79,6 +79,38 @@ func TestExtractBodyMultipart(t *testing.T) {
 	}
 }
 
+func TestExternalBodyParts(t *testing.T) {
+	// A large HTML body Gmail externalized (Data empty, AttachmentId set) plus an
+	// inline text/plain alternative.
+	m := &gmail.Message{Payload: &gmail.MessagePart{
+		MimeType: "multipart/alternative",
+		Parts: []*gmail.MessagePart{
+			{MimeType: "text/plain", Body: &gmail.MessagePartBody{Data: b64("plain")}},
+			{MimeType: "text/html", Body: &gmail.MessagePartBody{AttachmentId: "html-att", Size: 1 << 20}},
+		},
+	}}
+	textAtt, htmlAtt := ExternalBodyParts(m)
+	if htmlAtt != "html-att" {
+		t.Fatalf("htmlAtt = %q, want html-att", htmlAtt)
+	}
+	if textAtt != "" {
+		t.Fatalf("textAtt = %q, want empty (it was inline)", textAtt)
+	}
+	// extractBody alone misses the externalized HTML — the gap this closes.
+	if _, html := extractBody(m.Payload); html != "" {
+		t.Fatalf("extractBody html = %q, want empty (externalized)", html)
+	}
+	// All-inline bodies report no external parts.
+	if tA, hA := ExternalBodyParts(&gmail.Message{Payload: &gmail.MessagePart{
+		MimeType: "multipart/alternative",
+		Parts: []*gmail.MessagePart{
+			{MimeType: "text/html", Body: &gmail.MessagePartBody{Data: b64("<p>hi</p>")}},
+		},
+	}}); tA != "" || hA != "" {
+		t.Fatalf("inline body reported external parts: %q %q", tA, hA)
+	}
+}
+
 func TestAttachmentsFromMessage(t *testing.T) {
 	m := &gmail.Message{Payload: &gmail.MessagePart{
 		MimeType: "multipart/mixed",
