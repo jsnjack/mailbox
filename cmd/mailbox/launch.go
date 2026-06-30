@@ -200,6 +200,13 @@ func launchUI(mailto string) error {
 		rt.wg.Add(2)
 		go func() { defer rt.wg.Done(); backgroundSync(actx, engine, act, b, a.ID, a.Email, wake) }()
 		go func() { defer rt.wg.Done(); backgroundSweep(actx, engine, b, a.ID) }()
+		// One-time recovery: re-fetch Gmail messages cached text-only by an older
+		// build that dropped externalized (attachment-id-served) HTML bodies. IMAP
+		// fetches whole bodies, so its text-only mail is genuinely text-only — skip it.
+		if a.Type == model.AccountGmail || a.Type == "" {
+			rt.wg.Add(1)
+			go func() { defer rt.wg.Done(); backgroundBackfillHTML(actx, engine, act, b, a.ID, a.Email) }()
+		}
 		return nil
 	}
 	for _, a := range accounts {
@@ -722,6 +729,38 @@ func backgroundSync(ctx context.Context, engine *syncer.Engine, act *activity.Hu
 		case <-ticker.C:
 		case <-wake: // a push notification (IMAP IDLE) — sync now
 		}
+	}
+}
+
+// htmlBackfillCap bounds how many text-only messages one launch re-fetches for
+// HTML recovery. Generous enough to clear a typical cache in one run, bounded so
+// a huge cache (or a flaky network) stays a gentle background trickle; whatever
+// is left — including any that failed to fetch — is retried on the next launch.
+const htmlBackfillCap = 2000
+
+// htmlBackfillDelay holds the recovery pass back briefly so it never competes
+// with the initial sync and UI startup for network/CPU.
+const htmlBackfillDelay = 25 * time.Second
+
+// backgroundBackfillHTML runs the one-time HTML re-fetch (see
+// engine.BackfillHTMLBodies) once, after a short startup delay. A no-op once the
+// account's bodies are all at the current fetch version.
+func backgroundBackfillHTML(ctx context.Context, engine *syncer.Engine, act *activity.Hub, b backend.Backend, accountID int64, email string) {
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(htmlBackfillDelay):
+	}
+	done := act.Begin("sync", "Recovering HTML for "+email)
+	n, err := engine.BackfillHTMLBodies(ctx, b, accountID, htmlBackfillCap)
+	switch {
+	case err != nil:
+		done("error: " + err.Error())
+		fmt.Fprintf(os.Stderr, "html backfill for %s: %v\n", email, err)
+	case n > 0:
+		done(fmt.Sprintf("recovered %d", n))
+	default:
+		done("")
 	}
 }
 

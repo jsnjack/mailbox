@@ -57,6 +57,9 @@ CREATE TABLE IF NOT EXISTS messages (
   is_starred      INTEGER NOT NULL DEFAULT 0,
   has_attachments INTEGER NOT NULL DEFAULT 0,
   size_estimate   INTEGER,
+  -- Fetch-version marker (not a bool): 0 = body not fetched, 1 = fetched by a
+  -- build before externalized-HTML support, 2 = fetched with it. Read as "fetched"
+  -- via != 0 everywhere; the difference only drives the one-time HTML backfill.
   body_fetched    INTEGER NOT NULL DEFAULT 0,
   UNIQUE (account_id, gmail_id)
 );

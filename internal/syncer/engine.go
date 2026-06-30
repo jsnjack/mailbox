@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jsnjack/mailbox/internal/backend"
@@ -268,6 +269,65 @@ func (e *Engine) FetchBody(ctx context.Context, b backend.Backend, accountID int
 	}
 	e.publish(Change{Kind: MessageUpserted, AccountID: accountID, GmailID: gmailID})
 	return nil
+}
+
+// htmlBackfillWorkers bounds the concurrency of the one-time HTML backfill. Kept
+// low so re-fetching a large cache stays a gentle background trickle rather than
+// a startup spike; the Gmail client throttles requests/quota on top of this.
+const htmlBackfillWorkers = 4
+
+// BackfillHTMLBodies re-fetches cached messages that have no HTML body and were
+// fetched before externalized-HTML support, recovering the HTML that an older
+// build dropped when Gmail served a large HTML part via an attachment id. It
+// re-fetches at most max messages (newest first), low-concurrency, and stores
+// them quietly — no per-message change is published, so a bulk pass can't flood
+// the UI; the recovered body is read on the message's next open. Returns the
+// number actually re-fetched. A no-op once every body is at the current version.
+func (e *Engine) BackfillHTMLBodies(ctx context.Context, b backend.Backend, accountID int64, max int) (int, error) {
+	ids, err := e.Store.MessagesMissingHTML(ctx, accountID, max)
+	if err != nil {
+		return 0, fmt.Errorf("list missing-html: %w", err)
+	}
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	var (
+		sem = make(chan struct{}, htmlBackfillWorkers)
+		wg  sync.WaitGroup
+		n   atomic.Int64
+	)
+	for _, id := range ids {
+		if ctx.Err() != nil {
+			break
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(id string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			m, err := e.Store.GetMessage(ctx, accountID, id)
+			if err != nil {
+				slog.Default().Warn("html backfill: get message", "id", id, "err", err)
+				return
+			}
+			body, atts, err := b.FetchBody(ctx, id)
+			if err != nil {
+				slog.Default().Warn("html backfill: fetch body", "id", id, "err", err)
+				return
+			}
+			body.MessageRowID = m.RowID
+			if err := e.Store.UpsertBody(ctx, body); err != nil { // stamps body_fetched = 2
+				slog.Default().Warn("html backfill: store body", "id", id, "err", err)
+				return
+			}
+			if err := e.Store.ReplaceAttachments(ctx, m.RowID, atts); err != nil {
+				slog.Default().Warn("html backfill: store attachments", "id", id, "err", err)
+			}
+			n.Add(1)
+		}(id)
+	}
+	wg.Wait()
+	return int(n.Load()), nil
 }
 
 // OpenAttachment ensures an attachment's bytes are cached on disk (downloading

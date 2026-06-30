@@ -109,7 +109,12 @@ func (s *Store) UpsertBody(ctx context.Context, b model.MessageBody) error {
 			b.MessageRowID, b.Text, b.HTML, b.RawHeaders); err != nil {
 			return fmt.Errorf("upsert body: %w", err)
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE messages SET body_fetched = 1 WHERE rowid = ?`, b.MessageRowID); err != nil {
+		// body_fetched is a fetch-version marker, not just a bool: 0 = never
+		// fetched, 1 = fetched by a build before externalized-HTML support, 2 =
+		// fetched with it. Stamping 2 here lets the one-time HTML backfill
+		// (MessagesMissingHTML) find and re-fetch the version-1 text-only bodies
+		// once, then never again. Everything else still reads it as "fetched" (!= 0).
+		if _, err := tx.ExecContext(ctx, `UPDATE messages SET body_fetched = 2 WHERE rowid = ?`, b.MessageRowID); err != nil {
 			return fmt.Errorf("mark body fetched: %w", err)
 		}
 		return reindexFTS(ctx, tx, b.MessageRowID)
@@ -448,6 +453,35 @@ func (s *Store) GetMessage(ctx context.Context, accountID int64, gmailID string)
 	}
 	m.Labels = labels
 	return m, nil
+}
+
+// MessagesMissingHTML returns the gmail ids of body-fetched messages that have
+// no HTML body and were fetched before externalized-HTML support (body_fetched =
+// 1), newest first. These may be messages whose large HTML part Gmail served via
+// an attachment id, which an older build dropped — re-fetching them recovers the
+// HTML. A re-fetch stamps body_fetched = 2 (see UpsertBody), so a genuinely
+// text-only message is re-checked exactly once and never re-selected here.
+func (s *Store) MessagesMissingHTML(ctx context.Context, accountID int64, limit int) ([]string, error) {
+	rows, err := s.reader.QueryContext(ctx, `
+		SELECT m.gmail_id
+		FROM messages m JOIN message_bodies b ON b.message_rowid = m.rowid
+		WHERE m.account_id = ? AND m.body_fetched = 1
+		  AND (b.body_html IS NULL OR b.body_html = '')
+		ORDER BY m.internal_date DESC
+		LIMIT ?`, accountID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query missing-html messages: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan gmail id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 // GetBody returns the stored body parts for a message rowid.

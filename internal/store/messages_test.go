@@ -17,6 +17,67 @@ func seedAccount(t *testing.T, s *Store) int64 {
 	return id
 }
 
+func TestMessagesMissingHTML(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	acc := seedAccount(t, s)
+
+	// Helper: insert a message and store a body, then force a fetch-version so the
+	// test can recreate both the legacy (1) and current (2) states.
+	store := func(gmailID string, date int64, text, html string, version int) {
+		t.Helper()
+		row, err := s.UpsertMessage(ctx, model.Message{AccountID: acc, GmailID: gmailID, ThreadID: gmailID, InternalDate: time.Unix(date, 0)})
+		if err != nil {
+			t.Fatalf("upsert %s: %v", gmailID, err)
+		}
+		if err := s.UpsertBody(ctx, model.MessageBody{MessageRowID: row, Text: text, HTML: html}); err != nil {
+			t.Fatalf("upsert body %s: %v", gmailID, err)
+		}
+		// UpsertBody always stamps version 2; rewrite to the case under test.
+		if _, err := s.writer.ExecContext(ctx, `UPDATE messages SET body_fetched = ? WHERE rowid = ?`, version, row); err != nil {
+			t.Fatalf("set version %s: %v", gmailID, err)
+		}
+	}
+
+	store("legacy-textonly", 300, "plain only", "", 1)     // candidate
+	store("legacy-hashtml", 200, "plain", "<p>hi</p>", 1)  // has HTML — skip
+	store("current-textonly", 400, "plain only", "", 2)    // already re-checked — skip
+	store("legacy-textonly-old", 100, "plain only", "", 1) // candidate (older)
+	// A metadata-only message (body never fetched) must not be selected.
+	if _, err := s.UpsertMessage(ctx, model.Message{AccountID: acc, GmailID: "nobody", ThreadID: "nobody"}); err != nil {
+		t.Fatalf("upsert nobody: %v", err)
+	}
+
+	got, err := s.MessagesMissingHTML(ctx, acc, 10)
+	if err != nil {
+		t.Fatalf("MessagesMissingHTML: %v", err)
+	}
+	// Only the two legacy text-only messages, newest first.
+	want := []string{"legacy-textonly", "legacy-textonly-old"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	}
+
+	// The limit caps the batch (newest first).
+	if one, err := s.MessagesMissingHTML(ctx, acc, 1); err != nil || len(one) != 1 || one[0] != "legacy-textonly" {
+		t.Fatalf("limit=1 got %v err %v", one, err)
+	}
+
+	// Re-fetching a candidate (UpsertBody stamps version 2) removes it from the set.
+	row, _ := s.GetMessage(ctx, acc, "legacy-textonly")
+	if err := s.UpsertBody(ctx, model.MessageBody{MessageRowID: row.RowID, Text: "plain", HTML: "<p>recovered</p>"}); err != nil {
+		t.Fatalf("re-fetch: %v", err)
+	}
+	if after, _ := s.MessagesMissingHTML(ctx, acc, 10); len(after) != 1 || after[0] != "legacy-textonly-old" {
+		t.Fatalf("after re-fetch got %v, want [legacy-textonly-old]", after)
+	}
+}
+
 func TestUpsertMessagesBatch(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
