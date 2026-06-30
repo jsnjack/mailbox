@@ -162,6 +162,9 @@ type window struct {
 	categories     map[string]string
 	categorizedMsg map[string]string
 	categorizing   bool
+	// inlineRefetched guards the one-time re-fetch of a message whose body
+	// references inline (cid:) images that older extraction didn't capture.
+	inlineRefetched map[string]bool
 	// AI health: aiFailedAt is when the last AI request failed; aiFailing drives
 	// the status-bar warning. Used to back off auto-categorization when the LLM is
 	// unreachable so it doesn't retry on every inbox refresh.
@@ -202,6 +205,7 @@ func newWindow(app *adw.Application, deps Deps) *window {
 		selected:         map[string]bool{},
 		categories:       map[string]string{},
 		categorizedMsg:   map[string]string{},
+		inlineRefetched:  map[string]bool{},
 	}
 	w.accountNames, _ = config.LoadAccountNames()
 	if p, err := config.LoadPrefs(); err == nil {
@@ -2911,7 +2915,7 @@ func (w *window) renderConversation(msgs []model.Message) {
 			// The latest message always needs its body read for the auth/phishing
 			// signals, even when its section is cached.
 			if m.RowID == latest.RowID {
-				body, _ := w.deps.Store.GetBody(ctx, m.RowID)
+				body := w.bodyForRender(ctx, m)
 				latestAuth = body.RawHeaders
 				latestHTML = body.HTML
 				if cs, ok := cached[m.GmailID]; ok {
@@ -2931,7 +2935,7 @@ func (w *window) renderConversation(msgs []model.Message) {
 				blocked += cs.trackers
 				continue
 			}
-			body, _ := w.deps.Store.GetBody(ctx, m.RowID)
+			body := w.bodyForRender(ctx, m)
 			sec, n := conversationSection(m, body, w.cleanHTML)
 			sec = w.inlineCIDImages(ctx, m, sec)
 			fresh[m.GmailID] = cachedSection{html: sec, trackers: n}
@@ -3045,6 +3049,44 @@ func conversationSection(m model.Message, body model.MessageBody, clean func(str
 	default:
 		return header + "<p>" + linkifyText(m.Snippet) + "</p>", 0
 	}
+}
+
+// bodyForRender loads a message's body, re-fetching once (this session) when it
+// references inline cid: images that weren't captured under older extraction
+// logic — so already-cached mail picks up inline images without a manual resync.
+func (w *window) bodyForRender(ctx context.Context, m model.Message) model.MessageBody {
+	body, _ := w.deps.Store.GetBody(ctx, m.RowID)
+	if w.needsInlineRefetch(ctx, m, body) {
+		w.inlineRefetched[m.GmailID] = true
+		if err := w.deps.FetchBody(ctx, m.AccountID, m.GmailID); err != nil {
+			slog.Warn("ui: inline re-fetch", "id", m.GmailID, "err", err)
+		} else {
+			body, _ = w.deps.Store.GetBody(ctx, m.RowID)
+		}
+	}
+	return body
+}
+
+// needsInlineRefetch reports whether m's body references inline images (cid:) but
+// no inline attachment was captured — the signature of a body fetched before
+// inline parts were stored. Guarded so each message is re-fetched at most once.
+func (w *window) needsInlineRefetch(ctx context.Context, m model.Message, body model.MessageBody) bool {
+	if w.deps.FetchBody == nil || w.inlineRefetched[m.GmailID] {
+		return false
+	}
+	if !strings.Contains(strings.ToLower(body.HTML), "cid:") {
+		return false
+	}
+	atts, err := w.deps.Store.ListAttachments(ctx, m.RowID)
+	if err != nil {
+		return false
+	}
+	for _, a := range atts {
+		if a.ContentID != "" {
+			return false // inline parts already captured
+		}
+	}
+	return true
 }
 
 // cidSrcPattern matches an <img> src that references an inline part by Content-ID.
