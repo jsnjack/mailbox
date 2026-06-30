@@ -3,12 +3,12 @@ package ui
 import (
 	"context"
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"html"
 	"log/slog"
 	"net/mail"
+	"net/url"
 	"os"
 	"os/exec"
 	"regexp"
@@ -165,6 +165,10 @@ type window struct {
 	// inlineRefetched guards the one-time re-fetch of a message whose body
 	// references inline (cid:) images that older extraction didn't capture.
 	inlineRefetched map[string]bool
+	// inlineByCID maps the open thread's inline-image Content-IDs to their cached
+	// files, served by the cid: URI-scheme handler (so a big inline image loads as
+	// a streamed resource, not a multi-MB base64 blob inflating the HTML).
+	inlineByCID map[string]inlineImage
 	// AI health: aiFailedAt is when the last AI request failed; aiFailing drives
 	// the status-bar warning. Used to back off auto-categorization when the LLM is
 	// unreachable so it doesn't retry on every inbox refresh.
@@ -1999,6 +2003,10 @@ func (w *window) onThreadSelected() {
 func (w *window) buildReader() *adw.NavigationPage {
 	w.registerReaderActions()
 	w.webview = webkit.NewWebView()
+	// Serve inline (cid:) images from the cache as streamed resources rather than
+	// embedding them in the HTML — a big inline image (e.g. a 15 MB banner) would
+	// otherwise inflate the page to tens of MB and stall WebKit's parse.
+	w.webview.Context().RegisterURIScheme("cid", w.serveCID)
 	w.sectionCache = make(map[string]cachedSection)
 	// Paint an opaque white page background (matches email content + the light
 	// wrapper). The cover (below) hides the widget-level swap flash.
@@ -2009,7 +2017,11 @@ func (w *window) buildReader() *adw.NavigationPage {
 	// mapped (so it keeps rendering) and mask the swap with an opaque white cover
 	// shown during the load and hidden once it finishes painting.
 	w.webview.ConnectLoadChanged(func(e webkit.LoadEvent) {
-		if e == webkit.LoadFinished && w.readerCover != nil {
+		// Hide the swap-cover once the new document is committed (its white bg is
+		// painting) rather than at LoadFinished — the latter waits for every
+		// subresource, so a big inline image would keep the cover (and the reader)
+		// "loading" long after the text is readable.
+		if (e == webkit.LoadCommitted || e == webkit.LoadFinished) && w.readerCover != nil {
 			w.readerCover.SetVisible(false)
 		}
 	})
@@ -2924,7 +2936,6 @@ func (w *window) renderConversation(msgs []model.Message) {
 					continue
 				}
 				sec, n := conversationSection(m, body, w.cleanHTML)
-				sec = w.inlineCIDImages(ctx, m, sec)
 				fresh[m.GmailID] = cachedSection{html: sec, trackers: n}
 				b.WriteString(sec)
 				blocked += n
@@ -2937,7 +2948,6 @@ func (w *window) renderConversation(msgs []model.Message) {
 			}
 			body := w.bodyForRender(ctx, m)
 			sec, n := conversationSection(m, body, w.cleanHTML)
-			sec = w.inlineCIDImages(ctx, m, sec)
 			fresh[m.GmailID] = cachedSection{html: sec, trackers: n}
 			b.WriteString(sec)
 			blocked += n
@@ -2945,9 +2955,10 @@ func (w *window) renderConversation(msgs []model.Message) {
 		out := b.String()
 		verdict := parseAuthResults(latestAuth)
 		warnings := phishingWarnings(latest, latestHTML)
-		// Gather attachment rows here (off the main thread); the main thread only
-		// builds the chip widgets.
+		// Gather attachment rows + download inline images here (off the main
+		// thread); the main thread only builds widgets and loads the page.
 		atts := w.threadAttachments(ctx, msgs)
+		inlineImgs := w.prepareInlineImages(ctx, msgs)
 		slog.Debug("ui: renderConversation", "msgs", len(msgs), "fetched", fetched,
 			"trackers", blocked, "auth", verdict.level, "fetch", fetchDur, "sanitize", time.Since(sanitizeStart))
 		dispatch.Main(func() {
@@ -2955,6 +2966,7 @@ func (w *window) renderConversation(msgs []model.Message) {
 			if w.openThreadID != threadID {
 				return // user switched to another conversation while this rendered
 			}
+			w.inlineByCID = inlineImgs // serveCID resolves cid: against this
 			w.setTrackerCount(blocked)
 			w.setAuthBadge(verdict)
 			w.setCaution(warnings)
@@ -3089,55 +3101,73 @@ func (w *window) needsInlineRefetch(ctx context.Context, m model.Message, body m
 	return true
 }
 
-// cidSrcPattern matches an <img> src that references an inline part by Content-ID.
-var cidSrcPattern = regexp.MustCompile(`(?i)src\s*=\s*["']?cid:([^"'\s>]+)["']?`)
+// inlineImage is a cached inline-image file plus its MIME type, served by the
+// cid: URI-scheme handler.
+type inlineImage struct {
+	path string
+	mime string
+}
 
-// inlineCIDImages rewrites cid: image references in a message's rendered HTML to
-// self-contained data: URIs by matching each Content-ID to the message's inline
-// attachment and embedding its bytes. WebKit has no cid: handler, so without this
-// inline images (e.g. report charts) render as empty boxes. A cid with no
-// matching attachment, or a failed download, is left untouched.
-func (w *window) inlineCIDImages(ctx context.Context, m model.Message, htmlStr string) string {
-	if w.deps.OpenAttach == nil || !strings.Contains(strings.ToLower(htmlStr), "cid:") {
-		return htmlStr
+// prepareInlineImages downloads the thread's inline (cid:) attachments and
+// returns a Content-ID → file map for serveCID. Embedding these in the HTML as
+// base64 (a 15 MB image → ~20 MB page) made WebKit's parse the dominant cost of
+// opening a thread; serving them as resources keeps the HTML small. Runs off the
+// main thread (it may download).
+func (w *window) prepareInlineImages(ctx context.Context, msgs []model.Message) map[string]inlineImage {
+	if w.deps.OpenAttach == nil {
+		return nil
 	}
-	atts, err := w.deps.Store.ListAttachments(ctx, m.RowID)
+	out := map[string]inlineImage{}
+	for _, m := range msgs {
+		atts, err := w.deps.Store.ListAttachments(ctx, m.RowID)
+		if err != nil {
+			continue
+		}
+		for _, a := range atts {
+			if a.ContentID == "" {
+				continue
+			}
+			if _, done := out[a.ContentID]; done {
+				continue
+			}
+			path, err := w.deps.OpenAttach(ctx, m.AccountID, m.GmailID, a.ID)
+			if err != nil {
+				slog.Warn("ui: inline image fetch", "cid", a.ContentID, "err", err)
+				continue
+			}
+			mime := a.MimeType
+			if mime == "" {
+				mime = "application/octet-stream"
+			}
+			out[a.ContentID] = inlineImage{path: path, mime: mime}
+		}
+	}
+	return out
+}
+
+// serveCID answers a cid: image request from the reader by streaming the matching
+// inline attachment off disk (resolved against the open thread, populated by
+// prepareInlineImages). Main-thread WebKit callback.
+func (w *window) serveCID(req *webkit.URISchemeRequest) {
+	cid := strings.TrimPrefix(req.URI(), "cid:")
+	if dec, err := url.PathUnescape(cid); err == nil {
+		cid = dec
+	}
+	img, ok := w.inlineByCID[strings.Trim(cid, "<>")]
+	if !ok {
+		req.FinishError(fmt.Errorf("inline image %q not found", cid))
+		return
+	}
+	stream, err := gio.NewFileForPath(img.path).Read(context.Background())
 	if err != nil {
-		return htmlStr
+		req.FinishError(err)
+		return
 	}
-	byCID := make(map[string]model.Attachment, len(atts))
-	for _, a := range atts {
-		if a.ContentID != "" {
-			byCID[a.ContentID] = a
-		}
+	var size int64 = -1
+	if fi, e := os.Stat(img.path); e == nil {
+		size = fi.Size()
 	}
-	if len(byCID) == 0 {
-		return htmlStr
-	}
-	return cidSrcPattern.ReplaceAllStringFunc(htmlStr, func(match string) string {
-		sub := cidSrcPattern.FindStringSubmatch(match)
-		if len(sub) != 2 {
-			return match
-		}
-		a, ok := byCID[sub[1]]
-		if !ok {
-			return match
-		}
-		path, err := w.deps.OpenAttach(ctx, m.AccountID, m.GmailID, a.ID)
-		if err != nil {
-			slog.Warn("ui: inline image fetch", "cid", sub[1], "err", err)
-			return match
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return match
-		}
-		mime := a.MimeType
-		if mime == "" {
-			mime = "application/octet-stream"
-		}
-		return `src="data:` + mime + `;base64,` + base64.StdEncoding.EncodeToString(data) + `"`
-	})
+	req.Finish(stream, size, img.mime)
 }
 
 // urlPattern matches an explicit http/https URL. Deliberately narrow (a scheme is
@@ -3772,11 +3802,12 @@ func (w *window) showTranslatedConversation(msgs []model.Message) {
 		m := msgs[i]
 		body := model.MessageBody{HTML: w.translationCache[m.GmailID]}
 		sec, n := conversationSection(m, body, w.cleanHTML)
-		sec = w.inlineCIDImages(context.Background(), m, sec)
 		b.WriteString(sec)
 		blocked += n
 	}
 	w.setTrackerCount(blocked)
+	// cid: images resolve via w.inlineByCID, already populated by the original
+	// render of this thread (serveCID).
 	w.loadReaderHTML(wrapHTML(b.String()))
 }
 
