@@ -19,9 +19,9 @@ func (s *Store) ReplaceAttachments(ctx context.Context, messageRowID int64, atts
 		}
 		for _, a := range atts {
 			if _, err := tx.ExecContext(ctx, `
-				INSERT INTO attachments (message_rowid, gmail_att_id, filename, mime_type, size_bytes)
-				VALUES (?,?,?,?,?)`,
-				messageRowID, a.GmailAttID, a.Filename, a.MimeType, a.SizeBytes); err != nil {
+				INSERT INTO attachments (message_rowid, gmail_att_id, filename, mime_type, size_bytes, content_id)
+				VALUES (?,?,?,?,?,?)`,
+				messageRowID, a.GmailAttID, a.Filename, a.MimeType, a.SizeBytes, a.ContentID); err != nil {
 				return fmt.Errorf("insert attachment %q: %w", a.Filename, err)
 			}
 		}
@@ -32,7 +32,7 @@ func (s *Store) ReplaceAttachments(ctx context.Context, messageRowID int64, atts
 // ListAttachments returns a message's attachments, ordered by id.
 func (s *Store) ListAttachments(ctx context.Context, messageRowID int64) ([]model.Attachment, error) {
 	rows, err := s.reader.QueryContext(ctx, `
-		SELECT id, message_rowid, gmail_att_id, filename, mime_type, size_bytes, sha256, disk_path
+		SELECT id, message_rowid, gmail_att_id, filename, mime_type, size_bytes, sha256, disk_path, content_id
 		FROM attachments WHERE message_rowid = ? ORDER BY id`, messageRowID)
 	if err != nil {
 		return nil, fmt.Errorf("list attachments: %w", err)
@@ -53,7 +53,7 @@ func (s *Store) ListAttachments(ctx context.Context, messageRowID int64) ([]mode
 // GetAttachmentByID returns a single attachment row.
 func (s *Store) GetAttachmentByID(ctx context.Context, id int64) (model.Attachment, error) {
 	row := s.reader.QueryRowContext(ctx, `
-		SELECT id, message_rowid, gmail_att_id, filename, mime_type, size_bytes, sha256, disk_path
+		SELECT id, message_rowid, gmail_att_id, filename, mime_type, size_bytes, sha256, disk_path, content_id
 		FROM attachments WHERE id = ?`, id)
 	a, err := scanAttachment(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -77,11 +77,11 @@ func (s *Store) SetAttachmentDownloaded(ctx context.Context, id int64, sha256, d
 
 func scanAttachment(sc rowScanner) (model.Attachment, error) {
 	var (
-		a                         model.Attachment
-		filename, mime, sha, disk sql.NullString
-		size                      sql.NullInt64
+		a                              model.Attachment
+		filename, mime, sha, disk, cid sql.NullString
+		size                           sql.NullInt64
 	)
-	if err := sc.Scan(&a.ID, &a.MessageRowID, &a.GmailAttID, &filename, &mime, &size, &sha, &disk); err != nil {
+	if err := sc.Scan(&a.ID, &a.MessageRowID, &a.GmailAttID, &filename, &mime, &size, &sha, &disk, &cid); err != nil {
 		return model.Attachment{}, err
 	}
 	a.Filename = filename.String
@@ -89,5 +89,6 @@ func scanAttachment(sc rowScanner) (model.Attachment, error) {
 	a.SizeBytes = size.Int64
 	a.SHA256 = sha.String
 	a.DiskPath = disk.String
+	a.ContentID = cid.String
 	return a, nil
 }

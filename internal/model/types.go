@@ -169,4 +169,7 @@ type Attachment struct {
 	SizeBytes    int64
 	SHA256       string
 	DiskPath     string
+	// ContentID is the part's Content-ID (without angle brackets) for an inline
+	// image referenced by a cid: URL in the body; empty for a regular attachment.
+	ContentID string
 }

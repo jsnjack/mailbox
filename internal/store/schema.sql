@@ -83,7 +83,8 @@ CREATE TABLE IF NOT EXISTS attachments (
   mime_type       TEXT,
   size_bytes      INTEGER,
   sha256          TEXT,             -- content hash; NULL until downloaded
-  disk_path       TEXT
+  disk_path       TEXT,
+  content_id      TEXT NOT NULL DEFAULT ''  -- Content-ID for an inline (cid:) image; '' for a normal attachment
 );
 
 CREATE TABLE IF NOT EXISTS outbox (

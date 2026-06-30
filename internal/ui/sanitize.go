@@ -28,6 +28,12 @@ func emailPolicy() *bluemonday.Policy {
 	// javascript: urls).
 	p.AllowAttrs("style").Globally()
 
+	// Allow cid: image references through (in addition to the default
+	// http/https/mailto) so inline images survive sanitizing; inlineCIDImages then
+	// rewrites them to embedded data: URIs for rendering. cid: in any other context
+	// is inert (no handler), and the data: it becomes is injected after this pass.
+	p.AllowURLSchemes("http", "https", "mailto", "cid")
+
 	// class is purely presentational; it lets each message's scoped <style> rules
 	// (see scopeCSS) match the elements they were written for — many newsletters
 	// lay out via classes rather than inline styles.

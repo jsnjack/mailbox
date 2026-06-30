@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"html"
@@ -2372,6 +2373,9 @@ func (w *window) forwardAttachments(ctx context.Context, m model.Message) []mode
 	var out []model.OutgoingAttachment
 	seen := make(map[string]bool)
 	for _, a := range atts {
+		if a.ContentID != "" {
+			continue // inline body image, not a real attachment to carry over
+		}
 		key := a.SHA256
 		if key == "" {
 			key = fmt.Sprintf("%s\x00%d", a.Filename, a.SizeBytes)
@@ -2846,6 +2850,7 @@ func (w *window) renderConversation(msgs []model.Message) {
 					continue
 				}
 				sec, n := conversationSection(m, body, w.cleanHTML)
+				sec = w.inlineCIDImages(ctx, m, sec)
 				fresh[m.GmailID] = cachedSection{html: sec, trackers: n}
 				b.WriteString(sec)
 				blocked += n
@@ -2858,6 +2863,7 @@ func (w *window) renderConversation(msgs []model.Message) {
 			}
 			body, _ := w.deps.Store.GetBody(ctx, m.RowID)
 			sec, n := conversationSection(m, body, w.cleanHTML)
+			sec = w.inlineCIDImages(ctx, m, sec)
 			fresh[m.GmailID] = cachedSection{html: sec, trackers: n}
 			b.WriteString(sec)
 			blocked += n
@@ -2971,6 +2977,57 @@ func conversationSection(m model.Message, body model.MessageBody, clean func(str
 	}
 }
 
+// cidSrcPattern matches an <img> src that references an inline part by Content-ID.
+var cidSrcPattern = regexp.MustCompile(`(?i)src\s*=\s*["']?cid:([^"'\s>]+)["']?`)
+
+// inlineCIDImages rewrites cid: image references in a message's rendered HTML to
+// self-contained data: URIs by matching each Content-ID to the message's inline
+// attachment and embedding its bytes. WebKit has no cid: handler, so without this
+// inline images (e.g. report charts) render as empty boxes. A cid with no
+// matching attachment, or a failed download, is left untouched.
+func (w *window) inlineCIDImages(ctx context.Context, m model.Message, htmlStr string) string {
+	if w.deps.OpenAttach == nil || !strings.Contains(strings.ToLower(htmlStr), "cid:") {
+		return htmlStr
+	}
+	atts, err := w.deps.Store.ListAttachments(ctx, m.RowID)
+	if err != nil {
+		return htmlStr
+	}
+	byCID := make(map[string]model.Attachment, len(atts))
+	for _, a := range atts {
+		if a.ContentID != "" {
+			byCID[a.ContentID] = a
+		}
+	}
+	if len(byCID) == 0 {
+		return htmlStr
+	}
+	return cidSrcPattern.ReplaceAllStringFunc(htmlStr, func(match string) string {
+		sub := cidSrcPattern.FindStringSubmatch(match)
+		if len(sub) != 2 {
+			return match
+		}
+		a, ok := byCID[sub[1]]
+		if !ok {
+			return match
+		}
+		path, err := w.deps.OpenAttach(ctx, m.AccountID, m.GmailID, a.ID)
+		if err != nil {
+			slog.Warn("ui: inline image fetch", "cid", sub[1], "err", err)
+			return match
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return match
+		}
+		mime := a.MimeType
+		if mime == "" {
+			mime = "application/octet-stream"
+		}
+		return `src="data:` + mime + `;base64,` + base64.StdEncoding.EncodeToString(data) + `"`
+	})
+}
+
 // urlPattern matches an explicit http/https URL. Deliberately narrow (a scheme is
 // required, and the URL stops at whitespace or a char that would break out of an
 // attribute) so linkifyText never fabricates a non-http link or turns an ordinary
@@ -3041,6 +3098,11 @@ func (w *window) threadAttachments(ctx context.Context, msgs []model.Message) []
 			continue
 		}
 		for _, a := range atts {
+			// Inline images (cid:) are rendered in the body, not offered as
+			// downloadable chips.
+			if a.ContentID != "" {
+				continue
+			}
 			// The same file is usually carried by every message in a reply chain;
 			// show it once. Key on content hash when known, else name+size.
 			key := a.SHA256
@@ -3598,6 +3660,7 @@ func (w *window) showTranslatedConversation(msgs []model.Message) {
 		m := msgs[i]
 		body := model.MessageBody{HTML: w.translationCache[m.GmailID]}
 		sec, n := conversationSection(m, body, w.cleanHTML)
+		sec = w.inlineCIDImages(context.Background(), m, sec)
 		b.WriteString(sec)
 		blocked += n
 	}

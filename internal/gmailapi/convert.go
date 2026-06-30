@@ -2,6 +2,7 @@ package gmailapi
 
 import (
 	"html"
+	"strings"
 
 	"github.com/jsnjack/mailbox/internal/model"
 	gmail "google.golang.org/api/gmail/v1"
@@ -65,12 +66,17 @@ func AttachmentsFromMessage(m *gmail.Message) []model.Attachment {
 		if p == nil {
 			return
 		}
-		if p.Filename != "" && p.Body != nil && p.Body.AttachmentId != "" {
+		// A normal attachment (named part with bytes), or an inline image
+		// referenced by a cid: URL (a Content-ID part, which may have no filename).
+		cid := strings.Trim(headerValue(p.Headers, "Content-ID"), "<>")
+		named := p.Filename != ""
+		if (named || cid != "") && p.Body != nil && p.Body.AttachmentId != "" {
 			out = append(out, model.Attachment{
 				GmailAttID: p.Body.AttachmentId,
 				Filename:   p.Filename,
 				MimeType:   p.MimeType,
 				SizeBytes:  p.Body.Size,
+				ContentID:  cid,
 			})
 		}
 		for _, c := range p.Parts {

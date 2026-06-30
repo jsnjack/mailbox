@@ -20,6 +20,8 @@ func TestAttachmentsRoundTrip(t *testing.T) {
 	atts := []model.Attachment{
 		{GmailAttID: "att-1", Filename: "report.pdf", MimeType: "application/pdf", SizeBytes: 1024},
 		{GmailAttID: "att-2", Filename: "photo.jpg", MimeType: "image/jpeg", SizeBytes: 2048},
+		// An inline image (no filename) referenced by a cid: URL in the body.
+		{GmailAttID: "att-3", MimeType: "image/png", SizeBytes: 512, ContentID: "logo123"},
 	}
 	if err := s.ReplaceAttachments(ctx, rowID, atts); err != nil {
 		t.Fatalf("ReplaceAttachments: %v", err)
@@ -29,11 +31,15 @@ func TestAttachmentsRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListAttachments: %v", err)
 	}
-	if len(got) != 2 {
-		t.Fatalf("got %d attachments, want 2", len(got))
+	if len(got) != 3 {
+		t.Fatalf("got %d attachments, want 3", len(got))
 	}
 	if got[0].Filename != "report.pdf" || got[0].SizeBytes != 1024 {
 		t.Fatalf("unexpected first attachment: %+v", got[0])
+	}
+	// The Content-ID round-trips so a cid: body image can be resolved.
+	if got[2].ContentID != "logo123" {
+		t.Fatalf("ContentID not stored: %+v", got[2])
 	}
 	if got[0].DiskPath != "" {
 		t.Fatal("expected empty disk path before download")

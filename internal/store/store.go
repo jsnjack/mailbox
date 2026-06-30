@@ -83,6 +83,9 @@ func migrate(db *sql.DB) error {
 		// per-folder UIDVALIDITY/MODSEQ summary here instead).
 		`ALTER TABLE accounts ADD COLUMN account_type TEXT NOT NULL DEFAULT 'gmail'`,
 		`ALTER TABLE accounts RENAME COLUMN last_history_id TO sync_cursor`,
+		// Inline-image support: remember each part's Content-ID so a cid: <img> in
+		// the body can be resolved to its bytes and rendered.
+		`ALTER TABLE attachments ADD COLUMN content_id TEXT NOT NULL DEFAULT ''`,
 	}
 	for _, s := range stmts {
 		if _, err := db.Exec(s); err != nil {
