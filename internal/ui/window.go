@@ -223,13 +223,83 @@ func newWindow(app *adw.Application, deps Deps) *window {
 // tree — currently "open-message", fired when a new-mail notification is
 // clicked, carrying "<accountID>|<gmailID>" as its string target.
 func (w *window) registerActions() {
+	// All three carry "<accountID>|<gmailID>" so a notification (which may target a
+	// non-active account) can act on the right message.
 	act := gio.NewSimpleAction("open-message", glib.NewVariantType("s"))
-	act.ConnectActivate(func(parameter *glib.Variant) {
-		if parameter != nil {
-			w.openFromNotification(parameter.String())
+	act.ConnectActivate(func(p *glib.Variant) {
+		if p != nil {
+			w.openFromNotification(p.String())
 		}
 	})
 	w.app.AddAction(act)
+
+	arch := gio.NewSimpleAction("notify-archive", glib.NewVariantType("s"))
+	arch.ConnectActivate(func(p *glib.Variant) {
+		if p != nil {
+			w.archiveFromNotification(p.String())
+		}
+	})
+	w.app.AddAction(arch)
+
+	rep := gio.NewSimpleAction("notify-reply", glib.NewVariantType("s"))
+	rep.ConnectActivate(func(p *glib.Variant) {
+		if p != nil {
+			w.replyFromNotification(p.String())
+		}
+	})
+	w.app.AddAction(rep)
+}
+
+// parseNotifyTarget splits a notification action target "<accountID>|<gmailID>".
+func parseNotifyTarget(target string) (accountID int64, gmailID string, ok bool) {
+	parts := strings.SplitN(target, "|", 2)
+	if len(parts) != 2 {
+		return 0, "", false
+	}
+	id, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		return 0, "", false
+	}
+	return id, parts[1], true
+}
+
+// archiveFromNotification archives a message straight from its new-mail
+// notification (no window focus needed), then dismisses the notification.
+func (w *window) archiveFromNotification(target string) {
+	acctID, gmailID, ok := parseNotifyTarget(target)
+	if !ok || w.deps.ModifyLabels == nil {
+		return
+	}
+	w.app.WithdrawNotification(fmt.Sprintf("mailbox-mail-%d-%s", acctID, gmailID))
+	go func() {
+		if err := w.deps.ModifyLabels(context.Background(), acctID, []string{gmailID}, nil, []string{model.LabelInbox}); err != nil {
+			slog.Warn("ui: notification archive", "id", gmailID, "err", err)
+		}
+	}()
+}
+
+// replyFromNotification opens a reply to a message from its notification,
+// focusing the window and switching to the message's account first.
+func (w *window) replyFromNotification(target string) {
+	acctID, gmailID, ok := parseNotifyTarget(target)
+	if !ok || w.deps.Send == nil {
+		return
+	}
+	w.win.Present()
+	if acctID != w.activeID {
+		for _, a := range w.deps.Accounts {
+			if a.ID == acctID {
+				w.setActiveAccount(a)
+				break
+			}
+		}
+	}
+	m, err := w.deps.Store.GetMessage(context.Background(), acctID, gmailID)
+	if err != nil {
+		slog.Warn("ui: notification reply", "id", gmailID, "err", err)
+		return
+	}
+	w.openCompose(w.replyInit(m), w.threadContextFor(m), "Reply")
 }
 
 // registerAppMenuActions wires the primary-menu actions: Preferences (gated on
@@ -4318,9 +4388,16 @@ func (w *window) notifyNewMail(accountID int64, m model.Message) {
 		body += " — " + m.Subject
 	}
 	n.SetBody(body)
-	// Clicking the notification opens this message (see registerActions).
+	// Clicking the notification opens this message; the buttons act on it without
+	// opening (see registerActions).
 	target := glib.NewVariantString(fmt.Sprintf("%d|%s", accountID, m.GmailID))
 	n.SetDefaultAction(gio.ActionPrintDetailedName("app.open-message", target))
+	if w.deps.ModifyLabels != nil {
+		n.AddButton("Archive", gio.ActionPrintDetailedName("app.notify-archive", target))
+	}
+	if w.deps.Send != nil {
+		n.AddButton("Reply", gio.ActionPrintDetailedName("app.notify-reply", target))
+	}
 	// Unique id per message so concurrent accounts' notifications don't replace
 	// one another.
 	w.app.SendNotification(fmt.Sprintf("mailbox-mail-%d-%s", accountID, m.GmailID), n)
