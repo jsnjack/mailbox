@@ -57,6 +57,11 @@ func TestScopeCSS(t *testing.T) {
 	if strings.Contains(out, ".m1 body") {
 		t.Errorf("body should map to the wrapper, not descend into it:\n%s", out)
 	}
+	// !important is stripped so an element's inline style still wins (an Outlook
+	// hack like ".keep-white{color:#000!important}" must not override inline white).
+	if strings.Contains(scopeCSS(`.keep-white{color:#000 !important}`, ".m1"), "important") {
+		t.Errorf("!important should be stripped from re-injected email CSS")
+	}
 	// Unparseable / breakout CSS yields no styles rather than corrupting output.
 	if got := scopeCSS(`x{}</style><script>`, ".m1"); got != "" {
 		t.Errorf("breakout CSS should be rejected, got %q", got)

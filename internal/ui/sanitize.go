@@ -85,11 +85,19 @@ func scopeCSS(cssText, scopeSel string) string {
 	return out
 }
 
-// scopeRules rewrites each rule's selectors in place, recursing into @media /
-// @supports blocks (their nested rules carry the selectors).
+// scopeRules rewrites each rule's selectors in place (recursing into @media /
+// @supports blocks) and strips !important. Dropping !important makes the email's
+// <style> behave as defaults that an element's own inline style overrides — the
+// correct cascade for email, and what Gmail effectively does. Without it, an
+// Outlook-targeted hack like ".keep-white { color:#000 !important }" (paired with
+// an mso gradient WebKit ignores) would override an inline color:#fff and render
+// white-on-dark banners as black.
 func scopeRules(rules []*css.Rule, scopeSel string) {
 	for _, r := range rules {
 		scopeRules(r.Rules, scopeSel)
+		for _, d := range r.Declarations {
+			d.Important = false
+		}
 		for i, sel := range r.Selectors {
 			r.Selectors[i] = scopeSelector(sel, scopeSel)
 		}
