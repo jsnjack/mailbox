@@ -42,7 +42,15 @@ func (w *window) buildStatusBar() gtk.Widgetter {
 	left.Append(w.statusSpinner)
 	left.Append(w.statusLabel)
 
+	// Shown when AI requests are failing (e.g. the provider is unreachable), so
+	// the user knows AI features are degraded; hidden again on the next success.
+	w.aiWarnIcon = gtk.NewImageFromIconName("dialog-warning-symbolic")
+	w.aiWarnIcon.AddCSSClass("warning")
+	w.aiWarnIcon.SetTooltipText("AI provider unavailable — the last request failed")
+	w.aiWarnIcon.SetVisible(false)
+
 	bar.Append(left)
+	bar.Append(w.aiWarnIcon)
 	bar.Append(w.buildActivityLogButton())
 	return bar
 }
@@ -100,12 +108,37 @@ func doneErr(err error) string {
 }
 
 // aiActivity reports an AI operation to the status bar; the returned function
-// ends it (pass a note, e.g. a token count or "" ). Safe when no hub is wired.
+// ends it (pass a note, e.g. a token count or "" ). It also records AI health so
+// the status bar can flag a failing provider. Safe when no hub is wired.
 func (w *window) aiActivity(label string) func(note string) {
-	if w.deps.Activity == nil {
-		return func(string) {}
+	var end func(string)
+	if w.deps.Activity != nil {
+		end = w.deps.Activity.Begin("ai", label)
 	}
-	return w.deps.Activity.Begin("ai", label)
+	return func(note string) {
+		if end != nil {
+			end(note)
+		}
+		w.noteAIResult(note)
+	}
+}
+
+// noteAIResult reads an AI op's completion note (doneErr yields "error: …" on
+// failure) and toggles the status-bar warning, recording the failure time so
+// auto-categorization can back off (see categorizeInbox).
+func (w *window) noteAIResult(note string) {
+	failed := strings.HasPrefix(note, "error:")
+	dispatch.Main(func() {
+		if failed {
+			w.aiFailedAt = time.Now()
+		}
+		if w.aiFailing != failed {
+			w.aiFailing = failed
+			if w.aiWarnIcon != nil {
+				w.aiWarnIcon.SetVisible(failed)
+			}
+		}
+	})
 }
 
 // subscribeActivity drains the activity hub into the status bar (on the main

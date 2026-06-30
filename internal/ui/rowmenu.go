@@ -7,6 +7,7 @@ import (
 	"github.com/diamondburned/gotk4/pkg/gio/v2"
 	glib "github.com/diamondburned/gotk4/pkg/glib/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
+	"github.com/jsnjack/mailbox/internal/ai"
 	"github.com/jsnjack/mailbox/internal/model"
 )
 
@@ -43,11 +44,20 @@ func (w *window) showRowMenu(row gtk.Widgetter, threadID string, x, y float64) {
 	}
 	menu.AppendSection("", flags)
 
-	// Re-categorize this one conversation — only where categories apply (the
-	// inbox, with AI on and the toggle enabled).
-	if w.inboxCategories && w.deps.Assistant != nil && w.current == model.LabelInbox {
+	// Categorize this one conversation — where categories apply (the inbox, with
+	// the toggle on). Manual "Categorize as" works without the AI (a fallback when
+	// the provider is down); "Re-categorize with AI" needs an assistant.
+	if w.inboxCategories && w.current == model.LabelInbox {
 		cat := gio.NewMenu()
-		cat.AppendItem(rowItem("Re-categorize", "win.row-recategorize", tv))
+		choices := gio.NewMenu()
+		for _, c := range ai.EmailCategories {
+			choices.AppendItem(rowItem(c, "win.row-setcat", glib.NewVariantString(threadID+"\x1f"+c)))
+		}
+		choices.AppendItem(rowItem("None", "win.row-setcat", glib.NewVariantString(threadID+"\x1f")))
+		cat.AppendSubmenu("Categorize as", choices)
+		if w.deps.Assistant != nil {
+			cat.AppendItem(rowItem("Re-categorize with AI", "win.row-recategorize", tv))
+		}
 		menu.AppendSection("", cat)
 	}
 

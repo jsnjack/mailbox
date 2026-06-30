@@ -47,6 +47,7 @@ type window struct {
 	// the left); cumulative session stats + the log live in a popover.
 	statusSpinner    *adw.Spinner
 	statusLabel      *gtk.Label
+	aiWarnIcon       *gtk.Image           // status-bar warning shown when AI requests are failing
 	statusStatsLabel *gtk.Label           // session stats inside the popover
 	statusLogBox     *gtk.Box             // log lines (newest first) inside the popover
 	statusLogBtn     *gtk.MenuButton      // opens the activity-log popover
@@ -130,7 +131,7 @@ type window struct {
 	header       *gtk.Label
 	attachBox    *gtk.FlowBox // chips for the open message's attachments (wraps, never forces width)
 	trackerLabel *gtk.Label   // "N trackers blocked" indicator
-	authLabel    *gtk.Label   // sender authentication (SPF/DKIM/DMARC) badge
+	authIcon     *gtk.Image   // compact sender-auth (SPF/DKIM/DMARC) status; details on hover
 	cautionLabel *gtk.Label   // anti-phishing heuristic warnings
 	webview      *webkit.WebView
 	readerZoom   float64 // reader message zoom (Ctrl +/-/0), persisted
@@ -157,9 +158,14 @@ type window struct {
 	// categorizedMsg records the latest message id each thread's category was
 	// computed for, so a thread is re-categorized when a new message arrives (e.g.
 	// a "Needs reply" thread that gets a discount reply becomes "Discount").
-	categories      map[string]string
-	categorizedMsg  map[string]string
-	categorizing    bool
+	categories     map[string]string
+	categorizedMsg map[string]string
+	categorizing   bool
+	// AI health: aiFailedAt is when the last AI request failed; aiFailing drives
+	// the status-bar warning. Used to back off auto-categorization when the LLM is
+	// unreachable so it doesn't retry on every inbox refresh.
+	aiFailing       bool
+	aiFailedAt      time.Time
 	inboxCategories bool
 
 	// AI thread summary: a button reveals a card that streams a summary in.
@@ -1081,6 +1087,48 @@ func (w *window) registerListActions() {
 		w.rowLatest(id, func(m model.Message) { w.applyLabels([]model.Message{m}, []string{model.LabelUnread}, nil, nil) })
 	})
 	row("row-recategorize", func(id string) { w.recategorizeThread(id) })
+	// row-setcat carries "threadID\x1fcategory" (empty category = clear).
+	setcat := gio.NewSimpleAction("row-setcat", glib.NewVariantType("s"))
+	setcat.ConnectActivate(func(p *glib.Variant) {
+		if p == nil {
+			return
+		}
+		if parts := strings.SplitN(p.String(), "\x1f", 2); len(parts) == 2 {
+			w.setThreadCategory(parts[0], parts[1])
+		}
+	})
+	w.win.AddAction(setcat)
+}
+
+// setThreadCategory manually assigns (or clears, when cat is empty) a
+// conversation's category. It persists the choice keyed by the thread's latest
+// message and pins categorizedMsg so the auto-categorizer won't override it —
+// the manual fallback when the AI is unavailable, or to correct a misfire.
+func (w *window) setThreadCategory(threadID, cat string) {
+	t, ok := w.threadByID[threadID]
+	if !ok {
+		return
+	}
+	msgID := t.Latest.GmailID
+	acctID := w.activeID
+	if cat == "" {
+		delete(w.categories, threadID)
+	} else {
+		w.categories[threadID] = cat
+	}
+	w.categorizedMsg[threadID] = msgID // pin so categorizeInbox leaves the manual choice alone
+	w.refreshList(w.searchEntry.Text())
+	go func() {
+		var err error
+		if cat == "" {
+			err = w.deps.Store.ClearMessageCategory(context.Background(), acctID, msgID)
+		} else {
+			err = w.deps.Store.SetMessageCategory(context.Background(), acctID, msgID, cat)
+		}
+		if err != nil {
+			slog.Warn("ui: set thread category", "err", err)
+		}
+	}()
 }
 
 // recategorizeThread re-runs AI categorization for a single conversation: it
@@ -1639,6 +1687,10 @@ func (w *window) renderSig(id string) string {
 // so a huge inbox can't trigger a flood of AI calls.
 const maxCategorize = 40
 
+// aiRetryCooldown is how long auto-categorization waits after an AI failure
+// before trying the provider again, so a down LLM isn't hit on every refresh.
+const aiRetryCooldown = 60 * time.Second
+
 // categoryCand is one thread to (maybe) categorize: its thread id, the gmail id
 // of its latest message (what the category is keyed/persisted by), and the
 // "From / Subject / Snippet" context fed to the AI.
@@ -1678,6 +1730,9 @@ func (w *window) categorizeInbox() {
 	}
 	w.categorizing = true
 	acctID := w.activeID
+	// Back off the AI classification (not the free cache seeding) while the
+	// provider is failing, so a down LLM isn't retried on every inbox refresh.
+	skipAI := w.aiFailing && time.Since(w.aiFailedAt) < aiRetryCooldown
 	go func() {
 		ctx := context.Background()
 
@@ -1712,7 +1767,12 @@ func (w *window) categorizeInbox() {
 		})
 
 		// 2) Classify the remainder with the AI (capped to bound cost; the rest
-		// finishes on subsequent passes), persisting each result per email.
+		// finishes on subsequent passes), persisting each result per email. Skipped
+		// while the provider is in its post-failure cooldown — retried on a later
+		// pass once it lapses.
+		if skipAI {
+			todo = nil
+		}
 		if len(todo) > maxCategorize {
 			todo = todo[:maxCategorize]
 		}
@@ -1898,11 +1958,22 @@ func (w *window) buildReader() *adw.NavigationPage {
 
 	w.header = gtk.NewLabel("")
 	w.header.SetXAlign(0)
+	w.header.SetHExpand(true)
 	w.header.SetWrap(true)
 	// Let the user select & copy the subject and sender address from the header
 	// (the message body is in the WebView, which is already selectable).
 	w.header.SetSelectable(true)
-	setMargins(w.header, 12, 12, 8, 8)
+
+	// Compact sender-auth status next to the subject (Gmail-style): a small shield
+	// whose colour/icon conveys the SPF/DKIM/DMARC verdict; the full detail is on
+	// hover (setAuthBadge sets the tooltip).
+	w.authIcon = gtk.NewImageFromIconName("security-high-symbolic")
+	w.authIcon.SetVAlign(gtk.AlignCenter)
+	w.authIcon.SetVisible(false)
+	headerRow := gtk.NewBox(gtk.OrientationHorizontal, 6)
+	setMargins(headerRow, 12, 12, 8, 8)
+	headerRow.Append(w.authIcon)
+	headerRow.Append(w.header)
 
 	// A FlowBox wraps chips to additional rows instead of a single horizontal row,
 	// whose summed width could otherwise force the reader pane — and the whole
@@ -1923,13 +1994,6 @@ func (w *window) buildReader() *adw.NavigationPage {
 	setMargins(w.trackerLabel, 12, 12, 0, 6)
 	w.trackerLabel.SetVisible(false)
 
-	w.authLabel = gtk.NewLabel("")
-	w.authLabel.SetXAlign(0)
-	w.authLabel.SetWrap(true)
-	w.authLabel.AddCSSClass("caption")
-	setMargins(w.authLabel, 12, 12, 0, 6)
-	w.authLabel.SetVisible(false)
-
 	w.cautionLabel = gtk.NewLabel("")
 	w.cautionLabel.SetXAlign(0)
 	w.cautionLabel.SetWrap(true)
@@ -1946,10 +2010,9 @@ func (w *window) buildReader() *adw.NavigationPage {
 
 	box := gtk.NewBox(gtk.OrientationVertical, 0)
 	box.Append(w.translationBanner)
-	box.Append(w.header)
+	box.Append(headerRow)
 	box.Append(w.buildSummaryCard())
 	box.Append(w.attachBox)
-	box.Append(w.authLabel)
 	box.Append(w.cautionLabel)
 	box.Append(w.trackerLabel)
 
@@ -3364,24 +3427,27 @@ func (w *window) setTrackerCount(n int) {
 // setAuthBadge shows the sender-authentication verdict (SPF/DKIM/DMARC, as
 // computed by Gmail) with semantic colour; an inconclusive verdict hides it.
 func (w *window) setAuthBadge(v authVerdict) {
-	w.authLabel.RemoveCSSClass("success")
-	w.authLabel.RemoveCSSClass("warning")
-	w.authLabel.RemoveCSSClass("error")
+	w.authIcon.RemoveCSSClass("success")
+	w.authIcon.RemoveCSSClass("warning")
+	w.authIcon.RemoveCSSClass("error")
 	switch v.level {
 	case authPass:
-		w.authLabel.SetText("✓ Verified sender · " + v.detail)
-		w.authLabel.AddCSSClass("success")
-		w.authLabel.SetVisible(true)
+		w.authIcon.SetFromIconName("security-high-symbolic")
+		w.authIcon.AddCSSClass("success")
+		w.authIcon.SetTooltipText("Verified sender · " + v.detail)
+		w.authIcon.SetVisible(true)
 	case authPartial:
-		w.authLabel.SetText("Partially verified · " + v.detail)
-		w.authLabel.AddCSSClass("warning")
-		w.authLabel.SetVisible(true)
+		w.authIcon.SetFromIconName("security-medium-symbolic")
+		w.authIcon.AddCSSClass("warning")
+		w.authIcon.SetTooltipText("Partially verified · " + v.detail)
+		w.authIcon.SetVisible(true)
 	case authFail:
-		w.authLabel.SetText("⚠ Authentication failed — sender may be spoofed (" + v.detail + ")")
-		w.authLabel.AddCSSClass("error")
-		w.authLabel.SetVisible(true)
+		w.authIcon.SetFromIconName("security-low-symbolic")
+		w.authIcon.AddCSSClass("error")
+		w.authIcon.SetTooltipText("Authentication failed — sender may be spoofed (" + v.detail + ")")
+		w.authIcon.SetVisible(true)
 	default:
-		w.authLabel.SetVisible(false)
+		w.authIcon.SetVisible(false)
 	}
 }
 
