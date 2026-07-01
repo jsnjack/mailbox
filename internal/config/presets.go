@@ -1,5 +1,7 @@
 package config
 
+import "github.com/jsnjack/mailbox/internal/logging"
+
 // AuthKind is how an account authenticates to IMAP/SMTP.
 type AuthKind string
 
@@ -92,8 +94,10 @@ var Presets = []Preset{
 func PresetByID(id string) (Preset, bool) {
 	for _, p := range Presets {
 		if p.ID == id {
+			logging.Trace("config: preset resolved", "id", id, "name", p.Name, "auth", string(p.Auth), "imapHost", p.IMAPHost, "smtpHost", p.SMTPHost)
 			return p, true
 		}
 	}
+	logging.Trace("config: preset not found", "id", id)
 	return Preset{}, false
 }

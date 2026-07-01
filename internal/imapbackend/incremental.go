@@ -6,9 +6,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapclient"
+	"github.com/jsnjack/mailbox/internal/logging"
 )
 
 // folderState is the per-folder incremental-sync watermark: the UIDVALIDITY (so a
@@ -99,12 +101,16 @@ func (b *Backend) snapshot(c *conn, folder string) (folderState, []imap.UID, err
 	if err != nil {
 		return folderState{}, nil, err
 	}
+	start := time.Now()
 	sd, err := c.cl.UIDSearch(&imap.SearchCriteria{}, nil).Wait()
 	if err != nil {
+		logging.Trace("imapbackend: snapshot uid search failed", "folder", folder, "dur", time.Since(start), "err", err)
 		return folderState{}, nil, fmt.Errorf("imap uid search %q: %w", folder, err)
 	}
 	uids := sd.AllUIDs()
 	sort.Slice(uids, func(i, j int) bool { return uids[i] < uids[j] })
+	logging.Trace("imapbackend: snapshot",
+		"folder", folder, "uidvalidity", sel.UIDValidity, "modseq", sel.HighestModSeq, "count", len(uids), "dur", time.Since(start))
 	return folderState{UIDValidity: sel.UIDValidity, ModSeq: sel.HighestModSeq, UIDs: encodeUIDs(uids)}, uids, nil
 }
 
@@ -113,18 +119,22 @@ func (b *Backend) snapshot(c *conn, folder string) (folderState, []imap.UID, err
 // there are no messages. The folder must already be selected on cl.
 func (b *Backend) changedSince(cl *imapclient.Client, modseq uint64, curUIDs []imap.UID) ([]imap.UID, error) {
 	if modseq == 0 || len(curUIDs) == 0 {
+		logging.Trace("imapbackend: changedsince skipped (full-diff fallback)", "modseq", modseq, "curUIDs", len(curUIDs))
 		return nil, nil // no CONDSTORE: flag changes are picked up on a later re-fetch
 	}
 	var set imap.UIDSet
 	set.AddNum(curUIDs...)
+	start := time.Now()
 	bufs, err := cl.Fetch(set, &imap.FetchOptions{UID: true, ChangedSince: modseq}).Collect()
 	if err != nil {
+		logging.Trace("imapbackend: changedsince rejected (no deltas)", "modseq", modseq, "dur", time.Since(start), "err", err)
 		return nil, nil // a server that rejects CHANGEDSINCE just yields no deltas
 	}
 	out := make([]imap.UID, 0, len(bufs))
 	for _, m := range bufs {
 		out = append(out, m.UID)
 	}
+	logging.Trace("imapbackend: changedsince", "modseq", modseq, "changed", len(out), "dur", time.Since(start))
 	return out, nil
 }
 
@@ -135,6 +145,7 @@ func (b *Backend) buildProfileCursor(c *conn) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	logging.Trace("imapbackend: build profile cursor", "account", b.cfg.Email, "folders", len(folders))
 	cur := cursor{Folders: make(map[string]folderState, len(folders))}
 	for _, f := range folders {
 		st, _, err := b.snapshot(c, f)
@@ -173,7 +184,11 @@ func (b *Backend) computeChanges(c *conn, prev cursor) (upserts, deletes []strin
 
 		if old.UIDValidity != 0 && old.UIDValidity != st.UIDValidity {
 			// Folder reset: the old UIDs are meaningless now. Drop them and re-add all.
-			for _, u := range decodeUIDs(old.UIDs) {
+			oldUIDs := decodeUIDs(old.UIDs)
+			logging.Trace("imapbackend: folder uidvalidity change (full re-sync)",
+				"folder", f, "old_uidvalidity", old.UIDValidity, "new_uidvalidity", st.UIDValidity,
+				"drop", len(oldUIDs), "readd", len(curUIDs))
+			for _, u := range oldUIDs {
 				deletes = append(deletes, msgID(f, old.UIDValidity, u))
 			}
 			for _, u := range curUIDs {
@@ -182,16 +197,20 @@ func (b *Backend) computeChanges(c *conn, prev cursor) (upserts, deletes []strin
 			continue
 		}
 
-		oldSet := uidSet(decodeUIDs(old.UIDs))
+		oldUIDs := decodeUIDs(old.UIDs)
+		oldSet := uidSet(oldUIDs)
 		curSet := uidSet(curUIDs)
+		newN, vanishedN := 0, 0
 		for _, u := range curUIDs { // new = current \ stored
 			if !oldSet[u] {
 				addUp(msgID(f, st.UIDValidity, u))
+				newN++
 			}
 		}
-		for _, u := range decodeUIDs(old.UIDs) { // vanished = stored \ current
+		for _, u := range oldUIDs { // vanished = stored \ current
 			if !curSet[u] {
 				deletes = append(deletes, msgID(f, old.UIDValidity, u))
+				vanishedN++
 			}
 		}
 		// Flag changes since the stored modseq (re-fetch to update read/star).
@@ -199,13 +218,30 @@ func (b *Backend) computeChanges(c *conn, prev cursor) (upserts, deletes []strin
 		if cerr != nil {
 			return nil, nil, cursor{}, cerr
 		}
+		flagN := 0
 		for _, u := range changed {
 			if curSet[u] { // ignore changes to messages that also vanished
 				addUp(msgID(f, st.UIDValidity, u))
+				flagN++
 			}
 		}
+		logging.Trace("imapbackend: folder diff",
+			"folder", f, "uidvalidity", st.UIDValidity, "stored", len(oldUIDs), "current", len(curUIDs),
+			"new", newN, "vanished", vanishedN, "flag_changed", flagN,
+			"path", condStorePath(old.ModSeq))
 	}
+	logging.Trace("imapbackend: compute changes done", "account", b.cfg.Email, "upserts", len(upserts), "deletes", len(deletes))
 	return upserts, deletes, next, nil
+}
+
+// condStorePath names which flag-change detection branch a folder diff used, for
+// tracing: CONDSTORE CHANGEDSINCE when a stored modseq is present, else the
+// full-diff fallback.
+func condStorePath(modseq uint64) string {
+	if modseq == 0 {
+		return "full-diff"
+	}
+	return "condstore-changedsince"
 }
 
 func uidSet(uids []imap.UID) map[imap.UID]bool {

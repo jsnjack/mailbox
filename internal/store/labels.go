@@ -4,12 +4,15 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 
+	"github.com/jsnjack/mailbox/internal/logging"
 	"github.com/jsnjack/mailbox/internal/model"
 )
 
 // UpsertLabel inserts or updates a label for an account.
 func (s *Store) UpsertLabel(ctx context.Context, l model.Label) error {
+	logging.TraceContext(ctx, "store: upsert label", "account", l.AccountID, "id", l.GmailID, "label", l.Name, "unread", l.UnreadTotal)
 	_, err := s.writer.ExecContext(ctx, `
 		INSERT INTO labels (account_id, gmail_id, name, type, color_bg, unread_total)
 		VALUES (?, ?, ?, ?, ?, ?)
@@ -20,6 +23,7 @@ func (s *Store) UpsertLabel(ctx context.Context, l model.Label) error {
 			unread_total = excluded.unread_total`,
 		l.AccountID, l.GmailID, l.Name, string(l.Type), l.ColorBg, l.UnreadTotal)
 	if err != nil {
+		logging.TraceContext(ctx, "store: upsert label", "account", l.AccountID, "id", l.GmailID, "err", err)
 		return fmt.Errorf("upsert label %q: %w", l.GmailID, err)
 	}
 	return nil
@@ -27,10 +31,12 @@ func (s *Store) UpsertLabel(ctx context.Context, l model.Label) error {
 
 // ListLabels returns all labels for an account, ordered by name.
 func (s *Store) ListLabels(ctx context.Context, accountID int64) ([]model.Label, error) {
+	start := time.Now()
 	rows, err := s.reader.QueryContext(ctx, `
 		SELECT account_id, gmail_id, name, type, color_bg, unread_total
 		FROM labels WHERE account_id = ? ORDER BY name`, accountID)
 	if err != nil {
+		logging.TraceContext(ctx, "store: list labels", "account", accountID, "err", err)
 		return nil, fmt.Errorf("list labels: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
@@ -51,5 +57,9 @@ func (s *Store) ListLabels(ctx context.Context, accountID int64) ([]model.Label,
 		l.UnreadTotal = int(unread.Int64)
 		out = append(out, l)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	logging.TraceContext(ctx, "store: list labels", "account", accountID, "count", len(out), "dur", time.Since(start))
+	return out, nil
 }

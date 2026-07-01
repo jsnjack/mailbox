@@ -5,6 +5,7 @@ import (
 
 	"github.com/emersion/go-imap/v2/imapclient"
 	"github.com/emersion/go-sasl"
+	"github.com/jsnjack/mailbox/internal/logging"
 	"golang.org/x/oauth2"
 )
 
@@ -26,7 +27,14 @@ func PasswordAuth(username, password string) Credential {
 }
 
 func (c passwordCred) imapLogin(cl *imapclient.Client) error {
-	return cl.Login(c.username, c.password).Wait()
+	logging.Trace("imapbackend: imap login", "account", c.username, "cred", "password", "password_len", len(c.password))
+	err := cl.Login(c.username, c.password).Wait()
+	if err != nil {
+		logging.Trace("imapbackend: imap login failed", "account", c.username, "cred", "password", "err", err)
+		return err
+	}
+	logging.Trace("imapbackend: imap login ok", "account", c.username, "cred", "password")
+	return nil
 }
 
 func (c passwordCred) smtpSASL() (sasl.Client, error) {
@@ -49,17 +57,26 @@ func OAuthAuth(username string, ts oauth2.TokenSource) Credential {
 func (c *oauthCred) accessToken() (string, error) {
 	tok, err := c.ts.Token()
 	if err != nil {
+		logging.Trace("imapbackend: oauth token refresh failed", "account", c.username, "err", err)
 		return "", fmt.Errorf("oauth token: %w", err)
 	}
+	logging.Trace("imapbackend: oauth token obtained", "account", c.username, "token_len", len(tok.AccessToken))
 	return tok.AccessToken, nil
 }
 
 func (c *oauthCred) imapLogin(cl *imapclient.Client) error {
+	logging.Trace("imapbackend: imap authenticate", "account", c.username, "cred", "xoauth2")
 	at, err := c.accessToken()
 	if err != nil {
 		return err
 	}
-	return cl.Authenticate(xoauth2Client(c.username, at))
+	err = cl.Authenticate(xoauth2Client(c.username, at))
+	if err != nil {
+		logging.Trace("imapbackend: imap authenticate failed", "account", c.username, "cred", "xoauth2", "err", err)
+		return err
+	}
+	logging.Trace("imapbackend: imap authenticate ok", "account", c.username, "cred", "xoauth2")
+	return nil
 }
 
 func (c *oauthCred) smtpSASL() (sasl.Client, error) {

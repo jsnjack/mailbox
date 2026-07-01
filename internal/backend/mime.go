@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jsnjack/mailbox/internal/logging"
 	"github.com/jsnjack/mailbox/internal/model"
 )
 
@@ -19,6 +20,10 @@ import (
 // The body's newlines are normalized to CRLF. Threading headers are included when
 // present so replies/forwards thread correctly.
 func BuildMIME(m model.OutgoingMessage) ([]byte, error) {
+	logging.Trace("backend: BuildMIME",
+		"from", m.From, "to", m.To, "cc", m.Cc, "bcc", m.Bcc,
+		"subject", m.Subject, "attachments", len(m.Attachments),
+		"threaded", m.InReplyTo != "" || m.References != "", "threadID", m.ThreadID)
 	var b bytes.Buffer
 	header := func(k, v string) { fmt.Fprintf(&b, "%s: %s\r\n", k, v) }
 
@@ -49,9 +54,16 @@ func BuildMIME(m model.OutgoingMessage) ([]byte, error) {
 		header("Content-Transfer-Encoding", "8bit")
 		b.WriteString("\r\n")
 		b.WriteString(normalizeNewlines(m.Body))
+		logging.Trace("backend: BuildMIME done", "kind", "text/plain", "bytes", b.Len())
 		return b.Bytes(), nil
 	}
-	return buildMultipart(&b, header, m)
+	out, err := buildMultipart(&b, header, m)
+	if err != nil {
+		logging.Trace("backend: BuildMIME done", "kind", "multipart/mixed", "err", err)
+		return out, err
+	}
+	logging.Trace("backend: BuildMIME done", "kind", "multipart/mixed", "attachments", len(m.Attachments), "bytes", len(out))
+	return out, nil
 }
 
 // buildMultipart writes a multipart/mixed body (text part + base64 attachments)

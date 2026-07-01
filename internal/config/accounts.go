@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/jsnjack/mailbox/internal/logging"
 )
 
 // accountNamesPath is the JSON file mapping account email → user-assigned
@@ -30,17 +32,21 @@ func LoadAccountNames() (map[string]string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
+			logging.Trace("config: load account names (none)", "path", path)
 			return map[string]string{}, nil
 		}
+		logging.Trace("config: load account names failed", "path", path, "err", err)
 		return map[string]string{}, fmt.Errorf("read account names: %w", err)
 	}
 	var m map[string]string
 	if err := json.Unmarshal(data, &m); err != nil {
+		logging.Trace("config: load account names corrupt (ignored)", "path", path, "err", err)
 		return map[string]string{}, nil // ignore a corrupt file
 	}
 	if m == nil {
 		m = map[string]string{}
 	}
+	logging.Trace("config: load account names", "path", path, "count", len(m))
 	return m, nil
 }
 
@@ -51,8 +57,10 @@ func SaveAccountName(email, name string) error {
 	if err != nil {
 		return err
 	}
+	cleared := false
 	if name = strings.TrimSpace(name); name == "" {
 		delete(names, email)
+		cleared = true
 	} else {
 		names[email] = name
 	}
@@ -69,7 +77,9 @@ func SaveAccountName(email, name string) error {
 		return fmt.Errorf("marshal account names: %w", err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "accounts.json"), data, 0o600); err != nil {
+		logging.Trace("config: save account name failed", "email", email, "err", err)
 		return fmt.Errorf("write account names: %w", err)
 	}
+	logging.Trace("config: save account name", "email", email, "cleared", cleared, "count", len(names))
 	return nil
 }

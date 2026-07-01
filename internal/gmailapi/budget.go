@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/jsnjack/mailbox/internal/logging"
 )
 
 // gmailPerUserUnitsPerMin is Gmail's per-user quota ceiling. The budget refills
@@ -53,19 +55,29 @@ func newRateBudget(unitsPerMin int, now func() time.Time, sleep func(context.Con
 // the context error if cancelled while waiting.
 func (b *RateBudget) Reserve(ctx context.Context, cost int) error {
 	if float64(cost) > b.capacity {
+		logging.TraceContext(ctx, "gmailapi: budget cost exceeds capacity", "quota", cost, "capacity", b.capacity)
 		return fmt.Errorf("reserve %d units exceeds budget capacity %.0f", cost, b.capacity)
 	}
+	waited := false
 	for {
 		b.mu.Lock()
 		b.refillLocked()
 		if b.tokens >= float64(cost) {
 			b.tokens -= float64(cost)
+			remaining := b.tokens
 			b.mu.Unlock()
+			if waited {
+				logging.TraceContext(ctx, "gmailapi: budget granted after wait", "quota", cost, "remaining", remaining)
+			}
 			return nil
 		}
 		wait := time.Duration((float64(cost) - b.tokens) / b.perSec * float64(time.Second))
+		tokens := b.tokens
 		b.mu.Unlock()
+		logging.TraceContext(ctx, "gmailapi: budget exhausted, waiting", "quota", cost, "available", tokens, "wait", wait)
+		waited = true
 		if err := b.sleep(ctx, wait); err != nil {
+			logging.TraceContext(ctx, "gmailapi: budget wait cancelled", "quota", cost, "err", err)
 			return err
 		}
 	}

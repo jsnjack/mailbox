@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jsnjack/mailbox/internal/logging"
 	"github.com/zalando/go-keyring"
 	"golang.org/x/oauth2"
 )
@@ -23,9 +24,14 @@ func IsAuthError(err error) bool {
 	}
 	var re *oauth2.RetrieveError
 	if errors.As(err, &re) && re.ErrorCode == "invalid_grant" {
+		logging.Trace("auth: IsAuthError classified revoked/expired", "via", "RetrieveError", "code", re.ErrorCode)
 		return true
 	}
-	return strings.Contains(err.Error(), "invalid_grant")
+	if strings.Contains(err.Error(), "invalid_grant") {
+		logging.Trace("auth: IsAuthError classified revoked/expired", "via", "string")
+		return true
+	}
+	return false
 }
 
 // keyringService is the Secret Service collection key under which refresh tokens
@@ -35,8 +41,10 @@ const keyringService = "mailbox"
 // SaveRefreshToken stores the account's refresh token in the OS keyring.
 func SaveRefreshToken(email, refreshToken string) error {
 	if err := keyring.Set(keyringService, email, refreshToken); err != nil {
+		logging.Trace("auth: keyring save refresh token failed", "service", keyringService, "email", email, "err", err)
 		return fmt.Errorf("save refresh token for %q: %w", email, err)
 	}
+	logging.Trace("auth: keyring save refresh token", "service", keyringService, "email", email, "tokenLen", len(refreshToken))
 	return nil
 }
 
@@ -44,16 +52,20 @@ func SaveRefreshToken(email, refreshToken string) error {
 func LoadRefreshToken(email string) (string, error) {
 	rt, err := keyring.Get(keyringService, email)
 	if err != nil {
+		logging.Trace("auth: keyring load refresh token not found", "service", keyringService, "email", email, "err", err)
 		return "", fmt.Errorf("load refresh token for %q: %w", email, err)
 	}
+	logging.Trace("auth: keyring load refresh token", "service", keyringService, "email", email, "tokenLen", len(rt))
 	return rt, nil
 }
 
 // DeleteRefreshToken removes the account's refresh token from the OS keyring.
 func DeleteRefreshToken(email string) error {
 	if err := keyring.Delete(keyringService, email); err != nil {
+		logging.Trace("auth: keyring delete refresh token failed", "service", keyringService, "email", email, "err", err)
 		return fmt.Errorf("delete refresh token for %q: %w", email, err)
 	}
+	logging.Trace("auth: keyring delete refresh token", "service", keyringService, "email", email)
 	return nil
 }
 
@@ -69,6 +81,7 @@ func TokenSource(ctx context.Context, cc ClientConfig, email string, expiry time
 	conf := oauthConfig(cc, "") // redirect is unused for refresh
 	seed := &oauth2.Token{RefreshToken: rt, Expiry: expiry}
 	base := &persistingTokenSource{service: keyringService, email: email, last: rt, src: conf.TokenSource(ctx, seed)}
+	logging.Trace("auth: token source built", "service", keyringService, "email", email, "seedExpiry", expiry)
 	return oauth2.ReuseTokenSource(seed, base), nil
 }
 
@@ -86,12 +99,17 @@ type persistingTokenSource struct {
 func (p *persistingTokenSource) Token() (*oauth2.Token, error) {
 	tok, err := p.src.Token()
 	if err != nil {
+		logging.Trace("auth: token refresh failed", "service", p.service, "email", p.email, "authError", IsAuthError(err), "err", err)
 		return nil, fmt.Errorf("refresh token for %q: %w", p.email, err)
 	}
-	if tok.RefreshToken != "" && tok.RefreshToken != p.last {
+	rotated := tok.RefreshToken != "" && tok.RefreshToken != p.last
+	logging.Trace("auth: token refreshed", "service", p.service, "email", p.email, "expiry", tok.Expiry, "rotated", rotated)
+	if rotated {
 		if err := keyring.Set(p.service, p.email, tok.RefreshToken); err != nil {
+			logging.Trace("auth: rotated token write-back failed", "service", p.service, "email", p.email, "err", err)
 			return nil, fmt.Errorf("persist rotated token for %q: %w", p.email, err)
 		}
+		logging.Trace("auth: rotated token written back", "service", p.service, "email", p.email, "tokenLen", len(tok.RefreshToken))
 		p.last = tok.RefreshToken
 	}
 	return tok, nil

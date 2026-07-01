@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/jsnjack/mailbox/internal/logging"
 )
 
 // Prefs holds general user preferences that don't belong in the [ai] config or
@@ -39,14 +41,18 @@ func LoadPrefs() (Prefs, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
+			logging.Trace("config: load prefs (defaults)", "path", path)
 			return Prefs{}, nil
 		}
+		logging.Trace("config: load prefs failed", "path", path, "err", err)
 		return Prefs{}, fmt.Errorf("read prefs: %w", err)
 	}
 	var p Prefs
 	if err := json.Unmarshal(data, &p); err != nil {
+		logging.Trace("config: load prefs corrupt (ignored)", "path", path, "err", err)
 		return Prefs{}, nil // ignore a corrupt file
 	}
+	logging.Trace("config: load prefs", "path", path, "blockRemoteImages", p.BlockRemoteImages, "disableInboxCategories", p.DisableInboxCategories)
 	return p, nil
 }
 
@@ -64,7 +70,9 @@ func SavePrefs(p Prefs) error {
 		return fmt.Errorf("marshal prefs: %w", err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "prefs.json"), data, 0o600); err != nil {
+		logging.Trace("config: save prefs failed", "err", err)
 		return fmt.Errorf("write prefs: %w", err)
 	}
+	logging.Trace("config: save prefs", "blockRemoteImages", p.BlockRemoteImages, "disableInboxCategories", p.DisableInboxCategories)
 	return nil
 }

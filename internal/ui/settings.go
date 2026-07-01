@@ -12,6 +12,7 @@ import (
 
 	"github.com/jsnjack/mailbox/internal/config"
 	"github.com/jsnjack/mailbox/internal/dispatch"
+	"github.com/jsnjack/mailbox/internal/logging"
 )
 
 // humanBytes formats a byte count as B/KB/MB/GB.
@@ -32,9 +33,12 @@ func humanBytes(n int64) string {
 // saved to config.toml when the window is closed; they take effect on next launch.
 func (w *window) openSettings() {
 	if w.deps.AISettings == nil {
+		logging.Trace("ui: open settings skipped", "reason", "no AI settings")
 		return
 	}
 	provider, endpoint, model := w.deps.AISettings()
+	logging.Trace("ui: open settings", "provider", provider, "endpoint", endpoint, "model", model,
+		"accounts", len(w.deps.Accounts), "categorize", w.inboxCategories, "block_images", w.blockImages)
 
 	providerRow := adw.NewEntryRow()
 	providerRow.SetTitle("Provider (openai / litellm / anthropic)")
@@ -63,6 +67,7 @@ func (w *window) openSettings() {
 		testBtn.SetVAlign(gtk.AlignCenter)
 		testBtn.ConnectClicked(func() {
 			provider, endpoint, model := providerRow.Text(), endpointRow.Text(), modelRow.Text()
+			logging.Trace("ui: settings test AI connection", "provider", provider, "endpoint", endpoint, "model", model)
 			testBtn.SetSensitive(false)
 			testBtn.SetLabel("Testing…")
 			testBtn.RemoveCSSClass("success")
@@ -75,10 +80,12 @@ func (w *window) openSettings() {
 				dispatch.Main(func() {
 					testBtn.SetSensitive(true)
 					if err != nil {
+						logging.Trace("ui: settings test AI connection failed", "err", err)
 						testBtn.SetLabel("Test failed")
 						testBtn.AddCSSClass("error")
 						testBtn.SetTooltipText(err.Error())
 					} else {
+						logging.Trace("ui: settings test AI connection ok")
 						testBtn.SetLabel("Connected ✓")
 						testBtn.AddCSSClass("success")
 					}
@@ -185,6 +192,7 @@ func (w *window) openSettings() {
 	imgRow.SetActive(!w.blockImages)
 	imgRow.Connect("notify::active", func() {
 		load := imgRow.Active()
+		logging.Trace("ui: setting changed", "pref", "load_remote_images", "old", !w.blockImages, "new", load)
 		w.blockImages = !load
 		savePref(func(p *config.Prefs) { p.BlockRemoteImages = !load })
 		w.setImagesEnabled(load)
@@ -201,6 +209,7 @@ func (w *window) openSettings() {
 		catRow.SetActive(w.inboxCategories)
 		catRow.Connect("notify::active", func() {
 			on := catRow.Active()
+			logging.Trace("ui: setting changed", "pref", "categorize_inbox", "old", w.inboxCategories, "new", on)
 			w.inboxCategories = on
 			savePref(func(p *config.Prefs) { p.DisableInboxCategories = !on })
 			if on {
@@ -217,12 +226,14 @@ func (w *window) openSettings() {
 	clearBtn := gtk.NewButtonWithLabel("Clear")
 	clearBtn.SetVAlign(gtk.AlignCenter)
 	clearBtn.ConnectClicked(func() {
+		logging.Trace("ui: settings clear attachment cache")
 		freed, err := config.ClearAttachmentsCache()
 		if err != nil {
 			slog.Warn("ui: clear attachments cache", "err", err)
 			clearRow.SetSubtitle("Couldn't clear the cache.")
 			return
 		}
+		logging.Trace("ui: settings cleared attachment cache", "freed", freed)
 		clearRow.SetSubtitle(fmt.Sprintf("Cleared — freed %s.", humanBytes(freed)))
 		clearBtn.SetSensitive(false)
 	})
@@ -242,11 +253,13 @@ func (w *window) openSettings() {
 		compactBtn.SetSensitive(false)
 		compactBtn.SetLabel("Compacting…")
 		before, _ := config.DBSize()
+		logging.Trace("ui: settings compact database", "before", before)
 		go func() {
 			err := w.deps.Store.Vacuum(context.Background())
 			after, _ := config.DBSize()
 			dispatch.Main(func() {
 				compactBtn.SetLabel("Compact")
+				logging.Trace("ui: settings compact database done", "before", before, "after", after, "err", err)
 				if err != nil {
 					slog.Warn("ui: compact database", "err", err)
 					dbRow.SetSubtitle("Couldn't compact the database.")
@@ -282,8 +295,11 @@ func (w *window) openSettings() {
 	dialog.SetContentHeight(360)
 	dialog.Add(page)
 	dialog.ConnectClosed(func() {
+		logging.Trace("ui: settings dialog closed, saving")
 		if w.deps.SaveAISettings != nil {
-			if err := w.deps.SaveAISettings(providerRow.Text(), endpointRow.Text(), modelRow.Text()); err != nil {
+			np, ne, nm := providerRow.Text(), endpointRow.Text(), modelRow.Text()
+			logging.Trace("ui: save AI settings", "provider", np, "endpoint", ne, "model", nm)
+			if err := w.deps.SaveAISettings(np, ne, nm); err != nil {
 				slog.Warn("ui: save settings", "err", err)
 			}
 		}
@@ -300,6 +316,7 @@ func (w *window) openSettings() {
 				// Blank removes the per-account override (falls back to default).
 				err = config.SaveAccountSignature(key, newSig)
 			}
+			logging.Trace("ui: save signature", "account", key, "old_len", len(sigSeeded[key]), "new_len", len(newSig), "err", err)
 			if err != nil {
 				slog.Warn("ui: save signature", "err", err, "account", key)
 			}
@@ -321,6 +338,7 @@ func (w *window) applyAccountNames(rows map[string]*adw.EntryRow) {
 		if newName == strings.TrimSpace(w.accountNames[email]) {
 			continue
 		}
+		logging.Trace("ui: rename account", "email", email, "old", w.accountNames[email], "new", newName)
 		if err := config.SaveAccountName(email, newName); err != nil {
 			slog.Warn("ui: save account name", "email", email, "err", err)
 			continue
@@ -354,15 +372,19 @@ func (w *window) confirmRemoveAccount(a AccountInfo, onRemoved func()) {
 	dialog.SetCloseResponse("cancel")
 	dialog.ConnectResponse(func(resp string) {
 		if resp != "remove" {
+			logging.Trace("ui: remove account cancelled", "id", a.ID, "email", a.Email)
 			return
 		}
+		logging.Trace("ui: remove account confirmed", "id", a.ID, "email", a.Email)
 		go func() {
 			err := w.deps.RemoveAccount(context.Background(), a.ID)
 			dispatch.Main(func() {
 				if err != nil {
+					logging.Trace("ui: remove account failed", "id", a.ID, "err", err)
 					w.toast("Couldn't remove account: " + err.Error())
 					return
 				}
+				logging.Trace("ui: remove account done", "id", a.ID, "email", a.Email)
 				w.removeAccountFromUI(a.ID)
 				if onRemoved != nil {
 					onRemoved()

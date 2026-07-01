@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jsnjack/mailbox/internal/logging"
 	"github.com/jsnjack/mailbox/internal/model"
 	gmail "google.golang.org/api/gmail/v1"
 )
@@ -114,6 +115,9 @@ func ExternalBodyParts(m *gmail.Message) (textAttID, htmlAttID string) {
 		}
 	}
 	walk(m.Payload)
+	if textAttID != "" || htmlAttID != "" {
+		logging.Trace("gmailapi: externalBodyParts", "id", m.Id, "text_att_id", textAttID, "html_att_id", htmlAttID)
+	}
 	return textAttID, htmlAttID
 }
 

@@ -4,6 +4,7 @@ import (
 	"html"
 	"strings"
 
+	"github.com/jsnjack/mailbox/internal/logging"
 	"github.com/jsnjack/mailbox/internal/model"
 	gmail "google.golang.org/api/gmail/v1"
 )
@@ -17,6 +18,7 @@ func ToMessage(accountID int64, m *gmail.Message) model.Message {
 	}
 	name, addr := parseFromHeader(headerValue(headers, "From"))
 	unread, starred := decodeFlags(m.LabelIds)
+	logging.Trace("gmailapi: toMessage", "id", m.Id, "thread_id", m.ThreadId, "from", addr, "subject", logging.Body(headerValue(headers, "Subject")), "unread", unread, "starred", starred, "labels", m.LabelIds, "has_attachments", m.Payload != nil && hasAttachments(m.Payload))
 	return model.Message{
 		AccountID:    accountID,
 		GmailID:      m.Id,
@@ -51,6 +53,7 @@ func ToBody(m *gmail.Message) model.MessageBody {
 	if m.Payload != nil {
 		auth = headerValue(m.Payload.Headers, "Authentication-Results")
 	}
+	logging.Trace("gmailapi: toBody", "id", m.Id, "text_bytes", len(text), "html_bytes", len(html), "has_html", html != "", "has_text", text != "", "has_auth", auth != "")
 	return model.MessageBody{Text: text, HTML: html, RawHeaders: auth}
 }
 
@@ -84,6 +87,7 @@ func AttachmentsFromMessage(m *gmail.Message) []model.Attachment {
 		}
 	}
 	walk(m.Payload)
+	logging.Trace("gmailapi: attachmentsFromMessage", "id", m.Id, "count", len(out))
 	return out
 }
 

@@ -3,18 +3,23 @@ package store
 import (
 	"context"
 	"fmt"
+	"time"
+
+	"github.com/jsnjack/mailbox/internal/logging"
 )
 
 // SetTranslation persists a message's translation into lang (the translated,
 // markup-preserving body HTML). A message body is immutable, so the translation
 // is keyed by the message's Gmail id and never needs invalidation.
 func (s *Store) SetTranslation(ctx context.Context, accountID int64, gmailID, lang, text string) error {
+	logging.TraceContext(ctx, "store: set translation", "account", accountID, "id", gmailID, "lang", lang, "bytes", len(text))
 	_, err := s.writer.ExecContext(ctx,
 		`INSERT INTO message_translations (account_id, gmail_id, lang, text)
 		 VALUES (?, ?, ?, ?)
 		 ON CONFLICT(account_id, gmail_id, lang) DO UPDATE SET text = excluded.text`,
 		accountID, gmailID, lang, text)
 	if err != nil {
+		logging.TraceContext(ctx, "store: set translation", "account", accountID, "id", gmailID, "lang", lang, "err", err)
 		return fmt.Errorf("set translation: %w", err)
 	}
 	return nil
@@ -24,6 +29,8 @@ func (s *Store) SetTranslation(ctx context.Context, accountID int64, gmailID, la
 // as a gmail_id → text map. Ids with no stored translation are absent. An empty
 // input returns an empty map without querying.
 func (s *Store) Translations(ctx context.Context, accountID int64, gmailIDs []string, lang string) (map[string]string, error) {
+	start := time.Now()
+	logging.TraceContext(ctx, "store: translations", "account", accountID, "lang", lang, "n", len(gmailIDs))
 	out := make(map[string]string, len(gmailIDs))
 	const chunk = 500 // stay well under SQLite's bound-variable limit
 	for start := 0; start < len(gmailIDs); start += chunk {
@@ -59,5 +66,6 @@ func (s *Store) Translations(ctx context.Context, accountID int64, gmailIDs []st
 			return nil, err
 		}
 	}
+	logging.TraceContext(ctx, "store: translations done", "account", accountID, "lang", lang, "n", len(gmailIDs), "count", len(out), "dur", time.Since(start))
 	return out, nil
 }

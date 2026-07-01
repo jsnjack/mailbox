@@ -24,6 +24,7 @@ import (
 	"github.com/emersion/go-imap/v2/imapclient"
 	gomail "github.com/emersion/go-message/mail"
 	"github.com/jsnjack/mailbox/internal/backend"
+	"github.com/jsnjack/mailbox/internal/logging"
 	"github.com/jsnjack/mailbox/internal/model"
 )
 
@@ -112,9 +113,11 @@ var _ backend.Backend = (*Backend)(nil)
 // dial opens and logs in a new connection. handler, when non-nil, receives
 // unsolicited server data (used by Watch for IDLE).
 func (b *Backend) dial(handler *imapclient.UnilateralDataHandler) (*imapclient.Client, error) {
+	start := time.Now()
 	addr := net.JoinHostPort(b.cfg.Host, strconv.Itoa(b.cfg.Port))
 	tlsCfg := &tls.Config{ServerName: b.cfg.Host}
 	opts := &imapclient.Options{TLSConfig: tlsCfg, UnilateralDataHandler: handler}
+	logging.Trace("imapbackend: dial", "account", b.cfg.Email, "addr", addr, "security", string(b.cfg.Security), "dialTimeout", dialTimeout)
 
 	// Dial the raw TCP conn ourselves and wrap it in a byte counter (below TLS, so
 	// it counts wire bytes), then build the client over it. STARTTLS falls back to
@@ -144,6 +147,7 @@ func (b *Backend) dial(handler *imapclient.UnilateralDataHandler) (*imapclient.C
 		return nil, fmt.Errorf("imap: unknown security %q", b.cfg.Security)
 	}
 	if err != nil {
+		logging.Trace("imapbackend: dial failed", "account", b.cfg.Email, "addr", addr, "dur", time.Since(start), "err", err)
 		return nil, fmt.Errorf("imap dial %s: %w", addr, err)
 	}
 	// Bound login (greeting + LOGIN/AUTHENTICATE) with a deadline, then clear it so
@@ -159,6 +163,12 @@ func (b *Backend) dial(handler *imapclient.UnilateralDataHandler) (*imapclient.C
 		_ = cl.Close()
 		return nil, loginError(loginErr)
 	}
+	logging.Trace("imapbackend: connected",
+		"account", b.cfg.Email, "addr", addr, "dur", time.Since(start),
+		"idle", cl.Caps().Has(imap.CapIdle),
+		"condstore", cl.Caps().Has(imap.CapCondStore),
+		"qresync", cl.Caps().Has(imap.CapQResync),
+		"uidplus", cl.Caps().Has(imap.CapUIDPlus))
 	return cl, nil
 }
 
@@ -167,8 +177,10 @@ func (b *Backend) dial(handler *imapclient.UnilateralDataHandler) (*imapclient.C
 // retrying a doomed login every sync tick.
 func loginError(err error) error {
 	if isAuthFailure(err) {
+		logging.Trace("imapbackend: login classified as auth failure", "err", err, "wrapped", "ErrAuth")
 		return fmt.Errorf("imap login: %w: %v", backend.ErrAuth, err)
 	}
+	logging.Trace("imapbackend: login failed (non-auth)", "err", err)
 	return fmt.Errorf("imap login: %w", err)
 }
 
@@ -212,6 +224,7 @@ func (b *Backend) acquire() (*conn, error) {
 	}
 	select {
 	case c := <-b.idle:
+		logging.Trace("imapbackend: pool acquire (reused)", "account", b.cfg.Email, "selected", c.selected)
 		return c, nil
 	default:
 	}
@@ -220,6 +233,7 @@ func (b *Backend) acquire() (*conn, error) {
 		<-b.sem
 		return nil, err
 	}
+	logging.Trace("imapbackend: pool acquire (new conn)", "account", b.cfg.Email)
 	return &conn{cl: cl}, nil
 }
 
@@ -230,11 +244,13 @@ func (b *Backend) release(c *conn, healthy bool) {
 	if healthy && !b.closed.Load() {
 		select {
 		case b.idle <- c:
+			logging.Trace("imapbackend: pool release (repooled)", "account", b.cfg.Email, "selected", c.selected)
 			<-b.sem
 			return
 		default:
 		}
 	}
+	logging.Trace("imapbackend: pool release (closing conn)", "account", b.cfg.Email, "healthy", healthy, "closed", b.closed.Load())
 	_ = c.cl.Close()
 	<-b.sem
 }
@@ -260,13 +276,20 @@ func (b *Backend) withConn(fn func(*conn) error) (err error) {
 // CONDSTORE when the server supports it.
 func (c *conn) selectMailbox(mailbox string, condStore bool) (*imap.SelectData, error) {
 	if c.selected == mailbox && c.selData != nil {
+		logging.Trace("imapbackend: select (cached)", "mailbox", mailbox)
 		return c.selData, nil
 	}
-	opts := &imap.SelectOptions{CondStore: condStore && c.cl.Caps().Has(imap.CapCondStore)}
+	cs := condStore && c.cl.Caps().Has(imap.CapCondStore)
+	opts := &imap.SelectOptions{CondStore: cs}
+	start := time.Now()
 	data, err := c.cl.Select(mailbox, opts).Wait()
 	if err != nil {
+		logging.Trace("imapbackend: select failed", "mailbox", mailbox, "condstore", cs, "dur", time.Since(start), "err", err)
 		return nil, fmt.Errorf("imap select %q: %w", mailbox, err)
 	}
+	logging.Trace("imapbackend: select",
+		"mailbox", mailbox, "condstore", cs, "uidvalidity", data.UIDValidity,
+		"exists", data.NumMessages, "highestmodseq", data.HighestModSeq, "dur", time.Since(start))
 	c.selected, c.selData = mailbox, data
 	return data, nil
 }
@@ -285,12 +308,16 @@ func (c *conn) reselect(mailbox string, condStore bool) (*imap.SelectData, error
 // idle connections. The dedicated IDLE connection from Watch is owned by that
 // goroutine and closes when its context is cancelled.
 func (b *Backend) Close() {
+	logging.Trace("imapbackend: close (draining pool)", "account", b.cfg.Email)
 	b.closed.Store(true)
+	drained := 0
 	for {
 		select {
 		case c := <-b.idle:
 			_ = c.cl.Close()
+			drained++
 		default:
+			logging.Trace("imapbackend: closed", "account", b.cfg.Email, "drained", drained)
 			return
 		}
 	}
@@ -314,6 +341,7 @@ func (b *Backend) labelFor(mailbox string) string {
 // the post-backfill baseline (mail arriving during backfill is then caught as a
 // change rather than missed).
 func (b *Backend) Profile(ctx context.Context) (backend.Profile, error) {
+	logging.TraceContext(ctx, "imapbackend: profile", "account", b.cfg.Email)
 	var cur string
 	err := b.withConn(func(c *conn) error {
 		var e error
@@ -321,8 +349,10 @@ func (b *Backend) Profile(ctx context.Context) (backend.Profile, error) {
 		return e
 	})
 	if err != nil {
+		logging.TraceContext(ctx, "imapbackend: profile failed", "account", b.cfg.Email, "err", err)
 		return backend.Profile{}, err
 	}
+	logging.TraceContext(ctx, "imapbackend: profile ok", "account", b.cfg.Email, "cursor_bytes", len(cur))
 	return backend.Profile{Email: b.cfg.Email, Cursor: cur}, nil
 }
 
@@ -331,11 +361,14 @@ func (b *Backend) Profile(ctx context.Context) (backend.Profile, error) {
 // ids so the existing folder views work. It also records the mailbox→label
 // mapping for FetchMetadata.
 func (b *Backend) Labels(ctx context.Context) ([]model.Label, error) {
+	logging.TraceContext(ctx, "imapbackend: labels", "account", b.cfg.Email)
 	if err := b.withConn(b.ensureFolders); err != nil {
+		logging.TraceContext(ctx, "imapbackend: labels failed", "account", b.cfg.Email, "err", err)
 		return nil, err
 	}
 	b.folderMu.Lock()
 	defer b.folderMu.Unlock()
+	logging.TraceContext(ctx, "imapbackend: labels ok", "account", b.cfg.Email, "count", len(b.labels))
 	return b.labels, nil
 }
 
@@ -354,10 +387,13 @@ func (b *Backend) ensureFolders(c *conn) error {
 	// LIST without the lock held so a slow round-trip doesn't block label lookups
 	// (labelFor is called per message during backfill). A rare concurrent double
 	// LIST is harmless — both compute the same maps and the last write wins.
+	start := time.Now()
 	data, err := c.cl.List("", "*", &imap.ListOptions{ReturnSpecialUse: true}).Collect()
 	if err != nil {
+		logging.Trace("imapbackend: list failed", "account", b.cfg.Email, "dur", time.Since(start), "err", err)
 		return fmt.Errorf("imap list: %w", err)
 	}
+	logging.Trace("imapbackend: list", "account", b.cfg.Email, "count", len(data), "dur", time.Since(start))
 	folderToLabel := map[string]string{}
 	labelToFolder := map[string]string{}
 	archive := ""
@@ -365,6 +401,7 @@ func (b *Backend) ensureFolders(c *conn) error {
 	var synced []string
 	for _, d := range data {
 		if hasAttr(d.Attrs, imap.MailboxAttrNonExistent) || hasAttr(d.Attrs, imap.MailboxAttrNoSelect) {
+			logging.Trace("imapbackend: list folder skipped (non-selectable)", "folder", d.Mailbox)
 			continue
 		}
 		if hasAttr(d.Attrs, imap.MailboxAttrArchive) {
@@ -380,13 +417,16 @@ func (b *Backend) ensureFolders(c *conn) error {
 		labels = append(labels, model.Label{
 			AccountID: b.accountID, GmailID: id, Name: displayName(d.Mailbox, d.Delim), Type: ltype,
 		})
-		if !hasAttr(d.Attrs, imap.MailboxAttrAll) &&
+		syncable := !hasAttr(d.Attrs, imap.MailboxAttrAll) &&
 			!hasAttr(d.Attrs, imap.MailboxAttrFlagged) &&
-			!hasAttr(d.Attrs, imap.MailboxAttrImportant) {
+			!hasAttr(d.Attrs, imap.MailboxAttrImportant)
+		if syncable {
 			synced = append(synced, d.Mailbox)
 		}
+		logging.Trace("imapbackend: list folder mapped", "folder", d.Mailbox, "id", id, "type", ltype, "syncable", syncable)
 	}
 	sort.Strings(synced)
+	logging.Trace("imapbackend: folders ready", "account", b.cfg.Email, "labels", len(labels), "synced", len(synced), "archive", archive)
 	b.folderMu.Lock()
 	defer b.folderMu.Unlock()
 	if b.foldersLoaded { // lost a race with another LIST; keep the first result
@@ -402,6 +442,7 @@ func (b *Backend) ensureFolders(c *conn) error {
 // first within each (highest UID first), capped to max total. query is ignored
 // (provider search is a later addition).
 func (b *Backend) SearchIDs(ctx context.Context, query string, max int) ([]string, error) {
+	logging.TraceContext(ctx, "imapbackend: search ids", "account", b.cfg.Email, "query", query, "max", max)
 	var ids []string
 	err := b.withConn(func(c *conn) error {
 		folders, err := b.folders(c)
@@ -413,30 +454,40 @@ func (b *Backend) SearchIDs(ctx context.Context, query string, max int) ([]strin
 			if err != nil {
 				return err
 			}
+			start := time.Now()
 			sd, err := c.cl.UIDSearch(&imap.SearchCriteria{}, nil).Wait()
 			if err != nil {
+				logging.Trace("imapbackend: uid search failed", "folder", f, "dur", time.Since(start), "err", err)
 				return fmt.Errorf("imap uid search %q: %w", f, err)
 			}
 			uids := sd.AllUIDs()
+			logging.Trace("imapbackend: uid search", "folder", f, "uidvalidity", sel.UIDValidity, "count", len(uids), "dur", time.Since(start))
 			sort.Slice(uids, func(i, j int) bool { return uids[i] > uids[j] }) // newest first
 			for _, u := range uids {
 				ids = append(ids, msgID(f, sel.UIDValidity, u))
 				if max > 0 && len(ids) >= max {
+					logging.TraceContext(ctx, "imapbackend: search ids capped", "account", b.cfg.Email, "count", len(ids), "max", max)
 					return nil
 				}
 			}
 		}
 		return nil
 	})
-	return ids, err
+	if err != nil {
+		return ids, err
+	}
+	logging.TraceContext(ctx, "imapbackend: search ids ok", "account", b.cfg.Email, "count", len(ids))
+	return ids, nil
 }
 
 // FetchMetadata fetches one message's envelope + flags and converts it.
 func (b *Backend) FetchMetadata(ctx context.Context, id string) (model.Message, error) {
 	mailbox, uidv, uid, err := parseMsgID(id)
 	if err != nil {
+		logging.TraceContext(ctx, "imapbackend: fetch metadata bad id", "id", id, "err", err)
 		return model.Message{}, err
 	}
+	logging.TraceContext(ctx, "imapbackend: fetch metadata", "id", id, "mailbox", mailbox, "uid", uint32(uid), "uidvalidity", uidv)
 	var out model.Message
 	err = b.withConn(func(c *conn) error {
 		sel, err := c.selectMailbox(mailbox, false)
@@ -444,6 +495,7 @@ func (b *Backend) FetchMetadata(ctx context.Context, id string) (model.Message, 
 			return err
 		}
 		if sel.UIDValidity != uidv {
+			logging.Trace("imapbackend: fetch metadata stale id", "id", id, "uidvalidity", uidv, "current", sel.UIDValidity)
 			return fmt.Errorf("imap: stale id %q (uidvalidity %d != %d)", id, uidv, sel.UIDValidity)
 		}
 		// References isn't part of the IMAP ENVELOPE, so fetch that one header too
@@ -451,18 +503,24 @@ func (b *Backend) FetchMetadata(ctx context.Context, id string) (model.Message, 
 		refSection := &imap.FetchItemBodySection{
 			Specifier: imap.PartSpecifierHeader, HeaderFields: []string{"References"}, Peek: true,
 		}
+		start := time.Now()
 		bufs, err := c.cl.Fetch(imap.UIDSetNum(uid), &imap.FetchOptions{
 			Envelope: true, Flags: true, InternalDate: true, RFC822Size: true, UID: true,
 			BodySection: []*imap.FetchItemBodySection{refSection},
 		}).Collect()
 		if err != nil {
+			logging.Trace("imapbackend: fetch metadata failed", "id", id, "dur", time.Since(start), "err", err)
 			return fmt.Errorf("imap fetch metadata: %w", err)
 		}
 		if len(bufs) == 0 {
+			logging.Trace("imapbackend: fetch metadata not found", "mailbox", mailbox, "uid", uint32(uid))
 			return fmt.Errorf("imap: uid %d not found in %q", uid, mailbox)
 		}
 		refs := parseReferences(bufs[0].FindBodySection(refSection))
 		out = b.toMessage(mailbox, uidv, bufs[0], refs)
+		logging.Trace("imapbackend: fetch metadata ok",
+			"id", id, "subject", out.Subject, "from", out.FromAddr, "unread", out.IsUnread,
+			"starred", out.IsStarred, "size", out.SizeEstimate, "dur", time.Since(start))
 		return nil
 	})
 	return out, err
@@ -470,11 +528,15 @@ func (b *Backend) FetchMetadata(ctx context.Context, id string) (model.Message, 
 
 // FetchBody fetches and parses a message's full body + attachment metadata.
 func (b *Backend) FetchBody(ctx context.Context, id string) (model.MessageBody, []model.Attachment, error) {
+	logging.TraceContext(ctx, "imapbackend: fetch body", "id", id)
 	raw, err := b.fetchRaw(id)
 	if err != nil {
 		return model.MessageBody{}, nil, err
 	}
-	return parseBody(raw)
+	body, atts, err := parseBody(raw)
+	logging.TraceContext(ctx, "imapbackend: fetch body parsed",
+		"id", id, "raw_bytes", len(raw), "html_bytes", len(body.HTML), "text_bytes", len(body.Text), "attachments", len(atts))
+	return body, atts, err
 }
 
 // fetchRaw returns a message's full raw RFC 5322 bytes (BODY[], peeked so it
@@ -491,19 +553,24 @@ func (b *Backend) fetchRaw(id string) ([]byte, error) {
 			return err
 		}
 		if sel.UIDValidity != uidv {
+			logging.Trace("imapbackend: fetch raw stale id", "id", id, "uidvalidity", uidv, "current", sel.UIDValidity)
 			return fmt.Errorf("imap: stale id %q", id)
 		}
 		section := &imap.FetchItemBodySection{Peek: true}
+		start := time.Now()
 		bufs, err := c.cl.Fetch(imap.UIDSetNum(uid), &imap.FetchOptions{
 			BodySection: []*imap.FetchItemBodySection{section},
 		}).Collect()
 		if err != nil {
+			logging.Trace("imapbackend: fetch raw failed", "id", id, "dur", time.Since(start), "err", err)
 			return fmt.Errorf("imap fetch body: %w", err)
 		}
 		if len(bufs) == 0 {
+			logging.Trace("imapbackend: fetch raw not found", "mailbox", mailbox, "uid", uint32(uid))
 			return fmt.Errorf("imap: uid %d not found", uid)
 		}
 		raw = bufs[0].FindBodySection(section)
+		logging.Trace("imapbackend: fetch raw ok", "id", id, "bytes", len(raw), "dur", time.Since(start))
 		return nil
 	})
 	return raw, err
@@ -514,6 +581,7 @@ func (b *Backend) fetchRaw(id string) ([]byte, error) {
 // and delete (vanished), plus the next cursor. A UIDVALIDITY change re-syncs that
 // folder wholesale. (Mutations, send, and drafts live in mutate.go.)
 func (b *Backend) Changes(ctx context.Context, cur string) (upserts, deletes []string, next string, err error) {
+	logging.TraceContext(ctx, "imapbackend: changes", "account", b.cfg.Email, "cursor_bytes", len(cur))
 	var nextCur cursor
 	err = b.withConn(func(c *conn) error {
 		var e error
@@ -521,8 +589,10 @@ func (b *Backend) Changes(ctx context.Context, cur string) (upserts, deletes []s
 		return e
 	})
 	if err != nil {
+		logging.TraceContext(ctx, "imapbackend: changes failed", "account", b.cfg.Email, "err", err)
 		return nil, nil, "", err
 	}
+	logging.TraceContext(ctx, "imapbackend: changes ok", "account", b.cfg.Email, "upserts", len(upserts), "deletes", len(deletes))
 	return upserts, deletes, nextCur.encode(), nil
 }
 

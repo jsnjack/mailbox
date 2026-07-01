@@ -8,6 +8,7 @@ import (
 	glib "github.com/diamondburned/gotk4/pkg/glib/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 	"github.com/jsnjack/mailbox/internal/ai"
+	"github.com/jsnjack/mailbox/internal/logging"
 	"github.com/jsnjack/mailbox/internal/model"
 )
 
@@ -18,8 +19,10 @@ import (
 func (w *window) showRowMenu(row gtk.Widgetter, threadID string, x, y float64) {
 	t, ok := w.threadByID[threadID]
 	if !ok || w.deps.ModifyLabels == nil {
+		logging.Trace("ui: row menu skipped", "id", threadID, "found", ok, "can_modify", w.deps.ModifyLabels != nil)
 		return
 	}
+	logging.Trace("ui: show row menu", "id", threadID, "label", w.current, "starred", t.Latest.IsStarred, "unread", t.UnreadCount)
 	tv := glib.NewVariantString(threadID)
 	menu := gio.NewMenu()
 
@@ -89,8 +92,10 @@ func rowItem(label, action string, target *glib.Variant) *gio.MenuItem {
 func (w *window) threadModifyAll(threadID, verb string, add, remove []string) {
 	msgs, err := w.deps.Store.ListThreadMessages(context.Background(), w.activeID, threadID)
 	if err != nil || len(msgs) == 0 {
+		logging.Trace("ui: thread modify all skipped", "id", threadID, "verb", verb, "n", len(msgs), "err", err)
 		return
 	}
+	logging.Trace("ui: thread modify all", "id", threadID, "verb", verb, "n", len(msgs), "add", add, "remove", remove)
 	w.applyLabels(msgs, add, remove, nil)
 	if verb != "" {
 		w.showUndoToast(verb, msgs, add, remove)

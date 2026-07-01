@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 
+	"github.com/jsnjack/mailbox/internal/logging"
 	"github.com/jsnjack/mailbox/internal/model"
 )
 
@@ -16,9 +17,11 @@ func (s *Store) EnqueueOutbox(ctx context.Context, accountID int64, threadID str
 	if err != nil {
 		return err
 	}
+	logging.TraceContext(ctx, "store: enqueue outbox", "account", accountID, "thread", threadID, "uuid", uuid, "bytes", len(rfc822))
 	if _, err := s.writer.ExecContext(ctx, `
 		INSERT INTO outbox (local_uuid, account_id, thread_id, rfc822, state)
 		VALUES (?, ?, ?, ?, 'queued')`, uuid, accountID, threadID, rfc822); err != nil {
+		logging.TraceContext(ctx, "store: enqueue outbox", "account", accountID, "uuid", uuid, "err", err)
 		return fmt.Errorf("enqueue outbox: %w", err)
 	}
 	return nil
@@ -33,6 +36,7 @@ func (s *Store) ListSendableOutbox(ctx context.Context, accountID int64, maxAtte
 		WHERE account_id = ? AND state IN ('queued','failed') AND attempts < ?
 		ORDER BY id`, accountID, maxAttempts)
 	if err != nil {
+		logging.TraceContext(ctx, "store: list sendable outbox", "account", accountID, "err", err)
 		return nil, fmt.Errorf("list outbox: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
@@ -51,7 +55,11 @@ func (s *Store) ListSendableOutbox(ctx context.Context, accountID int64, maxAtte
 		it.LastError = lastErr.String
 		out = append(out, it)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	logging.TraceContext(ctx, "store: list sendable outbox", "account", accountID, "count", len(out))
+	return out, nil
 }
 
 // CountPendingOutbox returns how many of an account's messages are awaiting
@@ -61,8 +69,10 @@ func (s *Store) CountPendingOutbox(ctx context.Context, accountID int64) (int, e
 	if err := s.reader.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM outbox WHERE account_id = ? AND state IN ('queued','failed')`,
 		accountID).Scan(&n); err != nil {
+		logging.TraceContext(ctx, "store: count pending outbox", "account", accountID, "err", err)
 		return 0, fmt.Errorf("count pending outbox: %w", err)
 	}
+	logging.TraceContext(ctx, "store: count pending outbox", "account", accountID, "count", n)
 	return n, nil
 }
 
@@ -76,6 +86,7 @@ func (s *Store) ListPendingOutbox(ctx context.Context, accountID int64) ([]model
 		WHERE account_id = ? AND state IN ('queued','failed')
 		ORDER BY id`, accountID)
 	if err != nil {
+		logging.TraceContext(ctx, "store: list pending outbox", "account", accountID, "err", err)
 		return nil, fmt.Errorf("list pending outbox: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
@@ -94,15 +105,21 @@ func (s *Store) ListPendingOutbox(ctx context.Context, accountID int64) ([]model
 		it.LastError = lastErr.String
 		out = append(out, it)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	logging.TraceContext(ctx, "store: list pending outbox", "account", accountID, "count", len(out))
+	return out, nil
 }
 
 // RequeueOutbox resets an item to queued and clears its failure state so the
 // next sweep retries it, even if it had exhausted its attempts.
 func (s *Store) RequeueOutbox(ctx context.Context, id int64) error {
+	logging.TraceContext(ctx, "store: requeue outbox", "id", id)
 	if _, err := s.writer.ExecContext(ctx,
 		`UPDATE outbox SET state = 'queued', attempts = 0, last_error = NULL WHERE id = ?`,
 		id); err != nil {
+		logging.TraceContext(ctx, "store: requeue outbox", "id", id, "err", err)
 		return fmt.Errorf("requeue outbox: %w", err)
 	}
 	return nil
@@ -110,7 +127,9 @@ func (s *Store) RequeueOutbox(ctx context.Context, id int64) error {
 
 // DeleteOutbox discards a queued/failed message without sending it.
 func (s *Store) DeleteOutbox(ctx context.Context, id int64) error {
+	logging.TraceContext(ctx, "store: delete outbox", "id", id)
 	if _, err := s.writer.ExecContext(ctx, `DELETE FROM outbox WHERE id = ?`, id); err != nil {
+		logging.TraceContext(ctx, "store: delete outbox", "id", id, "err", err)
 		return fmt.Errorf("delete outbox: %w", err)
 	}
 	return nil
@@ -118,7 +137,9 @@ func (s *Store) DeleteOutbox(ctx context.Context, id int64) error {
 
 // MarkOutboxSent removes a successfully sent message from the outbox.
 func (s *Store) MarkOutboxSent(ctx context.Context, id int64) error {
+	logging.TraceContext(ctx, "store: mark outbox sent", "id", id)
 	if _, err := s.writer.ExecContext(ctx, `DELETE FROM outbox WHERE id = ?`, id); err != nil {
+		logging.TraceContext(ctx, "store: mark outbox sent", "id", id, "err", err)
 		return fmt.Errorf("mark outbox sent: %w", err)
 	}
 	return nil
@@ -126,9 +147,11 @@ func (s *Store) MarkOutboxSent(ctx context.Context, id int64) error {
 
 // MarkOutboxFailed records a failed send attempt.
 func (s *Store) MarkOutboxFailed(ctx context.Context, id int64, errMsg string) error {
+	logging.TraceContext(ctx, "store: mark outbox failed", "id", id, "reason", errMsg)
 	if _, err := s.writer.ExecContext(ctx,
 		`UPDATE outbox SET state = 'failed', attempts = attempts + 1, last_error = ? WHERE id = ?`,
 		errMsg, id); err != nil {
+		logging.TraceContext(ctx, "store: mark outbox failed", "id", id, "err", err)
 		return fmt.Errorf("mark outbox failed: %w", err)
 	}
 	return nil

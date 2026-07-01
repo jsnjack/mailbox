@@ -7,6 +7,8 @@ import (
 	"github.com/aymerick/douceur/css"
 	"github.com/aymerick/douceur/parser"
 	"github.com/microcosm-cc/bluemonday"
+
+	"github.com/jsnjack/mailbox/internal/logging"
 )
 
 // emailPolicy returns an HTML sanitizer tuned for rendering real email. It keeps
@@ -81,13 +83,16 @@ func extractStyleCSS(htmlStr string) string {
 func scopeCSS(cssText, scopeSel string) string {
 	ss, err := parser.Parse(cssText)
 	if err != nil {
+		logging.Trace("ui: scope css parse failed", "err", err, "bytes", len(cssText))
 		return ""
 	}
 	scopeRules(ss.Rules, scopeSel)
 	out := ss.String()
 	if strings.Contains(strings.ToLower(out), "</style") {
+		logging.Trace("ui: scope css rejected", "reason", "closes style tag")
 		return "" // never let serialized CSS terminate the <style> tag early
 	}
+	logging.Trace("ui: scope css", "scope", scopeSel, "in_bytes", len(cssText), "out_bytes", len(out))
 	return out
 }
 

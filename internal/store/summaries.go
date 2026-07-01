@@ -5,12 +5,15 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+
+	"github.com/jsnjack/mailbox/internal/logging"
 )
 
 // SetThreadSummary persists a thread's AI summary together with the fingerprint
 // it was computed for (the thread's message-id set). A later fingerprint
 // mismatch tells the caller the thread changed and the summary is stale.
 func (s *Store) SetThreadSummary(ctx context.Context, accountID int64, threadID, fingerprint, summary string) error {
+	logging.TraceContext(ctx, "store: set thread summary", "account", accountID, "id", threadID, "fingerprint", fingerprint, "bytes", len(summary))
 	_, err := s.writer.ExecContext(ctx,
 		`INSERT INTO thread_summaries (account_id, thread_id, fingerprint, summary)
 		 VALUES (?, ?, ?, ?)
@@ -18,6 +21,7 @@ func (s *Store) SetThreadSummary(ctx context.Context, accountID int64, threadID,
 		   fingerprint = excluded.fingerprint, summary = excluded.summary`,
 		accountID, threadID, fingerprint, summary)
 	if err != nil {
+		logging.TraceContext(ctx, "store: set thread summary", "account", accountID, "id", threadID, "err", err)
 		return fmt.Errorf("set thread summary: %w", err)
 	}
 	return nil
@@ -33,9 +37,12 @@ func (s *Store) ThreadSummary(ctx context.Context, accountID int64, threadID str
 		accountID, threadID)
 	switch scanErr := row.Scan(&fingerprint, &summary); {
 	case errors.Is(scanErr, sql.ErrNoRows):
+		logging.TraceContext(ctx, "store: thread summary", "account", accountID, "id", threadID, "hit", false)
 		return "", "", false, nil
 	case scanErr != nil:
+		logging.TraceContext(ctx, "store: thread summary", "account", accountID, "id", threadID, "err", scanErr)
 		return "", "", false, fmt.Errorf("query thread summary: %w", scanErr)
 	}
+	logging.TraceContext(ctx, "store: thread summary", "account", accountID, "id", threadID, "hit", true, "fingerprint", fingerprint)
 	return fingerprint, summary, true, nil
 }

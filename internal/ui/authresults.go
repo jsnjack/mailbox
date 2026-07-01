@@ -1,6 +1,24 @@
 package ui
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/jsnjack/mailbox/internal/logging"
+)
+
+// authLevelName maps an authLevel to a colour-coded label for trace logs.
+func authLevelName(l authLevel) string {
+	switch l {
+	case authFail:
+		return "red"
+	case authPartial:
+		return "amber"
+	case authPass:
+		return "green"
+	default:
+		return "unknown"
+	}
+}
 
 // authLevel classifies a message's sender-authentication outcome.
 type authLevel int
@@ -22,6 +40,12 @@ type authVerdict struct {
 // receiving server — Gmail — computed for SPF/DKIM/DMARC) into a sender-
 // authenticity verdict. An empty/inconclusive header yields authUnknown.
 func parseAuthResults(header string) authVerdict {
+	v := parseAuthResultsInner(header)
+	logging.Trace("ui: auth-results parsed", "verdict", authLevelName(v.level), "detail", v.detail, "header", logging.Body(header))
+	return v
+}
+
+func parseAuthResultsInner(header string) authVerdict {
 	spf := authMethodResult(header, "spf")
 	dkim := authMethodResult(header, "dkim")
 	dmarc := authMethodResult(header, "dmarc")

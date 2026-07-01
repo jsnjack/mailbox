@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/jsnjack/mailbox/internal/logging"
 )
 
 // WindowState is the persisted main-window geometry, remembered across launches.
@@ -33,14 +35,18 @@ func LoadWindowState() (WindowState, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
+			logging.Trace("config: load window state (defaults)", "path", path)
 			return WindowState{}, nil
 		}
+		logging.Trace("config: load window state failed", "path", path, "err", err)
 		return WindowState{}, fmt.Errorf("read window state: %w", err)
 	}
 	var s WindowState
 	if err := json.Unmarshal(data, &s); err != nil {
+		logging.Trace("config: load window state corrupt (ignored)", "path", path, "err", err)
 		return WindowState{}, nil // ignore a corrupt state file
 	}
+	logging.Trace("config: load window state", "path", path, "width", s.Width, "height", s.Height)
 	return s, nil
 }
 
@@ -58,7 +64,9 @@ func SaveWindowState(s WindowState) error {
 		return fmt.Errorf("marshal window state: %w", err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "window.json"), data, 0o600); err != nil {
+		logging.Trace("config: save window state failed", "err", err)
 		return fmt.Errorf("write window state: %w", err)
 	}
+	logging.Trace("config: save window state", "width", s.Width, "height", s.Height)
 	return nil
 }

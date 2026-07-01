@@ -4,7 +4,11 @@
 // onto the GTK main loop). It imports no GTK code.
 package syncer
 
-import "sync"
+import (
+	"sync"
+
+	"github.com/jsnjack/mailbox/internal/logging"
+)
 
 // ChangeKind identifies what changed so a subscriber can react.
 type ChangeKind int
@@ -25,6 +29,29 @@ const (
 	// SendStateChanged means an outbox item was sent or its state changed.
 	SendStateChanged
 )
+
+// kindName returns a human-readable name for a ChangeKind, used only in trace
+// logs so a published change reads as its name rather than an opaque int.
+func kindName(k ChangeKind) string {
+	switch k {
+	case MessageUpserted:
+		return "MessageUpserted"
+	case MessageDeleted:
+		return "MessageDeleted"
+	case LabelsSynced:
+		return "LabelsSynced"
+	case BackfillProgress:
+		return "BackfillProgress"
+	case BackfillComplete:
+		return "BackfillComplete"
+	case AuthExpired:
+		return "AuthExpired"
+	case SendStateChanged:
+		return "SendStateChanged"
+	default:
+		return "unknown"
+	}
+}
 
 // Change is a lightweight notification carrying ids only; subscribers re-query
 // the store for details so the channel stays cheap and non-blocking.
@@ -58,12 +85,14 @@ func (h *Hub) Subscribe() (<-chan Change, func()) {
 	h.next++
 	ch := make(chan Change, 128)
 	h.subs[id] = ch
+	logging.Trace("syncer: hub subscribe", "sub", id, "subs", len(h.subs))
 	return ch, func() {
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		if c, ok := h.subs[id]; ok {
 			close(c)
 			delete(h.subs, id)
+			logging.Trace("syncer: hub unsubscribe", "sub", id, "subs", len(h.subs))
 		}
 	}
 }
@@ -74,6 +103,7 @@ func (h *Hub) Subscribe() (<-chan Change, func()) {
 func (h *Hub) Publish(c Change) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	logging.Trace("syncer: hub publish", "kind", kindName(c.Kind), "account", c.AccountID, "id", c.GmailID, "thread", c.ThreadID, "count", c.Count, "subs", len(h.subs))
 	for _, ch := range h.subs {
 		select {
 		case ch <- c:

@@ -8,6 +8,7 @@ import (
 	"golang.org/x/net/html"
 	"golang.org/x/net/publicsuffix"
 
+	"github.com/jsnjack/mailbox/internal/logging"
 	"github.com/jsnjack/mailbox/internal/model"
 )
 
@@ -23,12 +24,16 @@ var bareHost = regexp.MustCompile(`^[A-Za-z0-9\-]+(\.[A-Za-z0-9\-]+)*\.[A-Za-z]{
 // authentication.
 func phishingWarnings(m model.Message, htmlBody string) []string {
 	var out []string
-	if senderNameSpoofed(m.FromName, m.FromAddr) {
+	spoofed := senderNameSpoofed(m.FromName, m.FromAddr)
+	if spoofed {
 		out = append(out, "The sender's name looks like a different address than who actually sent it.")
 	}
-	if hasDeceptiveLink(htmlBody) {
+	deceptive := hasDeceptiveLink(htmlBody)
+	if deceptive {
 		out = append(out, "A link's text shows a different site than where it actually goes.")
 	}
+	logging.Trace("ui: phishing heuristics", "id", m.GmailID, "from_name", m.FromName, "from_addr", m.FromAddr,
+		"name_spoofed", spoofed, "deceptive_link", deceptive, "warnings", len(out))
 	return out
 }
 

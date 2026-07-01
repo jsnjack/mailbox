@@ -12,10 +12,13 @@ import (
 	"strconv"
 	"strings"
 
+	"time"
+
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapclient"
 	gomail "github.com/emersion/go-message/mail"
 	"github.com/emersion/go-smtp"
+	"github.com/jsnjack/mailbox/internal/logging"
 	"github.com/jsnjack/mailbox/internal/model"
 )
 
@@ -63,6 +66,7 @@ func uidSetOf(uids []imap.UID) imap.UIDSet {
 // changes a message's UID, so the optimistic local change is reconciled by the
 // next incremental (old id vanishes from the source, new id appears in dest).
 func (b *Backend) ApplyLabels(ctx context.Context, ids []string, add, remove []string) error {
+	logging.TraceContext(ctx, "imapbackend: apply labels", "account", b.cfg.Email, "ids", len(ids), "add", add, "remove", remove)
 	return b.withConn(func(c *conn) error {
 		if err := b.ensureFolders(c); err != nil {
 			return err
@@ -83,6 +87,7 @@ func (b *Backend) ApplyLabels(ctx context.Context, ids []string, add, remove []s
 		}
 
 		dest := b.moveDest(add, remove)
+		logging.Trace("imapbackend: apply labels resolved", "addFlags", addFlags, "delFlags", delFlags, "moveDest", dest)
 
 		for folder, g := range groupByFolder(ids) {
 			sel, err := c.reselect(folder, false) // fresh SELECT: a move is destructive
@@ -90,20 +95,24 @@ func (b *Backend) ApplyLabels(ctx context.Context, ids []string, add, remove []s
 				return err
 			}
 			if sel.UIDValidity != g.uidv {
+				logging.Trace("imapbackend: apply labels skip stale folder", "folder", folder, "uidvalidity", g.uidv, "current", sel.UIDValidity)
 				continue // stale ids; the next incremental reconciles
 			}
 			set := uidSetOf(g.uids)
 			if len(addFlags) > 0 {
+				logging.Trace("imapbackend: store +flags", "folder", folder, "n", len(g.uids), "flags", addFlags)
 				if err := c.cl.Store(set, &imap.StoreFlags{Op: imap.StoreFlagsAdd, Flags: addFlags}, nil).Close(); err != nil {
 					return fmt.Errorf("imap store +flags: %w", err)
 				}
 			}
 			if len(delFlags) > 0 {
+				logging.Trace("imapbackend: store -flags", "folder", folder, "n", len(g.uids), "flags", delFlags)
 				if err := c.cl.Store(set, &imap.StoreFlags{Op: imap.StoreFlagsDel, Flags: delFlags}, nil).Close(); err != nil {
 					return fmt.Errorf("imap store -flags: %w", err)
 				}
 			}
 			if dest != "" && dest != folder {
+				logging.Trace("imapbackend: move", "folder", folder, "dest", dest, "n", len(g.uids))
 				if _, err := c.cl.Move(set, dest).Wait(); err != nil {
 					return fmt.Errorf("imap move to %q: %w", dest, err)
 				}
@@ -136,6 +145,7 @@ func (b *Backend) moveDest(add, remove []string) string {
 
 // Delete permanently removes messages: \Deleted + EXPUNGE per folder.
 func (b *Backend) Delete(ctx context.Context, ids []string) error {
+	logging.TraceContext(ctx, "imapbackend: delete", "account", b.cfg.Email, "ids", len(ids))
 	return b.withConn(func(c *conn) error {
 		for folder, g := range groupByFolder(ids) {
 			sel, err := c.reselect(folder, false) // fresh SELECT: EXPUNGE is irreversible
@@ -143,9 +153,11 @@ func (b *Backend) Delete(ctx context.Context, ids []string) error {
 				return err
 			}
 			if sel.UIDValidity != g.uidv {
+				logging.Trace("imapbackend: delete skip stale folder", "folder", folder, "uidvalidity", g.uidv, "current", sel.UIDValidity)
 				continue
 			}
 			set := uidSetOf(g.uids)
+			logging.Trace("imapbackend: store \\Deleted + expunge", "folder", folder, "n", len(g.uids))
 			if err := c.cl.Store(set, &imap.StoreFlags{Op: imap.StoreFlagsAdd, Flags: []imap.Flag{imap.FlagDeleted}}, nil).Close(); err != nil {
 				return fmt.Errorf("imap store \\Deleted: %w", err)
 			}
@@ -161,11 +173,13 @@ func (b *Backend) Delete(ctx context.Context, ids []string) error {
 // go, else a plain EXPUNGE of the folder's \Deleted set.
 func expunge(cl *imapclient.Client, set imap.UIDSet) error {
 	if cl.Caps().Has(imap.CapUIDPlus) {
+		logging.Trace("imapbackend: expunge", "cmd", "UID EXPUNGE")
 		if _, err := cl.UIDExpunge(set).Collect(); err != nil {
 			return fmt.Errorf("imap uid expunge: %w", err)
 		}
 		return nil
 	}
+	logging.Trace("imapbackend: expunge", "cmd", "EXPUNGE (no UIDPLUS)")
 	if _, err := cl.Expunge().Collect(); err != nil {
 		return fmt.Errorf("imap expunge: %w", err)
 	}
@@ -176,6 +190,7 @@ func expunge(cl *imapclient.Client, set imap.UIDSet) error {
 // delivery doesn't file it in IMAP the way Gmail's API does). The returned id is
 // empty — the Sent copy surfaces through the next incremental.
 func (b *Backend) Send(ctx context.Context, raw []byte, threadID string) (string, error) {
+	logging.TraceContext(ctx, "imapbackend: send", "account", b.cfg.Email, "bytes", len(raw), "threadID", threadID)
 	from, to, cleaned, err := smtpEnvelope(raw)
 	if err != nil {
 		return "", err
@@ -183,9 +198,12 @@ func (b *Backend) Send(ctx context.Context, raw []byte, threadID string) (string
 	if len(to) == 0 {
 		return "", fmt.Errorf("imap send: no recipients")
 	}
+	logging.Trace("imapbackend: send envelope", "from", from, "to", to, "recipients", len(to))
 	if err := b.smtpSend(from, to, cleaned); err != nil {
+		logging.TraceContext(ctx, "imapbackend: send failed", "account", b.cfg.Email, "err", err)
 		return "", err
 	}
+	logging.TraceContext(ctx, "imapbackend: send ok", "account", b.cfg.Email)
 	b.appendToSent(cleaned) // best-effort; a failure just means no local Sent copy yet
 	return "", nil
 }
@@ -241,8 +259,10 @@ func stripHeader(raw []byte, name string) []byte {
 }
 
 func (b *Backend) smtpSend(from string, to []string, msg []byte) error {
+	start := time.Now()
 	addr := net.JoinHostPort(b.cfg.SMTPHost, strconv.Itoa(b.cfg.SMTPPort))
 	tlsCfg := &tls.Config{ServerName: b.cfg.SMTPHost}
+	logging.Trace("imapbackend: smtp dial", "addr", addr, "security", string(b.cfg.SMTPSecurity))
 	// Dial raw + count (below TLS), then build the SMTP client over the wrapped
 	// conn so SMTP traffic is included in the byte stats.
 	raw, err := net.Dial("tcp", addr)
@@ -272,11 +292,14 @@ func (b *Backend) smtpSend(from string, to []string, msg []byte) error {
 		return err
 	}
 	if err := c.Auth(sc); err != nil {
+		logging.Trace("imapbackend: smtp auth failed", "addr", addr, "err", err)
 		return fmt.Errorf("smtp auth: %w", err)
 	}
 	if err := c.SendMail(from, to, bytes.NewReader(msg)); err != nil {
+		logging.Trace("imapbackend: smtp sendmail failed", "addr", addr, "dur", time.Since(start), "err", err)
 		return fmt.Errorf("smtp send: %w", err)
 	}
+	logging.Trace("imapbackend: smtp sent", "addr", addr, "bytes", len(msg), "recipients", len(to), "dur", time.Since(start))
 	return nil
 }
 
@@ -290,7 +313,12 @@ func (b *Backend) appendToSent(msg []byte) {
 		sent := b.labelToFolder[model.LabelSent]
 		b.folderMu.Unlock()
 		if sent != "" {
-			_, _ = appendMessage(c.cl, sent, msg, imap.FlagSeen)
+			logging.Trace("imapbackend: append to sent", "folder", sent, "bytes", len(msg))
+			if _, err := appendMessage(c.cl, sent, msg, imap.FlagSeen); err != nil {
+				logging.Trace("imapbackend: append to sent failed", "folder", sent, "err", err)
+			}
+		} else {
+			logging.Trace("imapbackend: append to sent skipped (no Sent folder)", "account", b.cfg.Email)
 		}
 		return nil
 	})
@@ -312,6 +340,7 @@ func appendMessage(cl *imapclient.Client, mailbox string, msg []byte, flags ...i
 // SaveDraft APPENDs raw to the Drafts folder (with \Draft) and returns the new
 // draft's provider id (empty when the server lacks UIDPLUS, so no stable id).
 func (b *Backend) SaveDraft(ctx context.Context, raw []byte, threadID string) (string, error) {
+	logging.TraceContext(ctx, "imapbackend: save draft", "account", b.cfg.Email, "bytes", len(raw), "threadID", threadID)
 	var draftID string
 	err := b.withConn(func(c *conn) error {
 		if err := b.ensureFolders(c); err != nil {
@@ -323,6 +352,7 @@ func (b *Backend) SaveDraft(ctx context.Context, raw []byte, threadID string) (s
 		if drafts == "" {
 			return fmt.Errorf("imap: no Drafts folder")
 		}
+		logging.Trace("imapbackend: append draft", "folder", drafts, "bytes", len(raw))
 		ad, err := appendMessage(c.cl, drafts, raw, imap.FlagDraft)
 		if err != nil {
 			return fmt.Errorf("imap append draft: %w", err)
@@ -330,6 +360,7 @@ func (b *Backend) SaveDraft(ctx context.Context, raw []byte, threadID string) (s
 		if ad != nil && ad.UID != 0 {
 			draftID = msgID(drafts, ad.UIDValidity, ad.UID)
 		}
+		logging.Trace("imapbackend: save draft ok", "id", draftID)
 		return nil
 	})
 	return draftID, err
@@ -361,6 +392,7 @@ func (b *Backend) FindDraftID(ctx context.Context, id string) (string, error) {
 // FetchAttachment re-fetches the message body and returns the bytes of the
 // attachment at the 1-based ordinal recorded during parsing.
 func (b *Backend) FetchAttachment(ctx context.Context, msgIDArg, attID string) ([]byte, error) {
+	logging.TraceContext(ctx, "imapbackend: fetch attachment", "id", msgIDArg, "attID", attID)
 	raw, err := b.fetchRaw(msgIDArg)
 	if err != nil {
 		return nil, err
@@ -369,7 +401,13 @@ func (b *Backend) FetchAttachment(ctx context.Context, msgIDArg, attID string) (
 	if err != nil {
 		return nil, fmt.Errorf("imap: bad attachment id %q", attID)
 	}
-	return attachmentBytes(raw, idx)
+	data, err := attachmentBytes(raw, idx)
+	if err != nil {
+		logging.TraceContext(ctx, "imapbackend: fetch attachment failed", "id", msgIDArg, "attID", attID, "err", err)
+		return nil, err
+	}
+	logging.TraceContext(ctx, "imapbackend: fetch attachment ok", "id", msgIDArg, "attID", attID, "bytes", len(data))
+	return data, nil
 }
 
 // attachmentBytes returns the idx-th attachment part's decoded bytes.

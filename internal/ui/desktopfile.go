@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/jsnjack/mailbox/internal/logging"
 )
 
 // desktopFileName is <app-id>.desktop. GNOME maps a GApplication's id to an
@@ -44,8 +46,10 @@ StartupNotify=true
 // never shadows or clobbers a real install. Best-effort: failures are logged and
 // ignored — they only cost notifications, not functionality.
 func ensureDesktopFile() {
+	logging.Trace("ui: ensure desktop file", "name", desktopFileName)
 	for _, dir := range systemAppDirs() {
 		if fileExists(filepath.Join(dir, desktopFileName)) {
+			logging.Trace("ui: desktop file skip", "reason", "system entry exists", "dir", dir)
 			return // a packaged install already handles notifications
 		}
 	}
@@ -56,9 +60,11 @@ func ensureDesktopFile() {
 		// older self-install still becomes the default mail handler. A user-edited
 		// entry (without our marker) is never touched.
 		if !isStaleOwnEntry(existing) {
+			logging.Trace("ui: desktop file skip", "reason", "user entry exists", "path", dest)
 			return
 		}
 		slog.Info("ui: refreshing stale user desktop entry (adds mailto handler)", "path", dest)
+		logging.Trace("ui: desktop file refresh stale own entry", "path", dest)
 	}
 	exe, err := os.Executable()
 	if err != nil {
@@ -75,13 +81,19 @@ func ensureDesktopFile() {
 		return
 	}
 	slog.Info("ui: installed user desktop entry so notifications resolve", "path", dest)
+	logging.Trace("ui: desktop file installed", "path", dest, "exec", exe)
 	// Rebuild the user mimeinfo cache so the mailto registration takes effect
 	// (otherwise the app won't show under Default Apps → Mail until the next login
 	// or a manual refresh). Best-effort; the binary may not exist on minimal hosts.
 	if bin, err := exec.LookPath("update-desktop-database"); err == nil {
 		if err := exec.Command(bin, filepath.Dir(dest)).Run(); err != nil {
 			slog.Debug("ui: update-desktop-database", "err", err)
+			logging.Trace("ui: update-desktop-database failed", "err", err)
+		} else {
+			logging.Trace("ui: ran update-desktop-database", "dir", filepath.Dir(dest))
 		}
+	} else {
+		logging.Trace("ui: update-desktop-database not found")
 	}
 }
 

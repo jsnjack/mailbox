@@ -89,6 +89,7 @@ func loginWithConfig(ctx context.Context, conf *oauth2.Config, authOpts ...oauth
 	verifier := oauth2.GenerateVerifier()
 	opts := append([]oauth2.AuthCodeOption{oauth2.S256ChallengeOption(verifier)}, authOpts...)
 	authURL := conf.AuthCodeURL(state, opts...)
+	logging.TraceContext(ctx, "auth: oauth loopback start", "redirect", conf.RedirectURL, "scopes", conf.Scopes)
 
 	type result struct {
 		code string
@@ -98,16 +99,20 @@ func loginWithConfig(ctx context.Context, conf *oauth2.Config, authOpts ...oauth
 	mux := http.NewServeMux()
 	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
+		logging.TraceContext(ctx, "auth: oauth callback received")
 		if e := q.Get("error"); e != "" {
 			http.Error(w, "Authorization failed. You can close this tab.", http.StatusBadRequest)
+			logging.TraceContext(ctx, "auth: oauth authorization denied", "reason", e)
 			resCh <- result{err: fmt.Errorf("authorization denied: %s", e)}
 			return
 		}
 		if q.Get("state") != state {
 			http.Error(w, "State mismatch. You can close this tab.", http.StatusBadRequest)
+			logging.TraceContext(ctx, "auth: oauth state mismatch")
 			resCh <- result{err: errors.New("state mismatch (possible CSRF)")}
 			return
 		}
+		logging.TraceContext(ctx, "auth: oauth state validated", "hasCode", q.Get("code") != "")
 		_, _ = w.Write([]byte("<html><body>Signed in. You can close this tab and return to mailbox.</body></html>"))
 		resCh <- result{code: q.Get("code")}
 	})
@@ -115,7 +120,7 @@ func loginWithConfig(ctx context.Context, conf *oauth2.Config, authOpts ...oauth
 	srv := &http.Server{Handler: mux}
 	go func() {
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Default().Log(ctx, logging.LevelTrace, "loopback server", "err", err)
+			logging.TraceContext(ctx, "auth: loopback server", "err", err)
 		}
 	}()
 	defer func() { _ = srv.Shutdown(context.Background()) }()
@@ -127,6 +132,7 @@ func loginWithConfig(ctx context.Context, conf *oauth2.Config, authOpts ...oauth
 
 	select {
 	case <-ctx.Done():
+		logging.TraceContext(ctx, "auth: oauth loopback canceled", "err", ctx.Err())
 		return nil, ctx.Err()
 	case res := <-resCh:
 		if res.err != nil {
@@ -134,8 +140,10 @@ func loginWithConfig(ctx context.Context, conf *oauth2.Config, authOpts ...oauth
 		}
 		tok, err := conf.Exchange(ctx, res.code, oauth2.VerifierOption(verifier))
 		if err != nil {
+			logging.TraceContext(ctx, "auth: oauth code exchange failed", "err", err)
 			return nil, fmt.Errorf("exchange authorization code: %w", err)
 		}
+		logging.TraceContext(ctx, "auth: oauth code exchange ok", "expiry", tok.Expiry, "tokenType", tok.TokenType, "hasRefresh", tok.RefreshToken != "")
 		return tok, nil
 	}
 }

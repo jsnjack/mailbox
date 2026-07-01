@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/jsnjack/mailbox/internal/logging"
 )
 
 // ViewState remembers the last-used folder and unread filter so the app reopens
@@ -36,14 +38,18 @@ func LoadViewState() (ViewState, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
+			logging.Trace("config: load view state (defaults)", "path", path)
 			return ViewState{}, nil
 		}
+		logging.Trace("config: load view state failed", "path", path, "err", err)
 		return ViewState{}, fmt.Errorf("read view state: %w", err)
 	}
 	var s ViewState
 	if err := json.Unmarshal(data, &s); err != nil {
+		logging.Trace("config: load view state corrupt (ignored)", "path", path, "err", err)
 		return ViewState{}, nil // ignore a corrupt file
 	}
+	logging.Trace("config: load view state", "path", path, "folder", s.Folder, "unreadOnly", s.UnreadOnly, "zoom", s.Zoom, "composeW", s.ComposeWidth, "composeH", s.ComposeHeight)
 	return s, nil
 }
 
@@ -61,7 +67,9 @@ func SaveViewState(s ViewState) error {
 		return fmt.Errorf("marshal view state: %w", err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "view.json"), data, 0o600); err != nil {
+		logging.Trace("config: save view state failed", "err", err)
 		return fmt.Errorf("write view state: %w", err)
 	}
+	logging.Trace("config: save view state", "folder", s.Folder, "unreadOnly", s.UnreadOnly, "zoom", s.Zoom, "composeW", s.ComposeWidth, "composeH", s.ComposeHeight)
 	return nil
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/jsnjack/mailbox/internal/backend"
 	"github.com/jsnjack/mailbox/internal/config"
 	"github.com/jsnjack/mailbox/internal/dispatch"
+	"github.com/jsnjack/mailbox/internal/logging"
 	"github.com/jsnjack/mailbox/internal/model"
 )
 
@@ -30,8 +31,14 @@ type addAccountPrefill struct {
 // existing account (same email → its cache is preserved).
 func (w *window) openAddAccount(prefill *addAccountPrefill) {
 	if w.deps.AddIMAPAccount == nil {
+		logging.Trace("ui: add account unavailable")
 		w.toast("Adding accounts isn't available")
 		return
+	}
+	if prefill != nil {
+		logging.Trace("ui: open add account", "reconnect", prefill.reconnect, "email", prefill.email, "preset", prefill.presetID)
+	} else {
+		logging.Trace("ui: open add account", "reconnect", false)
 	}
 
 	dialog := adw.NewPreferencesDialog()
@@ -112,6 +119,7 @@ func (w *window) openAddAccount(prefill *addAccountPrefill) {
 			h += "  " + p.URL
 		}
 		hint.SetText(h)
+		logging.Trace("ui: add account preset chosen", "preset", p.ID, "auth", p.Auth, "imap_host", p.IMAPHost, "smtp_host", p.SMTPHost, "oauth", isOAuth)
 	}
 	if prefill != nil {
 		emailRow.SetText(prefill.email)
@@ -156,14 +164,18 @@ func (w *window) openAddAccount(prefill *addAccountPrefill) {
 
 	// finish persists + starts the account, registers it in the switcher, and closes.
 	finish := func(acct config.IMAPAccount, secret string) {
+		logging.Trace("ui: add account persist", "email", acct.Email, "auth", acct.Auth,
+			"imap_host", acct.IMAPHost, "smtp_host", acct.SMTPHost, "secret_len", len(secret))
 		go func() {
 			id, err := w.deps.AddIMAPAccount(context.Background(), acct, secret)
 			dispatch.Main(func() {
 				if err != nil {
+					logging.Trace("ui: add account persist failed", "email", acct.Email, "err", err)
 					status.SetText("Couldn't add account: " + friendlyConnError(err))
 					addBtn.SetSensitive(true)
 					return
 				}
+				logging.Trace("ui: add account persisted", "email", acct.Email, "id", id)
 				dialog.Close()
 				atype := model.AccountIMAP
 				if acct.Auth == config.AuthGmailREST {
@@ -181,12 +193,14 @@ func (w *window) openAddAccount(prefill *addAccountPrefill) {
 			status.SetText("Enter your email address.")
 			return
 		}
+		logging.Trace("ui: add account test&add clicked", "email", acct.Email, "auth", p.Auth)
 		addBtn.SetSensitive(false)
 
 		// OAuth providers (Gmail REST, Gmail-IMAP, Outlook): sign in via the
 		// browser to obtain a refresh token, then add.
 		if p.Auth == config.AuthGmailREST || p.Auth == config.AuthGoogle || p.Auth == config.AuthMicrosoft {
 			if oauthDone {
+				logging.Trace("ui: add account oauth reuse token", "email", acct.Email, "token_present", oauthToken != "")
 				if oauthEmail != "" {
 					acct.Email, acct.Username = oauthEmail, oauthEmail
 				}
@@ -194,14 +208,17 @@ func (w *window) openAddAccount(prefill *addAccountPrefill) {
 				return
 			}
 			status.SetText("Opening your browser to sign in…")
+			logging.Trace("ui: add account oauth begin", "auth", p.Auth, "email", acct.Email)
 			go func() {
 				email, tok, err := w.deps.OAuthConnect(context.Background(), p.Auth)
 				dispatch.Main(func() {
 					if err != nil {
+						logging.Trace("ui: add account oauth failed", "auth", p.Auth, "err", err)
 						status.SetText("Sign-in failed: " + err.Error())
 						addBtn.SetSensitive(true)
 						return
 					}
+					logging.Trace("ui: add account oauth ok", "auth", p.Auth, "verified_email", email, "token_present", tok != "", "token_len", len(tok))
 					// Prefer the address actually signed in (Gmail reports it via the
 					// profile) over whatever was typed.
 					if email != "" {
@@ -222,14 +239,17 @@ func (w *window) openAddAccount(prefill *addAccountPrefill) {
 		}
 		pw := passwordRow.Text()
 		status.SetText("Testing connection…")
+		logging.Trace("ui: add account test connection", "email", acct.Email, "imap_host", acct.IMAPHost, "password_len", len(pw))
 		go func() {
 			err := w.deps.TestIMAPAccount(context.Background(), acct, pw)
 			dispatch.Main(func() {
 				if err != nil {
+					logging.Trace("ui: add account test failed", "email", acct.Email, "err", err)
 					status.SetText("Connection failed: " + friendlyConnError(err))
 					addBtn.SetSensitive(true)
 					return
 				}
+				logging.Trace("ui: add account test ok", "email", acct.Email)
 				finish(acct, pw)
 			})
 		}()
@@ -269,6 +289,7 @@ func friendlyConnError(err error) string {
 // in again (OAuth) or re-enters the app password. Re-adding the same email
 // preserves the account's cached mail (the sync cursor is kept).
 func (w *window) reconnectAccount(a AccountInfo) {
+	logging.Trace("ui: reconnect account", "id", a.ID, "email", a.Email, "type", a.Type)
 	w.openAddAccount(&addAccountPrefill{
 		email:     a.Email,
 		presetID:  presetForReconnect(a),

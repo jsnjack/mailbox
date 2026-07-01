@@ -6,6 +6,8 @@ import (
 	"unicode"
 
 	"golang.org/x/net/html"
+
+	"github.com/jsnjack/mailbox/internal/logging"
 )
 
 // trackerSrcPatterns are URL substrings of well-known email open-tracking
@@ -37,6 +39,7 @@ var trackerSrcPatterns = []string{
 func cleanEmailHTML(htmlStr string) (string, int) {
 	doc, err := html.Parse(strings.NewReader(htmlStr))
 	if err != nil {
+		logging.Trace("ui: clean email html parse failed", "err", err, "bytes", len(htmlStr))
 		return htmlStr, 0
 	}
 	removed := 0
@@ -61,8 +64,10 @@ func cleanEmailHTML(htmlStr string) (string, int) {
 	walk(doc, false)
 
 	if removed == 0 && len(quotes) == 0 {
+		logging.Trace("ui: clean email html unchanged", "bytes", len(htmlStr))
 		return htmlStr, 0 // unchanged; avoid re-serializing
 	}
+	logging.Trace("ui: clean email html", "trackers", removed, "quoted_blocks", len(quotes))
 	for _, bq := range quotes {
 		parent := bq.Parent
 		if parent == nil {
@@ -152,6 +157,7 @@ func findBody(n *html.Node) *html.Node {
 func translateHTMLText(htmlStr string, translate func([]string) ([]string, error)) (string, error) {
 	doc, err := html.Parse(strings.NewReader(htmlStr))
 	if err != nil {
+		logging.Trace("ui: translate html parse failed", "err", err)
 		return "", err
 	}
 
@@ -176,12 +182,16 @@ func translateHTMLText(htmlStr string, translate func([]string) ([]string, error
 	walk(doc)
 
 	if len(texts) == 0 {
+		logging.Trace("ui: translate html no text segments")
 		return htmlStr, nil
 	}
+	logging.Trace("ui: translate html segments", "n", len(texts))
 	translated, err := translate(texts)
 	if err != nil {
+		logging.Trace("ui: translate html failed", "err", err, "segments", len(texts))
 		return "", err
 	}
+	logging.Trace("ui: translate html done", "segments", len(translated))
 	for i, n := range nodes {
 		if i >= len(translated) || strings.TrimSpace(translated[i]) == "" {
 			continue // length mismatch or empty → keep the original text

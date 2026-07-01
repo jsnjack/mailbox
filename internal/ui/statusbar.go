@@ -11,6 +11,7 @@ import (
 	"github.com/diamondburned/gotk4/pkg/pango"
 	"github.com/jsnjack/mailbox/internal/activity"
 	"github.com/jsnjack/mailbox/internal/dispatch"
+	"github.com/jsnjack/mailbox/internal/logging"
 )
 
 // statusLogCap bounds how many recent activity lines the log popover keeps.
@@ -134,6 +135,7 @@ func (w *window) noteAIResult(note string) {
 		}
 		if w.aiFailing != failed {
 			w.aiFailing = failed
+			logging.Trace("ui: ai provider health changed", "failing", failed, "note", note)
 			if w.aiWarnIcon != nil {
 				w.aiWarnIcon.SetVisible(failed)
 			}
@@ -163,6 +165,7 @@ func (w *window) onActivity(e activity.Event) {
 		w.statusActive = append(w.statusActive, e.Label)
 		w.statusStarted[e.Label] = time.Now()
 		w.appendLogLine("▸ " + e.Label)
+		logging.Trace("ui: activity start", "op", e.Op, "label", e.Label, "active", len(w.statusActive))
 	case activity.Progress:
 		if e.Total > 0 {
 			w.statusProgText[e.Label] = fmt.Sprintf("%d/%d", e.Done, e.Total)
@@ -179,6 +182,11 @@ func (w *window) onActivity(e activity.Event) {
 			line += " · " + e.Note
 		}
 		w.appendLogLine("✓ " + line)
+		var dur time.Duration
+		if t, ok := w.statusStarted[e.Label]; ok {
+			dur = time.Since(t)
+		}
+		logging.Trace("ui: activity done", "op", e.Op, "label", e.Label, "dur", dur, "note", e.Note)
 		delete(w.statusStarted, e.Label)
 		delete(w.statusProgText, e.Label)
 		if e.Op == "sync" {
@@ -263,6 +271,8 @@ func (w *window) refreshStatusStats() {
 	if s.CacheBytes > 0 {
 		lines = append(lines, fmt.Sprintf("Attachments: %s", humanBytes(s.CacheBytes)))
 	}
+	logging.Trace("ui: refresh session stats", "requests", s.Requests, "quota", s.QuotaUnits,
+		"bytes_in", s.BytesIn, "bytes_out", s.BytesOut, "messages", s.Messages, "db_bytes", s.DBBytes, "cache_bytes", s.CacheBytes)
 	w.statusStatsLabel.SetText(strings.Join(lines, "\n"))
 }
 

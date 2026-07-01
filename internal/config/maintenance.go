@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/jsnjack/mailbox/internal/logging"
 )
 
 // DBSize returns the size in bytes of the SQLite database file (the main file,
@@ -35,18 +37,24 @@ func ClearAttachmentsCache() (int64, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
+			logging.Trace("config: clear attachments cache (none)", "path", dir)
 			return 0, nil
 		}
+		logging.Trace("config: clear attachments cache read failed", "path", dir, "err", err)
 		return 0, fmt.Errorf("read attachments dir: %w", err)
 	}
 	var freed int64
+	removed := 0
 	for _, e := range entries {
 		if info, err := e.Info(); err == nil {
 			freed += info.Size()
 		}
 		if err := os.RemoveAll(filepath.Join(dir, e.Name())); err != nil {
+			logging.Trace("config: clear attachments cache remove failed", "path", dir, "removed", removed, "bytes", freed, "err", err)
 			return freed, fmt.Errorf("remove cached attachment: %w", err)
 		}
+		removed++
 	}
+	logging.Trace("config: clear attachments cache", "path", dir, "removed", removed, "bytes", freed)
 	return freed, nil
 }

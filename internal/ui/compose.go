@@ -20,6 +20,7 @@ import (
 	"github.com/jsnjack/mailbox/internal/ai"
 	"github.com/jsnjack/mailbox/internal/config"
 	"github.com/jsnjack/mailbox/internal/dispatch"
+	"github.com/jsnjack/mailbox/internal/logging"
 	"github.com/jsnjack/mailbox/internal/model"
 )
 
@@ -39,8 +40,10 @@ func (w *window) composeFromMailto(uri string) {
 	msg, ok := parseMailto(uri)
 	if !ok {
 		slog.Debug("ui: ignoring non-mailto open", "uri", uri)
+		logging.Trace("ui: compose from mailto ignored", "uri", uri)
 		return
 	}
+	logging.Trace("ui: compose from mailto", "uri", uri, "to", msg.To, "subject", msg.Subject)
 	w.openCompose(msg, "", "New message")
 }
 
@@ -81,12 +84,17 @@ func newMsgPresets() []aiPreset {
 
 func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title string, addSignature bool, auto ...composeAutoAI) {
 	if w.deps.Send == nil {
+		logging.Trace("ui: open compose skipped", "reason", "no sender")
 		return
 	}
+	logging.Trace("ui: open compose", "title", title, "to", init.To, "subject", init.Subject,
+		"draft_id", init.DraftID, "in_reply_to", init.InReplyTo, "thread_id", init.ThreadID,
+		"is_reply", aiContext != "", "attachments", len(init.Attachments), "add_signature", addSignature)
 
 	// Append the configured default signature: below the cursor area for a new
 	// message, between the reply area and the quoted history for a reply/forward.
 	if addSignature {
+		logging.Trace("ui: compose signature resolved", "sig_len", len(w.signature))
 		init.Body = composeBodyWithSignature(init.Body, w.signature)
 	}
 
@@ -201,12 +209,14 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 			subjBtn.SetSensitive(false)
 			status.SetVisible(true)
 			status.SetText("Generating subject…")
+			logging.Trace("ui: ai generate subject", "body_len", len(body))
 			done := w.aiActivity("Generating subject")
 			go func() {
 				subject, err := w.deps.Assistant.GenerateSubject(aiCtx, body)
 				dispatch.Main(func() {
 					done(doneErr(err))
 					subjBtn.SetSensitive(true)
+					logging.Trace("ui: ai generate subject done", "subject", subject, "err", err)
 					if err != nil || subject == "" {
 						status.SetText("Couldn't generate a subject")
 						return
@@ -335,17 +345,20 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 		confirm.ConnectResponse(func(response string) {
 			switch response {
 			case "discard":
+				logging.Trace("ui: compose discard on close")
 				sent = true // bypass the guard on the programmatic close below
 				cancelAI()
 				win.Close()
 			case "save":
 				msg := gather()
 				acctID := selectedAccount().ID
+				logging.Trace("ui: compose save draft on close", "account", acctID, "to", msg.To, "subject", msg.Subject)
 				sent = true
 				cancelAI()
 				go func() {
 					if err := w.deps.SaveDraft(context.Background(), acctID, msg); err != nil {
 						slog.Warn("ui: save draft on close", "err", err)
+						logging.Trace("ui: compose save draft on close failed", "err", err)
 					}
 				}()
 				win.Close()
@@ -371,6 +384,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 				data, err := os.ReadFile(path)
 				if err != nil {
 					slog.Warn("ui: read attachment", "path", path, "err", err)
+					logging.Trace("ui: compose attachment read failed", "path", path, "err", err)
 					return
 				}
 				name := filepath.Base(path)
@@ -380,6 +394,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 				}
 				dispatch.Main(func() {
 					attachments = append(attachments, model.OutgoingAttachment{Filename: name, MimeType: mtype, Data: data})
+					logging.Trace("ui: compose attachment added", "name", name, "mime", mtype, "bytes", len(data), "total", len(attachments))
 					addChip(name)
 				})
 			}()
@@ -389,6 +404,8 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 	doSend := func() {
 		msg := gather() // reads the selected account on the main thread
 		acctID := selectedAccount().ID
+		logging.Trace("ui: compose send (deferred)", "account", acctID, "to", msg.To, "cc", msg.Cc, "bcc", msg.Bcc,
+			"subject", msg.Subject, "attachments", len(msg.Attachments), "draft_id", msg.DraftID, "thread_id", msg.ThreadID)
 		// Close immediately and hand off to the delayed-send queue, which shows an
 		// "Undo" toast for a few seconds before the message actually goes out.
 		sent = true
@@ -408,6 +425,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 	}
 	send.ConnectClicked(func() {
 		if warn := preSendWarning(); warn != "" {
+			logging.Trace("ui: compose pre-send warning", "warning", warn)
 			confirm := adw.NewAlertDialog("Send anyway?", warn)
 			confirm.AddResponse("cancel", "Cancel")
 			confirm.AddResponse("send", "Send anyway")
@@ -429,6 +447,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 		draftBtn.ConnectClicked(func() {
 			msg := gather()
 			acctID := selectedAccount().ID
+			logging.Trace("ui: compose save draft", "account", acctID, "to", msg.To, "subject", msg.Subject, "draft_id", msg.DraftID)
 			draftBtn.SetSensitive(false)
 			status.SetVisible(true)
 			status.SetText("Saving draft…")
@@ -437,10 +456,12 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 				dispatch.Main(func() {
 					if err != nil {
 						slog.Warn("ui: save draft", "err", err)
+						logging.Trace("ui: compose save draft failed", "err", err)
 						status.SetText("Could not save draft: " + err.Error())
 						draftBtn.SetSensitive(true)
 						return
 					}
+					logging.Trace("ui: compose save draft done", "account", acctID)
 					sent = true
 					win.Close()
 				})
@@ -463,6 +484,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 		// runDraft streams a draft guided by instruction (may be empty) into the
 		// body, above whatever was already there (quote/signature), which is kept.
 		runDraft = func(instruction string) {
+			logging.Trace("ui: ai draft begin", "is_reply", isReply, "instruction", instruction)
 			aiBtn.SetSensitive(false)
 			quote := init.Body
 			subject := strings.TrimSpace(subjEntry.Text())
@@ -483,6 +505,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 					msg := err.Error()
 					dispatch.Main(func() {
 						done(doneErr(err))
+						logging.Trace("ui: ai draft failed", "is_reply", isReply, "err", err)
 						buf.SetText("AI error: " + msg + "\n" + quote)
 						aiBtn.SetSensitive(true)
 					})
@@ -493,6 +516,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 				})
 				dispatch.Main(func() {
 					done("")
+					logging.Trace("ui: ai draft done", "is_reply", isReply, "body_len", len(final), "omit_sig", omitSig)
 					// Models often add a sign-off despite being told not to; when a
 					// signature already follows, strip the model's so the reply isn't
 					// double-signed. (Done on the final text only, not mid-stream.)
@@ -527,8 +551,10 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 			startIter, endIter := grammarRange(buf)
 			original := buf.Text(startIter, endIter, false)
 			if strings.TrimSpace(original) == "" {
+				logging.Trace("ui: ai proofread skipped", "reason", "empty")
 				return
 			}
+			logging.Trace("ui: ai proofread begin", "len", len(original))
 			// Anchor the range with marks so the exact span is replaced even if it
 			// streams back after an edit (left/right gravity keeps it bracketing the
 			// text). Other text — signature, quote — is left untouched.
@@ -552,6 +578,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 				dispatch.Main(func() {
 					done(doneErr(err))
 					grammarBtn.SetSensitive(true)
+					logging.Trace("ui: ai proofread done", "corrected_len", len(corrected), "err", err)
 					defer func() { buf.DeleteMark(startMark); buf.DeleteMark(endMark) }()
 					if err != nil || strings.TrimSpace(corrected) == "" {
 						status.SetText("Grammar check failed")
@@ -625,11 +652,14 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 		a := auto[0]
 		switch {
 		case a.quickReply != "":
+			logging.Trace("ui: compose auto quick reply", "len", len(a.quickReply))
 			buf.SetText(a.quickReply + init.Body) // chosen reply above the signature/quote
 			bodyView.GrabFocus()
 		case a.instruction != "" && runDraft != nil:
+			logging.Trace("ui: compose auto draft", "instruction", a.instruction)
 			runDraft(a.instruction)
 		case a.openDialog && startAIDraft != nil:
+			logging.Trace("ui: compose auto open ai dialog")
 			startAIDraft()
 		}
 	}
@@ -640,6 +670,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 // field. Picking a quick reply calls onQuickReply with its text (used directly);
 // a preset or free text calls onInstruction to generate a full draft.
 func (w *window) askAIIntent(parent gtk.Widgetter, isReply bool, threadContext string, onInstruction, onQuickReply func(string)) {
+	logging.Trace("ui: ai intent dialog", "is_reply", isReply, "has_context", strings.TrimSpace(threadContext) != "")
 	dialog := adw.NewDialog()
 	dialog.SetContentWidth(440)
 	dialog.SetFollowsContentSize(true)
@@ -694,6 +725,7 @@ func (w *window) askAIIntent(parent gtk.Widgetter, isReply bool, threadContext s
 				busy.AddCSSClass("dim-label")
 				busy.AddCSSClass("caption")
 				quick.Append(busy)
+				logging.Trace("ui: ai smart replies begin")
 				done := w.aiActivity("Suggesting quick replies")
 				go func() {
 					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -702,6 +734,7 @@ func (w *window) askAIIntent(parent gtk.Widgetter, isReply bool, threadContext s
 					dispatch.Main(func() {
 						done(doneErr(err))
 						clearQuick()
+						logging.Trace("ui: ai smart replies done", "n", len(replies), "err", err)
 						if err != nil || len(replies) == 0 {
 							if err != nil {
 								slog.Warn("ui: smart replies", "err", err)

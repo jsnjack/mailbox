@@ -30,6 +30,7 @@ import (
 	"github.com/jsnjack/mailbox/internal/ai"
 	"github.com/jsnjack/mailbox/internal/config"
 	"github.com/jsnjack/mailbox/internal/dispatch"
+	"github.com/jsnjack/mailbox/internal/logging"
 	"github.com/jsnjack/mailbox/internal/model"
 	"github.com/jsnjack/mailbox/internal/syncer"
 	"github.com/microcosm-cc/bluemonday"
@@ -286,6 +287,7 @@ func parseNotifyTarget(target string) (accountID int64, gmailID string, ok bool)
 // notification (no window focus needed), then dismisses the notification.
 func (w *window) archiveFromNotification(target string) {
 	acctID, gmailID, ok := parseNotifyTarget(target)
+	logging.Trace("ui: notification archive", "target", target, "account", acctID, "id", gmailID, "ok", ok)
 	if !ok || w.deps.ModifyLabels == nil {
 		return
 	}
@@ -301,6 +303,7 @@ func (w *window) archiveFromNotification(target string) {
 // focusing the window and switching to the message's account first.
 func (w *window) replyFromNotification(target string) {
 	acctID, gmailID, ok := parseNotifyTarget(target)
+	logging.Trace("ui: notification reply", "target", target, "account", acctID, "id", gmailID, "ok", ok)
 	if !ok || w.deps.Send == nil {
 		return
 	}
@@ -369,6 +372,7 @@ func (w *window) openFromNotification(target string) {
 		return
 	}
 	gmailID := parts[1]
+	logging.Trace("ui: open from notification", "target", target, "account", acctID, "id", gmailID)
 	if acctID != w.activeID {
 		for _, a := range w.deps.Accounts {
 			if a.ID == acctID {
@@ -566,6 +570,7 @@ func (w *window) setStarred(star bool) {
 	if w.openMsg.GmailID == "" {
 		return
 	}
+	logging.Trace("ui: set starred", "thread", w.openThreadID, "id", w.openMsg.GmailID, "star", star, "account", w.activeID)
 	w.openMsg.IsStarred = star
 	msgs := w.openThreadMsgs
 	if len(msgs) == 0 {
@@ -591,6 +596,7 @@ func (w *window) goBack() {
 // expired account can't be identified it falls back to the plain Add account
 // dialog, or to read-only guidance if account management isn't available.
 func (w *window) onReconnect() {
+	logging.Trace("ui: reconnect", "account", w.authExpiredID)
 	if w.deps.AddIMAPAccount == nil {
 		w.showConnectHelp()
 		return
@@ -764,6 +770,7 @@ func (w *window) buildSidebar() *adw.NavigationPage {
 	w.newBtn.SetTooltipText("New message")
 	w.newBtn.SetSensitive(w.deps.Send != nil && len(w.deps.Accounts) > 0)
 	w.newBtn.ConnectClicked(func() {
+		logging.Trace("ui: new message", "account", w.activeID)
 		w.openCompose(model.OutgoingMessage{}, "", "New message")
 	})
 	hb.PackStart(w.newBtn)
@@ -1201,6 +1208,7 @@ func (w *window) setThreadCategory(threadID, cat string) {
 	}
 	msgID := t.Latest.GmailID
 	acctID := w.activeID
+	logging.Trace("ui: set thread category", "thread", threadID, "id", msgID, "category", cat, "account", acctID)
 	if cat == "" {
 		delete(w.categories, threadID)
 	} else {
@@ -1227,9 +1235,11 @@ func (w *window) setThreadCategory(threadID, cat string) {
 func (w *window) recategorizeThread(threadID string) {
 	t, ok := w.threadByID[threadID]
 	if !ok || w.deps.Assistant == nil {
+		logging.Trace("ui: recategorize thread skipped", "thread", threadID, "known", ok, "assistant", w.deps.Assistant != nil)
 		return
 	}
 	msgID := t.Latest.GmailID
+	logging.Trace("ui: recategorize thread", "thread", threadID, "id", msgID, "account", w.activeID)
 	delete(w.categories, threadID)
 	delete(w.categorizedMsg, threadID)
 	acctID := w.activeID
@@ -1287,6 +1297,7 @@ func (w *window) onRecategorize() {
 		return
 	}
 	acctID := w.activeID
+	logging.Trace("ui: recategorize inbox", "account", acctID)
 	go func() {
 		if err := w.deps.Store.ClearCategories(context.Background(), acctID); err != nil {
 			slog.Warn("ui: clear categories", "err", err)
@@ -1309,6 +1320,7 @@ func (w *window) onMarkAllRead() {
 	}
 	label := w.current
 	acctID := w.activeID
+	logging.Trace("ui: mark all read", "label", label, "account", acctID)
 	go func() {
 		if err := w.deps.MarkAllRead(context.Background(), acctID, label); err != nil {
 			slog.Warn("ui: mark all read", "label", label, "err", err)
@@ -1377,6 +1389,7 @@ func (w *window) setSelectMode(on bool) {
 	if w.selectMode == on {
 		return
 	}
+	logging.Trace("ui: select mode", "on", on)
 	w.selectMode = on
 	if !on {
 		w.selected = map[string]bool{}
@@ -1397,6 +1410,7 @@ func (w *window) bulkApply(verb string, add, remove []string) {
 	if len(w.selected) == 0 {
 		return
 	}
+	logging.Trace("ui: bulk apply", "verb", verb, "selected", len(w.selected), "add", add, "remove", remove, "account", w.activeID)
 	ctx := context.Background()
 	var msgs []model.Message
 	n := 0
@@ -1410,6 +1424,7 @@ func (w *window) bulkApply(verb string, add, remove []string) {
 	if len(msgs) == 0 {
 		return
 	}
+	logging.Trace("ui: bulk apply resolved", "verb", verb, "threads", n, "messages", len(msgs))
 	w.applyLabels(msgs, add, remove, nil)
 	w.showUndoToast(fmt.Sprintf("%s %d conversations", verb, n), msgs, add, remove)
 }
@@ -1417,6 +1432,7 @@ func (w *window) bulkApply(verb string, add, remove []string) {
 // onSearchAllMail runs a Gmail server-side search for the current query, caches
 // the matches, and shows them — finding mail beyond the local cache.
 func (w *window) onSearchAllMail() {
+	logging.Trace("ui: search all mail", "query", strings.TrimSpace(w.searchEntry.Text()), "account", w.activeID)
 	w.serverSearch = true // stay in server-search mode across refreshes
 	w.runServerSearch(strings.TrimSpace(w.searchEntry.Text()))
 }
@@ -1425,8 +1441,10 @@ func (w *window) onSearchAllMail() {
 // results. refreshList calls this (instead of local FTS) while serverSearch is on.
 func (w *window) runServerSearch(q string) {
 	if q == "" || w.deps.SearchServer == nil {
+		logging.Trace("ui: run server search skipped", "query", q, "hasSearch", w.deps.SearchServer != nil)
 		return
 	}
+	logging.Trace("ui: run server search", "query", q, "account", w.activeID)
 	w.serverQuery = q
 	w.emptyPage.SetChild(nil)
 	w.emptyPage.SetIconName("edit-find-symbolic")
@@ -1441,6 +1459,7 @@ func (w *window) runServerSearch(q string) {
 		dispatch.Main(func() {
 			if gen != w.refreshGen || !w.serverSearch ||
 				strings.TrimSpace(w.searchEntry.Text()) != q || w.activeID != acctID {
+				logging.Trace("ui: server search discarded", "query", q, "gen", gen, "cur", w.refreshGen, "serverSearch", w.serverSearch, "account", acctID)
 				return // mode/query/account changed while searching
 			}
 			if err != nil {
@@ -1449,6 +1468,7 @@ func (w *window) runServerSearch(q string) {
 				w.showThreads(nil)
 				return
 			}
+			logging.Trace("ui: server search results", "query", q, "n", len(sums), "account", acctID)
 			w.showThreads(sums)
 			if len(sums) == 0 {
 				w.toast("No messages found")
@@ -1493,6 +1513,7 @@ func (w *window) onSearchChanged() {
 	if w.suppressSearch {
 		return
 	}
+	logging.Trace("ui: search changed", "query", w.searchEntry.Text(), "serverQuery", w.serverQuery)
 	// The search-changed signal is debounced, so a programmatic SetText (e.g.
 	// "Find emails from sender") arrives here after suppressSearch was cleared.
 	// Only a genuinely different query exits server-search mode back to local.
@@ -1525,6 +1546,7 @@ func (w *window) loadThreadsFor(query string) {
 	if trimmed == "" {
 		w.serverSearch, w.serverQuery = false, "" // no query → not server-searching
 		label, acct := w.current, w.activeID
+		logging.Trace("ui: load threads (label)", "label", label, "account", acct, "unreadOnly", w.unreadOnly)
 		w.loadThreads(func(ctx context.Context) ([]model.ThreadSummary, error) {
 			if label == allMailID {
 				return w.deps.Store.ListAllThreads(ctx, acct, threadListCap, 0)
@@ -1537,11 +1559,13 @@ func (w *window) loadThreadsFor(query string) {
 	// A server-side search stays a server search across refreshes (e.g. a
 	// background sync) instead of reverting to local FTS of the same query.
 	if w.serverSearch && w.deps.SearchServer != nil {
+		logging.Trace("ui: load threads (server search)", "query", trimmed, "account", w.activeID)
 		w.runServerSearch(trimmed)
 		return
 	}
 
 	acct := w.activeID
+	logging.Trace("ui: load threads (local search)", "query", query, "account", acct)
 	w.loadThreads(func(ctx context.Context) ([]model.ThreadSummary, error) {
 		return w.searchThreads(ctx, acct, query)
 	})
@@ -1557,8 +1581,10 @@ func (w *window) loadThreads(query func(context.Context) ([]model.ThreadSummary,
 		start := time.Now()
 		sums, err := query(context.Background())
 		slog.Debug("ui: loadThreads", "n", len(sums), "dur", time.Since(start))
+		logging.Trace("ui: load threads result", "n", len(sums), "dur", time.Since(start), "err", err)
 		dispatch.Main(func() {
 			if gen != w.refreshGen {
+				logging.Trace("ui: load threads discarded", "gen", gen, "cur", w.refreshGen, "n", len(sums))
 				return // superseded by a newer refresh
 			}
 			if err != nil {
@@ -1732,17 +1758,25 @@ func (w *window) diffThreadModel(oldIDs, newIDs []string) {
 	}
 
 	if sameOrder {
+		rebound := 0
 		for i, id := range newIDs {
 			sig := w.renderSig(id)
 			if w.rowSig[id] != sig {
 				w.rowSig[id] = sig
 				w.threadModel.Splice(uint(i), 1, []string{id}) // remove+add same id → re-bind row i
+				rebound++
 			}
+		}
+		if rebound == 0 {
+			logging.Trace("ui: diff threads no-op", "n", len(newIDs))
+		} else {
+			logging.Trace("ui: diff threads rebind", "n", len(newIDs), "rebound", rebound)
 		}
 		return
 	}
 
 	// Structural change: replace the whole model and rebuild the signature cache.
+	logging.Trace("ui: diff threads splice", "old", len(oldIDs), "new", len(newIDs))
 	w.threadModel.Splice(0, w.threadModel.NItems(), newIDs)
 	w.rowSig = make(map[string]string, len(newIDs))
 	for _, id := range newIDs {
@@ -1818,6 +1852,7 @@ func (w *window) categorizeInbox() {
 	if len(cands) == 0 {
 		return
 	}
+	logging.Trace("ui: categorize inbox", "candidates", len(cands), "account", w.activeID)
 	// Debounce an unchanged candidate set (see categorizeFP). showThreads re-enters
 	// here on every refresh — including the cache-seed refresh this call issues — so
 	// without this an unclassifiable set (the LLM is down, or a prior pass resolved
@@ -1825,6 +1860,7 @@ func (w *window) categorizeInbox() {
 	// fingerprint and runs at once; an unchanged set retries at most once per cooldown.
 	fp := candidatesFP(cands)
 	if fp == w.categorizeFP && time.Since(w.categorizeAt) < aiRetryCooldown {
+		logging.Trace("ui: categorize inbox debounced", "since", time.Since(w.categorizeAt))
 		return
 	}
 	w.categorizeFP = fp
@@ -1854,6 +1890,7 @@ func (w *window) categorizeInbox() {
 				todo = append(todo, c)
 			}
 		}
+		logging.Trace("ui: categorize seeded from cache", "cached", len(cached), "todo", len(todo), "skipAI", skipAI, "account", acctID)
 		dispatch.Main(func() {
 			if w.activeID != acctID {
 				return // switched accounts; these tags belong to the other account
@@ -1927,6 +1964,7 @@ func (w *window) categorizeInbox() {
 					}
 				})
 			}
+			logging.Trace("ui: categorize inbox classified", "assigned", assigned, "todo", len(todo), "err", firstErr, "account", acctID)
 			dispatch.Main(func() { done(doneErr(firstErr)) })
 		}
 		dispatch.Main(func() {
@@ -1975,9 +2013,12 @@ func (w *window) onRefresh() {
 		return
 	}
 	acctID := w.activeID
+	logging.Trace("ui: sync now", "account", acctID)
 	w.setSyncing(true)
 	go func() {
+		start := time.Now()
 		err := w.deps.Sync(context.Background(), acctID)
+		logging.Trace("ui: sync now done", "account", acctID, "dur", time.Since(start), "err", err)
 		dispatch.Main(func() {
 			w.setSyncing(false)
 			if err != nil {
@@ -2010,6 +2051,7 @@ func (w *window) onDecidePolicy(decision webkit.PolicyDecisioner, dtype webkit.P
 	switch {
 	case strings.HasPrefix(uri, "http://"), strings.HasPrefix(uri, "https://"),
 		strings.HasPrefix(uri, "mailto:"), strings.HasPrefix(uri, "ftp://"), strings.HasPrefix(uri, "ftps://"):
+		logging.Trace("ui: open external link", "uri", uri)
 		openExternal(uri)
 	default:
 		slog.Debug("ui: blocked navigation to unsupported scheme", "uri", uri)
@@ -2047,8 +2089,10 @@ func (w *window) onThreadSelected() {
 	}
 	id := so.String()
 	if id == w.openThreadID {
+		logging.Trace("ui: thread selected (already open)", "thread", id)
 		return // already shown; avoids a re-render when the list refreshes live
 	}
+	logging.Trace("ui: thread selected", "thread", id, "account", w.activeID)
 	w.showThread(id)
 }
 
@@ -2299,6 +2343,7 @@ func (w *window) onReply() {
 	if m.GmailID == "" {
 		return
 	}
+	logging.Trace("ui: reply", "id", m.GmailID, "thread", w.openThreadID, "to", replyTarget(m), "account", w.activeID)
 	w.openCompose(w.replyInit(m), w.threadContextFor(m), "Reply")
 }
 
@@ -2307,6 +2352,7 @@ func (w *window) onReplyAll() {
 	if !ok {
 		return
 	}
+	logging.Trace("ui: reply all", "id", w.openMsg.GmailID, "thread", w.openThreadID, "to", init.To, "cc", init.Cc, "account", w.activeID)
 	w.openCompose(init, aiContext, "Reply all")
 }
 
@@ -2337,6 +2383,8 @@ func (w *window) aiReply(auto composeAutoAI) {
 	if !ok {
 		return
 	}
+	logging.Trace("ui: ai reply", "id", w.openMsg.GmailID, "thread", w.openThreadID,
+		"quickReply", auto.quickReply != "", "instruction", logging.Body(auto.instruction), "openDialog", auto.openDialog, "account", w.activeID)
 	w.openCompose(init, aiContext, "Reply", auto)
 }
 
@@ -2366,10 +2414,12 @@ func (w *window) buildAIReplyPopover() *gtk.Popover {
 	spinner.SetSizeRequest(20, 20)
 	sug.Append(spinner)
 	done := w.aiActivity("Suggesting replies")
+	logging.Trace("ui: suggest quick replies", "thread", w.openThreadID, "account", w.activeID)
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		replies, err := w.deps.Assistant.SmartReplies(ctx, threadContext)
+		logging.Trace("ui: suggest quick replies result", "n", len(replies), "err", err)
 		dispatch.Main(func() {
 			done(doneErr(err))
 			for c := sug.FirstChild(); c != nil; c = sug.FirstChild() {
@@ -2476,6 +2526,7 @@ func (w *window) onForward() {
 	if m.GmailID == "" {
 		return
 	}
+	logging.Trace("ui: forward", "id", m.GmailID, "thread", w.openThreadID, "account", w.activeID)
 	init := model.OutgoingMessage{
 		Subject: ensureFwdPrefix(m.Subject),
 		Body:    quoteOriginal(m, w.bodyTextFor(m)),
@@ -2724,6 +2775,7 @@ func (w *window) setActiveAccount(a AccountInfo) {
 	if a.ID == w.activeID {
 		return
 	}
+	logging.Trace("ui: switch account", "from", w.activeID, "to", a.ID, "email", a.Email)
 	w.activeID = a.ID
 	w.activeEmail = a.Email
 	w.signature = w.signatureForActive() // signature the next compose appends
@@ -2747,6 +2799,7 @@ func (w *window) clearReader() {
 }
 
 func (w *window) selectLabel(labelID string) {
+	logging.Trace("ui: select label", "label", labelID, "account", w.activeID)
 	w.current = labelID
 	// The "empty folder" banner appears only in Trash/Spam.
 	if w.deps.EmptyFolder != nil && (labelID == model.LabelTrash || labelID == model.LabelSpam) {
@@ -2791,6 +2844,7 @@ func (w *window) setZoom(z float64) {
 	case z > 3.0:
 		z = 3.0
 	}
+	logging.Trace("ui: set zoom", "zoom", z)
 	w.readerZoom = z
 	w.webview.SetZoomLevel(z)
 	w.saveViewState()
@@ -2802,6 +2856,7 @@ func (w *window) showThread(threadID string) {
 	// In the Drafts folder, a click resumes editing the draft in compose rather
 	// than rendering it read-only.
 	if w.current == model.LabelDraft && w.deps.Send != nil {
+		logging.Trace("ui: show thread → edit draft", "thread", threadID, "account", w.activeID)
 		w.openDraftForEdit(threadID)
 		return
 	}
@@ -2810,8 +2865,10 @@ func (w *window) showThread(threadID string) {
 		if err != nil {
 			slog.Warn("ui: load thread", "thread", threadID, "err", err)
 		}
+		logging.Trace("ui: show thread empty", "thread", threadID, "n", len(msgs), "err", err)
 		return
 	}
+	logging.Trace("ui: show thread", "thread", threadID, "n", len(msgs), "account", w.activeID)
 	w.openThreadID = threadID
 	w.openThreadMsgs = msgs
 	w.openMsg = msgs[len(msgs)-1] // newest, for reply/forward/star/unread
@@ -2833,6 +2890,7 @@ func (w *window) showThread(threadID string) {
 		}
 		if len(ids) > 0 {
 			acctID := w.activeID
+			logging.Trace("ui: mark thread read", "thread", threadID, "n", len(ids), "account", acctID)
 			go func() {
 				if err := w.deps.ModifyLabels(context.Background(), acctID, ids, nil, []string{model.LabelUnread}); err != nil {
 					slog.Warn("ui: mark read", "n", len(ids), "err", err)
@@ -2858,6 +2916,7 @@ func hasLabel(m model.Message, label string) bool {
 // draft rather than duplicating it), then opens a compose window prefilled with
 // the draft's recipients, subject, and body.
 func (w *window) openDraftForEdit(threadID string) {
+	logging.Trace("ui: open draft for edit", "thread", threadID, "account", w.activeID)
 	msgs, err := w.deps.Store.ListThreadMessages(context.Background(), w.activeID, threadID)
 	if err != nil || len(msgs) == 0 {
 		if err != nil {
@@ -2941,6 +3000,7 @@ func (w *window) renderConversation(msgs []model.Message) {
 	// Snapshot already-rendered sections on the main thread; the goroutine reuses
 	// these and only sanitizes the misses, so re-opening a thread is near-instant.
 	cached := w.cachedSectionsFor(msgs)
+	logging.Trace("ui: render conversation", "thread", threadID, "msgs", len(msgs), "cachedSections", len(cached))
 	go func() {
 		start := time.Now()
 		ctx := context.Background()
@@ -2960,6 +3020,7 @@ func (w *window) renderConversation(msgs []model.Message) {
 				go func(m model.Message) {
 					defer wg.Done()
 					defer func() { <-sem }()
+					logging.Trace("ui: fetch body", "id", m.GmailID, "account", m.AccountID)
 					if err := w.deps.FetchBody(ctx, m.AccountID, m.GmailID); err != nil {
 						slog.Warn("ui: fetch body", "id", m.GmailID, "err", err)
 					}
@@ -3013,9 +3074,14 @@ func (w *window) renderConversation(msgs []model.Message) {
 		inlineImgs := w.prepareInlineImages(ctx, msgs)
 		slog.Debug("ui: renderConversation", "msgs", len(msgs), "fetched", fetched,
 			"trackers", blocked, "auth", verdict.level, "fetch", fetchDur, "sanitize", time.Since(sanitizeStart))
+		logging.Trace("ui: render conversation ready", "thread", threadID, "msgs", len(msgs), "fetched", fetched,
+			"newSections", len(fresh), "trackers", blocked, "auth", verdict.level, "warnings", len(warnings),
+			"attachments", len(atts), "inlineImages", len(inlineImgs), "bytes", len(out), "html", logging.Body(out),
+			"fetch", fetchDur, "sanitize", time.Since(sanitizeStart))
 		dispatch.Main(func() {
 			w.mergeSectionCache(fresh) // cache newly-rendered sections (main thread)
 			if w.openThreadID != threadID {
+				logging.Trace("ui: render conversation discarded", "thread", threadID, "openThread", w.openThreadID)
 				return // user switched to another conversation while this rendered
 			}
 			w.inlineByCID = inlineImgs // serveCID resolves cid: against this
@@ -3121,6 +3187,7 @@ func conversationSection(m model.Message, body model.MessageBody, clean func(str
 func (w *window) bodyForRender(ctx context.Context, m model.Message) model.MessageBody {
 	body, _ := w.deps.Store.GetBody(ctx, m.RowID)
 	if w.needsInlineRefetch(ctx, m, body) {
+		logging.Trace("ui: inline re-fetch", "id", m.GmailID, "account", m.AccountID)
 		w.inlineRefetched[m.GmailID] = true
 		if err := w.deps.FetchBody(ctx, m.AccountID, m.GmailID); err != nil {
 			slog.Warn("ui: inline re-fetch", "id", m.GmailID, "err", err)
@@ -3334,6 +3401,7 @@ func (w *window) openAttachment(accountID int64, gmailID string, attID int64) {
 	if w.deps.OpenAttach == nil {
 		return
 	}
+	logging.Trace("ui: open attachment", "account", accountID, "id", gmailID, "attID", attID)
 	go func() {
 		path, err := w.deps.OpenAttach(context.Background(), accountID, gmailID, attID)
 		if err != nil {
@@ -3341,6 +3409,7 @@ func (w *window) openAttachment(accountID int64, gmailID string, attID int64) {
 			dispatch.Main(func() { w.toast("Couldn't download attachment") })
 			return
 		}
+		logging.Trace("ui: open attachment ready", "id", gmailID, "path", path)
 		openExternal(path)
 	}()
 }
@@ -3358,10 +3427,12 @@ func attachmentChip(a model.Attachment) *gtk.Box {
 }
 
 func (w *window) onArchive() {
+	logging.Trace("ui: archive", "thread", w.openThreadID, "account", w.activeID)
 	w.removeFromList("Archived", nil, []string{model.LabelInbox})
 }
 
 func (w *window) onTrash() {
+	logging.Trace("ui: trash", "thread", w.openThreadID, "account", w.activeID)
 	w.removeFromList("Moved to Trash", []string{model.LabelTrash}, []string{model.LabelInbox})
 }
 
@@ -3371,17 +3442,20 @@ func (w *window) onMoveToInbox() {
 	if len(w.openThreadMsgs) == 0 {
 		return
 	}
+	logging.Trace("ui: move to inbox", "thread", w.openThreadID, "account", w.activeID)
 	w.applyLabels(w.openThreadMsgs, []string{model.LabelInbox}, []string{model.LabelTrash}, nil)
 	w.toast("Moved to Inbox")
 }
 
 // onReportSpam moves the open conversation to Spam (and out of the inbox).
 func (w *window) onReportSpam() {
+	logging.Trace("ui: report spam", "thread", w.openThreadID, "account", w.activeID)
 	w.removeFromList("Reported spam", []string{model.LabelSpam}, []string{model.LabelInbox})
 }
 
 // onNotSpam takes the open conversation out of Spam and back to the inbox.
 func (w *window) onNotSpam() {
+	logging.Trace("ui: not spam", "thread", w.openThreadID, "account", w.activeID)
 	w.removeFromList("Marked not spam", []string{model.LabelInbox}, []string{model.LabelSpam})
 }
 
@@ -3396,6 +3470,7 @@ func (w *window) onEmptyFolder() {
 	if w.deps.EmptyFolder == nil || (label != model.LabelTrash && label != model.LabelSpam) {
 		return
 	}
+	logging.Trace("ui: empty folder requested", "label", label, "account", w.activeID)
 	name := "Trash"
 	if label == model.LabelSpam {
 		name = "Spam"
@@ -3409,10 +3484,13 @@ func (w *window) onEmptyFolder() {
 	acctID := w.activeID
 	confirm.ConnectResponse(func(response string) {
 		if response != "empty" {
+			logging.Trace("ui: empty folder cancelled", "label", label)
 			return
 		}
+		logging.Trace("ui: empty folder confirmed", "label", label, "account", acctID)
 		go func() {
 			n, err := w.deps.EmptyFolder(context.Background(), acctID, label)
+			logging.Trace("ui: empty folder done", "label", label, "deleted", n, "err", err)
 			dispatch.Main(func() {
 				if err != nil {
 					slog.Warn("ui: empty folder", "label", label, "err", err)
@@ -3442,6 +3520,7 @@ func (w *window) onDeleteForever() {
 	if w.deps.DeleteForever == nil || len(w.openThreadMsgs) == 0 {
 		return
 	}
+	logging.Trace("ui: delete forever requested", "thread", w.openThreadID, "n", len(w.openThreadMsgs), "account", w.activeID)
 	msgs := w.openThreadMsgs
 	pos := w.threadSel.Selected()
 	confirm := adw.NewAlertDialog("Delete forever?", "This permanently deletes the conversation. This can't be undone.")
@@ -3452,6 +3531,7 @@ func (w *window) onDeleteForever() {
 	confirm.SetCloseResponse("cancel")
 	confirm.ConnectResponse(func(response string) {
 		if response != "delete" {
+			logging.Trace("ui: delete forever cancelled", "thread", w.openThreadID)
 			return
 		}
 		ids := make([]string, len(msgs))
@@ -3459,8 +3539,10 @@ func (w *window) onDeleteForever() {
 			ids[i] = m.GmailID
 		}
 		acctID := w.activeID
+		logging.Trace("ui: delete forever confirmed", "n", len(ids), "account", acctID)
 		go func() {
 			err := w.deps.DeleteForever(context.Background(), acctID, ids)
+			logging.Trace("ui: delete forever done", "n", len(ids), "err", err)
 			dispatch.Main(func() {
 				if err != nil {
 					slog.Warn("ui: delete forever", "err", err)
@@ -3478,6 +3560,7 @@ func (w *window) onDeleteForever() {
 
 func (w *window) onMarkUnread() {
 	if w.openMsg.GmailID != "" {
+		logging.Trace("ui: mark unread", "id", w.openMsg.GmailID, "thread", w.openThreadID, "account", w.activeID)
 		w.applyLabels([]model.Message{w.openMsg}, []string{model.LabelUnread}, nil, nil)
 	}
 }
@@ -3636,6 +3719,7 @@ func (w *window) buildReaderMenuModel() *gio.Menu {
 // ("from:addr"), so it finds messages beyond the local cache too.
 func (w *window) searchFrom(addr string) {
 	q := "from:" + strings.TrimSpace(addr)
+	logging.Trace("ui: find from sender", "query", q, "account", w.activeID)
 	w.suppressSearch = true
 	w.searchEntry.SetText(q)
 	w.suppressSearch = false
@@ -3750,7 +3834,9 @@ func (w *window) onTranslate() {
 			todo = append(todo, m)
 		}
 	}
+	logging.Trace("ui: translate", "thread", threadID, "msgs", len(msgs), "todo", len(todo), "account", acctID)
 	if len(todo) == 0 { // whole thread already translated → show instantly
+		logging.Trace("ui: translate cache hit (memory)", "thread", threadID)
 		w.showTranslatedConversation(msgs)
 		return
 	}
@@ -3781,6 +3867,7 @@ func (w *window) onTranslate() {
 				remaining = append(remaining, m)
 			}
 		}
+		logging.Trace("ui: translate seeded from cache", "seeded", len(seeded), "remaining", len(remaining), "account", acctID)
 
 		// 2) Translate the remainder concurrently (bounded), writing each result
 		// through to the store. Sources are read + sanitized here (off the main
@@ -3818,9 +3905,11 @@ func (w *window) onTranslate() {
 		}
 		wg.Wait()
 
+		logging.Trace("ui: translate done", "thread", threadID, "translated", len(results), "err", firstErr)
 		dispatch.Main(func() {
 			done(doneErr(firstErr))
 			if w.openThreadID != threadID || ctx.Err() != nil {
+				logging.Trace("ui: translate discarded", "thread", threadID, "openThread", w.openThreadID, "cancelled", ctx.Err() != nil)
 				return // user switched conversations or reverted
 			}
 			if firstErr != nil {
@@ -3893,6 +3982,7 @@ func stripCodeFence(s string) string {
 
 // showOriginal cancels any translation and restores the original message view.
 func (w *window) showOriginal() {
+	logging.Trace("ui: show original", "thread", w.openThreadID)
 	w.resetTranslation()
 	if len(w.openThreadMsgs) > 0 {
 		w.renderConversation(w.openThreadMsgs) // re-render only; keep summary as-is
@@ -3966,8 +4056,10 @@ func (w *window) onSummarize() {
 	w.cardIcon.SetFromIconName("view-list-bullet-symbolic")
 	w.cardTitle.SetText("Summary")
 	key := w.summaryKey()
+	logging.Trace("ui: summarize", "thread", w.openThreadID, "account", w.activeID)
 	w.summaryRevealer.SetRevealChild(true)
 	if cached, ok := w.summaryCache[key]; ok {
+		logging.Trace("ui: summarize cache hit (memory)", "thread", w.openThreadID)
 		w.summaryLabel.SetText(cached)
 		return
 	}
@@ -3975,10 +4067,12 @@ func (w *window) onSummarize() {
 	// fingerprint is the same key, so a thread that gained a reply misses and is
 	// re-summarized. A single indexed lookup, fine on the main thread.
 	if fp, sum, ok, err := w.deps.Store.ThreadSummary(context.Background(), w.activeID, w.openThreadID); err == nil && ok && fp == key {
+		logging.Trace("ui: summarize cache hit (persisted)", "thread", w.openThreadID)
 		w.summaryCache[key] = sum
 		w.summaryLabel.SetText(sum)
 		return
 	}
+	logging.Trace("ui: summarize cache miss → AI", "thread", w.openThreadID)
 
 	w.summaryLabel.SetText("Summarizing…")
 	ctx, cancel := context.WithCancel(context.Background())
@@ -4060,9 +4154,11 @@ func (w *window) onAnalyze() {
 	}
 	w.cardIcon.SetFromIconName("security-high-symbolic")
 	w.cardTitle.SetText("Security analysis")
+	logging.Trace("ui: analyze phishing", "id", m.GmailID, "thread", w.openThreadID, "account", w.activeID)
 	w.summaryRevealer.SetRevealChild(true)
 	key := "analyze:" + m.GmailID
 	if cached, ok := w.summaryCache[key]; ok {
+		logging.Trace("ui: analyze cache hit (memory)", "id", m.GmailID)
 		w.summaryLabel.SetText(cached)
 		return
 	}
@@ -4070,10 +4166,12 @@ func (w *window) onAnalyze() {
 	// are immutable, so a stored analysis is always valid. A single indexed
 	// lookup, fine on the main thread.
 	if a, ok, err := w.deps.Store.Analysis(context.Background(), w.activeID, m.GmailID); err == nil && ok {
+		logging.Trace("ui: analyze cache hit (persisted)", "id", m.GmailID)
 		w.summaryCache[key] = a
 		w.summaryLabel.SetText(a)
 		return
 	}
+	logging.Trace("ui: analyze cache miss → AI", "id", m.GmailID)
 
 	w.summaryLabel.SetText("Analyzing…")
 	ctx, cancel := context.WithCancel(context.Background())
@@ -4260,6 +4358,7 @@ func (w *window) applyLabels(msgs []model.Message, add, remove []string, after f
 	for i, m := range msgs {
 		ids[i] = m.GmailID
 	}
+	logging.Trace("ui: apply labels", "n", len(ids), "add", add, "remove", remove, "account", accountID)
 	go func() {
 		start := time.Now()
 		if err := w.deps.ModifyLabels(context.Background(), accountID, ids, add, remove); err != nil {
@@ -4329,11 +4428,13 @@ const sendUndoDelay = 5 * time.Second
 // compose window has already closed, so this runs at the main-window level.
 // (Caveat: quitting within the window drops the unsent message.)
 func (w *window) deferSend(accountID int64, msg model.OutgoingMessage) {
+	logging.Trace("ui: defer send", "account", accountID, "to", msg.To, "cc", msg.Cc, "subject", msg.Subject)
 	cancelled := false
 	toast := adw.NewToast("Sending…")
 	toast.SetButtonLabel("Undo")
 	toast.SetTimeout(0) // we control the lifetime via the timer below
 	toast.ConnectButtonClicked(func() {
+		logging.Trace("ui: undo send", "account", accountID, "subject", msg.Subject)
 		cancelled = true
 		toast.Dismiss()
 		// Reopen the message exactly as it was (no second signature).
@@ -4356,8 +4457,10 @@ func (w *window) deferSend(accountID int64, msg model.OutgoingMessage) {
 // reallySend performs the actual send (after the undo window elapsed). On
 // failure engine.Send queues it to the outbox, surfaced via the outbox banner.
 func (w *window) reallySend(accountID int64, msg model.OutgoingMessage) {
+	logging.Trace("ui: send", "account", accountID, "to", msg.To, "subject", msg.Subject)
 	go func() {
 		err := w.deps.Send(context.Background(), accountID, msg)
+		logging.Trace("ui: send done", "account", accountID, "subject", msg.Subject, "err", err)
 		dispatch.Main(func() {
 			if err != nil {
 				slog.Warn("ui: send", "err", err)
@@ -4380,6 +4483,7 @@ func (w *window) showUndoToast(title string, msgs []model.Message, add, remove [
 	t.SetButtonLabel("Undo")
 	t.SetTimeout(6)
 	t.ConnectButtonClicked(func() {
+		logging.Trace("ui: undo", "title", title, "n", len(msgs), "add", add, "remove", remove)
 		w.applyLabels(msgs, remove, add, nil) // swap to reverse the change
 	})
 	w.toastOverlay.AddToast(t)
@@ -4405,6 +4509,7 @@ func (w *window) subscribe() {
 // notifies for genuinely new inbox mail on any account. The refresh is coalesced
 // so a burst of per-message events from a sync triggers one refresh, not N.
 func (w *window) onChange(c syncer.Change) {
+	logging.Trace("ui: sync change", "kind", c.Kind, "account", c.AccountID, "id", c.GmailID, "thread", c.ThreadID, "active", w.activeID)
 	switch c.Kind {
 	case syncer.MessageUpserted, syncer.MessageDeleted:
 		w.invalidateSection(c.GmailID) // a re-synced message must re-render
@@ -4438,6 +4543,7 @@ func (w *window) onChange(c syncer.Change) {
 				break
 			}
 		}
+		logging.Trace("ui: auth expired banner", "account", c.AccountID, "email", email)
 		w.authExpiredID = c.AccountID // the Reconnect button re-authenticates this one
 		if email != "" {
 			w.authBanner.SetTitle("Sign-in expired for " + email + " — reconnect to keep syncing")
@@ -4470,6 +4576,7 @@ func (w *window) scheduleRefresh(withList bool) {
 		w.refreshListPending = true
 	}
 	if w.refreshPending {
+		logging.Trace("ui: schedule refresh coalesced", "withList", withList)
 		return
 	}
 	w.refreshPending = true
@@ -4479,6 +4586,7 @@ func (w *window) scheduleRefresh(withList bool) {
 		thread := w.refreshThreadPending
 		w.refreshListPending = false
 		w.refreshThreadPending = false
+		logging.Trace("ui: refresh (coalesced)", "list", list, "thread", thread, "account", w.activeID)
 		w.loadLabels()
 		if list {
 			w.liveRefreshList()
@@ -4497,6 +4605,7 @@ func (w *window) refreshOpenThread() {
 	if w.openThreadID == "" {
 		return
 	}
+	logging.Trace("ui: refresh open thread", "thread", w.openThreadID, "account", w.activeID)
 	msgs, err := w.deps.Store.ListThreadMessages(context.Background(), w.activeID, w.openThreadID)
 	if err != nil || len(msgs) == 0 {
 		return
@@ -4507,6 +4616,7 @@ func (w *window) refreshOpenThread() {
 }
 
 func (w *window) notifyNewMail(accountID int64, m model.Message) {
+	logging.Trace("ui: notify new mail", "account", accountID, "id", m.GmailID, "from", m.FromAddr, "subject", m.Subject)
 	n := gio.NewNotification("New mail")
 	body := displayFrom(m)
 	if m.Subject != "" {

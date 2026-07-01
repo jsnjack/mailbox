@@ -4,7 +4,11 @@
 // subscribes and renders a status bar and activity log.
 package activity
 
-import "sync"
+import (
+	"sync"
+
+	"github.com/jsnjack/mailbox/internal/logging"
+)
 
 // Phase marks where an operation is in its lifecycle.
 type Phase int
@@ -44,6 +48,7 @@ func (h *Hub) Publish(e Event) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	logging.Trace("activity: publish", "op", e.Op, "phase", e.Phase, "label", e.Label, "done", e.Done, "total", e.Total, "note", logging.Body(e.Note), "subs", len(h.subs))
 	for _, ch := range h.subs {
 		select {
 		case ch <- e:
@@ -73,12 +78,14 @@ func (h *Hub) Subscribe() (<-chan Event, func()) {
 	h.next++
 	ch := make(chan Event, 64)
 	h.subs[id] = ch
+	logging.Trace("activity: subscribe", "id", id, "subs", len(h.subs))
 	return ch, func() {
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		if c, ok := h.subs[id]; ok {
 			delete(h.subs, id)
 			close(c)
+			logging.Trace("activity: unsubscribe", "id", id, "subs", len(h.subs))
 		}
 	}
 }

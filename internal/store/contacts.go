@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jsnjack/mailbox/internal/logging"
 	"github.com/jsnjack/mailbox/internal/model"
 )
 
@@ -25,11 +26,14 @@ type contactInput struct {
 // how often and how recently they appear (best first), excluding the account's
 // own address. limit caps the result (<=0 means no cap).
 func (s *Store) Contacts(ctx context.Context, accountID int64, self string, limit int) ([]model.Contact, error) {
+	start := time.Now()
+	logging.TraceContext(ctx, "store: contacts", "account", accountID, "self", self, "limit", limit)
 	rows, err := s.reader.QueryContext(ctx,
 		`SELECT from_name, from_addr, to_addrs, cc_addrs, internal_date
 		   FROM messages WHERE account_id = ? ORDER BY internal_date DESC LIMIT ?`,
 		accountID, contactScanCap)
 	if err != nil {
+		logging.TraceContext(ctx, "store: contacts", "account", accountID, "err", err)
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
@@ -49,7 +53,9 @@ func (s *Store) Contacts(ctx context.Context, accountID int64, self string, limi
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return buildContacts(in, self, limit), nil
+	out := buildContacts(in, self, limit)
+	logging.TraceContext(ctx, "store: contacts done", "account", accountID, "scanned", len(in), "count", len(out), "dur", time.Since(start))
+	return out, nil
 }
 
 // buildContacts aggregates address-bearing headers into a ranked contact list.

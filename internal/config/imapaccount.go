@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/jsnjack/mailbox/internal/logging"
 )
 
 // IMAPAccount is the persisted connection config for one IMAP account (the
@@ -41,17 +43,21 @@ func LoadIMAPAccounts() (map[string]IMAPAccount, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
+			logging.Trace("config: load imap accounts (none)", "path", path)
 			return map[string]IMAPAccount{}, nil
 		}
+		logging.Trace("config: load imap accounts failed", "path", path, "err", err)
 		return map[string]IMAPAccount{}, fmt.Errorf("read imap accounts: %w", err)
 	}
 	var m map[string]IMAPAccount
 	if err := json.Unmarshal(data, &m); err != nil {
+		logging.Trace("config: load imap accounts corrupt (ignored)", "path", path, "err", err)
 		return map[string]IMAPAccount{}, nil // ignore a corrupt file
 	}
 	if m == nil {
 		m = map[string]IMAPAccount{}
 	}
+	logging.Trace("config: load imap accounts", "path", path, "count", len(m))
 	return m, nil
 }
 
@@ -72,6 +78,7 @@ func SaveIMAPAccount(a IMAPAccount) error {
 		return err
 	}
 	all[a.Email] = a
+	logging.Trace("config: save imap account", "email", a.Email, "imapHost", a.IMAPHost, "imapPort", a.IMAPPort, "smtpHost", a.SMTPHost, "smtpPort", a.SMTPPort, "auth", string(a.Auth))
 	return writeIMAPAccounts(all)
 }
 
@@ -82,6 +89,7 @@ func DeleteIMAPAccount(email string) error {
 		return err
 	}
 	delete(all, email)
+	logging.Trace("config: delete imap account", "email", email)
 	return writeIMAPAccounts(all)
 }
 
@@ -98,7 +106,9 @@ func writeIMAPAccounts(all map[string]IMAPAccount) error {
 		return fmt.Errorf("marshal imap accounts: %w", err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "imap-accounts.json"), data, 0o600); err != nil {
+		logging.Trace("config: write imap accounts failed", "err", err)
 		return fmt.Errorf("write imap accounts: %w", err)
 	}
+	logging.Trace("config: write imap accounts", "count", len(all))
 	return nil
 }

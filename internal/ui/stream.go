@@ -6,6 +6,7 @@ import (
 
 	"github.com/jsnjack/mailbox/internal/ai"
 	"github.com/jsnjack/mailbox/internal/dispatch"
+	"github.com/jsnjack/mailbox/internal/logging"
 )
 
 // streamFlushInterval bounds how often a streaming AI response repaints its
@@ -25,14 +26,17 @@ const streamFlushInterval = 33 * time.Millisecond
 // re-check any staleness guards itself, since the stream it belongs to may have
 // been superseded by the time the idle callback runs.
 func streamCoalesced(ch <-chan ai.Chunk, flush func(text string)) (string, error) {
+	logging.Trace("ui: ai stream begin")
 	var acc strings.Builder
 	var firstErr error
 	var last time.Time
+	var chunks int
 	for c := range ch {
 		if c.Err != nil {
 			firstErr = c.Err
 			break
 		}
+		chunks++
 		acc.WriteString(c.Text)
 		if time.Since(last) >= streamFlushInterval {
 			last = time.Now()
@@ -40,5 +44,6 @@ func streamCoalesced(ch <-chan ai.Chunk, flush func(text string)) (string, error
 			dispatch.Main(func() { flush(snap) })
 		}
 	}
+	logging.Trace("ui: ai stream end", "chunks", chunks, "bytes", acc.Len(), "err", firstErr)
 	return acc.String(), firstErr
 }

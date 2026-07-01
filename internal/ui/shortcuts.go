@@ -3,11 +3,14 @@ package ui
 import (
 	"github.com/diamondburned/gotk4-adwaita/pkg/adw"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
+
+	"github.com/jsnjack/mailbox/internal/logging"
 )
 
 // showShortcuts presents a keyboard-shortcuts cheat sheet (the single-key
 // actions are otherwise undiscoverable). Bound to "?".
 func (w *window) showShortcuts() {
+	logging.Trace("ui: show shortcuts dialog")
 	box := gtk.NewBox(gtk.OrientationVertical, 18)
 	setMargins(box, 18, 18, 14, 18)
 

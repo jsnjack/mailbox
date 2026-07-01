@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jsnjack/mailbox/internal/logging"
 	"github.com/jsnjack/mailbox/internal/model"
 )
 
@@ -21,13 +22,20 @@ const msgCols = `m.rowid, m.account_id, m.gmail_id, m.thread_id, m.internal_date
 // UpsertMessage inserts or updates a message's metadata, replaces its label set,
 // and refreshes its full-text index entry. It returns the message's local rowid.
 func (s *Store) UpsertMessage(ctx context.Context, m model.Message) (int64, error) {
+	start := time.Now()
+	logging.TraceContext(ctx, "store: upsert message", "account", m.AccountID, "id", m.GmailID, "thread", m.ThreadID, "subject", m.Subject)
 	var rowid int64
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
 		var err error
 		rowid, err = upsertMessageTx(ctx, tx, m)
 		return err
 	})
-	return rowid, err
+	if err != nil {
+		logging.TraceContext(ctx, "store: upsert message", "account", m.AccountID, "id", m.GmailID, "err", err)
+		return rowid, err
+	}
+	logging.TraceContext(ctx, "store: upsert message done", "account", m.AccountID, "id", m.GmailID, "rowid", rowid, "dur", time.Since(start))
+	return rowid, nil
 }
 
 // UpsertMessages upserts many messages in a single transaction. Backfill and
@@ -35,9 +43,12 @@ func (s *Store) UpsertMessage(ctx context.Context, m model.Message) (int64, erro
 // commit/fsync instead of N — the dominant cost when catching up a mailbox.
 func (s *Store) UpsertMessages(ctx context.Context, msgs []model.Message) error {
 	if len(msgs) == 0 {
+		logging.TraceContext(ctx, "store: upsert messages", "n", 0)
 		return nil
 	}
-	return s.withTx(ctx, func(tx *sql.Tx) error {
+	start := time.Now()
+	logging.TraceContext(ctx, "store: upsert messages", "n", len(msgs))
+	err := s.withTx(ctx, func(tx *sql.Tx) error {
 		for _, m := range msgs {
 			if _, err := upsertMessageTx(ctx, tx, m); err != nil {
 				return err
@@ -45,6 +56,12 @@ func (s *Store) UpsertMessages(ctx context.Context, msgs []model.Message) error 
 		}
 		return nil
 	})
+	if err != nil {
+		logging.TraceContext(ctx, "store: upsert messages", "n", len(msgs), "err", err)
+		return err
+	}
+	logging.TraceContext(ctx, "store: upsert messages done", "n", len(msgs), "dur", time.Since(start))
+	return nil
 }
 
 // upsertMessageTx upserts one message's metadata, replaces its label set, and
@@ -99,7 +116,9 @@ func upsertMessageTx(ctx context.Context, tx *sql.Tx, m model.Message) (int64, e
 // UpsertBody stores a message's body parts, marks the message body-fetched, and
 // refreshes the full-text index so the body becomes searchable.
 func (s *Store) UpsertBody(ctx context.Context, b model.MessageBody) error {
-	return s.withTx(ctx, func(tx *sql.Tx) error {
+	start := time.Now()
+	logging.TraceContext(ctx, "store: upsert body", "rowid", b.MessageRowID, "text_bytes", len(b.Text), "html_bytes", len(b.HTML))
+	err := s.withTx(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO message_bodies (message_rowid, body_text, body_html, raw_headers)
 			VALUES (?,?,?,?)
@@ -119,14 +138,25 @@ func (s *Store) UpsertBody(ctx context.Context, b model.MessageBody) error {
 		}
 		return reindexFTS(ctx, tx, b.MessageRowID)
 	})
+	if err != nil {
+		logging.TraceContext(ctx, "store: upsert body", "rowid", b.MessageRowID, "err", err)
+		return err
+	}
+	logging.TraceContext(ctx, "store: upsert body done", "rowid", b.MessageRowID, "dur", time.Since(start))
+	return nil
 }
 
 // DeleteMessage removes a message and its dependent rows (labels, body,
 // attachments cascade) plus its FTS entry. It is a no-op if the message is absent.
 func (s *Store) DeleteMessage(ctx context.Context, accountID int64, gmailID string) error {
-	return s.withTx(ctx, func(tx *sql.Tx) error {
+	logging.TraceContext(ctx, "store: delete message", "account", accountID, "id", gmailID)
+	err := s.withTx(ctx, func(tx *sql.Tx) error {
 		return deleteMessageTx(ctx, tx, accountID, gmailID)
 	})
+	if err != nil {
+		logging.TraceContext(ctx, "store: delete message", "account", accountID, "id", gmailID, "err", err)
+	}
+	return err
 }
 
 // DeleteMessages removes many messages (and their FTS rows) in one transaction;
@@ -134,9 +164,12 @@ func (s *Store) DeleteMessage(ctx context.Context, accountID int64, gmailID stri
 // one commit, not one per id.
 func (s *Store) DeleteMessages(ctx context.Context, accountID int64, gmailIDs []string) error {
 	if len(gmailIDs) == 0 {
+		logging.TraceContext(ctx, "store: delete messages", "account", accountID, "n", 0)
 		return nil
 	}
-	return s.withTx(ctx, func(tx *sql.Tx) error {
+	start := time.Now()
+	logging.TraceContext(ctx, "store: delete messages", "account", accountID, "n", len(gmailIDs))
+	err := s.withTx(ctx, func(tx *sql.Tx) error {
 		for _, id := range gmailIDs {
 			if err := deleteMessageTx(ctx, tx, accountID, id); err != nil {
 				return err
@@ -144,6 +177,12 @@ func (s *Store) DeleteMessages(ctx context.Context, accountID int64, gmailIDs []
 		}
 		return nil
 	})
+	if err != nil {
+		logging.TraceContext(ctx, "store: delete messages", "account", accountID, "n", len(gmailIDs), "err", err)
+		return err
+	}
+	logging.TraceContext(ctx, "store: delete messages done", "account", accountID, "n", len(gmailIDs), "dur", time.Since(start))
+	return nil
 }
 
 // deleteMessageTx deletes one message and its FTS row within tx; absent ids are
@@ -194,7 +233,8 @@ func deleteMessageTx(ctx context.Context, tx *sql.Tx, accountID int64, gmailID s
 // ids) and recomputes the derived unread/starred flags. It is used for optimistic
 // local updates before the change is mirrored to Gmail.
 func (s *Store) ModifyLabels(ctx context.Context, accountID int64, gmailID string, add, remove []string) error {
-	return s.withTx(ctx, func(tx *sql.Tx) error {
+	logging.TraceContext(ctx, "store: modify labels", "account", accountID, "id", gmailID, "add", add, "remove", remove)
+	err := s.withTx(ctx, func(tx *sql.Tx) error {
 		var rowID int64
 		err := tx.QueryRowContext(ctx,
 			`SELECT rowid FROM messages WHERE account_id = ? AND gmail_id = ?`,
@@ -228,15 +268,21 @@ func (s *Store) ModifyLabels(ctx context.Context, accountID int64, gmailID strin
 		}
 		return nil
 	})
+	if err != nil {
+		logging.TraceContext(ctx, "store: modify labels", "account", accountID, "id", gmailID, "err", err)
+	}
+	return err
 }
 
 // UnreadIDsByLabel returns the Gmail ids of unread messages carrying labelID.
 func (s *Store) UnreadIDsByLabel(ctx context.Context, accountID int64, labelID string) ([]string, error) {
+	logging.TraceContext(ctx, "store: unread ids by label", "account", accountID, "label", labelID)
 	rows, err := s.reader.QueryContext(ctx, `
 		SELECT m.gmail_id FROM messages m
 		JOIN message_labels ml ON ml.message_rowid = m.rowid AND ml.label_id = ?
 		WHERE m.account_id = ? AND m.is_unread = 1`, labelID, accountID)
 	if err != nil {
+		logging.TraceContext(ctx, "store: unread ids by label", "account", accountID, "label", labelID, "err", err)
 		return nil, fmt.Errorf("unread ids: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
@@ -248,13 +294,18 @@ func (s *Store) UnreadIDsByLabel(ctx context.Context, accountID int64, labelID s
 		}
 		out = append(out, id)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	logging.TraceContext(ctx, "store: unread ids by label", "account", accountID, "label", labelID, "count", len(out))
+	return out, nil
 }
 
 // MarkLabelReadLocal clears the unread flag and removes the UNREAD label from
 // every message in a label (optimistic local mirror of a bulk mark-read).
 func (s *Store) MarkLabelReadLocal(ctx context.Context, accountID int64, labelID string) error {
-	return s.withTx(ctx, func(tx *sql.Tx) error {
+	logging.TraceContext(ctx, "store: mark label read local", "account", accountID, "label", labelID)
+	err := s.withTx(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE messages SET is_unread = 0
 			WHERE account_id = ? AND rowid IN (
@@ -270,6 +321,10 @@ func (s *Store) MarkLabelReadLocal(ctx context.Context, accountID int64, labelID
 		}
 		return nil
 	})
+	if err != nil {
+		logging.TraceContext(ctx, "store: mark label read local", "account", accountID, "label", labelID, "err", err)
+	}
+	return err
 }
 
 // UnreadCountByLabelForAccounts returns, per account, the number of unread
@@ -280,6 +335,7 @@ func (s *Store) UnreadCountByLabelForAccounts(ctx context.Context, accountIDs []
 	if len(accountIDs) == 0 {
 		return out, nil
 	}
+	logging.TraceContext(ctx, "store: unread count by label for accounts", "label", labelID, "n", len(accountIDs))
 	args := make([]any, 0, len(accountIDs)+1)
 	args = append(args, labelID)
 	for _, id := range accountIDs {
@@ -291,6 +347,7 @@ func (s *Store) UnreadCountByLabelForAccounts(ctx context.Context, accountIDs []
 		WHERE m.is_unread = 1 AND m.account_id IN (`+placeholders(len(accountIDs))+`)
 		GROUP BY m.account_id`, args...)
 	if err != nil {
+		logging.TraceContext(ctx, "store: unread count by label for accounts", "label", labelID, "err", err)
 		return nil, fmt.Errorf("unread counts by accounts: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
@@ -309,8 +366,10 @@ func (s *Store) UnreadCountByLabelForAccounts(ctx context.Context, accountIDs []
 func (s *Store) Count(ctx context.Context) (int64, error) {
 	var n int64
 	if err := s.reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages`).Scan(&n); err != nil {
+		logging.TraceContext(ctx, "store: count messages", "err", err)
 		return 0, fmt.Errorf("count messages: %w", err)
 	}
+	logging.TraceContext(ctx, "store: count messages", "count", n)
 	return n, nil
 }
 
@@ -320,8 +379,10 @@ func (s *Store) CountByLabel(ctx context.Context, accountID int64, labelID strin
 	if err := s.reader.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM message_labels WHERE account_id = ? AND label_id = ?`,
 		accountID, labelID).Scan(&n); err != nil {
+		logging.TraceContext(ctx, "store: count by label", "account", accountID, "label", labelID, "err", err)
 		return 0, fmt.Errorf("count by label: %w", err)
 	}
+	logging.TraceContext(ctx, "store: count by label", "account", accountID, "label", labelID, "count", n)
 	return n, nil
 }
 
@@ -334,14 +395,18 @@ func (s *Store) CountUnreadByLabel(ctx context.Context, accountID int64, labelID
 		JOIN message_labels ml ON ml.message_rowid = m.rowid AND ml.label_id = ?
 		WHERE m.account_id = ? AND m.is_unread = 1`,
 		labelID, accountID).Scan(&n); err != nil {
+		logging.TraceContext(ctx, "store: count unread by label", "account", accountID, "label", labelID, "err", err)
 		return 0, fmt.Errorf("count unread by label: %w", err)
 	}
+	logging.TraceContext(ctx, "store: count unread by label", "account", accountID, "label", labelID, "count", n)
 	return n, nil
 }
 
 // ListByLabel returns a page of messages carrying labelID, newest first. Labels
 // are not populated on list rows (the list view needs only headers and flags).
 func (s *Store) ListByLabel(ctx context.Context, accountID int64, labelID string, limit, offset int) ([]model.Message, error) {
+	start := time.Now()
+	logging.TraceContext(ctx, "store: list by label", "account", accountID, "label", labelID, "limit", limit, "offset", offset)
 	rows, err := s.reader.QueryContext(ctx, `
 		SELECT `+msgCols+`
 		FROM messages m JOIN message_labels ml ON ml.message_rowid = m.rowid
@@ -349,18 +414,27 @@ func (s *Store) ListByLabel(ctx context.Context, accountID int64, labelID string
 		ORDER BY m.internal_date DESC
 		LIMIT ? OFFSET ?`, accountID, labelID, limit, offset)
 	if err != nil {
+		logging.TraceContext(ctx, "store: list by label", "account", accountID, "label", labelID, "err", err)
 		return nil, fmt.Errorf("list by label: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
-	return scanMessages(rows)
+	out, err := scanMessages(rows)
+	if err != nil {
+		return nil, err
+	}
+	logging.TraceContext(ctx, "store: list by label done", "account", accountID, "label", labelID, "count", len(out), "dur", time.Since(start))
+	return out, nil
 }
 
 // Search runs a full-text query scoped to an account, best matches first. The
 // raw user query is turned into a safe FTS5 expression (each whitespace token is
 // quoted and made a prefix match), so arbitrary input cannot break the syntax.
 func (s *Store) Search(ctx context.Context, accountID int64, query string, limit int) ([]model.Message, error) {
+	start := time.Now()
 	match := ftsQuery(query)
+	logging.TraceContext(ctx, "store: search", "account", accountID, "query", query, "match", match, "limit", limit)
 	if match == "" {
+		logging.TraceContext(ctx, "store: search", "account", accountID, "query", query, "count", 0, "reason", "blank match")
 		return nil, nil
 	}
 	rows, err := s.reader.QueryContext(ctx, `
@@ -370,16 +444,23 @@ func (s *Store) Search(ctx context.Context, accountID int64, query string, limit
 		ORDER BY rank
 		LIMIT ?`, match, accountID, limit)
 	if err != nil {
+		logging.TraceContext(ctx, "store: search", "account", accountID, "query", query, "err", err)
 		return nil, fmt.Errorf("search: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
-	return scanMessages(rows)
+	out, err := scanMessages(rows)
+	if err != nil {
+		return nil, err
+	}
+	logging.TraceContext(ctx, "store: search done", "account", accountID, "query", query, "count", len(out), "dur", time.Since(start))
+	return out, nil
 }
 
 // ThreadIDsForMessages maps each given Gmail message id to its thread id,
 // omitting ids with no cached message. It does this in one query per chunk
 // rather than a GetMessage per id (which would also needlessly load labels).
 func (s *Store) ThreadIDsForMessages(ctx context.Context, accountID int64, gmailIDs []string) (map[string]string, error) {
+	logging.TraceContext(ctx, "store: thread ids for messages", "account", accountID, "n", len(gmailIDs))
 	out := make(map[string]string, len(gmailIDs))
 	const chunk = 500
 	for start := 0; start < len(gmailIDs); start += chunk {
@@ -397,6 +478,7 @@ func (s *Store) ThreadIDsForMessages(ctx context.Context, accountID int64, gmail
 			`SELECT gmail_id, thread_id FROM messages WHERE account_id = ? AND gmail_id IN (`+placeholders(len(ids))+`)`,
 			args...)
 		if err != nil {
+			logging.TraceContext(ctx, "store: thread ids for messages", "account", accountID, "err", err)
 			return nil, fmt.Errorf("thread ids for messages: %w", err)
 		}
 		err = func() error {
@@ -414,6 +496,7 @@ func (s *Store) ThreadIDsForMessages(ctx context.Context, accountID int64, gmail
 			return nil, err
 		}
 	}
+	logging.TraceContext(ctx, "store: thread ids for messages done", "account", accountID, "n", len(gmailIDs), "count", len(out))
 	return out, nil
 }
 
@@ -437,14 +520,17 @@ func ftsQuery(raw string) string {
 
 // GetMessage returns a single message (with its labels) by Gmail id.
 func (s *Store) GetMessage(ctx context.Context, accountID int64, gmailID string) (model.Message, error) {
+	logging.TraceContext(ctx, "store: get message", "account", accountID, "id", gmailID)
 	row := s.reader.QueryRowContext(ctx,
 		`SELECT `+msgCols+` FROM messages m WHERE m.account_id = ? AND m.gmail_id = ?`,
 		accountID, gmailID)
 	m, err := scanMessage(row)
 	if err == sql.ErrNoRows {
+		logging.TraceContext(ctx, "store: get message", "account", accountID, "id", gmailID, "found", false)
 		return model.Message{}, ErrNotFound
 	}
 	if err != nil {
+		logging.TraceContext(ctx, "store: get message", "account", accountID, "id", gmailID, "err", err)
 		return model.Message{}, fmt.Errorf("get message %q: %w", gmailID, err)
 	}
 	labels, err := s.loadLabels(ctx, m.RowID)
@@ -462,6 +548,7 @@ func (s *Store) GetMessage(ctx context.Context, accountID int64, gmailID string)
 // HTML. A re-fetch stamps body_fetched = 2 (see UpsertBody), so a genuinely
 // text-only message is re-checked exactly once and never re-selected here.
 func (s *Store) MessagesMissingHTML(ctx context.Context, accountID int64, limit int) ([]string, error) {
+	logging.TraceContext(ctx, "store: messages missing html", "account", accountID, "limit", limit)
 	rows, err := s.reader.QueryContext(ctx, `
 		SELECT m.gmail_id
 		FROM messages m JOIN message_bodies b ON b.message_rowid = m.rowid
@@ -470,6 +557,7 @@ func (s *Store) MessagesMissingHTML(ctx context.Context, accountID int64, limit 
 		ORDER BY m.internal_date DESC
 		LIMIT ?`, accountID, limit)
 	if err != nil {
+		logging.TraceContext(ctx, "store: messages missing html", "account", accountID, "err", err)
 		return nil, fmt.Errorf("query missing-html messages: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
@@ -481,11 +569,16 @@ func (s *Store) MessagesMissingHTML(ctx context.Context, accountID int64, limit 
 		}
 		ids = append(ids, id)
 	}
-	return ids, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	logging.TraceContext(ctx, "store: messages missing html done", "account", accountID, "count", len(ids))
+	return ids, nil
 }
 
 // GetBody returns the stored body parts for a message rowid.
 func (s *Store) GetBody(ctx context.Context, messageRowID int64) (model.MessageBody, error) {
+	logging.TraceContext(ctx, "store: get body", "rowid", messageRowID)
 	var b model.MessageBody
 	b.MessageRowID = messageRowID
 	var text, html, raw sql.NullString
@@ -493,12 +586,15 @@ func (s *Store) GetBody(ctx context.Context, messageRowID int64) (model.MessageB
 		`SELECT body_text, body_html, raw_headers FROM message_bodies WHERE message_rowid = ?`,
 		messageRowID).Scan(&text, &html, &raw)
 	if err == sql.ErrNoRows {
+		logging.TraceContext(ctx, "store: get body", "rowid", messageRowID, "found", false)
 		return model.MessageBody{}, ErrNotFound
 	}
 	if err != nil {
+		logging.TraceContext(ctx, "store: get body", "rowid", messageRowID, "err", err)
 		return model.MessageBody{}, fmt.Errorf("get body: %w", err)
 	}
 	b.Text, b.HTML, b.RawHeaders = text.String, html.String, raw.String
+	logging.TraceContext(ctx, "store: get body done", "rowid", messageRowID, "text_bytes", len(b.Text), "html_bytes", len(b.HTML))
 	return b, nil
 }
 

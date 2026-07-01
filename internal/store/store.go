@@ -11,7 +11,9 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
+	"github.com/jsnjack/mailbox/internal/logging"
 	_ "modernc.org/sqlite" // registers the "sqlite" database/sql driver
 )
 
@@ -31,10 +33,13 @@ type Store struct {
 // Open opens (creating if needed) the SQLite database at path and applies the
 // schema. path may be a filename or ":memory:"-style DSN fragment.
 func Open(path string) (*Store, error) {
+	start := time.Now()
+	logging.Trace("store: open", "path", path)
 	dsn := fmt.Sprintf("file:%s?%s", path, pragmas)
 
 	writer, err := sql.Open("sqlite", dsn)
 	if err != nil {
+		logging.Trace("store: open", "path", path, "err", err)
 		return nil, fmt.Errorf("open writer: %w", err)
 	}
 	// A single writer connection serializes all writes, avoiding "database is
@@ -42,8 +47,10 @@ func Open(path string) (*Store, error) {
 	writer.SetMaxOpenConns(1)
 	if _, err := writer.Exec(schemaSQL); err != nil {
 		_ = writer.Close()
+		logging.Trace("store: apply schema", "path", path, "err", err)
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
+	logging.Trace("store: schema applied", "path", path)
 	if err := migrate(writer); err != nil {
 		_ = writer.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
@@ -52,6 +59,7 @@ func Open(path string) (*Store, error) {
 	reader, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		_ = writer.Close()
+		logging.Trace("store: open reader", "path", path, "err", err)
 		return nil, fmt.Errorf("open reader: %w", err)
 	}
 	// WAL lets reads run concurrently; cap the pool so a burst can't open an
@@ -61,6 +69,7 @@ func Open(path string) (*Store, error) {
 	reader.SetMaxOpenConns(8)
 	reader.SetMaxIdleConns(4)
 
+	logging.Trace("store: opened", "path", path, "dur", time.Since(start))
 	return &Store{writer: writer, reader: reader}, nil
 }
 
@@ -91,10 +100,13 @@ func migrate(db *sql.DB) error {
 		if _, err := db.Exec(s); err != nil {
 			msg := strings.ToLower(err.Error())
 			if strings.Contains(msg, "duplicate column") || strings.Contains(msg, "no such column") {
+				logging.Trace("store: migrate step already applied", "stmt", s)
 				continue // already applied on a prior open (or fresh DB)
 			}
+			logging.Trace("store: migrate step", "stmt", s, "err", err)
 			return fmt.Errorf("%s: %w", s, err)
 		}
+		logging.Trace("store: migrate step applied", "stmt", s)
 	}
 	return nil
 }
@@ -106,12 +118,18 @@ func migrate(db *sql.DB) error {
 // the on-disk size actually shrinks. It briefly takes the write lock, so callers
 // should run it off the UI thread.
 func (s *Store) Vacuum(ctx context.Context) error {
+	start := time.Now()
+	logging.TraceContext(ctx, "store: vacuum")
 	if _, err := s.writer.ExecContext(ctx, "VACUUM"); err != nil {
+		logging.TraceContext(ctx, "store: vacuum", "err", err)
 		return fmt.Errorf("vacuum: %w", err)
 	}
+	logging.TraceContext(ctx, "store: wal-truncate")
 	if _, err := s.writer.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+		logging.TraceContext(ctx, "store: wal-truncate", "err", err)
 		return fmt.Errorf("checkpoint after vacuum: %w", err)
 	}
+	logging.TraceContext(ctx, "store: vacuum done", "dur", time.Since(start))
 	return nil
 }
 
@@ -120,13 +138,16 @@ func (s *Store) Vacuum(ctx context.Context) error {
 func (s *Store) withTx(ctx context.Context, fn func(*sql.Tx) error) error {
 	tx, err := s.writer.BeginTx(ctx, nil)
 	if err != nil {
+		logging.TraceContext(ctx, "store: begin tx", "err", err)
 		return fmt.Errorf("begin tx: %w", err)
 	}
 	if err := fn(tx); err != nil {
 		_ = tx.Rollback()
+		logging.TraceContext(ctx, "store: tx rollback", "err", err)
 		return err
 	}
 	if err := tx.Commit(); err != nil {
+		logging.TraceContext(ctx, "store: tx commit", "err", err)
 		return fmt.Errorf("commit tx: %w", err)
 	}
 	return nil

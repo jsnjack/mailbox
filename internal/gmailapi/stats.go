@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"sync/atomic"
 
+	"github.com/jsnjack/mailbox/internal/logging"
 	"golang.org/x/oauth2"
 	gmail "google.golang.org/api/gmail/v1"
 	"google.golang.org/api/option"
@@ -46,9 +47,16 @@ func (c *Client) Stats() StatsSnapshot { return c.stats.Snapshot() }
 // counts bytes in/out into stats. Pair it with NewClientStats(srv, stats) so the
 // request/quota counters land in the same Stats.
 func NewService(ctx context.Context, ts oauth2.TokenSource, stats *Stats) (*gmail.Service, error) {
+	logging.TraceContext(ctx, "gmailapi: newService", "token_source", ts != nil)
 	httpClient := oauth2.NewClient(ctx, ts) // an *http.Client whose Transport adds auth
 	httpClient.Transport = &countingTransport{base: httpClient.Transport, stats: stats}
-	return gmail.NewService(ctx, option.WithHTTPClient(httpClient))
+	srv, err := gmail.NewService(ctx, option.WithHTTPClient(httpClient))
+	if err != nil {
+		logging.TraceContext(ctx, "gmailapi: newService failed", "err", err)
+		return nil, err
+	}
+	logging.TraceContext(ctx, "gmailapi: newService done")
+	return srv, nil
 }
 
 // countingTransport tallies request and response bytes into Stats.

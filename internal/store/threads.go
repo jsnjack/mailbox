@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 
+	"github.com/jsnjack/mailbox/internal/logging"
 	"github.com/jsnjack/mailbox/internal/model"
 )
 
@@ -13,6 +15,8 @@ import (
 // labelID, newest first. The summary's Latest is the newest labeled message; the
 // counts cover the labeled messages in that thread.
 func (s *Store) ListThreadsByLabel(ctx context.Context, accountID int64, labelID string, limit, offset int) ([]model.ThreadSummary, error) {
+	start := time.Now()
+	logging.TraceContext(ctx, "store: list threads by label", "account", accountID, "label", labelID, "limit", limit, "offset", offset)
 	// Exactly one row per thread: the labeled message with the greatest
 	// (internal_date, rowid). The rowid tiebreak avoids duplicate rows when two
 	// messages share a whole-second internal_date, and ordering by rowid means a
@@ -33,6 +37,7 @@ func (s *Store) ListThreadsByLabel(ctx context.Context, accountID int64, labelID
 		LIMIT ? OFFSET ?`,
 		labelID, accountID, labelID, limit, offset)
 	if err != nil {
+		logging.TraceContext(ctx, "store: list threads by label", "account", accountID, "label", labelID, "err", err)
 		return nil, fmt.Errorf("list threads: %w", err)
 	}
 	latest, err := scanMessagesAndClose(rows)
@@ -55,6 +60,7 @@ func (s *Store) ListThreadsByLabel(ctx context.Context, accountID int64, labelID
 	if err := s.markRepliedByMe(ctx, accountID, out); err != nil {
 		return nil, err
 	}
+	logging.TraceContext(ctx, "store: list threads by label done", "account", accountID, "label", labelID, "count", len(out), "dur", time.Since(start))
 	return out, nil
 }
 
@@ -62,6 +68,8 @@ func (s *Store) ListThreadsByLabel(ctx context.Context, accountID int64, labelID
 // first, across all of the account's cached mail except threads whose newest
 // message is in Spam or Trash. It backs the "All Mail" folder.
 func (s *Store) ListAllThreads(ctx context.Context, accountID int64, limit, offset int) ([]model.ThreadSummary, error) {
+	start := time.Now()
+	logging.TraceContext(ctx, "store: list all threads", "account", accountID, "limit", limit, "offset", offset)
 	rows, err := s.reader.QueryContext(ctx, `
 		SELECT `+msgCols+`
 		FROM messages m
@@ -80,6 +88,7 @@ func (s *Store) ListAllThreads(ctx context.Context, accountID int64, limit, offs
 		LIMIT ? OFFSET ?`,
 		accountID, model.LabelSpam, model.LabelTrash, limit, offset)
 	if err != nil {
+		logging.TraceContext(ctx, "store: list all threads", "account", accountID, "err", err)
 		return nil, fmt.Errorf("list all threads: %w", err)
 	}
 	latest, err := scanMessagesAndClose(rows)
@@ -108,29 +117,39 @@ func (s *Store) ListAllThreads(ctx context.Context, accountID int64, limit, offs
 	if err := s.markRepliedByMe(ctx, accountID, out); err != nil {
 		return nil, err
 	}
+	logging.TraceContext(ctx, "store: list all threads done", "account", accountID, "count", len(out), "dur", time.Since(start))
 	return out, nil
 }
 
 // ListThreadMessages returns every message in a thread, oldest first.
 func (s *Store) ListThreadMessages(ctx context.Context, accountID int64, threadID string) ([]model.Message, error) {
+	logging.TraceContext(ctx, "store: list thread messages", "account", accountID, "thread", threadID)
 	rows, err := s.reader.QueryContext(ctx,
 		`SELECT `+msgCols+` FROM messages m WHERE m.account_id = ? AND m.thread_id = ? ORDER BY m.internal_date`,
 		accountID, threadID)
 	if err != nil {
+		logging.TraceContext(ctx, "store: list thread messages", "account", accountID, "thread", threadID, "err", err)
 		return nil, fmt.Errorf("list thread messages: %w", err)
 	}
-	return scanMessagesAndClose(rows)
+	out, err := scanMessagesAndClose(rows)
+	if err != nil {
+		return nil, err
+	}
+	logging.TraceContext(ctx, "store: list thread messages done", "account", accountID, "thread", threadID, "count", len(out))
+	return out, nil
 }
 
 // ThreadLabels returns the set of label ids applied to any message in the
 // thread — used to reflect which labels are currently on a conversation.
 func (s *Store) ThreadLabels(ctx context.Context, accountID int64, threadID string) (map[string]bool, error) {
+	logging.TraceContext(ctx, "store: thread labels", "account", accountID, "thread", threadID)
 	rows, err := s.reader.QueryContext(ctx, `
 		SELECT DISTINCT ml.label_id
 		FROM message_labels ml
 		JOIN messages m ON m.rowid = ml.message_rowid
 		WHERE m.account_id = ? AND m.thread_id = ?`, accountID, threadID)
 	if err != nil {
+		logging.TraceContext(ctx, "store: thread labels", "account", accountID, "thread", threadID, "err", err)
 		return nil, fmt.Errorf("thread labels: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
@@ -142,25 +161,33 @@ func (s *Store) ThreadLabels(ctx context.Context, accountID int64, threadID stri
 		}
 		out[id] = true
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	logging.TraceContext(ctx, "store: thread labels done", "account", accountID, "thread", threadID, "count", len(out))
+	return out, nil
 }
 
 // GetThreadSummary returns the summary for a single thread (all messages, not
 // label-scoped) — used to present search hits as threads.
 func (s *Store) GetThreadSummary(ctx context.Context, accountID int64, threadID string) (model.ThreadSummary, error) {
+	logging.TraceContext(ctx, "store: get thread summary", "account", accountID, "thread", threadID)
 	row := s.reader.QueryRowContext(ctx,
 		`SELECT `+msgCols+` FROM messages m WHERE m.account_id = ? AND m.thread_id = ? ORDER BY m.internal_date DESC LIMIT 1`,
 		accountID, threadID)
 	latest, err := scanMessage(row)
 	if err != nil {
+		logging.TraceContext(ctx, "store: get thread summary", "account", accountID, "thread", threadID, "err", err)
 		return model.ThreadSummary{}, fmt.Errorf("thread summary %q: %w", threadID, err)
 	}
 	var total, unread int
 	if err := s.reader.QueryRowContext(ctx,
 		`SELECT COUNT(*), COALESCE(SUM(is_unread),0) FROM messages WHERE account_id = ? AND thread_id = ?`,
 		accountID, threadID).Scan(&total, &unread); err != nil {
+		logging.TraceContext(ctx, "store: get thread summary", "account", accountID, "thread", threadID, "err", err)
 		return model.ThreadSummary{}, fmt.Errorf("thread counts %q: %w", threadID, err)
 	}
+	logging.TraceContext(ctx, "store: get thread summary done", "account", accountID, "thread", threadID, "count", total, "unread", unread)
 	return model.ThreadSummary{ThreadID: threadID, Latest: latest, Count: total, UnreadCount: unread}, nil
 }
 
@@ -173,6 +200,8 @@ func (s *Store) GetThreadSummaries(ctx context.Context, accountID int64, threadI
 	if len(threadIDs) == 0 {
 		return nil, nil
 	}
+	start := time.Now()
+	logging.TraceContext(ctx, "store: get thread summaries", "account", accountID, "n", len(threadIDs))
 	latest := make(map[string]model.Message, len(threadIDs))
 
 	// Chunk the IN-list to stay well under SQLite's bound-variable ceiling.
@@ -198,6 +227,7 @@ func (s *Store) GetThreadSummaries(ctx context.Context, accountID int64, threadI
 				LIMIT 1
 			)`, args...)
 		if err != nil {
+			logging.TraceContext(ctx, "store: get thread summaries", "account", accountID, "err", err)
 			return nil, fmt.Errorf("thread summaries (latest): %w", err)
 		}
 		msgs, err := scanMessagesAndClose(rows)
@@ -231,6 +261,7 @@ func (s *Store) GetThreadSummaries(ctx context.Context, accountID int64, threadI
 	if err := s.markRepliedByMe(ctx, accountID, out); err != nil {
 		return nil, err
 	}
+	logging.TraceContext(ctx, "store: get thread summaries done", "account", accountID, "n", len(threadIDs), "count", len(out), "dur", time.Since(start))
 	return out, nil
 }
 

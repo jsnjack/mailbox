@@ -12,6 +12,7 @@ import (
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 	"github.com/diamondburned/gotk4/pkg/pango"
 	"github.com/jsnjack/mailbox/internal/dispatch"
+	"github.com/jsnjack/mailbox/internal/logging"
 	"github.com/jsnjack/mailbox/internal/model"
 )
 
@@ -23,6 +24,7 @@ func (w *window) refreshOutbox() {
 		slog.Warn("ui: count outbox", "err", err)
 		return
 	}
+	logging.Trace("ui: refresh outbox", "account", w.activeID, "pending", n)
 	if n == 0 {
 		w.outboxBanner.SetRevealed(false)
 		return
@@ -38,6 +40,7 @@ func (w *window) refreshOutbox() {
 // openOutbox shows a dialog listing the account's queued/failed sends, with
 // per-item retry/discard and a "Send now" action that sweeps the whole outbox.
 func (w *window) openOutbox() {
+	logging.Trace("ui: open outbox dialog", "account", w.activeID)
 	listBox := gtk.NewListBox()
 	listBox.AddCSSClass("boxed-list")
 	listBox.SetSelectionMode(gtk.SelectionNone)
@@ -76,6 +79,7 @@ func (w *window) openOutbox() {
 		sendNow.AddCSSClass("suggested-action")
 		sendNow.ConnectClicked(func() {
 			acctID := w.activeID
+			logging.Trace("ui: outbox send now", "account", acctID)
 			go func() {
 				err := w.deps.SweepOutbox(context.Background(), acctID)
 				dispatch.Main(func() {
@@ -83,6 +87,7 @@ func (w *window) openOutbox() {
 						slog.Warn("ui: sweep outbox", "err", err)
 						w.toast("Couldn't send — messages stay queued")
 					}
+					logging.Trace("ui: outbox send now done", "account", acctID, "err", err)
 					rebuild()
 					w.refreshOutbox()
 				})
@@ -153,6 +158,7 @@ func (w *window) outboxRow(it model.OutboxItem, rebuild func()) *gtk.Box {
 		retry.AddCSSClass("flat")
 		retry.ConnectClicked(func() {
 			acctID := w.activeID
+			logging.Trace("ui: outbox retry item", "account", acctID, "id", id)
 			go func() {
 				err := w.deps.RetryOutbox(context.Background(), acctID, id)
 				dispatch.Main(func() {
@@ -160,6 +166,7 @@ func (w *window) outboxRow(it model.OutboxItem, rebuild func()) *gtk.Box {
 						slog.Warn("ui: retry outbox", "err", err)
 						w.toast("Retry failed — message stays queued")
 					}
+					logging.Trace("ui: outbox retry item done", "account", acctID, "id", id, "err", err)
 					rebuild()
 					w.refreshOutbox()
 				})
@@ -174,6 +181,7 @@ func (w *window) outboxRow(it model.OutboxItem, rebuild func()) *gtk.Box {
 		discard.AddCSSClass("flat")
 		discard.ConnectClicked(func() {
 			acctID := w.activeID
+			logging.Trace("ui: outbox discard item", "account", acctID, "id", id)
 			go func() {
 				err := w.deps.DiscardOutbox(context.Background(), acctID, id)
 				dispatch.Main(func() {
@@ -181,6 +189,7 @@ func (w *window) outboxRow(it model.OutboxItem, rebuild func()) *gtk.Box {
 						slog.Warn("ui: discard outbox", "err", err)
 						w.toast("Couldn't discard message")
 					}
+					logging.Trace("ui: outbox discard item done", "account", acctID, "id", id, "err", err)
 					rebuild()
 					w.refreshOutbox()
 				})

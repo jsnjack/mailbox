@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"time"
+
+	"github.com/jsnjack/mailbox/internal/logging"
 )
 
 // openAIProvider speaks the OpenAI-compatible Chat Completions API. The same
@@ -44,6 +46,9 @@ func (p *openAIProvider) Stream(ctx context.Context, system string, msgs []Msg) 
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
+	logging.Trace("ai: openai stream", "model", p.model, "endpoint", p.endpoint,
+		"hasKey", p.apiKey != "", "msgs", len(msgs), "bytes", len(body),
+		"payload", logging.Body(string(body)))
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.endpoint+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
@@ -52,7 +57,7 @@ func (p *openAIProvider) Stream(ctx context.Context, system string, msgs []Msg) 
 	if p.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+p.apiKey)
 	}
-	return streamSSE(ctx, p.client, req, extractOpenAIDelta)
+	return streamSSE(ctx, p.client, req, extractOpenAIDelta, p.Name(), p.model)
 }
 
 func openAIMessages(system string, msgs []Msg) []map[string]string {

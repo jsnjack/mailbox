@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"time"
+
+	"github.com/jsnjack/mailbox/internal/logging"
 )
 
 const (
@@ -52,6 +54,9 @@ func (p *anthropicProvider) Stream(ctx context.Context, system string, msgs []Ms
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
+	logging.Trace("ai: anthropic stream", "model", p.model, "endpoint", p.endpoint,
+		"hasKey", p.apiKey != "", "msgs", len(msgs), "maxTokens", anthropicMaxTokens,
+		"bytes", len(body), "payload", logging.Body(string(body)))
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.endpoint+"/messages", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
@@ -59,7 +64,7 @@ func (p *anthropicProvider) Stream(ctx context.Context, system string, msgs []Ms
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-api-key", p.apiKey)
 	req.Header.Set("anthropic-version", anthropicVersion)
-	return streamSSE(ctx, p.client, req, extractAnthropicDelta)
+	return streamSSE(ctx, p.client, req, extractAnthropicDelta, p.Name(), p.model)
 }
 
 // anthropicMessages maps turns to the Anthropic schema; the system prompt is

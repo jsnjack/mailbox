@@ -8,6 +8,8 @@ import (
 
 	"github.com/diamondburned/gotk4/pkg/gdk/v4"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
+
+	"github.com/jsnjack/mailbox/internal/logging"
 )
 
 // Bundled symbolic icons for concepts Adwaita doesn't cover well (a cheerful
@@ -48,6 +50,7 @@ var bundledIcons = map[string][]byte{
 func registerCustomIcons() {
 	display := gdk.DisplayGetDefault()
 	if display == nil {
+		logging.Trace("ui: register custom icons skipped", "reason", "no display")
 		return
 	}
 	cache, err := os.UserCacheDir()
@@ -74,6 +77,7 @@ func registerCustomIcons() {
 		slog.Warn("ui: write app icon", "name", appID, "err", err)
 	}
 	gtk.IconThemeGetForDisplay(display).AddSearchPath(base)
+	logging.Trace("ui: registered custom icons", "n", len(bundledIcons), "path", base)
 }
 
 // appCSS adds a single accent colour on top of stock Adwaita, following GNOME's
@@ -145,10 +149,12 @@ const appCSS = `
 func loadAppCSS() {
 	display := gdk.DisplayGetDefault()
 	if display == nil {
+		logging.Trace("ui: load app css skipped", "reason", "no display")
 		return
 	}
 	provider := gtk.NewCSSProvider()
 	provider.LoadFromString(appCSS)
 	gtk.StyleContextAddProviderForDisplay(display, provider, gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+	logging.Trace("ui: registered app stylesheet")
 	registerCustomIcons()
 }

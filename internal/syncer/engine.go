@@ -16,6 +16,7 @@ import (
 
 	"github.com/jsnjack/mailbox/internal/backend"
 	"github.com/jsnjack/mailbox/internal/config"
+	"github.com/jsnjack/mailbox/internal/logging"
 	"github.com/jsnjack/mailbox/internal/model"
 	"github.com/jsnjack/mailbox/internal/store"
 )
@@ -55,21 +56,27 @@ func (e *Engine) publish(c Change) {
 // to reconnect the account. Used when a sync fails because the refresh token was
 // revoked or expired — a state that cannot be recovered without re-login.
 func (e *Engine) NotifyAuthExpired(accountID int64) {
+	logging.Trace("syncer: auth expired", "account", accountID)
 	e.publish(Change{Kind: AuthExpired, AccountID: accountID})
 }
 
 // SyncLabels refreshes the account's label set from Gmail.
 func (e *Engine) SyncLabels(ctx context.Context, b backend.Backend, accountID int64) (int, error) {
+	start := time.Now()
+	logging.TraceContext(ctx, "syncer: SyncLabels", "account", accountID)
 	labels, err := b.Labels(ctx)
 	if err != nil {
+		logging.TraceContext(ctx, "syncer: SyncLabels fetch failed", "account", accountID, "dur", time.Since(start), "err", err)
 		return 0, err
 	}
 	for _, l := range labels {
 		if err := e.Store.UpsertLabel(ctx, l); err != nil {
+			logging.TraceContext(ctx, "syncer: SyncLabels upsert failed", "account", accountID, "label", l.GmailID, "err", err)
 			return 0, err
 		}
 	}
 	e.publish(Change{Kind: LabelsSynced, AccountID: accountID, Count: len(labels)})
+	logging.TraceContext(ctx, "syncer: SyncLabels ok", "account", accountID, "count", len(labels), "dur", time.Since(start))
 	return len(labels), nil
 }
 
@@ -77,10 +84,14 @@ func (e *Engine) SyncLabels(ctx context.Context, b backend.Backend, accountID in
 // max (0 = all), fetches each message's metadata concurrently, and upserts it.
 // Individual fetch failures are logged and skipped; it returns the number stored.
 func (e *Engine) Backfill(ctx context.Context, b backend.Backend, accountID int64, query string, max int) (int, error) {
+	start := time.Now()
+	logging.TraceContext(ctx, "syncer: Backfill start", "account", accountID, "query", query, "max", max, "workers", backfillWorkers)
 	ids, err := b.SearchIDs(ctx, query, max)
 	if err != nil {
+		logging.TraceContext(ctx, "syncer: Backfill list ids failed", "account", accountID, "query", query, "err", err)
 		return 0, fmt.Errorf("list message ids: %w", err)
 	}
+	logging.TraceContext(ctx, "syncer: Backfill listed ids", "account", accountID, "count", len(ids))
 
 	// Fetch metadata concurrently, but write in batches: each worker only does
 	// network work and hands the converted message to a single collector that
@@ -133,10 +144,12 @@ func (e *Engine) Backfill(ctx context.Context, b backend.Backend, accountID int6
 		if len(batch) == 0 {
 			return nil
 		}
+		bstart := time.Now()
 		if err := e.Store.UpsertMessages(ctx, batch); err != nil {
 			return fmt.Errorf("backfill upsert: %w", err)
 		}
 		stored += len(batch)
+		logging.TraceContext(ctx, "syncer: Backfill batch committed", "account", accountID, "batch", len(batch), "stored", stored, "dur", time.Since(bstart))
 		e.publish(Change{Kind: BackfillProgress, AccountID: accountID, Count: stored})
 		batch = batch[:0]
 		return nil
@@ -154,13 +167,16 @@ func (e *Engine) Backfill(ctx context.Context, b backend.Backend, accountID int6
 		}
 	}
 	if flushErr != nil {
+		logging.TraceContext(ctx, "syncer: Backfill aborted", "account", accountID, "stored", stored, "dur", time.Since(start), "err", flushErr)
 		return stored, flushErr
 	}
 	if err := flush(); err != nil {
+		logging.TraceContext(ctx, "syncer: Backfill final flush failed", "account", accountID, "stored", stored, "dur", time.Since(start), "err", err)
 		return stored, err
 	}
 
 	e.publish(Change{Kind: BackfillComplete, AccountID: accountID, Count: stored})
+	logging.TraceContext(ctx, "syncer: Backfill complete", "account", accountID, "total", stored, "dur", time.Since(start), "ctxErr", ctx.Err())
 	return stored, ctx.Err()
 }
 
@@ -559,27 +575,36 @@ func (e *Engine) Incremental(ctx context.Context, b backend.Backend, accountID i
 	defer func(start time.Time) {
 		slog.Default().Debug("engine: Incremental", "account", accountID, "dur", time.Since(start))
 	}(time.Now())
+	logging.TraceContext(ctx, "syncer: Incremental start", "account", accountID)
 	acc, err := e.Store.GetAccountByID(ctx, accountID)
 	if err != nil {
 		return 0, err
 	}
 	if acc.SyncCursor == "" {
+		logging.TraceContext(ctx, "syncer: Incremental no cursor; backfill first", "account", accountID)
 		return 0, fmt.Errorf("account %d has no sync cursor; backfill first", accountID)
 	}
 
 	upserts, deletes, next, err := b.Changes(ctx, acc.SyncCursor)
 	if err != nil {
 		if errors.Is(err, backend.ErrCursorExpired) {
+			// Cursor fell out of the provider's history window: signal the caller to
+			// self-heal via Resync (a full re-backfill) rather than retry incremental.
+			logging.TraceContext(ctx, "syncer: Incremental cursor expired -> resync required", "account", accountID, "cursor", acc.SyncCursor, "err", err)
 			return 0, ErrHistoryExpired
 		}
+		logging.TraceContext(ctx, "syncer: Incremental changes failed", "account", accountID, "cursor", acc.SyncCursor, "err", err)
 		return 0, err
 	}
+	logging.TraceContext(ctx, "syncer: Incremental changes", "account", accountID, "cursor", acc.SyncCursor, "next", next, "upserts", len(upserts), "deletes", len(deletes))
 
 	changed := 0
 	if len(deletes) > 0 {
+		dstart := time.Now()
 		if err := e.Store.DeleteMessages(ctx, accountID, deletes); err != nil {
 			return changed, err
 		}
+		logging.TraceContext(ctx, "syncer: Incremental deleted", "account", accountID, "count", len(deletes), "dur", time.Since(dstart))
 		// One event per id so per-message consumers still see each deletion; the
 		// UI coalesces the resulting refresh.
 		for _, id := range deletes {
@@ -594,9 +619,11 @@ func (e *Engine) Incremental(ctx context.Context, b backend.Backend, accountID i
 	// (e.g. a bulk archive done on another device) N/workers round-trips, not N.
 	msgs, fetchedIDs := e.fetchMetadataConcurrent(ctx, b, upserts)
 	if len(msgs) > 0 {
+		ustart := time.Now()
 		if err := e.Store.UpsertMessages(ctx, msgs); err != nil {
 			return changed, err
 		}
+		logging.TraceContext(ctx, "syncer: Incremental upserted", "account", accountID, "count", len(msgs), "dur", time.Since(ustart))
 		for i, id := range fetchedIDs {
 			tid := ""
 			if i < len(msgs) {
@@ -610,6 +637,7 @@ func (e *Engine) Incremental(ctx context.Context, b backend.Backend, accountID i
 	if err := e.Store.SetSyncCursor(ctx, accountID, next); err != nil {
 		return changed, err
 	}
+	logging.TraceContext(ctx, "syncer: Incremental done", "account", accountID, "changed", changed, "next", next)
 	return changed, nil
 }
 
@@ -627,18 +655,25 @@ func (e *Engine) Incremental(ctx context.Context, b backend.Backend, accountID i
 // expired aren't reconciled — incremental handles deletions going forward, and a
 // full-mailbox id diff isn't worth its cost here.
 func (e *Engine) Resync(ctx context.Context, b backend.Backend, accountID int64, max int) (int, error) {
+	start := time.Now()
+	logging.TraceContext(ctx, "syncer: Resync start", "account", accountID, "max", max)
 	prof, err := b.Profile(ctx)
 	if err != nil {
+		logging.TraceContext(ctx, "syncer: Resync profile failed", "account", accountID, "err", err)
 		return 0, fmt.Errorf("resync: profile: %w", err)
 	}
 	watermark := prof.Cursor
+	logging.TraceContext(ctx, "syncer: Resync captured watermark", "account", accountID, "historyId", watermark)
 	n, err := e.Backfill(ctx, b, accountID, "", max)
 	if err != nil {
+		logging.TraceContext(ctx, "syncer: Resync backfill failed", "account", accountID, "stored", n, "err", err)
 		return n, fmt.Errorf("resync: backfill: %w", err)
 	}
 	if err := e.Store.SetSyncCursor(ctx, accountID, watermark); err != nil {
+		logging.TraceContext(ctx, "syncer: Resync set cursor failed", "account", accountID, "historyId", watermark, "err", err)
 		return n, fmt.Errorf("resync: set cursor: %w", err)
 	}
+	logging.TraceContext(ctx, "syncer: Resync done", "account", accountID, "stored", n, "historyId", watermark, "dur", time.Since(start))
 	return n, nil
 }
 

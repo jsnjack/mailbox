@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/jsnjack/mailbox/internal/logging"
 )
 
 // appName is the directory segment used under each XDG base directory.
@@ -85,8 +87,10 @@ func EnsureDirs() error {
 	if err != nil {
 		return err
 	}
+	logging.Trace("config: ensure dirs", "config", cfg, "data", data, "attachments", att)
 	for _, d := range []string{cfg, data, att} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
+			logging.Trace("config: ensure dir failed", "path", d, "err", err)
 			return fmt.Errorf("create %s: %w", d, err)
 		}
 	}

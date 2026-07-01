@@ -337,6 +337,40 @@ afterward. The `sync` command and the headless packages build without GTK.
 
 ---
 
+## Tracing
+
+Tracing exists so an agent (or a human) can reconstruct exactly what the app did
+from `/tmp/mailbox.log` alone — enough to debug an issue and produce a fix
+without reproducing it live. Run with `--trace`; the file is truncated each
+start. **Every meaningful action and code-path branch must emit a trace log.**
+
+- **One helper.** `logging.Trace(msg, args...)` (or `logging.TraceContext(ctx,
+  …)`) — slog has no `Trace` method. `Info`/`Warn`/`Error` stay for
+  user-visible/terminal-worthy events; everything finer is `Trace`.
+- **Message format** `"pkg: action"` (e.g. `"store: upsert messages"`,
+  `"gmailapi: messages.get"`), then structured key/value pairs — never format
+  into the message string. Standard keys: `account`, `id`, `label`, `query`,
+  `n`/`count`, `bytes`, `dur`, and `err` on failures.
+- **What to trace, per code path:** entry of every exported function with its key
+  args; the outcome (result count, rows affected, bytes) and `dur` for anything
+  doing I/O; **which branch was taken and why** at each non-trivial decision
+  (cache hit vs. miss, retry, fallback, early return, skip); every external
+  boundary crossing (HTTP request/response status, SQL mutation, IMAP command,
+  AI request/response, keyring access, file read/write).
+- **Content policy:** this is a single-user local desktop client and the trace
+  file is local + per-run-truncated, so trace logs record full content to
+  maximise debuggability — full addresses, subjects, headers, query strings, and
+  bodies. Cap any unbounded/large value with `logging.Body(s)` (truncates to
+  ~2KB with a `…(+N more bytes)` marker). Never trace secrets: OAuth tokens, AI
+  API keys, and passwords are logged only as presence/length, never verbatim.
+- **Cost:** cheap args (ids, counts, an in-hand string via `logging.Body`) need
+  no guard — slog skips disabled levels. Guard only genuinely expensive arg
+  construction (hashing, re-serialising) behind `if logging.Enabled() { … }`.
+- **Headless rule still holds:** `logging` imports no GTK, so every headless
+  package (`store`, `gmailapi`, `imapbackend`, `ai`, …) may and should import it.
+
+---
+
 ## Gotchas
 
 - GTK4 is single-threaded: never touch a widget off the main loop — route through `dispatch.Main`.

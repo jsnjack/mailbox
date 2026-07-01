@@ -15,6 +15,7 @@ import (
 	"github.com/jsnjack/mailbox/internal/activity"
 	"github.com/jsnjack/mailbox/internal/ai"
 	"github.com/jsnjack/mailbox/internal/config"
+	"github.com/jsnjack/mailbox/internal/logging"
 	"github.com/jsnjack/mailbox/internal/model"
 	"github.com/jsnjack/mailbox/internal/store"
 	"github.com/jsnjack/mailbox/internal/syncer"
@@ -161,6 +162,7 @@ type Deps struct {
 // handler) — it opens a prefilled compose. GApplication routes it to an
 // already-running instance, so clicking a mailto link reuses the open window.
 func Run(deps Deps, mailto string) error {
+	logging.Trace("ui: run", "app_id", applicationID(), "accounts", len(deps.Accounts), "mailto", mailto != "")
 	// Notifications are routed by the desktop environment via the app id's
 	// installed desktop entry; make sure one exists before any can fire.
 	ensureDesktopFile()
@@ -173,18 +175,23 @@ func Run(deps Deps, mailto string) error {
 			win = newWindow(app, deps)
 			win.present()
 			slog.Debug("ui: window presented")
+			logging.Trace("ui: window presented")
 		}
 		return win
 	}
 	app.ConnectActivate(func() {
 		slog.Debug("ui: activate")
+		logging.Trace("ui: activate")
 		ensureWindow()
 	})
 	app.ConnectOpen(func(files []gio.Filer, hint string) {
 		slog.Debug("ui: open", "n", len(files))
+		logging.Trace("ui: open handler", "n", len(files), "hint", hint)
 		w := ensureWindow()
 		for _, f := range files {
-			w.composeFromMailto(f.URI())
+			uri := f.URI()
+			logging.Trace("ui: mailto routed", "uri", uri)
+			w.composeFromMailto(uri)
 		}
 	})
 	argv := []string{"mailbox"}
@@ -193,6 +200,7 @@ func Run(deps Deps, mailto string) error {
 	}
 	code := app.Run(argv)
 	slog.Debug("ui: app.Run returned", "code", code)
+	logging.Trace("ui: app.Run returned", "code", code)
 	if code != 0 {
 		return fmt.Errorf("gtk application exited with code %d", code)
 	}
