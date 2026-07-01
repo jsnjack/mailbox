@@ -122,6 +122,12 @@ func (w *window) showRowMenu(row gtk.Widgetter, threadID string, x, y float64) {
 		if w.deps.Assistant != nil {
 			item(box, "Re-categorize with AI", func() { w.recategorizeThread(threadID) })
 		}
+		// When this thread carries a category the user set by hand, offer a
+		// one-click way to drop it (reverting to the AI / "Replied" tag) rather
+		// than burying it under Categorize as → None.
+		if w.manualCat[threadID] {
+			item(box, "Clear category", func() { w.setThreadCategory(threadID, "") })
+		}
 	}
 
 	sep()
