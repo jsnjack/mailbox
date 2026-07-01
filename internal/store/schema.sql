@@ -111,6 +111,7 @@ CREATE TABLE IF NOT EXISTS message_categories (
   account_id      INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
   gmail_id        TEXT NOT NULL,
   category        TEXT NOT NULL,     -- a known category, or '' for "no tag"
+  manual          INTEGER NOT NULL DEFAULT 0, -- 1 = user picked it (overrides "Replied")
   PRIMARY KEY (account_id, gmail_id)
 );
 

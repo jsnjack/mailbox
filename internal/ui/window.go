@@ -163,7 +163,10 @@ type window struct {
 	// a "Needs reply" thread that gets a discount reply becomes "Discount").
 	categories     map[string]string
 	categorizedMsg map[string]string
-	categorizing   bool
+	// manualCat marks threads whose category the user picked by hand (thread id →
+	// true). A manual pick outranks the automatic "Replied" tag in the list.
+	manualCat    map[string]bool
+	categorizing bool
 	// categorizeFP / categorizeAt debounce categorizeInbox against the same
 	// candidate set: every list refresh re-enters it (showThreads calls it), and
 	// the cache-seed refresh it issues re-enters it again. When the candidate set
@@ -221,6 +224,7 @@ func newWindow(app *adw.Application, deps Deps) *window {
 		selected:         map[string]bool{},
 		categories:       map[string]string{},
 		categorizedMsg:   map[string]string{},
+		manualCat:        map[string]bool{},
 		inlineRefetched:  map[string]bool{},
 	}
 	w.accountNames, _ = config.LoadAccountNames()
@@ -1003,7 +1007,7 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 		// Keep the signature cache in step with what is actually on screen, so a
 		// scroll-recycled row never looks "unchanged" to the next diff.
 		w.rowSig[id] = w.renderSig(id)
-		row := threadRow(w.threadByID[id], outgoing, w.categories[id])
+		row := threadRow(w.threadByID[id], outgoing, w.categories[id], w.manualCat[id])
 		// Right-click a row for quick actions (archive/star/read/trash) without
 		// opening it. A fresh row+gesture is created each bind, so the captured id
 		// always matches what's shown.
@@ -1175,9 +1179,13 @@ func (w *window) setThreadCategory(threadID, cat string) {
 	acctID := w.activeID
 	logging.Trace("ui: set thread category", "thread", threadID, "id", msgID, "category", cat, "account", acctID)
 	if cat == "" {
+		// "None" clears the manual override entirely, reverting to the default
+		// (which, for a thread you replied to last, is the "Replied" tag).
 		delete(w.categories, threadID)
+		delete(w.manualCat, threadID)
 	} else {
 		w.categories[threadID] = cat
+		w.manualCat[threadID] = true // a hand-picked category outranks "Replied"
 	}
 	w.categorizedMsg[threadID] = msgID // pin so categorizeInbox leaves the manual choice alone
 	w.refreshList(w.searchEntry.Text())
@@ -1186,7 +1194,7 @@ func (w *window) setThreadCategory(threadID, cat string) {
 		if cat == "" {
 			err = w.deps.Store.ClearMessageCategory(context.Background(), acctID, msgID)
 		} else {
-			err = w.deps.Store.SetMessageCategory(context.Background(), acctID, msgID, cat)
+			err = w.deps.Store.SetManualCategory(context.Background(), acctID, msgID, cat)
 		}
 		if err != nil {
 			slog.Warn("ui: set thread category", "err", err)
@@ -1207,6 +1215,7 @@ func (w *window) recategorizeThread(threadID string) {
 	logging.Trace("ui: recategorize thread", "thread", threadID, "id", msgID, "account", w.activeID)
 	delete(w.categories, threadID)
 	delete(w.categorizedMsg, threadID)
+	delete(w.manualCat, threadID) // re-running AI drops any manual override
 	acctID := w.activeID
 	go func() {
 		if err := w.deps.Store.ClearMessageCategory(context.Background(), acctID, msgID); err != nil {
@@ -1273,6 +1282,7 @@ func (w *window) onRecategorize() {
 			}
 			w.categories = map[string]string{}
 			w.categorizedMsg = map[string]string{}
+			w.manualCat = map[string]bool{}
 			// Re-populating the list runs categorizeInbox afresh (no cache to skip).
 			w.refreshList(w.searchEntry.Text())
 		})
@@ -1767,8 +1777,8 @@ func (w *window) renderSig(id string) string {
 			sel = "s"
 		}
 	}
-	return fmt.Sprintf("%s\x1f%d\x1f%d\x1f%s\x1f%s\x1f%s\x1f%d\x1f%t\x1f%t\x1f%t\x1f%s",
-		sel, t.UnreadCount, t.Count, w.categories[id], who, m.Subject,
+	return fmt.Sprintf("%s\x1f%d\x1f%d\x1f%s\x1f%t\x1f%s\x1f%s\x1f%d\x1f%t\x1f%t\x1f%t\x1f%s",
+		sel, t.UnreadCount, t.Count, w.categories[id], w.manualCat[id], who, m.Subject,
 		m.InternalDate.Unix(), m.HasAttachments, m.IsStarred, t.RepliedByMe, m.Snippet)
 }
 
@@ -1849,13 +1859,20 @@ func (w *window) categorizeInbox() {
 			slog.Warn("ui: load cached categories", "err", err)
 			cached = map[string]string{}
 		}
+		// Which of those were set by hand — so a manual pick still outranks the
+		// "Replied" tag after a restart, not just in the session it was made.
+		manual, err := w.deps.Store.ManualCategoryIDs(ctx, acctID, msgIDs)
+		if err != nil {
+			slog.Warn("ui: load manual categories", "err", err)
+			manual = map[string]bool{}
+		}
 		var todo []categoryCand
 		for _, c := range cands {
 			if _, ok := cached[c.msgID]; !ok {
 				todo = append(todo, c)
 			}
 		}
-		logging.Trace("ui: categorize seeded from cache", "cached", len(cached), "todo", len(todo), "skipAI", skipAI, "account", acctID)
+		logging.Trace("ui: categorize seeded from cache", "cached", len(cached), "manual", len(manual), "todo", len(todo), "skipAI", skipAI, "account", acctID)
 		dispatch.Main(func() {
 			if w.activeID != acctID {
 				return // switched accounts; these tags belong to the other account
@@ -1864,6 +1881,9 @@ func (w *window) categorizeInbox() {
 				if cat, ok := cached[c.msgID]; ok {
 					w.categories[c.threadID] = cat
 					w.categorizedMsg[c.threadID] = c.msgID
+					if manual[c.msgID] {
+						w.manualCat[c.threadID] = true
+					}
 				}
 			}
 			w.refreshList(w.searchEntry.Text()) // show seeded tags immediately
@@ -4636,13 +4656,14 @@ func countBadge(n int) *gtk.Label {
 	return c
 }
 
-func threadRow(t model.ThreadSummary, outgoing bool, category string) *gtk.Box {
+func threadRow(t model.ThreadSummary, outgoing bool, category string, manualCat bool) *gtk.Box {
 	m := t.Latest
 	unread := t.UnreadCount > 0
 	// Once you've had the last word the conversation is handled, so show a
 	// "Replied" tag in place of the content category (Needs reply / Discount / …).
-	// Skipped in Sent/Drafts, where the last message is always yours.
-	if t.RepliedByMe && !outgoing {
+	// Skipped in Sent/Drafts, where the last message is always yours, and when the
+	// user picked the category by hand (a deliberate choice outranks "Replied").
+	if t.RepliedByMe && !outgoing && !manualCat {
 		category = "Replied"
 	}
 

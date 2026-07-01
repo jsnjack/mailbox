@@ -25,6 +25,67 @@ func (s *Store) SetMessageCategory(ctx context.Context, accountID int64, gmailID
 	return nil
 }
 
+// SetManualCategory persists a category the user picked by hand, marking it
+// manual so it outranks the automatic "Replied" tag in the list and survives a
+// restart. Like SetMessageCategory but sets manual = 1.
+func (s *Store) SetManualCategory(ctx context.Context, accountID int64, gmailID, category string) error {
+	logging.TraceContext(ctx, "store: set manual category", "account", accountID, "id", gmailID, "category", category)
+	_, err := s.writer.ExecContext(ctx,
+		`INSERT INTO message_categories (account_id, gmail_id, category, manual)
+		 VALUES (?, ?, ?, 1)
+		 ON CONFLICT(account_id, gmail_id) DO UPDATE SET category = excluded.category, manual = 1`,
+		accountID, gmailID, category)
+	if err != nil {
+		logging.TraceContext(ctx, "store: set manual category", "account", accountID, "id", gmailID, "err", err)
+		return fmt.Errorf("set manual category: %w", err)
+	}
+	return nil
+}
+
+// ManualCategoryIDs returns, for the given message ids, the set of ids whose
+// category the user set manually (manual = 1). Non-manual and absent ids are not
+// in the map. An empty input returns an empty map without querying.
+func (s *Store) ManualCategoryIDs(ctx context.Context, accountID int64, gmailIDs []string) (map[string]bool, error) {
+	logging.TraceContext(ctx, "store: manual category ids", "account", accountID, "n", len(gmailIDs))
+	out := make(map[string]bool, len(gmailIDs))
+	const chunk = 500
+	for start := 0; start < len(gmailIDs); start += chunk {
+		end := start + chunk
+		if end > len(gmailIDs) {
+			end = len(gmailIDs)
+		}
+		ids := gmailIDs[start:end]
+		args := make([]any, 0, len(ids)+1)
+		args = append(args, accountID)
+		for _, id := range ids {
+			args = append(args, id)
+		}
+		rows, err := s.reader.QueryContext(ctx,
+			`SELECT gmail_id FROM message_categories
+			   WHERE account_id = ? AND manual = 1 AND gmail_id IN (`+placeholders(len(ids))+`)`,
+			args...)
+		if err != nil {
+			return nil, fmt.Errorf("query manual category ids: %w", err)
+		}
+		err = func() error {
+			defer func() { _ = rows.Close() }()
+			for rows.Next() {
+				var id string
+				if err := rows.Scan(&id); err != nil {
+					return err
+				}
+				out[id] = true
+			}
+			return rows.Err()
+		}()
+		if err != nil {
+			return nil, err
+		}
+	}
+	logging.TraceContext(ctx, "store: manual category ids done", "account", accountID, "count", len(out))
+	return out, nil
+}
+
 // ClearMessageCategory removes the cached category for a single message, so its
 // thread is re-classified on the next pass (used by the per-conversation
 // "Re-categorize" action).

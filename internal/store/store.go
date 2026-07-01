@@ -95,6 +95,9 @@ func migrate(db *sql.DB) error {
 		// Inline-image support: remember each part's Content-ID so a cid: <img> in
 		// the body can be resolved to its bytes and rendered.
 		`ALTER TABLE attachments ADD COLUMN content_id TEXT NOT NULL DEFAULT ''`,
+		// Manual category override: a category the user picked by hand outranks the
+		// automatic "Replied" tag in the list, and must survive a restart.
+		`ALTER TABLE message_categories ADD COLUMN manual INTEGER NOT NULL DEFAULT 0`,
 	}
 	for _, s := range stmts {
 		if _, err := db.Exec(s); err != nil {
