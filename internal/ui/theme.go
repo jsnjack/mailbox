@@ -122,6 +122,14 @@ const appCSS = `
 	background-color: alpha(@success_color, 0.15);
 	color: @success_color;
 }
+/* "Discount": deals should jump out, so this one breaks the quiet-pill rule on
+   purpose — a solid warm-amber "sale" pill with dark bold text, readable in both
+   light and dark since the fill is mode-independent. */
+.cat-discount {
+	background-color: #e5a50a;
+	color: #241f00;
+	font-weight: bold;
+}
 
 /* Opaque cover shown over the message view while it loads, so WebKit's
    content-swap never flashes black through. White matches email content. */

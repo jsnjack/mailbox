@@ -4710,6 +4710,8 @@ func threadRow(t model.ThreadSummary, outgoing bool, category string) *gtk.Box {
 			tag.AddCSSClass("cat-needsreply")
 		case "Replied":
 			tag.AddCSSClass("cat-replied")
+		case "Discount":
+			tag.AddCSSClass("cat-discount")
 		}
 		tag.SetVAlign(gtk.AlignCenter)
 		subjRow := gtk.NewBox(gtk.OrientationHorizontal, 6)
