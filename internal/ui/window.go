@@ -2952,7 +2952,7 @@ func (w *window) renderConversation(msgs []model.Message) {
 	if subject == "" {
 		subject = "(no subject)"
 	}
-	title := "<span size=\"x-large\" weight=\"bold\">" + html.EscapeString(subject) + "</span>"
+	title := "<span size=\"large\" weight=\"bold\">" + html.EscapeString(subject) + "</span>"
 	if len(msgs) > 1 {
 		title += fmt.Sprintf("\n<span size=\"small\">%d messages</span>", len(msgs))
 	}
