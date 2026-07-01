@@ -1157,44 +1157,8 @@ func (w *window) registerListActions() {
 	recat := gio.NewSimpleAction("list-recategorize", nil)
 	recat.ConnectActivate(func(*glib.Variant) { w.onRecategorize() })
 	w.win.AddAction(recat)
-
-	// Per-row context actions; each carries the row's thread id.
-	row := func(name string, fn func(threadID string)) {
-		act := gio.NewSimpleAction(name, glib.NewVariantType("s"))
-		act.ConnectActivate(func(p *glib.Variant) {
-			if p != nil {
-				fn(p.String())
-			}
-		})
-		w.win.AddAction(act)
-	}
-	row("row-archive", func(id string) { w.threadModifyAll(id, "Archived", nil, []string{model.LabelInbox}) })
-	row("row-move-inbox", func(id string) {
-		w.threadModifyAll(id, "Moved to Inbox", []string{model.LabelInbox}, []string{model.LabelTrash, model.LabelSpam})
-	})
-	row("row-trash", func(id string) {
-		w.threadModifyAll(id, "Moved to Trash", []string{model.LabelTrash}, []string{model.LabelInbox})
-	})
-	row("row-mark-read", func(id string) { w.threadModifyAll(id, "Marked as read", nil, []string{model.LabelUnread}) })
-	// Star/unstar the whole thread (no toast — trivially reversible), so unstarring
-	// clears it from the Starred folder instead of leaving older replies starred.
-	row("row-star", func(id string) { w.threadModifyAll(id, "", []string{model.LabelStarred}, nil) })
-	row("row-unstar", func(id string) { w.threadModifyAll(id, "", nil, []string{model.LabelStarred}) })
-	row("row-mark-unread", func(id string) {
-		w.rowLatest(id, func(m model.Message) { w.applyLabels([]model.Message{m}, []string{model.LabelUnread}, nil, nil) })
-	})
-	row("row-recategorize", func(id string) { w.recategorizeThread(id) })
-	// row-setcat carries "threadID\x1fcategory" (empty category = clear).
-	setcat := gio.NewSimpleAction("row-setcat", glib.NewVariantType("s"))
-	setcat.ConnectActivate(func(p *glib.Variant) {
-		if p == nil {
-			return
-		}
-		if parts := strings.SplitN(p.String(), "\x1f", 2); len(parts) == 2 {
-			w.setThreadCategory(parts[0], parts[1])
-		}
-	})
-	w.win.AddAction(setcat)
+	// The per-row context-menu actions live in a dedicated group built per popup
+	// in showRowMenu (parameter-less closures), not here — see the comment there.
 }
 
 // setThreadCategory manually assigns (or clears, when cat is empty) a
@@ -1204,6 +1168,7 @@ func (w *window) registerListActions() {
 func (w *window) setThreadCategory(threadID, cat string) {
 	t, ok := w.threadByID[threadID]
 	if !ok {
+		logging.Trace("ui: set thread category skipped", "thread", threadID, "reason", "thread not in map", "category", cat)
 		return
 	}
 	msgID := t.Latest.GmailID

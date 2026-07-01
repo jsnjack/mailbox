@@ -134,6 +134,19 @@ const appCSS = `
 	min-height: 22px;
 }
 
+/* Right-click row context menu. It is hand-built from flat buttons (a
+   GtkPopoverMenu manually parented to a recycled list row won't activate its
+   GActions), so these rules make the buttons read as native menu items: normal
+   weight instead of the default button semibold, tight menu padding, left-aligned. */
+.rowmenu { padding: 6px; }
+.rowmenu button {
+	font-weight: normal;
+	min-height: 0;
+	padding: 3px 14px;
+	border-radius: 6px;
+}
+.rowmenu button label { font-weight: normal; }
+
 /* AI thread-summary card: a soft accent-tinted panel pinned above the thread. */
 .summary-card {
 	background-color: alpha(@accent_color, 0.08);

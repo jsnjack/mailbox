@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"syscall"
 )
 
 // LevelTrace is the most verbose level, below slog.LevelDebug. Trace output is
@@ -79,6 +80,12 @@ func Init(tracePath, level string) func() {
 		f, err := os.OpenFile(tracePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 		if err == nil {
 			w = f
+			// Point the process's stderr at the trace file too, so GTK/GLib
+			// diagnostics (g_warning/g_critical — e.g. "failed to activate
+			// action") land in the log alongside our traces instead of scrolling
+			// past on a terminal nobody is watching. fd 2 then shares f's open
+			// file description, so slog and stderr writes interleave in order.
+			_ = syscall.Dup2(int(f.Fd()), int(os.Stderr.Fd()))
 			cleanup = func() { _ = f.Close() }
 		}
 	}

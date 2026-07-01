@@ -4,8 +4,6 @@ import (
 	"context"
 
 	"github.com/diamondburned/gotk4/pkg/gdk/v4"
-	"github.com/diamondburned/gotk4/pkg/gio/v2"
-	glib "github.com/diamondburned/gotk4/pkg/glib/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 	"github.com/jsnjack/mailbox/internal/ai"
 	"github.com/jsnjack/mailbox/internal/logging"
@@ -14,8 +12,14 @@ import (
 
 // showRowMenu opens a right-click context menu for a thread row at (x,y) within
 // row, with quick label actions that operate on that thread without opening it
-// or entering selection mode. It is a native GMenu model whose items target the
-// win.row-* actions (registered in registerListActions), carrying the thread id.
+// or entering selection mode.
+//
+// It is hand-built from flat GtkButtons with direct "clicked" handlers rather
+// than a GMenu model of win.*/row.* actions. A GtkPopoverMenu manually parented
+// to a recycled GtkListView row does not activate its items' GActions — clicking
+// only closes the popover, with no GTK warning, regardless of how the action is
+// registered or targeted (verified in a sandbox). Direct clicked handlers on
+// buttons owned by a plain GtkPopover sidestep the action machinery entirely.
 func (w *window) showRowMenu(row gtk.Widgetter, threadID string, x, y float64) {
 	t, ok := w.threadByID[threadID]
 	if !ok || w.deps.ModifyLabels == nil {
@@ -23,67 +27,110 @@ func (w *window) showRowMenu(row gtk.Widgetter, threadID string, x, y float64) {
 		return
 	}
 	logging.Trace("ui: show row menu", "id", threadID, "label", w.current, "starred", t.Latest.IsStarred, "unread", t.UnreadCount)
-	tv := glib.NewVariantString(threadID)
-	menu := gio.NewMenu()
 
-	move := gio.NewMenu()
-	if w.current == model.LabelTrash || w.current == model.LabelSpam {
-		move.AppendItem(rowItem("Move to Inbox", "win.row-move-inbox", tv))
-	} else {
-		move.AppendItem(rowItem("Archive", "win.row-archive", tv))
-	}
-	menu.AppendSection("", move)
-
-	flags := gio.NewMenu()
-	if t.Latest.IsStarred {
-		flags.AppendItem(rowItem("Unstar", "win.row-unstar", tv))
-	} else {
-		flags.AppendItem(rowItem("Star", "win.row-star", tv))
-	}
-	if t.UnreadCount > 0 {
-		flags.AppendItem(rowItem("Mark as read", "win.row-mark-read", tv))
-	} else {
-		flags.AppendItem(rowItem("Mark as unread", "win.row-mark-unread", tv))
-	}
-	menu.AppendSection("", flags)
-
-	// Categorize this one conversation — where categories apply (the inbox, with
-	// the toggle on). Manual "Categorize as" works without the AI (a fallback when
-	// the provider is down); "Re-categorize with AI" needs an assistant.
-	if w.inboxCategories && w.current == model.LabelInbox {
-		cat := gio.NewMenu()
-		choices := gio.NewMenu()
-		for _, c := range ai.EmailCategories {
-			choices.AppendItem(rowItem(c, "win.row-setcat", glib.NewVariantString(threadID+"\x1f"+c)))
-		}
-		choices.AppendItem(rowItem("None", "win.row-setcat", glib.NewVariantString(threadID+"\x1f")))
-		cat.AppendSubmenu("Categorize as", choices)
-		if w.deps.Assistant != nil {
-			cat.AppendItem(rowItem("Re-categorize with AI", "win.row-recategorize", tv))
-		}
-		menu.AppendSection("", cat)
-	}
-
-	del := gio.NewMenu()
-	del.AppendItem(rowItem("Move to Trash", "win.row-trash", tv))
-	menu.AppendSection("", del)
-
-	pop := gtk.NewPopoverMenuFromModel(menu)
+	pop := gtk.NewPopover()
 	pop.SetParent(row)
 	pop.SetHasArrow(false)
+	pop.SetPosition(gtk.PosBottom)
 	rect := gdk.NewRectangle(int(x), int(y), 1, 1)
 	pop.SetPointingTo(&rect)
 	// Detach from the row when dismissed so the recycled row isn't left parenting
 	// a stale popover.
-	pop.ConnectClosed(func() { pop.Unparent() })
-	pop.Popup()
-}
+	pop.ConnectClosed(func() {
+		logging.Trace("ui: row menu closed", "id", threadID)
+		pop.Unparent()
+	})
 
-// rowItem builds a menu item bound to a win.row-* action carrying the thread id.
-func rowItem(label, action string, target *glib.Variant) *gio.MenuItem {
-	item := gio.NewMenuItem(label, "")
-	item.SetActionAndTargetValue(action, target)
-	return item
+	box := gtk.NewBox(gtk.OrientationVertical, 0)
+	box.AddCSSClass("menu")
+	box.AddCSSClass("rowmenu")
+
+	// item appends a flat, left-aligned button that pops the menu down and runs fn
+	// (traced so the log shows exactly which row-menu item fired).
+	item := func(parent *gtk.Box, label string, fn func()) {
+		lbl := gtk.NewLabel(label)
+		lbl.SetXAlign(0)
+		lbl.SetHExpand(true)
+		b := gtk.NewButton()
+		b.SetChild(lbl)
+		b.AddCSSClass("flat")
+		b.ConnectClicked(func() {
+			logging.Trace("ui: row menu action", "action", label, "id", threadID)
+			pop.Popdown()
+			fn()
+		})
+		parent.Append(b)
+	}
+	sep := func() { box.Append(gtk.NewSeparator(gtk.OrientationHorizontal)) }
+
+	if w.current == model.LabelTrash || w.current == model.LabelSpam {
+		item(box, "Move to Inbox", func() {
+			w.threadModifyAll(threadID, "Moved to Inbox", []string{model.LabelInbox}, []string{model.LabelTrash, model.LabelSpam})
+		})
+	} else {
+		item(box, "Archive", func() { w.threadModifyAll(threadID, "Archived", nil, []string{model.LabelInbox}) })
+	}
+	sep()
+
+	if t.Latest.IsStarred {
+		item(box, "Unstar", func() { w.threadModifyAll(threadID, "", nil, []string{model.LabelStarred}) })
+	} else {
+		item(box, "Star", func() { w.threadModifyAll(threadID, "", []string{model.LabelStarred}, nil) })
+	}
+	if t.UnreadCount > 0 {
+		item(box, "Mark as read", func() { w.threadModifyAll(threadID, "Marked as read", nil, []string{model.LabelUnread}) })
+	} else {
+		item(box, "Mark as unread", func() {
+			w.rowLatest(threadID, func(m model.Message) { w.applyLabels([]model.Message{m}, []string{model.LabelUnread}, nil, nil) })
+		})
+	}
+
+	// Categorize this one conversation — where categories apply (the inbox, with
+	// the toggle on). "Categorize as" opens a nested popover of choices (works
+	// without the AI, a fallback when the provider is down); "Re-categorize with
+	// AI" needs an assistant.
+	if w.inboxCategories && w.current == model.LabelInbox {
+		sep()
+		catPop := gtk.NewPopover()
+		catPop.SetHasArrow(false)
+		catPop.SetPosition(gtk.PosRight)
+		catBox := gtk.NewBox(gtk.OrientationVertical, 0)
+		catBox.AddCSSClass("menu")
+		catBox.AddCSSClass("rowmenu")
+		setCat := func(label, cat string) {
+			item(catBox, label, func() { catPop.Popdown(); w.setThreadCategory(threadID, cat) })
+		}
+		for _, c := range ai.EmailCategories {
+			setCat(c, c)
+		}
+		setCat("None", "")
+		catPop.SetChild(catBox)
+
+		lbl := gtk.NewLabel("Categorize as")
+		lbl.SetXAlign(0)
+		lbl.SetHExpand(true)
+		catBtn := gtk.NewButton()
+		catBtn.SetChild(lbl)
+		catBtn.AddCSSClass("flat")
+		catBtn.ConnectClicked(func() {
+			catPop.SetParent(catBtn)
+			catPop.Popup()
+		})
+		catPop.ConnectClosed(func() { catPop.Unparent() })
+		box.Append(catBtn)
+
+		if w.deps.Assistant != nil {
+			item(box, "Re-categorize with AI", func() { w.recategorizeThread(threadID) })
+		}
+	}
+
+	sep()
+	item(box, "Move to Trash", func() {
+		w.threadModifyAll(threadID, "Moved to Trash", []string{model.LabelTrash}, []string{model.LabelInbox})
+	})
+
+	pop.SetChild(box)
+	pop.Popup()
 }
 
 // threadModifyAll applies a label delta to every message in a thread (loaded
