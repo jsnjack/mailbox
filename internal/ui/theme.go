@@ -122,13 +122,11 @@ const appCSS = `
 	background-color: alpha(@success_color, 0.15);
 	color: @success_color;
 }
-/* "Discount": deals should jump out, so this one breaks the quiet-pill rule on
-   purpose — a solid warm-amber "sale" pill with dark bold text, readable in both
-   light and dark since the fill is mode-independent. */
+/* "Discount": a warm amber tint — same quiet pill style as the others, just a
+   distinct hue so deals are easy to spot. */
 .cat-discount {
-	background-color: #e5a50a;
-	color: #241f00;
-	font-weight: bold;
+	background-color: alpha(@warning_color, 0.15);
+	color: @warning_color;
 }
 
 /* Opaque cover shown over the message view while it loads, so WebKit's
