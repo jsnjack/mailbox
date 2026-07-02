@@ -637,17 +637,22 @@ func (w *window) showConnectHelp() {
 	dialog.Present(w.win)
 }
 
-// addBreakpoints collapses the panes as the window narrows: below ~860sp the
-// accounts sidebar collapses (list + reader), and below ~520sp the thread list
-// collapses too (single pane with back navigation).
+// addBreakpoints collapses the panes as the window narrows, before a pane's
+// minimum width would be clipped. The thresholds track the split views' actual
+// minimums: the thread-list + reader pair needs ~709px (280 sidebar + ~429
+// reader header, whose min is dominated by the action buttons + window
+// controls), so the thread list collapses below 720sp; adding the accounts
+// sidebar (200) needs ~909px, so it collapses below 960sp. Collapsing any later
+// leaves a band where the panes are shown side-by-side but overflow the window
+// (GtkBox "exceeds AdwApplicationWindow width" warnings + clipped content).
 func (w *window) addBreakpoints() {
 	medium := adw.NewBreakpoint(adw.NewBreakpointConditionLength(
-		adw.BreakpointConditionMaxWidth, 860, adw.LengthUnitSp))
+		adw.BreakpointConditionMaxWidth, 960, adw.LengthUnitSp))
 	medium.AddSetter(w.outerSplit, "collapsed", coreglib.NewValue(true))
 	w.win.AddBreakpoint(medium)
 
 	narrow := adw.NewBreakpoint(adw.NewBreakpointConditionLength(
-		adw.BreakpointConditionMaxWidth, 520, adw.LengthUnitSp))
+		adw.BreakpointConditionMaxWidth, 720, adw.LengthUnitSp))
 	narrow.AddSetter(w.outerSplit, "collapsed", coreglib.NewValue(true))
 	narrow.AddSetter(w.innerSplit, "collapsed", coreglib.NewValue(true))
 	w.win.AddBreakpoint(narrow)
