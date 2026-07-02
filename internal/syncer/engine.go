@@ -1,12 +1,14 @@
 package syncer
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/mail"
 	"os"
 	"path/filepath"
 	"strings"
@@ -513,7 +515,28 @@ func (e *Engine) SweepOutbox(ctx context.Context, b backend.Backend, accountID i
 		return 0, err
 	}
 	sent := 0
+	gmailAcct := e.isGmailAccount(ctx, accountID)
 	for _, it := range items {
+		// Guard against resending a message a prior attempt already delivered: a
+		// send can succeed at the provider yet return a network error (the response
+		// was lost), which enqueues it here. Before resending, check whether the
+		// provider already has a message with this item's Message-ID and, if so,
+		// mark it sent instead of delivering a duplicate. Gmail-only: the check uses
+		// Gmail's rfc822msgid: search and the raw send preserves our Message-ID.
+		if gmailAcct {
+			if mid := messageIDOf(it.RFC822); mid != "" {
+				if ids, serr := b.SearchIDs(ctx, "rfc822msgid:"+mid, 1); serr == nil && len(ids) > 0 {
+					logging.TraceContext(ctx, "syncer: outbox already at provider; not resending", "id", it.ID, "msgid", mid)
+					if err := e.Store.MarkOutboxSent(ctx, it.ID); err != nil {
+						return sent, err
+					}
+					e.publish(Change{Kind: SendStateChanged, AccountID: accountID})
+					continue
+				} else if serr != nil {
+					logging.TraceContext(ctx, "syncer: outbox dedup search failed; proceeding to send", "id", it.ID, "err", serr)
+				}
+			}
+		}
 		if _, err := b.Send(ctx, it.RFC822, it.ThreadID); err != nil {
 			if mErr := e.Store.MarkOutboxFailed(ctx, it.ID, err.Error()); mErr != nil {
 				return sent, mErr
@@ -528,6 +551,28 @@ func (e *Engine) SweepOutbox(ctx context.Context, b backend.Backend, accountID i
 		sent++
 	}
 	return sent, nil
+}
+
+// isGmailAccount reports whether accountID is a Gmail account, so outbox dedup
+// can use Gmail's rfc822msgid: search (IMAP has no equivalent through the
+// provider-agnostic SearchIDs, so it opts out and keeps the prior behavior). A
+// lookup failure conservatively returns false (skip dedup, just send).
+func (e *Engine) isGmailAccount(ctx context.Context, accountID int64) bool {
+	acc, err := e.Store.GetAccountByID(ctx, accountID)
+	if err != nil {
+		return false
+	}
+	return acc.Type != model.AccountIMAP // "" (unset) is treated as Gmail
+}
+
+// messageIDOf extracts the Message-ID header (without angle brackets) from a raw
+// RFC 5322 message, or "" if absent/unparseable. Used to dedup outbox resends.
+func messageIDOf(rfc822 []byte) string {
+	m, err := mail.ReadMessage(bytes.NewReader(rfc822))
+	if err != nil {
+		return ""
+	}
+	return strings.Trim(m.Header.Get("Message-ID"), "<> ")
 }
 
 // ModifyLabelsBatch applies the same label change to many messages: it updates

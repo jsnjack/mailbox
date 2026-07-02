@@ -16,7 +16,8 @@ import (
 // countingBackend records how many times Send is called. Send sleeps briefly to
 // widen the window in which overlapping sweeps could both send the same item.
 type countingBackend struct {
-	sends atomic.Int32
+	sends     atomic.Int32
+	searchHit bool // when true, SearchIDs reports the message already exists
 }
 
 func (c *countingBackend) Send(_ context.Context, _ []byte, _ string) (string, error) {
@@ -29,8 +30,13 @@ func (c *countingBackend) Send(_ context.Context, _ []byte, _ string) (string, e
 func (c *countingBackend) Profile(context.Context) (backend.Profile, error) {
 	return backend.Profile{}, nil
 }
-func (c *countingBackend) Labels(context.Context) ([]model.Label, error)            { return nil, nil }
-func (c *countingBackend) SearchIDs(context.Context, string, int) ([]string, error) { return nil, nil }
+func (c *countingBackend) Labels(context.Context) ([]model.Label, error) { return nil, nil }
+func (c *countingBackend) SearchIDs(context.Context, string, int) ([]string, error) {
+	if c.searchHit {
+		return []string{"existing-id"}, nil
+	}
+	return nil, nil
+}
 func (c *countingBackend) FetchMetadata(context.Context, string) (model.Message, error) {
 	return model.Message{}, nil
 }
@@ -100,5 +106,42 @@ func TestSweepOutboxConcurrentNoDoubleSend(t *testing.T) {
 	}
 	if len(left) != 0 {
 		t.Fatalf("outbox still has %d sendable items, want 0", len(left))
+	}
+}
+
+// A queued item whose Message-ID the provider already has (a prior send that
+// succeeded but returned a network error) must be marked sent, NOT resent —
+// otherwise the recipient gets a duplicate.
+func TestSweepOutboxSkipsAlreadySent(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	acct, err := s.UpsertAccount(ctx, model.Account{Email: "a@example.com", Type: model.AccountGmail})
+	if err != nil {
+		t.Fatalf("upsert account: %v", err)
+	}
+	rfc := []byte("Message-ID: <dedup-test@example.com>\r\nFrom: a@example.com\r\n\r\nhi")
+	if err := s.EnqueueOutbox(ctx, acct, "thread-1", rfc); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	be := &countingBackend{searchHit: true} // provider already has this Message-ID
+	e := &Engine{Store: s}
+	if _, err := e.SweepOutbox(ctx, be, acct); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if got := be.sends.Load(); got != 0 {
+		t.Fatalf("Send called %d times, want 0 (already at provider)", got)
+	}
+	left, err := s.ListSendableOutbox(ctx, acct, maxOutboxAttempts)
+	if err != nil {
+		t.Fatalf("list sendable: %v", err)
+	}
+	if len(left) != 0 {
+		t.Fatalf("outbox still has %d sendable items, want 0 (should be marked sent)", len(left))
 	}
 }
