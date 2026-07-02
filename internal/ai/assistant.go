@@ -184,14 +184,6 @@ func (a *Assistant) Categorize(ctx context.Context, items []string) ([]string, e
 	return out, err
 }
 
-// categoryNames is the closed set of categories Categorize may return (order
-// unimportant). It mirrors the definitions in the Categorize system prompt and
-// is used only to salvage a single-item reply — see parseCategories.
-var categoryNames = []string{
-	"Needs reply", "Calendar", "Travel", "Receipt", "Finance",
-	"Security", "Discount", "Newsletter", "Notification",
-}
-
 // parseCategories reads the model's categorize reply into n category strings.
 // The normal reply is a JSON array (parseTranslatedSegments). Small models,
 // asked to classify a single email, tend to answer with a bare scalar instead
@@ -215,7 +207,7 @@ func parseCategories(raw string, n int) ([]string, error) {
 	} else {
 		s = strings.Trim(s, `"'`)
 	}
-	for _, c := range categoryNames {
+	for _, c := range EmailCategories {
 		if strings.EqualFold(s, c) {
 			return []string{c}, nil
 		}
