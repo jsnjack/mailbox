@@ -497,6 +497,15 @@ func IsHistoryExpired(err error) bool {
 	return errors.As(err, &gerr) && gerr.Code == 404
 }
 
+// IsNotFound reports whether err is a Gmail 404 for a specific resource — used to
+// tell a message that has genuinely vanished (safe to skip during sync) from a
+// transient fetch failure. Same HTTP code as IsHistoryExpired but a distinct
+// call site (a message get, not history.list).
+func IsNotFound(err error) bool {
+	var gerr *googleapi.Error
+	return errors.As(err, &gerr) && gerr.Code == 404
+}
+
 // isRetryableResponse reports whether err is a retryable HTTP error RESPONSE:
 // the server received the request and returned a rate-limit or transient server
 // error. It never matches bare network failures, so it's safe for

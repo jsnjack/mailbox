@@ -632,7 +632,7 @@ func (e *Engine) Incremental(ctx context.Context, b backend.Backend, accountID i
 	// then publish a per-id event so new-mail notifications (which need the id)
 	// still fire. Concurrency makes catching up a burst of external changes
 	// (e.g. a bulk archive done on another device) N/workers round-trips, not N.
-	msgs, fetchedIDs := e.fetchMetadataConcurrent(ctx, b, upserts)
+	msgs, fetchedIDs, transientFail := e.fetchMetadataConcurrent(ctx, b, upserts)
 	if len(msgs) > 0 {
 		ustart := time.Now()
 		if err := e.Store.UpsertMessages(ctx, msgs); err != nil {
@@ -647,6 +647,19 @@ func (e *Engine) Incremental(ctx context.Context, b backend.Backend, accountID i
 			e.publish(Change{Kind: MessageUpserted, AccountID: accountID, GmailID: id, ThreadID: tid})
 		}
 		changed += len(msgs)
+	}
+
+	// Only advance the cursor once every changed message has been durably applied
+	// (or is genuinely gone). If a fetch failed transiently — a network blip or a
+	// sustained outage that outlasted the client's own retries — advancing past it
+	// would skip that message forever (its history record is behind the new
+	// cursor). Holding the cursor makes the next incremental re-walk the same
+	// range and retry; the deletes and successful upserts already applied are
+	// idempotent, so re-processing is harmless. A vanished message (ErrNotFound)
+	// is not a transient failure, so it doesn't stall the cursor.
+	if transientFail {
+		logging.TraceContext(ctx, "syncer: Incremental holding cursor (transient fetch failure)", "account", accountID, "cursor", acc.SyncCursor, "fetched", len(fetchedIDs), "wanted", len(upserts))
+		return changed, nil
 	}
 
 	if err := e.Store.SetSyncCursor(ctx, accountID, next); err != nil {
@@ -694,13 +707,16 @@ func (e *Engine) Resync(ctx context.Context, b backend.Backend, accountID int64,
 
 // fetchMetadataConcurrent fetches each id's metadata in parallel (bounded by
 // backfillWorkers) and returns the converted messages and their ids in input
-// order, skipping ids that fail to fetch (a message can vanish between the
-// history record and the fetch). Each goroutine writes its own slot, so there is
-// no shared-state contention.
-func (e *Engine) fetchMetadataConcurrent(ctx context.Context, b backend.Backend, ids []string) ([]model.Message, []string) {
+// order. An id that is genuinely gone (backend.ErrNotFound) is skipped silently.
+// Any other fetch error is transient (network blip, exhausted retries) and sets
+// the returned transientFail flag so the caller can decline to advance the sync
+// cursor past a message it hasn't actually stored yet. Each goroutine writes its
+// own slot, so there is no shared-state contention.
+func (e *Engine) fetchMetadataConcurrent(ctx context.Context, b backend.Backend, ids []string) (msgs []model.Message, fetchedIDs []string, transientFail bool) {
 	type slot struct {
-		msg model.Message
-		ok  bool
+		msg       model.Message
+		ok        bool
+		transient bool
 	}
 	slots := make([]slot, len(ids))
 	sem := make(chan struct{}, backfillWorkers)
@@ -713,7 +729,9 @@ func (e *Engine) fetchMetadataConcurrent(ctx context.Context, b backend.Backend,
 			defer func() { <-sem }()
 			msg, err := b.FetchMetadata(ctx, id)
 			if err != nil {
-				slog.Default().Warn("incremental: fetch metadata", "id", id, "err", err)
+				gone := errors.Is(err, backend.ErrNotFound)
+				slog.Default().Warn("incremental: fetch metadata", "id", id, "gone", gone, "err", err)
+				slots[i] = slot{transient: !gone}
 				return
 			}
 			slots[i] = slot{msg: msg, ok: true}
@@ -721,13 +739,16 @@ func (e *Engine) fetchMetadataConcurrent(ctx context.Context, b backend.Backend,
 	}
 	wg.Wait()
 
-	msgs := make([]model.Message, 0, len(ids))
-	gids := make([]string, 0, len(ids))
+	msgs = make([]model.Message, 0, len(ids))
+	fetchedIDs = make([]string, 0, len(ids))
 	for i, s := range slots {
 		if s.ok {
 			msgs = append(msgs, s.msg)
-			gids = append(gids, ids[i])
+			fetchedIDs = append(fetchedIDs, ids[i])
+		}
+		if s.transient {
+			transientFail = true
 		}
 	}
-	return msgs, gids
+	return msgs, fetchedIDs, transientFail
 }

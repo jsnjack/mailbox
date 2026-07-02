@@ -79,6 +79,12 @@ func (b *Backend) FetchMetadata(ctx context.Context, id string) (model.Message, 
 	m, err := b.c.GetMessageMetadata(ctx, id)
 	if err != nil {
 		logging.TraceContext(ctx, "gmailbackend: FetchMetadata failed", "account", b.accountID, "id", id, "dur", time.Since(start), "err", err)
+		// A 404 means the message vanished between the history record and now;
+		// surface it as ErrNotFound so the engine skips it without treating it as a
+		// transient failure that must be retried.
+		if gmailapi.IsNotFound(err) {
+			return model.Message{}, fmt.Errorf("%w: %s", backend.ErrNotFound, id)
+		}
 		return model.Message{}, err
 	}
 	msg := gmailapi.ToMessage(b.accountID, m)

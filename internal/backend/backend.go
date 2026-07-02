@@ -24,6 +24,13 @@ var ErrCursorExpired = errors.New("sync cursor expired; full resync required")
 // invalid_grant is detected separately by auth.IsAuthError.)
 var ErrAuth = errors.New("authentication failed; reconnect required")
 
+// ErrNotFound means a specific message no longer exists at the provider (e.g. it
+// was deleted between a history record naming it and the fetch). Backends wrap a
+// 404/vanished-message error with it so the sync engine can tell a genuinely
+// gone message (safe to skip) from a transient fetch failure (must be retried,
+// not skipped past). See FetchMetadata.
+var ErrNotFound = errors.New("message not found")
+
 // Profile identifies the connected account and seeds incremental sync.
 type Profile struct {
 	Email  string
