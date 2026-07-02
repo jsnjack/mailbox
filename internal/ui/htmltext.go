@@ -114,8 +114,7 @@ func isTrackerImg(n *html.Node) bool {
 	if tinyDim(width) && tinyDim(height) {
 		return true
 	}
-	if strings.Contains(style, "width:1px") || strings.Contains(style, "width: 1px") ||
-		strings.Contains(style, "height:1px") || strings.Contains(style, "height: 1px") {
+	if tinyDim(styleDim(style, "width")) || tinyDim(styleDim(style, "height")) {
 		return true
 	}
 	for _, p := range trackerSrcPatterns {
@@ -128,12 +127,31 @@ func isTrackerImg(n *html.Node) bool {
 
 // tinyDim reports whether a width/height attribute is present and ≤ 2 px.
 func tinyDim(v string) bool {
-	v = strings.TrimSuffix(strings.TrimSpace(v), "px")
-	if v == "" {
+	v = strings.TrimSpace(v)
+	// Read the leading numeric run so any unit (px, em, %, pt, or none) is
+	// ignored — "1", "1.0", "1px", "0.5em" all count. strconv.Atoi missed the
+	// decimal/relative forms, letting 1x1 trackers evade detection.
+	i := 0
+	for i < len(v) && ((v[i] >= '0' && v[i] <= '9') || v[i] == '.') {
+		i++
+	}
+	if i == 0 {
 		return false
 	}
-	n, err := strconv.Atoi(v)
+	n, err := strconv.ParseFloat(v[:i], 64)
 	return err == nil && n <= 2
+}
+
+// styleDim extracts a CSS length declared for prop (e.g. "width") from an inline
+// style string, or "" if absent. Best-effort: enough to run tinyDim on it.
+func styleDim(style, prop string) string {
+	for _, decl := range strings.Split(style, ";") {
+		name, val, ok := strings.Cut(decl, ":")
+		if ok && strings.TrimSpace(name) == prop {
+			return strings.TrimSpace(val)
+		}
+	}
+	return ""
 }
 
 // findBody returns the <body> element of a parsed document.

@@ -73,6 +73,27 @@ func TestCleanEmailHTMLStripsTrackers(t *testing.T) {
 	}
 }
 
+// Trackers that dodge integer-pixel detection with decimals or relative units
+// must still be stripped (previously strconv.Atoi failed and they loaded).
+func TestCleanEmailHTMLStripsEvasiveTrackers(t *testing.T) {
+	cases := []string{
+		`<img src="https://t1.example.com/a.gif" width="1.0" height="1.0">`,         // decimal attrs
+		`<img src="https://t2.example.com/b.gif" style="width:0.1em;height:0.1em">`, // relative units
+		`<img src="https://t3.example.com/c.gif" style="width: 1px; height: 1px">`,  // spaced style
+	}
+	for _, in := range cases {
+		out, blocked := cleanEmailHTML(in)
+		if blocked != 1 || strings.Contains(out, ".gif") {
+			t.Fatalf("evasive tracker survived (blocked=%d): %s", blocked, out)
+		}
+	}
+	// A genuinely large image with a decimal size must NOT be treated as a tracker.
+	big := `<img src="https://cdn.example.com/hero.png" width="600.0" height="200.0">`
+	if out, n := cleanEmailHTML(big); n != 0 || !strings.Contains(out, "hero.png") {
+		t.Fatalf("large decimal-sized image wrongly stripped (n=%d): %s", n, out)
+	}
+}
+
 func TestCleanEmailHTMLCollapsesQuotes(t *testing.T) {
 	// A blockquote is wrapped in a <details> with a summary; its content survives.
 	in := `<p>My reply.</p><blockquote>On Mon, X wrote: original text</blockquote>`
