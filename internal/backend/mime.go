@@ -25,7 +25,13 @@ func BuildMIME(m model.OutgoingMessage) ([]byte, error) {
 		"subject", m.Subject, "attachments", len(m.Attachments),
 		"threaded", m.InReplyTo != "" || m.References != "", "threadID", m.ThreadID)
 	var b bytes.Buffer
-	header := func(k, v string) { fmt.Fprintf(&b, "%s: %s\r\n", k, v) }
+	// Header values must be single-line. Strip any CR/LF from the value so input
+	// sourced from an untrusted place — a crafted mailto: link the app is
+	// registered to handle, or a reply header echoed from a malicious sender —
+	// can't smuggle extra headers (e.g. a hidden Bcc) into the message the user
+	// sends. Nothing we build here legitimately needs a raw newline in a value.
+	stripCRLF := strings.NewReplacer("\r", "", "\n", "")
+	header := func(k, v string) { fmt.Fprintf(&b, "%s: %s\r\n", k, stripCRLF.Replace(v)) }
 
 	header("From", m.From)
 	if strings.TrimSpace(m.To) != "" {

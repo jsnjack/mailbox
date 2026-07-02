@@ -96,3 +96,36 @@ func TestBuildMIMESubjectEncoding(t *testing.T) {
 		t.Errorf("subject not encoded:\n%s", raw)
 	}
 }
+
+// A CR/LF smuggled into a header value (e.g. from a crafted mailto: link) must
+// not inject an extra header line into the sent message.
+func TestBuildMIMENoHeaderInjection(t *testing.T) {
+	raw, err := BuildMIME(model.OutgoingMessage{
+		From:    "me@example.com",
+		To:      "you@example.com",
+		Cc:      "cc@example.com\r\nBcc: attacker@evil.com",
+		Subject: "Hi\r\nBcc: attacker2@evil.com",
+		Body:    "hello",
+	})
+	if err != nil {
+		t.Fatalf("BuildMIME: %v", err)
+	}
+	// The headers end at the first blank line. Injection would place a Bcc on its
+	// own header line; the message has no legitimate Bcc, so any Bcc header line
+	// (or any header line at all mentioning an attacker address) is a leak. The
+	// stripped value stays on its original Cc/Subject line, which is not injection.
+	headers := string(raw)
+	if i := strings.Index(headers, "\r\n\r\n"); i >= 0 {
+		headers = headers[:i]
+	}
+	for _, line := range strings.Split(headers, "\r\n") {
+		key, _, _ := strings.Cut(line, ":")
+		if strings.EqualFold(strings.TrimSpace(key), "Bcc") {
+			t.Fatalf("injected Bcc header line: %q\nfull headers:\n%s", line, headers)
+		}
+	}
+	// The legitimate Cc must still be present (value kept, just single-lined).
+	if !strings.Contains(headers, "cc@example.com") {
+		t.Fatalf("legitimate Cc dropped:\n%s", headers)
+	}
+}
