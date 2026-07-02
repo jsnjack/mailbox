@@ -26,7 +26,12 @@ func (w *window) showRowMenu(row gtk.Widgetter, threadID string, x, y float64) {
 		logging.Trace("ui: row menu skipped", "id", threadID, "found", ok, "can_modify", w.deps.ModifyLabels != nil)
 		return
 	}
-	logging.Trace("ui: show row menu", "id", threadID, "label", w.current, "starred", t.Latest.IsStarred, "unread", t.UnreadCount)
+	// Capture the account this row belongs to now, so an action still targets the
+	// right account (and the right thread's messages) if the user switches
+	// accounts while the menu is open — otherwise the action would query the newly
+	// active account for a thread it doesn't have and silently do nothing.
+	acct := w.activeID
+	logging.Trace("ui: show row menu", "id", threadID, "account", acct, "label", w.current, "starred", t.Latest.IsStarred, "unread", t.UnreadCount)
 
 	pop := gtk.NewPopover()
 	pop.SetParent(row)
@@ -65,23 +70,26 @@ func (w *window) showRowMenu(row gtk.Widgetter, threadID string, x, y float64) {
 
 	if w.current == model.LabelTrash || w.current == model.LabelSpam {
 		item(box, "Move to Inbox", func() {
-			w.threadModifyAll(threadID, "Moved to Inbox", []string{model.LabelInbox}, []string{model.LabelTrash, model.LabelSpam})
+			w.threadModifyAll(acct, threadID, "Moved to Inbox", []string{model.LabelInbox}, []string{model.LabelTrash, model.LabelSpam})
 		})
 	} else {
-		item(box, "Archive", func() { w.threadModifyAll(threadID, "Archived", nil, []string{model.LabelInbox}) })
+		item(box, "Archive", func() { w.threadModifyAll(acct, threadID, "Archived", nil, []string{model.LabelInbox}) })
 	}
 	sep()
 
 	if t.Latest.IsStarred {
-		item(box, "Unstar", func() { w.threadModifyAll(threadID, "", nil, []string{model.LabelStarred}) })
+		item(box, "Unstar", func() { w.threadModifyAll(acct, threadID, "", nil, []string{model.LabelStarred}) })
 	} else {
-		item(box, "Star", func() { w.threadModifyAll(threadID, "", []string{model.LabelStarred}, nil) })
+		item(box, "Star", func() { w.threadModifyAll(acct, threadID, "", []string{model.LabelStarred}, nil) })
 	}
 	if t.UnreadCount > 0 {
-		item(box, "Mark as read", func() { w.threadModifyAll(threadID, "Marked as read", nil, []string{model.LabelUnread}) })
+		item(box, "Mark as read", func() { w.threadModifyAll(acct, threadID, "Marked as read", nil, []string{model.LabelUnread}) })
 	} else {
+		// Use the message captured when the menu opened (not a live map lookup),
+		// so a mid-menu account switch can't turn this into a no-op.
+		latest := t.Latest
 		item(box, "Mark as unread", func() {
-			w.rowLatest(threadID, func(m model.Message) { w.applyLabels([]model.Message{m}, []string{model.LabelUnread}, nil, nil) })
+			w.applyLabels([]model.Message{latest}, []string{model.LabelUnread}, nil, nil)
 		})
 	}
 
@@ -132,7 +140,7 @@ func (w *window) showRowMenu(row gtk.Widgetter, threadID string, x, y float64) {
 
 	sep()
 	item(box, "Move to Trash", func() {
-		w.threadModifyAll(threadID, "Moved to Trash", []string{model.LabelTrash}, []string{model.LabelInbox})
+		w.threadModifyAll(acct, threadID, "Moved to Trash", []string{model.LabelTrash}, []string{model.LabelInbox})
 	})
 
 	pop.SetChild(box)
@@ -140,15 +148,17 @@ func (w *window) showRowMenu(row gtk.Widgetter, threadID string, x, y float64) {
 }
 
 // threadModifyAll applies a label delta to every message in a thread (loaded
-// from the store), then shows an undo toast (reversing the change) when verb is
-// non-empty — so a right-click archive/trash is as recoverable as the reader's.
-func (w *window) threadModifyAll(threadID, verb string, add, remove []string) {
-	msgs, err := w.deps.Store.ListThreadMessages(context.Background(), w.activeID, threadID)
+// from the store for acctID — captured when the row menu opened, so it stays
+// correct across an account switch), then shows an undo toast (reversing the
+// change) when verb is non-empty — so a right-click archive/trash is as
+// recoverable as the reader's.
+func (w *window) threadModifyAll(acctID int64, threadID, verb string, add, remove []string) {
+	msgs, err := w.deps.Store.ListThreadMessages(context.Background(), acctID, threadID)
 	if err != nil || len(msgs) == 0 {
-		logging.Trace("ui: thread modify all skipped", "id", threadID, "verb", verb, "n", len(msgs), "err", err)
+		logging.Trace("ui: thread modify all skipped", "id", threadID, "account", acctID, "verb", verb, "n", len(msgs), "err", err)
 		return
 	}
-	logging.Trace("ui: thread modify all", "id", threadID, "verb", verb, "n", len(msgs), "add", add, "remove", remove)
+	logging.Trace("ui: thread modify all", "id", threadID, "account", acctID, "verb", verb, "n", len(msgs), "add", add, "remove", remove)
 	w.applyLabels(msgs, add, remove, nil)
 	if verb != "" {
 		w.showUndoToast(verb, msgs, add, remove)

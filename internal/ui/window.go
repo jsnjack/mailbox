@@ -1236,14 +1236,6 @@ func (w *window) recategorizeThread(threadID string) {
 	}()
 }
 
-// rowLatest runs fn with the newest message of the given thread, if it is still
-// known in the list model (the row may have been recycled).
-func (w *window) rowLatest(threadID string, fn func(model.Message)) {
-	if t, ok := w.threadByID[threadID]; ok {
-		fn(t.Latest)
-	}
-}
-
 // buildListMenuModel is the thread-list overflow menu model: the unread-only
 // filter (a native check item) and, where it applies, mark-all-read. Rebuilt
 // per open so it reflects the current folder.
