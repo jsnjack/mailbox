@@ -330,35 +330,36 @@ func (c *Client) DeleteDraft(ctx context.Context, draftID string) error {
 // id from the message id, so editing/sending a synced draft requires this lookup.
 func (c *Client) FindDraftID(ctx context.Context, messageID string) (string, error) {
 	logging.TraceContext(ctx, "gmailapi: drafts.list find", "message_id", messageID)
-	var found string
-	err := c.do(ctx, costMessageList, func() error {
-		pageToken := ""
-		for {
+	// Each page is its own do() call so quota/requests are charged per page (as in
+	// ListMessageIDs); paginating inside a single do() would under-count a
+	// multi-page drafts list as one request.
+	pageToken := ""
+	for page := 1; ; page++ {
+		var resp *gmail.ListDraftsResponse
+		err := c.do(ctx, costMessageList, func() error {
 			call := c.srv.Users.Drafts.List("me").MaxResults(100).Context(ctx)
 			if pageToken != "" {
 				call = call.PageToken(pageToken)
 			}
 			r, e := call.Do()
-			if e != nil {
-				return e
-			}
-			for _, d := range r.Drafts {
-				if d.Message != nil && d.Message.Id == messageID {
-					found = d.Id
-					return nil
-				}
-			}
-			if r.NextPageToken == "" {
-				return nil
-			}
-			pageToken = r.NextPageToken
+			resp = r
+			return e
+		})
+		if err != nil {
+			return "", fmt.Errorf("find draft id: %w", err)
 		}
-	})
-	if err != nil {
-		return "", fmt.Errorf("find draft id: %w", err)
+		for _, d := range resp.Drafts {
+			if d.Message != nil && d.Message.Id == messageID {
+				logging.TraceContext(ctx, "gmailapi: drafts.list find done", "message_id", messageID, "draft_id", d.Id, "found", true, "pages", page)
+				return d.Id, nil
+			}
+		}
+		if resp.NextPageToken == "" {
+			logging.TraceContext(ctx, "gmailapi: drafts.list find done", "message_id", messageID, "found", false, "pages", page)
+			return "", nil
+		}
+		pageToken = resp.NextPageToken
 	}
-	logging.TraceContext(ctx, "gmailapi: drafts.list find done", "message_id", messageID, "draft_id", found, "found", found != "")
-	return found, nil
 }
 
 // GetAttachment downloads and decodes an attachment's bytes.
