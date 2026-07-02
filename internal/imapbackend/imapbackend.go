@@ -119,13 +119,14 @@ func (b *Backend) dial(handler *imapclient.UnilateralDataHandler) (*imapclient.C
 	opts := &imapclient.Options{TLSConfig: tlsCfg, UnilateralDataHandler: handler}
 	logging.Trace("imapbackend: dial", "account", b.cfg.Email, "addr", addr, "security", string(b.cfg.Security), "dialTimeout", dialTimeout)
 
-	// Dial the raw TCP conn ourselves and wrap it in a byte counter (below TLS, so
-	// it counts wire bytes), then build the client over it. STARTTLS falls back to
-	// the library's dial (uncounted — uncommon for IMAP, which is almost always
-	// implicit TLS on 993).
+	// Dial the raw TCP conn ourselves for every mode and wrap it in a byte counter
+	// (below TLS, so it counts wire bytes), then build the client over it. Owning
+	// the conn lets us bound the dial (DialTimeout) and set a login deadline below
+	// — including for STARTTLS, whose handshake + LOGIN would otherwise be
+	// unbounded and could hang a pool connection forever.
 	var (
 		cl  *imapclient.Client
-		raw net.Conn // the conn we own (TLS/None) — nil for STARTTLS (library-dialed)
+		raw net.Conn // the conn we own; deadline-bindable
 		err error
 	)
 	switch b.cfg.Security {
@@ -142,7 +143,15 @@ func (b *Backend) dial(handler *imapclient.UnilateralDataHandler) (*imapclient.C
 			cl = imapclient.New(raw, opts)
 		}
 	case SecuritySTARTTLS:
-		cl, err = imapclient.DialStartTLS(addr, opts)
+		var tcp net.Conn
+		if tcp, err = net.DialTimeout("tcp", addr, dialTimeout); err == nil {
+			raw = &countingConn{Conn: tcp, stats: b.stats}
+			// The STARTTLS handshake does I/O, so bound it with the login deadline
+			// before it runs (the block below refreshes the deadline for LOGIN, then
+			// clears it). NewStartTLS closes the conn itself on failure.
+			_ = raw.SetDeadline(time.Now().Add(loginTimeout))
+			cl, err = imapclient.NewStartTLS(raw, opts)
+		}
 	default:
 		return nil, fmt.Errorf("imap: unknown security %q", b.cfg.Security)
 	}
