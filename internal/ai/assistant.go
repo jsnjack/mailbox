@@ -178,10 +178,49 @@ func (a *Assistant) Categorize(ctx context.Context, items []string) ([]string, e
 		}
 		b.WriteString(c.Text)
 	}
-	out, err := parseTranslatedSegments(b.String())
+	out, err := parseCategories(b.String(), len(items))
 	logging.Trace("ai: categorize done", "op", "Categorize",
 		"bytes", b.Len(), "results", len(out), "dur", time.Since(start), "err", err)
 	return out, err
+}
+
+// categoryNames is the closed set of categories Categorize may return (order
+// unimportant). It mirrors the definitions in the Categorize system prompt and
+// is used only to salvage a single-item reply — see parseCategories.
+var categoryNames = []string{
+	"Needs reply", "Calendar", "Travel", "Receipt", "Finance",
+	"Security", "Discount", "Newsletter", "Notification",
+}
+
+// parseCategories reads the model's categorize reply into n category strings.
+// The normal reply is a JSON array (parseTranslatedSegments). Small models,
+// asked to classify a single email, tend to answer with a bare scalar instead
+// of a one-element array (e.g. `""` or `Notification`), which has no JSON array
+// to find. When n == 1 we salvage that: strip code fences/quotes and match the
+// remaining text against the known category set, defaulting to "" (no tag).
+func parseCategories(raw string, n int) ([]string, error) {
+	out, err := parseTranslatedSegments(raw)
+	if err == nil {
+		return out, nil
+	}
+	if n != 1 {
+		return nil, err
+	}
+	s := strings.TrimSpace(raw)
+	s = strings.Trim(s, "`")
+	s = strings.TrimSpace(s)
+	// Tolerate a JSON-quoted string ("Notification") or a bare word.
+	if unq := ""; json.Unmarshal([]byte(s), &unq) == nil {
+		s = unq
+	} else {
+		s = strings.Trim(s, `"'`)
+	}
+	for _, c := range categoryNames {
+		if strings.EqualFold(s, c) {
+			return []string{c}, nil
+		}
+	}
+	return []string{""}, nil
 }
 
 // Proofread streams a grammar- and spelling-corrected version of the user's

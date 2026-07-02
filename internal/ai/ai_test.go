@@ -85,6 +85,31 @@ func TestCategorize(t *testing.T) {
 	}
 }
 
+func TestCategorizeSingleSalvage(t *testing.T) {
+	// Small models often answer a single-item classify with a bare scalar
+	// instead of a one-element JSON array; parseCategories salvages it.
+	cases := []struct {
+		reply string
+		want  string
+	}{
+		{`""`, ""},                       // JSON empty string → no tag
+		{`Notification`, "Notification"}, // bare word
+		{"`Needs reply`", "Needs reply"}, // code-fenced
+		{`"Receipt"`, "Receipt"},         // quoted scalar
+		{`something else`, ""},           // unknown → no tag
+	}
+	for _, tc := range cases {
+		fp := &fakeProvider{chunks: []Chunk{{Text: tc.reply}}}
+		got, err := NewAssistant(fp).Categorize(context.Background(), []string{"a"})
+		if err != nil {
+			t.Fatalf("Categorize(%q): %v", tc.reply, err)
+		}
+		if len(got) != 1 || got[0] != tc.want {
+			t.Fatalf("Categorize(%q) = %#v, want [%q]", tc.reply, got, tc.want)
+		}
+	}
+}
+
 func TestProofread(t *testing.T) {
 	fp := &fakeProvider{chunks: []Chunk{{Text: "Hi there,\n"}, {Text: "Thanks for your help."}}}
 	ch, err := NewAssistant(fp).Proofread(context.Background(), "hi their, thanks for you're help")
