@@ -39,6 +39,12 @@ const backfillBatch = 200
 type Engine struct {
 	Store *store.Store
 	Hub   *Hub
+
+	// sweepMu serializes SweepOutbox so overlapping sweeps (the background
+	// timer, the user's "Send now", and per-item "retry" all trigger one) can't
+	// both claim and send the same queued item — which would deliver the message
+	// to the recipient twice. Sends are infrequent, so serializing them is free.
+	sweepMu sync.Mutex
 }
 
 // NewEngine returns an engine writing to st and publishing to hub (hub may be nil).
@@ -487,6 +493,15 @@ func (e *Engine) SaveDraft(ctx context.Context, b backend.Backend, accountID int
 // SweepOutbox retries queued/failed messages for an account, returning how many
 // were sent. It is run periodically in the background.
 func (e *Engine) SweepOutbox(ctx context.Context, b backend.Backend, accountID int64) (int, error) {
+	// Serialize sweeps: the lock spans the list→send→mark loop so a second sweep
+	// blocks until the first finishes, then re-lists and sees the items already
+	// sent (no duplicate delivery). See sweepMu.
+	// Serialize sweeps: the lock spans the list→send→mark loop so a second sweep
+	// blocks until the first finishes, then re-lists and sees the items already
+	// sent (no duplicate delivery). See sweepMu.
+	e.sweepMu.Lock()
+	defer e.sweepMu.Unlock()
+
 	items, err := e.Store.ListSendableOutbox(ctx, accountID, maxOutboxAttempts)
 	if err != nil {
 		return 0, err
