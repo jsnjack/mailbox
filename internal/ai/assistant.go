@@ -186,8 +186,16 @@ func (a *Assistant) SmartReplies(ctx context.Context, threadContext string) ([]s
 
 // salvageReplyLines extracts up to 3 reply strings from a non-JSON reply by
 // splitting on lines, stripping list markers and quotes, and dropping empties
-// and bare JSON punctuation.
+// and bare JSON punctuation. It returns nothing when the reply looks like an
+// attempted (but malformed) JSON array — line-splitting JSON syntax yields
+// garbage like `"a",`, and showing no suggestions beats showing garbage.
 func salvageReplyLines(raw string) []string {
+	t := strings.TrimSpace(raw)
+	t = strings.TrimPrefix(t, "```json")
+	t = strings.TrimPrefix(t, "```")
+	if strings.HasPrefix(strings.TrimSpace(t), "[") {
+		return nil
+	}
 	var out []string
 	for _, ln := range strings.Split(raw, "\n") {
 		s := stripScalar(stripListMarker(ln))

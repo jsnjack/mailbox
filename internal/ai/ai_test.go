@@ -123,6 +123,16 @@ func TestSmartRepliesSalvage(t *testing.T) {
 	}
 }
 
+func TestSmartRepliesMalformedArrayNoGarbage(t *testing.T) {
+	// A malformed JSON array (trailing comma) fails to parse; line-splitting its
+	// syntax would yield garbage, so we surface the error instead of bad replies.
+	fp := &fakeProvider{chunks: []Chunk{{Text: "[\n  \"Sounds good\",\n  \"On my way\",\n]"}}}
+	got, err := NewAssistant(fp).SmartReplies(context.Background(), "ctx")
+	if err == nil {
+		t.Fatalf("expected error for malformed array, got replies %#v", got)
+	}
+}
+
 func TestTranslateSegmentsSingleSalvage(t *testing.T) {
 	// A single segment often comes back as a bare string, not a 1-element array.
 	fp := &fakeProvider{chunks: []Chunk{{Text: `"Hola"`}}}
