@@ -53,6 +53,13 @@ func (a *Assistant) TranslateSegments(ctx context.Context, segments []string, ta
 		b.WriteString(c.Text)
 	}
 	out, err := parseTranslatedSegments(b.String())
+	if err != nil && len(segments) == 1 {
+		// A single segment often comes back as a bare string ("Hola") instead of a
+		// 1-element array; salvage it so a short one-line email still translates.
+		if v := stripScalar(b.String()); v != "" {
+			out, err = []string{v}, nil
+		}
+	}
 	logging.Trace("ai: translate segments done", "op", "TranslateSegments",
 		"bytes", b.Len(), "results", len(out), "dur", time.Since(start), "err", err)
 	return out, err
@@ -106,6 +113,41 @@ func firstJSONArray(s string) string {
 	return ""
 }
 
+// stripScalar reduces a model reply that should have been a single JSON string
+// to its bare text: it trims whitespace and surrounding code fences/backticks,
+// then unquotes a JSON string ("hi") or drops stray surrounding quotes. Used to
+// salvage the bare-scalar reply small models return when only one value was
+// requested (see parseCategories, TranslateSegments) instead of a 1-element array.
+func stripScalar(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.Trim(s, "`")
+	s = strings.TrimSpace(s)
+	if unq := ""; json.Unmarshal([]byte(s), &unq) == nil {
+		return unq
+	}
+	return strings.Trim(s, `"'`)
+}
+
+// stripListMarker removes a single leading bullet ("- ", "* ", "• ") or ordinal
+// ("1. ", "1) ") marker from a line, so a reply salvaged from a bulleted/numbered
+// list (see SmartReplies) keeps its text without the marker.
+func stripListMarker(s string) string {
+	s = strings.TrimSpace(s)
+	for _, p := range []string{"- ", "* ", "• "} {
+		if strings.HasPrefix(s, p) {
+			return strings.TrimSpace(s[len(p):])
+		}
+	}
+	i := 0
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+	}
+	if i > 0 && i < len(s) && (s[i] == '.' || s[i] == ')') {
+		return strings.TrimSpace(s[i+1:])
+	}
+	return s
+}
+
 // SmartReplies suggests up to 3 short, ready-to-send replies to the latest
 // message in a thread. It returns plain strings (parsed from a JSON array).
 func (a *Assistant) SmartReplies(ctx context.Context, threadContext string) ([]string, error) {
@@ -129,9 +171,36 @@ func (a *Assistant) SmartReplies(ctx context.Context, threadContext string) ([]s
 		b.WriteString(c.Text)
 	}
 	out, err := parseTranslatedSegments(b.String())
+	if err != nil {
+		// Small models sometimes ignore the JSON-array instruction and answer with
+		// a bulleted or newline-separated list. Salvage each non-empty line (marker
+		// stripped) as a reply rather than dropping the whole suggestion.
+		if salv := salvageReplyLines(b.String()); len(salv) > 0 {
+			out, err = salv, nil
+		}
+	}
 	logging.Trace("ai: smart replies done", "op", "SmartReplies",
 		"bytes", b.Len(), "results", len(out), "dur", time.Since(start), "err", err)
 	return out, err
+}
+
+// salvageReplyLines extracts up to 3 reply strings from a non-JSON reply by
+// splitting on lines, stripping list markers and quotes, and dropping empties
+// and bare JSON punctuation.
+func salvageReplyLines(raw string) []string {
+	var out []string
+	for _, ln := range strings.Split(raw, "\n") {
+		s := stripScalar(stripListMarker(ln))
+		switch s {
+		case "", "[", "]", ",", "```":
+			continue
+		}
+		out = append(out, s)
+		if len(out) == 3 {
+			break
+		}
+	}
+	return out
 }
 
 // EmailCategories are the fixed action buckets Categorize assigns. A message
@@ -198,15 +267,8 @@ func parseCategories(raw string, n int) ([]string, error) {
 	if n != 1 {
 		return nil, err
 	}
-	s := strings.TrimSpace(raw)
-	s = strings.Trim(s, "`")
-	s = strings.TrimSpace(s)
 	// Tolerate a JSON-quoted string ("Notification") or a bare word.
-	if unq := ""; json.Unmarshal([]byte(s), &unq) == nil {
-		s = unq
-	} else {
-		s = strings.Trim(s, `"'`)
-	}
+	s := stripScalar(raw)
 	for _, c := range EmailCategories {
 		if strings.EqualFold(s, c) {
 			return []string{c}, nil

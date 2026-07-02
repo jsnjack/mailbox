@@ -110,6 +110,37 @@ func TestCategorizeSingleSalvage(t *testing.T) {
 	}
 }
 
+func TestSmartRepliesSalvage(t *testing.T) {
+	// Model ignored the JSON-array instruction and returned a bulleted list.
+	fp := &fakeProvider{chunks: []Chunk{{Text: "- Sounds good!\n"}, {Text: "2. Can we reschedule?\n* I'll take a look.\n"}}}
+	got, err := NewAssistant(fp).SmartReplies(context.Background(), "ctx")
+	if err != nil {
+		t.Fatalf("SmartReplies: %v", err)
+	}
+	want := []string{"Sounds good!", "Can we reschedule?", "I'll take a look."}
+	if len(got) != 3 || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+		t.Fatalf("replies = %#v, want %#v", got, want)
+	}
+}
+
+func TestTranslateSegmentsSingleSalvage(t *testing.T) {
+	// A single segment often comes back as a bare string, not a 1-element array.
+	fp := &fakeProvider{chunks: []Chunk{{Text: `"Hola"`}}}
+	got, err := NewAssistant(fp).TranslateSegments(context.Background(), []string{"Hello"}, "Spanish")
+	if err != nil {
+		t.Fatalf("TranslateSegments: %v", err)
+	}
+	if len(got) != 1 || got[0] != "Hola" {
+		t.Fatalf("segments = %#v, want [\"Hola\"]", got)
+	}
+	// A multi-segment reply that isn't an array must still error (no positional
+	// salvage possible), so the caller keeps the originals.
+	fp2 := &fakeProvider{chunks: []Chunk{{Text: "Hola"}}}
+	if _, err := NewAssistant(fp2).TranslateSegments(context.Background(), []string{"a", "b"}, "Spanish"); err == nil {
+		t.Fatal("multi-segment non-array reply should error")
+	}
+}
+
 func TestProofread(t *testing.T) {
 	fp := &fakeProvider{chunks: []Chunk{{Text: "Hi there,\n"}, {Text: "Thanks for your help."}}}
 	ch, err := NewAssistant(fp).Proofread(context.Background(), "hi their, thanks for you're help")
