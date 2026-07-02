@@ -45,6 +45,12 @@ type Engine struct {
 	// both claim and send the same queued item — which would deliver the message
 	// to the recipient twice. Sends are infrequent, so serializing them is free.
 	sweepMu sync.Mutex
+
+	// mirror holds a per-account FIFO queue (drained by one goroutine each) that
+	// serializes provider label-mirror operations in submission order, so an
+	// action and its Undo can't reach the provider out of order. See mirrorAsync.
+	mirrorMu sync.Mutex
+	mirror   map[int64]chan func()
 }
 
 // NewEngine returns an engine writing to st and publishing to hub (hub may be nil).
@@ -544,18 +550,47 @@ func (e *Engine) ModifyLabelsBatch(ctx context.Context, b backend.Backend, accou
 	slog.Default().Debug("engine: ModifyLabelsBatch (local)",
 		"n", len(gmailIDs), "add", add, "remove", remove, "dur", time.Since(start))
 
-	// Mirror to Gmail in the background so the UI updates instantly off the local
-	// change instead of waiting on the round-trip (e.g. unstarring should leave the
-	// Starred folder at once). A failure is logged; the next incremental sync
-	// reconciles any divergence.
+	// Mirror to Gmail off the calling path so the UI updates instantly off the
+	// local change instead of waiting on the round-trip (e.g. unstarring should
+	// leave the Starred folder at once). Ordered per account (see mirrorAsync): an
+	// action and a later Undo that reverses it must reach the provider in the order
+	// the user made them — otherwise a slow first call could be overtaken by the
+	// second, leaving Gmail (and, since sync is Gmail→local, the cache after the
+	// next sync) in the wrong final state. A failure is logged; the next
+	// incremental sync reconciles any divergence.
 	if b != nil {
-		go func() {
+		e.mirrorAsync(accountID, func() {
 			if err := b.ApplyLabels(context.Background(), gmailIDs, add, remove); err != nil {
 				slog.Default().Warn("modify labels: mirror to provider", "n", len(gmailIDs), "err", err)
 			}
-		}()
+		})
 	}
 	return nil
+}
+
+// mirrorAsync runs fn on accountID's serial mirror queue, off the caller's path
+// but preserving submission order: a single goroutine per account drains a FIFO
+// channel, so mirror operations apply one-at-a-time in the order they were
+// enqueued. This keeps an action and its Undo from racing to the provider. The
+// channel is buffered so the (already background) caller returns immediately; a
+// backlog deep enough to fill it just applies backpressure.
+func (e *Engine) mirrorAsync(accountID int64, fn func()) {
+	e.mirrorMu.Lock()
+	ch, ok := e.mirror[accountID]
+	if !ok {
+		if e.mirror == nil {
+			e.mirror = make(map[int64]chan func())
+		}
+		ch = make(chan func(), 128)
+		e.mirror[accountID] = ch
+		go func() {
+			for f := range ch {
+				f()
+			}
+		}()
+	}
+	e.mirrorMu.Unlock()
+	ch <- fn
 }
 
 // MarkLabelRead marks every unread message in a label as read: optimistically
