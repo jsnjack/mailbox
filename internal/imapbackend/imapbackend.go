@@ -100,7 +100,7 @@ type Backend struct {
 	// authenticated connection into the already-drained pool, leaking it (and
 	// its server-side session) for the life of the process.
 	closeMu sync.Mutex
-	stats  *Stats        // wire bytes transferred (IMAP + SMTP)
+	stats   *Stats // wire bytes transferred (IMAP + SMTP)
 
 	folderMu      sync.Mutex        // guards the folder caches below
 	folderToLabel map[string]string // mailbox name → label id (special-use mapped)
