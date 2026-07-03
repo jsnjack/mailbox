@@ -67,7 +67,7 @@ func TestStopAccountClosesAndRecreatesMirrorQueue(t *testing.T) {
 	e := &Engine{}
 	ran := make(chan int, 2)
 	e.mirrorAsync(1, func() { ran <- 1 })
-	e.StopAccount(1)
+	drained := e.StopAccount(1)
 	// The queued op still runs to completion before the drainer exits.
 	select {
 	case got := <-ran:
@@ -76,6 +76,13 @@ func TestStopAccountClosesAndRecreatesMirrorQueue(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("queued mirror op was dropped by StopAccount")
+	}
+	// The returned channel closes once the drain goroutine exits, so callers can
+	// hold the backend open until queued mirrors have finished.
+	select {
+	case <-drained:
+	case <-time.After(2 * time.Second):
+		t.Fatal("StopAccount's drained channel never closed")
 	}
 	// A new op after StopAccount starts a fresh queue and runs.
 	e.mirrorAsync(1, func() { ran <- 2 })
@@ -87,6 +94,10 @@ func TestStopAccountClosesAndRecreatesMirrorQueue(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("mirror op after StopAccount did not run")
 	}
-	// Stopping an account with no queue is a no-op.
-	e.StopAccount(42)
+	// Stopping an account with no queue is a no-op with an already-closed signal.
+	select {
+	case <-e.StopAccount(42):
+	default:
+		t.Fatal("StopAccount for an unknown account must return a closed channel")
+	}
 }

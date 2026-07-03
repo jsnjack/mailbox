@@ -51,8 +51,12 @@ type Engine struct {
 	// mirror holds a per-account FIFO queue (drained by one goroutine each) that
 	// serializes provider label-mirror operations in submission order, so an
 	// action and its Undo can't reach the provider out of order. See mirrorAsync.
-	mirrorMu sync.Mutex
-	mirror   map[int64]chan func()
+	// mirrorDone carries the matching drain goroutine's exit signal, so
+	// StopAccount can hand callers something to wait on before they tear down
+	// the backend the queued closures captured.
+	mirrorMu   sync.Mutex
+	mirror     map[int64]chan func()
+	mirrorDone map[int64]chan struct{}
 
 	// Now returns the current time; overridable in tests to drive the outbox
 	// not_before undo-window logic deterministically. nil means time.Now.
@@ -708,11 +712,15 @@ func (e *Engine) mirrorAsync(accountID int64, fn func()) {
 	if !ok {
 		if e.mirror == nil {
 			e.mirror = make(map[int64]chan func())
+			e.mirrorDone = make(map[int64]chan struct{})
 		}
 		ch = make(chan func(), 128)
+		done := make(chan struct{})
 		e.mirror[accountID] = ch
+		e.mirrorDone[accountID] = done
 		logging.Trace("syncer: mirror queue started", "account", accountID)
 		go func() {
+			defer close(done)
 			for f := range ch {
 				f()
 			}
@@ -728,17 +736,27 @@ func (e *Engine) mirrorAsync(accountID int64, fn func()) {
 // queue instead of a leaked goroutine whose queued closures capture the old,
 // torn-down backend across a reconnect. Callers should invoke it whenever an
 // account's runtime is stopped (remove, reconnect).
-func (e *Engine) StopAccount(accountID int64) {
+//
+// The returned channel closes once the drain goroutine has finished the queued
+// mirrors — wait on it (bounded) before closing the account's backend, so
+// already-queued label changes reach the provider instead of failing against a
+// closed connection. For an account with no queue it is already closed.
+func (e *Engine) StopAccount(accountID int64) <-chan struct{} {
 	e.mirrorMu.Lock()
 	defer e.mirrorMu.Unlock()
 	ch, ok := e.mirror[accountID]
 	if !ok {
 		logging.Trace("syncer: stop account (no mirror queue)", "account", accountID)
-		return
+		done := make(chan struct{})
+		close(done)
+		return done
 	}
+	done := e.mirrorDone[accountID]
 	delete(e.mirror, accountID)
+	delete(e.mirrorDone, accountID)
 	close(ch)
 	logging.Trace("syncer: stop account (mirror queue closed)", "account", accountID, "queued", len(ch))
+	return done
 }
 
 // MarkLabelRead marks every unread message in a label as read: optimistically

@@ -144,6 +144,14 @@ func launchUI(mailto string) error {
 		if rt != nil {
 			rt.cancel()
 		}
+		// Close the engine's mirror queue and give already-queued label mirrors a
+		// bounded window to reach the provider before the backend goes away —
+		// otherwise an archive/star done just before a remove/reconnect is
+		// silently dropped server-side (and the drain goroutine leaks).
+		select {
+		case <-engine.StopAccount(id):
+		case <-time.After(stopGrace):
+		}
 		if c, ok := b.(interface{ Close() }); ok {
 			c.Close() // releases the IMAP connection pool + idle conns; no-op for Gmail
 		}
