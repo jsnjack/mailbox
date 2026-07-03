@@ -22,7 +22,12 @@ import (
 type folderState struct {
 	UIDValidity uint32 `json:"uidvalidity"`
 	ModSeq      uint64 `json:"modseq,omitempty"`
-	UIDs        string `json:"uids"` // imap.UIDSet.String() form, e.g. "1:5,7"
+	// UIDNext is the folder's UIDNEXT at the last snapshot; with it, a cheap
+	// STATUS can prove a folder unchanged (see statusUnchanged) and skip the
+	// per-tick SELECT + full UID SEARCH. 0 in cursors written by older builds
+	// and by SeedCursor — those take the full snapshot once, which fills it.
+	UIDNext imap.UID `json:"uidnext,omitempty"`
+	UIDs    string   `json:"uids"` // imap.UIDSet.String() form, e.g. "1:5,7"
 }
 
 // cursor is the opaque sync watermark serialized into accounts.sync_cursor.
@@ -111,8 +116,44 @@ func (b *Backend) snapshot(c *conn, folder string) (folderState, []imap.UID, err
 	uids := sd.AllUIDs()
 	sort.Slice(uids, func(i, j int) bool { return uids[i] < uids[j] })
 	logging.Trace("imapbackend: snapshot",
-		"folder", folder, "uidvalidity", sel.UIDValidity, "modseq", sel.HighestModSeq, "count", len(uids), "dur", time.Since(start))
-	return folderState{UIDValidity: sel.UIDValidity, ModSeq: sel.HighestModSeq, UIDs: encodeUIDs(uids)}, uids, nil
+		"folder", folder, "uidvalidity", sel.UIDValidity, "modseq", sel.HighestModSeq, "uidnext", sel.UIDNext, "count", len(uids), "dur", time.Since(start))
+	return folderState{UIDValidity: sel.UIDValidity, ModSeq: sel.HighestModSeq, UIDNext: sel.UIDNext, UIDs: encodeUIDs(uids)}, uids, nil
+}
+
+// statusUnchanged reports whether a cheap STATUS proves folder f identical to
+// its stored state, letting the sync tick skip the SELECT + full UID SEARCH
+// (which enumerates every message server-side and materializes every UID
+// client-side — O(mailbox) per folder per tick even when nothing changed).
+// Unchanged means: same UIDVALIDITY, same UIDNEXT (no arrivals), same message
+// count (no arrivals ⇒ same count rules out expunges), and on a CONDSTORE
+// server the same HIGHESTMODSEQ (no flag changes; a non-CONDSTORE server can't
+// surface flag changes on the snapshot path either, so nothing is lost there).
+// Any doubt — STATUS failure, missing fields, a cursor without UIDNext, or a
+// CONDSTORE server before the modseq watermark is seeded — returns false and
+// the caller takes the full snapshot.
+func (b *Backend) statusUnchanged(c *conn, folder string, old folderState) bool {
+	if old.UIDNext == 0 || old.UIDValidity == 0 {
+		return false
+	}
+	condstore := c.cl.Caps().Has(imap.CapCondStore)
+	if condstore && old.ModSeq == 0 {
+		return false // take the snapshot so the modseq watermark gets seeded
+	}
+	opts := &imap.StatusOptions{NumMessages: true, UIDNext: true, UIDValidity: true, HighestModSeq: condstore}
+	start := time.Now()
+	sd, err := c.cl.Status(folder, opts).Wait()
+	if err != nil || sd.NumMessages == nil {
+		logging.Trace("imapbackend: status pre-check unavailable", "folder", folder, "err", err)
+		return false
+	}
+	same := sd.UIDValidity == old.UIDValidity &&
+		sd.UIDNext == old.UIDNext &&
+		int(*sd.NumMessages) == countUIDs(old.UIDs) &&
+		(!condstore || sd.HighestModSeq == old.ModSeq)
+	logging.Trace("imapbackend: status pre-check", "folder", folder, "unchanged", same,
+		"uidvalidity", sd.UIDValidity, "uidnext", sd.UIDNext, "messages", *sd.NumMessages,
+		"modseq", sd.HighestModSeq, "dur", time.Since(start))
+	return same
 }
 
 // changedSince returns which of the current UIDs had their flags changed since
@@ -210,6 +251,14 @@ func (b *Backend) computeChanges(c *conn, prev cursor) (upserts, deletes []strin
 		}
 	}
 	for _, f := range folders {
+		// Cheap unchanged check first: one STATUS round-trip instead of
+		// SELECT + UID SEARCH ALL, which is what makes an idle 60s tick nearly
+		// free. Skipped for the mailbox currently SELECTed on this connection
+		// (STATUS on the selected mailbox is unreliable on some servers).
+		if old, has := prev.Folders[f]; has && c.selected != f && b.statusUnchanged(c, f, old) {
+			next.Folders[f] = old
+			continue
+		}
 		st, curUIDs, serr := b.snapshot(c, f)
 		if serr != nil {
 			return nil, nil, cursor{}, serr
@@ -285,4 +334,32 @@ func uidSet(uids []imap.UID) map[imap.UID]bool {
 		m[u] = true
 	}
 	return m
+}
+
+// countUIDs returns how many UIDs a range-compressed set string holds, without
+// materializing them (the statusUnchanged pre-check runs every tick; decoding
+// "1:100000" into a slice there would defeat its purpose).
+func countUIDs(s string) int {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0
+	}
+	n := 0
+	for _, part := range strings.Split(s, ",") {
+		lo, hi, isRange := strings.Cut(part, ":")
+		l, err := strconv.ParseUint(strings.TrimSpace(lo), 10, 32)
+		if err != nil {
+			continue
+		}
+		if !isRange {
+			n++
+			continue
+		}
+		h, err := strconv.ParseUint(strings.TrimSpace(hi), 10, 32)
+		if err != nil || h < l {
+			continue
+		}
+		n += int(h - l + 1)
+	}
+	return n
 }

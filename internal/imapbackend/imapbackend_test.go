@@ -186,13 +186,19 @@ func TestIMAPIncremental(t *testing.T) {
 		t.Fatal("Profile cursor is empty; want a seeded cursor")
 	}
 
-	// No changes yet.
+	// No changes yet. The steady-state cursor must round-trip byte-identically
+	// (whether via the STATUS pre-check copying the old state or a fresh
+	// snapshot of an unchanged folder) — the engine skips the per-tick cursor
+	// DB write on that equality.
 	up, del, cur1, err := b.Changes(ctx, prof.Cursor)
 	if err != nil {
 		t.Fatalf("Changes (steady): %v", err)
 	}
 	if len(up) != 0 || len(del) != 0 {
 		t.Fatalf("steady-state changes: ups=%v dels=%v, want none", up, del)
+	}
+	if cur1 != prof.Cursor {
+		t.Fatalf("steady-state cursor changed:\n was %s\n now %s", prof.Cursor, cur1)
 	}
 
 	// A new message appears → one upsert, no deletes.
@@ -309,14 +315,30 @@ func TestCursorAndUIDCodec(t *testing.T) {
 		}
 	}
 	c := cursor{Folders: map[string]folderState{
-		"INBOX": {UIDValidity: 42, ModSeq: 1000, UIDs: encodeUIDs(uids)},
+		"INBOX": {UIDValidity: 42, ModSeq: 1000, UIDNext: 101, UIDs: encodeUIDs(uids)},
 	}}
 	rt := decodeCursor(c.encode())
-	if rt.Folders["INBOX"].UIDValidity != 42 || rt.Folders["INBOX"].ModSeq != 1000 {
+	if rt.Folders["INBOX"].UIDValidity != 42 || rt.Folders["INBOX"].ModSeq != 1000 || rt.Folders["INBOX"].UIDNext != 101 {
 		t.Fatalf("cursor round-trip lost fields: %+v", rt.Folders["INBOX"])
 	}
 	if decodeCursor("").Folders == nil {
 		t.Fatal("empty cursor must yield a usable (non-nil) folder map")
+	}
+
+	// countUIDs must agree with a full decode without materializing the set.
+	for _, tc := range []struct {
+		set  string
+		want int
+	}{
+		{"", 0},
+		{"7", 1},
+		{"1:5", 5},
+		{encodeUIDs(uids), len(uids)},
+		{"1:100000", 100000},
+	} {
+		if got := countUIDs(tc.set); got != tc.want {
+			t.Fatalf("countUIDs(%q) = %d, want %d", tc.set, got, tc.want)
+		}
 	}
 }
 

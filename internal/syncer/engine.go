@@ -893,8 +893,14 @@ func (e *Engine) Incremental(ctx context.Context, b backend.Backend, accountID i
 		return changed, nil
 	}
 
-	if err := e.Store.SetSyncCursor(ctx, accountID, next); err != nil {
-		return changed, err
+	// An idle tick usually produces an identical cursor (IMAP cursors carry the
+	// full per-folder UID sets — tens of KB); skip the WAL write + fsync then.
+	if next != acc.SyncCursor {
+		if err := e.Store.SetSyncCursor(ctx, accountID, next); err != nil {
+			return changed, err
+		}
+	} else {
+		logging.TraceContext(ctx, "syncer: Incremental cursor unchanged; write skipped", "account", accountID)
 	}
 	logging.TraceContext(ctx, "syncer: Incremental done", "account", accountID, "changed", changed, "next", next)
 	return changed, nil
