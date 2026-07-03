@@ -3923,7 +3923,7 @@ func (w *window) onTranslate() {
 
 		logging.Trace("ui: translate done", "thread", threadID, "translated", len(results), "err", firstErr)
 		dispatch.Main(func() {
-			done(doneErr(firstErr))
+			done(doneErrCtx(ctx, firstErr)) // a user cancel is neutral for AI health
 			if w.openThreadID != threadID || ctx.Err() != nil {
 				logging.Trace("ui: translate discarded", "thread", threadID, "openThread", w.openThreadID, "cancelled", ctx.Err() != nil)
 				return // user switched conversations or reverted
@@ -4103,7 +4103,7 @@ func (w *window) onSummarize() {
 		if err != nil {
 			msg := err.Error()
 			dispatch.Main(func() {
-				done(doneErr(err))
+				done(doneErrCtx(ctx, err)) // a user cancel is neutral for AI health
 				if w.openThreadID == threadID && ctx.Err() == nil {
 					w.summaryLabel.SetText("Summary failed: " + msg)
 				}
@@ -4128,7 +4128,7 @@ func (w *window) onSummarize() {
 			}
 		}
 		dispatch.Main(func() {
-			done(doneErr(serr))
+			done(doneErrCtx(ctx, serr)) // a user cancel is neutral for AI health
 			if w.openThreadID != threadID || ctx.Err() != nil {
 				return
 			}
@@ -4203,7 +4203,7 @@ func (w *window) onAnalyze() {
 		if err != nil {
 			msg := err.Error()
 			dispatch.Main(func() {
-				done(doneErr(err))
+				done(doneErrCtx(ctx, err)) // a user cancel is neutral for AI health
 				if w.openThreadID == threadID && ctx.Err() == nil {
 					w.summaryLabel.SetText("Analysis failed: " + msg)
 				}
@@ -4228,7 +4228,7 @@ func (w *window) onAnalyze() {
 			}
 		}
 		dispatch.Main(func() {
-			done(doneErr(serr))
+			done(doneErrCtx(ctx, serr)) // a user cancel is neutral for AI health
 			if w.openThreadID != threadID || ctx.Err() != nil {
 				return
 			}

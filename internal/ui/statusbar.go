@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -100,12 +102,23 @@ func heading(text string) *gtk.Label {
 	return l
 }
 
+// noteCancelled is the activity note for a user-cancelled operation. It is
+// neutral for AI health: a cancel (switching threads, reverting a translation)
+// says nothing about whether the provider works, so noteAIResult ignores it —
+// neither flagging a failure (which would pause categorization for the
+// cooldown) nor claiming a success.
+const noteCancelled = "cancelled"
+
 // doneErr summarizes an operation result for the activity log note.
 func doneErr(err error) string {
-	if err != nil {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, context.Canceled):
+		return noteCancelled
+	default:
 		return "error: " + err.Error()
 	}
-	return ""
 }
 
 // aiActivity reports an AI operation to the status bar; the returned function
@@ -124,10 +137,26 @@ func (w *window) aiActivity(label string) func(note string) {
 	}
 }
 
+// doneErrCtx is doneErr for an operation whose context the user can cancel
+// (switching threads, reverting a translation): once ctx is cancelled the
+// result is reported neutral regardless of how the provider surfaced the abort
+// (not every HTTP/stream error chain wraps context.Canceled).
+func doneErrCtx(ctx context.Context, err error) string {
+	if ctx.Err() != nil {
+		return noteCancelled
+	}
+	return doneErr(err)
+}
+
 // noteAIResult reads an AI op's completion note (doneErr yields "error: …" on
 // failure) and toggles the status-bar warning, recording the failure time so
-// auto-categorization can back off (see categorizeInbox).
+// auto-categorization can back off (see categorizeInbox). A user-cancelled op
+// is neutral — it neither marks the provider failing nor healthy.
 func (w *window) noteAIResult(note string) {
+	if note == noteCancelled {
+		logging.Trace("ui: ai result cancelled — health unchanged")
+		return
+	}
 	failed := strings.HasPrefix(note, "error:")
 	dispatch.Main(func() {
 		if failed {
