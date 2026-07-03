@@ -2982,6 +2982,16 @@ func (w *window) renderConversation(msgs []model.Message) {
 	// Snapshot already-rendered sections on the main thread; the goroutine reuses
 	// these and only sanitizes the misses, so re-opening a thread is near-instant.
 	cached := w.cachedSectionsFor(msgs)
+	// Snapshot the inline-refetch guard on the main thread too: w.inlineRefetched
+	// must never be touched from the render goroutine (overlapping renders — rapid
+	// j/k, a live thread refresh — would race). The goroutine works on its own
+	// copy and the writes are merged back via dispatch.Main below.
+	refetched := make(map[string]bool, len(msgs))
+	for _, m := range msgs {
+		if w.inlineRefetched[m.GmailID] {
+			refetched[m.GmailID] = true
+		}
+	}
 	logging.Trace("ui: render conversation", "thread", threadID, "msgs", len(msgs), "cachedSections", len(cached))
 	go func() {
 		start := time.Now()
@@ -3022,7 +3032,7 @@ func (w *window) renderConversation(msgs []model.Message) {
 			// The latest message always needs its body read for the auth/phishing
 			// signals, even when its section is cached.
 			if m.RowID == latest.RowID {
-				body := w.bodyForRender(ctx, m)
+				body := w.bodyForRender(ctx, m, refetched)
 				latestAuth = body.RawHeaders
 				latestHTML = body.HTML
 				if cs, ok := cached[m.GmailID]; ok {
@@ -3041,7 +3051,7 @@ func (w *window) renderConversation(msgs []model.Message) {
 				blocked += cs.trackers
 				continue
 			}
-			body := w.bodyForRender(ctx, m)
+			body := w.bodyForRender(ctx, m, refetched)
 			sec, n := conversationSection(m, body, w.cleanHTML)
 			fresh[m.GmailID] = cachedSection{html: sec, trackers: n}
 			b.WriteString(sec)
@@ -3062,6 +3072,12 @@ func (w *window) renderConversation(msgs []model.Message) {
 			"fetch", fetchDur, "sanitize", time.Since(sanitizeStart))
 		dispatch.Main(func() {
 			w.mergeSectionCache(fresh) // cache newly-rendered sections (main thread)
+			// Merge the goroutine-local inline-refetch marks back into the main-thread
+			// map (even for a discarded render — the re-fetch already happened, so it
+			// must not repeat).
+			for id := range refetched {
+				w.inlineRefetched[id] = true
+			}
 			if w.openThreadID != threadID {
 				logging.Trace("ui: render conversation discarded", "thread", threadID, "openThread", w.openThreadID)
 				return // user switched to another conversation while this rendered
@@ -3166,11 +3182,13 @@ func conversationSection(m model.Message, body model.MessageBody, clean func(str
 // bodyForRender loads a message's body, re-fetching once (this session) when it
 // references inline cid: images that weren't captured under older extraction
 // logic — so already-cached mail picks up inline images without a manual resync.
-func (w *window) bodyForRender(ctx context.Context, m model.Message) model.MessageBody {
+// refetched is the render goroutine's private copy of w.inlineRefetched (a
+// main-thread snapshot); marks made here are merged back on the main thread.
+func (w *window) bodyForRender(ctx context.Context, m model.Message, refetched map[string]bool) model.MessageBody {
 	body, _ := w.deps.Store.GetBody(ctx, m.RowID)
-	if w.needsInlineRefetch(ctx, m, body) {
+	if w.needsInlineRefetch(ctx, m, body, refetched) {
 		logging.Trace("ui: inline re-fetch", "id", m.GmailID, "account", m.AccountID)
-		w.inlineRefetched[m.GmailID] = true
+		refetched[m.GmailID] = true
 		if err := w.deps.FetchBody(ctx, m.AccountID, m.GmailID); err != nil {
 			slog.Warn("ui: inline re-fetch", "id", m.GmailID, "err", err)
 		} else {
@@ -3182,9 +3200,10 @@ func (w *window) bodyForRender(ctx context.Context, m model.Message) model.Messa
 
 // needsInlineRefetch reports whether m's body references inline images (cid:) but
 // no inline attachment was captured — the signature of a body fetched before
-// inline parts were stored. Guarded so each message is re-fetched at most once.
-func (w *window) needsInlineRefetch(ctx context.Context, m model.Message, body model.MessageBody) bool {
-	if w.deps.FetchBody == nil || w.inlineRefetched[m.GmailID] {
+// inline parts were stored. Guarded (via the caller-owned refetched set) so each
+// message is re-fetched at most once.
+func (w *window) needsInlineRefetch(ctx context.Context, m model.Message, body model.MessageBody, refetched map[string]bool) bool {
+	if w.deps.FetchBody == nil || refetched[m.GmailID] {
 		return false
 	}
 	if !strings.Contains(strings.ToLower(body.HTML), "cid:") {
