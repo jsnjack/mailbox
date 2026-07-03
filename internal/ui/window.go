@@ -3215,11 +3215,13 @@ func (w *window) renderConversation(msgs []model.Message) {
 	// previous message for up to the fetch timeout. When all bodies are cached
 	// (the common case) the previous message stays (no flash) and the rendered
 	// thread swaps in near-instantly behind the cover.
-	needsFetch := w.deps.FetchBody != nil
-	for _, m := range msgs {
-		if !m.BodyFetched {
-			needsFetch = true
-			break
+	needsFetch := false
+	if w.deps.FetchBody != nil {
+		for _, m := range msgs {
+			if !m.BodyFetched {
+				needsFetch = true
+				break
+			}
 		}
 	}
 	if needsFetch {
