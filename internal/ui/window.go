@@ -2227,7 +2227,9 @@ func (w *window) buildReader() *adw.NavigationPage {
 	// otherwise inflate the page to tens of MB and stall WebKit's parse.
 	w.webview.Context().RegisterURIScheme("cid", w.serveCID)
 	w.sectionCache = make(map[string]cachedSection)
-	// Paint an opaque white page background (matches email content + the shell).
+	// The view background is what WebKit paints where no content is (resize
+	// gutters, overscroll, the instant before the shell's first paint). Pin it
+	// to white so those areas always match email content, regardless of theme.
 	white := gdk.NewRGBA(1, 1, 1, 1)
 	w.webview.SetBackgroundColor(&white)
 	// The reader never navigates after this one shell load. A LoadHtml per
