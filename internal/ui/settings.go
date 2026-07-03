@@ -279,10 +279,12 @@ func (w *window) openSettings() {
 	// Storage: body retention — prune cached bodies of old mail (metadata and
 	// header search stay; a pruned message re-fetches its body on open). The
 	// options map to days; index 0 keeps everything forever (the default).
+	// The explanation lives in the group description (full-width), not a row
+	// subtitle — a long subtitle's natural width squeezes the combo dropdown
+	// until its selected value ellipsizes.
 	retentionDays := []int{0, 30, 91, 182, 365, 2 * 365, 5 * 365}
 	retentionRow := adw.NewComboRow()
 	retentionRow.SetTitle("Keep message bodies")
-	retentionRow.SetSubtitle("Older bodies are removed from the cache and re-downloaded when opened. Headers and search by sender/subject always stay.")
 	retentionRow.SetModel(gtk.NewStringList([]string{"Forever", "1 month", "3 months", "6 months", "1 year", "2 years", "5 years"}))
 	prefs, _ := config.LoadPrefs()
 	for i, d := range retentionDays {
@@ -315,6 +317,7 @@ func (w *window) openSettings() {
 
 	storageGroup := adw.NewPreferencesGroup()
 	storageGroup.SetTitle("Storage")
+	storageGroup.SetDescription("Bodies older than the retention window are removed from the cache and re-downloaded when opened. Headers and search by sender or subject always stay.")
 	storageGroup.Add(retentionRow)
 	storageGroup.Add(clearRow)
 	storageGroup.Add(dbRow)
@@ -329,8 +332,8 @@ func (w *window) openSettings() {
 	page.Add(storageGroup)
 
 	dialog := adw.NewPreferencesDialog()
-	dialog.SetContentWidth(600)
-	dialog.SetContentHeight(640)
+	dialog.SetContentWidth(720)
+	dialog.SetContentHeight(760)
 	dialog.Add(page)
 	dialog.ConnectClosed(func() {
 		logging.Trace("ui: settings dialog closed, saving")
