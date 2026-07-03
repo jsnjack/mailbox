@@ -24,6 +24,22 @@ Move an item into a commit (and delete it here) when it's done.
 
 _(none currently — recently shipped: per-account signatures, Reply-To handling.)_
 
+## Storage
+
+- **Body retention policy ("keep bodies for N years, metadata forever").** For an
+  archive-everything workflow the DB grows monotonically with real mail —
+  compaction reclaims nothing because nothing is deleted; the size is dominated
+  by message bodies kept forever. A retention setting would clear `body_html`/
+  `body_text` (and the FTS body columns) for messages older than N years while
+  keeping metadata, so the list/search-by-header experience is unchanged and an
+  old message's body is simply re-fetched on open (reset `body_fetched` to 0 —
+  the lazy-fetch path already handles it; Gmail keeps the authoritative copy).
+  Off by default. Run as a background sweep after sync, then a `store.Vacuum`
+  when it actually freed a meaningful fraction. Complications to decide up
+  front: local FTS stops matching pruned bodies (fall back to server search,
+  which we already have), and persisted AI caches keyed to those messages
+  (translations/analyses) should be pruned with them.
+
 ## Feature ideas — modern email clients, 2026 scan
 
 What the current crop (Superhuman, Hey, Notion Mail, Shortwave, Missive, Proton)
