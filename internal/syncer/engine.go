@@ -233,10 +233,8 @@ func (e *Engine) DeletePermanently(ctx context.Context, b backend.Backend, accou
 	if err := b.Delete(ctx, gmailIDs); err != nil {
 		return fmt.Errorf("delete permanently: %w", err)
 	}
-	for _, id := range gmailIDs {
-		if err := e.Store.DeleteMessage(ctx, accountID, id); err != nil {
-			slog.Default().Warn("delete permanently: local", "id", id, "err", err)
-		}
+	if err := e.Store.DeleteMessages(ctx, accountID, gmailIDs); err != nil {
+		slog.Default().Warn("delete permanently: local", "n", len(gmailIDs), "err", err)
 	}
 	e.publish(Change{Kind: MessageDeleted, AccountID: accountID})
 	return nil
@@ -262,16 +260,45 @@ func (e *Engine) EmptyLabel(ctx context.Context, b backend.Backend, accountID in
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	if err := b.Delete(ctx, ids); err != nil {
+	// Belt and braces before an irreversible bulk delete: never trust the backend
+	// to have scoped the query. Any returned id that is cached locally but does
+	// NOT carry the target label is dropped (and loudly logged) instead of
+	// deleted. Ids we don't have cached are kept — a server-side listing can
+	// legitimately reach beyond the local cache (e.g. Gmail trash older than the
+	// backfill window).
+	existing, err := e.Store.ExistingMessageIDs(ctx, accountID, ids)
+	if err != nil {
+		return 0, fmt.Errorf("empty %s: verify: %w", labelID, err)
+	}
+	labeled, err := e.Store.MessageIDsWithLabel(ctx, accountID, labelID, ids)
+	if err != nil {
+		return 0, fmt.Errorf("empty %s: verify: %w", labelID, err)
+	}
+	keep := make([]string, 0, len(ids))
+	skipped := 0
+	for _, id := range ids {
+		if existing[id] && !labeled[id] {
+			skipped++
+			logging.TraceContext(ctx, "syncer: EmptyLabel skipping out-of-scope id", "account", accountID, "label", labelID, "id", id)
+			continue
+		}
+		keep = append(keep, id)
+	}
+	if skipped > 0 {
+		slog.Default().Warn("empty label: backend returned ids outside the label; skipped them",
+			"label", labelID, "skipped", skipped, "kept", len(keep))
+	}
+	if len(keep) == 0 {
+		return 0, nil
+	}
+	if err := b.Delete(ctx, keep); err != nil {
 		return 0, fmt.Errorf("empty %s: delete: %w", labelID, err)
 	}
-	for _, id := range ids {
-		if err := e.Store.DeleteMessage(ctx, accountID, id); err != nil {
-			slog.Default().Warn("empty label: local delete", "id", id, "err", err)
-		}
+	if err := e.Store.DeleteMessages(ctx, accountID, keep); err != nil {
+		slog.Default().Warn("empty label: local delete", "n", len(keep), "err", err)
 	}
 	e.publish(Change{Kind: MessageDeleted, AccountID: accountID})
-	return len(ids), nil
+	return len(keep), nil
 }
 
 // FetchBody downloads a message's full body and caches it, marking it fetched.

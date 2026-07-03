@@ -500,6 +500,83 @@ func (s *Store) ThreadIDsForMessages(ctx context.Context, accountID int64, gmail
 	return out, nil
 }
 
+// ExistingMessageIDs returns which of the given provider ids are cached locally,
+// in one IN-query per chunk instead of a GetMessage per id.
+func (s *Store) ExistingMessageIDs(ctx context.Context, accountID int64, gmailIDs []string) (map[string]bool, error) {
+	logging.TraceContext(ctx, "store: existing message ids", "account", accountID, "n", len(gmailIDs))
+	out := make(map[string]bool, len(gmailIDs))
+	err := s.scanIDsIn(ctx, gmailIDs, out, func(ids []string) (string, []any) {
+		args := make([]any, 0, len(ids)+1)
+		args = append(args, accountID)
+		for _, id := range ids {
+			args = append(args, id)
+		}
+		return `SELECT gmail_id FROM messages WHERE account_id = ? AND gmail_id IN (` + placeholders(len(ids)) + `)`, args
+	})
+	if err != nil {
+		logging.TraceContext(ctx, "store: existing message ids", "account", accountID, "err", err)
+		return nil, fmt.Errorf("existing message ids: %w", err)
+	}
+	logging.TraceContext(ctx, "store: existing message ids done", "account", accountID, "n", len(gmailIDs), "found", len(out))
+	return out, nil
+}
+
+// MessageIDsWithLabel returns which of the given provider ids carry labelID
+// locally. Used as a guard before destructive bulk operations (empty Trash/Spam)
+// so a backend that returned out-of-scope ids can't wipe unrelated mail.
+func (s *Store) MessageIDsWithLabel(ctx context.Context, accountID int64, labelID string, gmailIDs []string) (map[string]bool, error) {
+	logging.TraceContext(ctx, "store: message ids with label", "account", accountID, "label", labelID, "n", len(gmailIDs))
+	out := make(map[string]bool, len(gmailIDs))
+	err := s.scanIDsIn(ctx, gmailIDs, out, func(ids []string) (string, []any) {
+		args := make([]any, 0, len(ids)+2)
+		args = append(args, labelID, accountID)
+		for _, id := range ids {
+			args = append(args, id)
+		}
+		return `SELECT m.gmail_id FROM messages m
+			JOIN message_labels ml ON ml.message_rowid = m.rowid AND ml.label_id = ?
+			WHERE m.account_id = ? AND m.gmail_id IN (` + placeholders(len(ids)) + `)`, args
+	})
+	if err != nil {
+		logging.TraceContext(ctx, "store: message ids with label", "account", accountID, "label", labelID, "err", err)
+		return nil, fmt.Errorf("message ids with label: %w", err)
+	}
+	logging.TraceContext(ctx, "store: message ids with label done", "account", accountID, "label", labelID, "n", len(gmailIDs), "found", len(out))
+	return out, nil
+}
+
+// scanIDsIn runs a chunked single-string-column query over ids (build returns
+// the SQL + args for one chunk) and collects the returned ids into out.
+func (s *Store) scanIDsIn(ctx context.Context, ids []string, out map[string]bool, build func(chunkIDs []string) (string, []any)) error {
+	const chunk = 500
+	for start := 0; start < len(ids); start += chunk {
+		end := start + chunk
+		if end > len(ids) {
+			end = len(ids)
+		}
+		q, args := build(ids[start:end])
+		rows, err := s.reader.QueryContext(ctx, q, args...)
+		if err != nil {
+			return err
+		}
+		err = func() error {
+			defer func() { _ = rows.Close() }()
+			for rows.Next() {
+				var id string
+				if err := rows.Scan(&id); err != nil {
+					return err
+				}
+				out[id] = true
+			}
+			return rows.Err()
+		}()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // ftsQuery converts free-text input into an FTS5 MATCH expression: each token is
 // double-quoted (escaping embedded quotes) and given a trailing prefix wildcard,
 // joined by implicit AND. Returns "" for blank input.

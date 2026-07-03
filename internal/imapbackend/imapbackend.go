@@ -408,6 +408,7 @@ func (b *Backend) ensureFolders(c *conn) error {
 	archive := ""
 	var labels []model.Label
 	var synced []string
+	prio := map[string]int{} // sync/backfill priority per mailbox (lower = first)
 	for _, d := range data {
 		if hasAttr(d.Attrs, imap.MailboxAttrNonExistent) || hasAttr(d.Attrs, imap.MailboxAttrNoSelect) {
 			logging.Trace("imapbackend: list folder skipped (non-selectable)", "folder", d.Mailbox)
@@ -431,10 +432,19 @@ func (b *Backend) ensureFolders(c *conn) error {
 			!hasAttr(d.Attrs, imap.MailboxAttrImportant)
 		if syncable {
 			synced = append(synced, d.Mailbox)
+			prio[d.Mailbox] = folderPriority(d.Mailbox, id)
 		}
-		logging.Trace("imapbackend: list folder mapped", "folder", d.Mailbox, "id", id, "type", ltype, "syncable", syncable)
+		logging.Trace("imapbackend: list folder mapped", "folder", d.Mailbox, "id", id, "type", ltype, "syncable", syncable, "priority", prio[d.Mailbox])
 	}
-	sort.Strings(synced)
+	// Order folders by priority (INBOX, then special-use, then the rest,
+	// alphabetical within a tier): a capped backfill (SearchIDs with max) fills
+	// with INBOX mail first instead of whatever sorts alphabetically earliest.
+	sort.Slice(synced, func(i, j int) bool {
+		if prio[synced[i]] != prio[synced[j]] {
+			return prio[synced[i]] < prio[synced[j]]
+		}
+		return synced[i] < synced[j]
+	})
 	logging.Trace("imapbackend: folders ready", "account", b.cfg.Email, "labels", len(labels), "synced", len(synced), "archive", archive)
 	b.folderMu.Lock()
 	defer b.folderMu.Unlock()
@@ -447,16 +457,31 @@ func (b *Backend) ensureFolders(c *conn) error {
 	return nil
 }
 
-// SearchIDs lists message ids for backfill across all synced folders, newest
-// first within each (highest UID first), capped to max total. query is ignored
-// (provider search is a later addition).
+// SearchIDs lists message ids matching query, newest first within each folder
+// (highest UID first), capped to max total. An empty query lists every synced
+// folder (backfill); otherwise the query is parsed (see parseSearchQuery) into a
+// folder scope (in:) plus IMAP SEARCH criteria. An unsupported query is an error
+// — it must never fall back to "all messages" (Empty Trash deletes the result).
+// Folders are visited in priority order (INBOX, special-use, rest — see
+// ensureFolders), so a capped backfill fills up with the mail that matters.
 func (b *Backend) SearchIDs(ctx context.Context, query string, max int) ([]string, error) {
 	logging.TraceContext(ctx, "imapbackend: search ids", "account", b.cfg.Email, "query", query, "max", max)
+	q, err := parseSearchQuery(query)
+	if err != nil {
+		logging.TraceContext(ctx, "imapbackend: search ids unsupported query", "account", b.cfg.Email, "query", query, "err", err)
+		return nil, err
+	}
 	var ids []string
-	err := b.withConn(func(c *conn) error {
+	err = b.withConn(func(c *conn) error {
 		folders, err := b.folders(c)
 		if err != nil {
 			return err
+		}
+		if q.label != "" {
+			folders, err = b.foldersForLabel(q.label)
+			if err != nil {
+				return err
+			}
 		}
 		for _, f := range folders {
 			sel, err := c.selectMailbox(f, false)
@@ -464,7 +489,8 @@ func (b *Backend) SearchIDs(ctx context.Context, query string, max int) ([]strin
 				return err
 			}
 			start := time.Now()
-			sd, err := c.cl.UIDSearch(&imap.SearchCriteria{}, nil).Wait()
+			crit := q.criteria // copy: UIDSearch may not mutate, but keep folders independent
+			sd, err := c.cl.UIDSearch(&crit, nil).Wait()
 			if err != nil {
 				logging.Trace("imapbackend: uid search failed", "folder", f, "dur", time.Since(start), "err", err)
 				return fmt.Errorf("imap uid search %q: %w", f, err)
@@ -749,6 +775,20 @@ func folderLabelID(d *imap.ListData) string {
 		}
 	}
 	return labelForMailbox(d.Mailbox)
+}
+
+// folderPriority ranks a syncable folder for capped backfills: INBOX first,
+// then the special-use folders (Sent/Drafts/Trash/Junk — those that mapped to a
+// system label), then everything else.
+func folderPriority(mailbox, labelID string) int {
+	switch {
+	case strings.EqualFold(mailbox, "INBOX"):
+		return 0
+	case isSystemLabel(labelID):
+		return 1
+	default:
+		return 2
+	}
 }
 
 // labelForMailbox maps a bare mailbox name (no special-use info) to a label id.
