@@ -59,3 +59,34 @@ func TestMirrorAsyncPerAccountConcurrency(t *testing.T) {
 		t.Fatal("per-account mirror queues did not run concurrently")
 	}
 }
+
+// StopAccount must close the account's queue (already-queued mirrors still run,
+// then the drain goroutine exits) and a later mirrorAsync for the same account
+// must get a fresh queue — no panic, no closure leaking the old backend.
+func TestStopAccountClosesAndRecreatesMirrorQueue(t *testing.T) {
+	e := &Engine{}
+	ran := make(chan int, 2)
+	e.mirrorAsync(1, func() { ran <- 1 })
+	e.StopAccount(1)
+	// The queued op still runs to completion before the drainer exits.
+	select {
+	case got := <-ran:
+		if got != 1 {
+			t.Fatalf("queued op = %d, want 1", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("queued mirror op was dropped by StopAccount")
+	}
+	// A new op after StopAccount starts a fresh queue and runs.
+	e.mirrorAsync(1, func() { ran <- 2 })
+	select {
+	case got := <-ran:
+		if got != 2 {
+			t.Fatalf("post-stop op = %d, want 2", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("mirror op after StopAccount did not run")
+	}
+	// Stopping an account with no queue is a no-op.
+	e.StopAccount(42)
+}

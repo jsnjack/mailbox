@@ -655,8 +655,13 @@ func (e *Engine) ModifyLabelsBatch(ctx context.Context, b backend.Backend, accou
 // enqueued. This keeps an action and its Undo from racing to the provider. The
 // channel is buffered so the (already background) caller returns immediately; a
 // backlog deep enough to fill it just applies backpressure.
+//
+// The send happens under mirrorMu so StopAccount (which closes the channel
+// under the same lock) can never close it mid-send. The drain goroutine never
+// takes the lock, so a full buffer still drains and the send can't deadlock.
 func (e *Engine) mirrorAsync(accountID int64, fn func()) {
 	e.mirrorMu.Lock()
+	defer e.mirrorMu.Unlock()
 	ch, ok := e.mirror[accountID]
 	if !ok {
 		if e.mirror == nil {
@@ -664,18 +669,41 @@ func (e *Engine) mirrorAsync(accountID int64, fn func()) {
 		}
 		ch = make(chan func(), 128)
 		e.mirror[accountID] = ch
+		logging.Trace("syncer: mirror queue started", "account", accountID)
 		go func() {
 			for f := range ch {
 				f()
 			}
+			logging.Trace("syncer: mirror queue drained and stopped", "account", accountID)
 		}()
 	}
-	e.mirrorMu.Unlock()
 	ch <- fn
 }
 
+// StopAccount releases the engine's per-account resources — today the mirror
+// queue: it is closed (the drain goroutine finishes any already-queued mirrors,
+// then exits) and forgotten, so a later start for the same account gets a fresh
+// queue instead of a leaked goroutine whose queued closures capture the old,
+// torn-down backend across a reconnect. Callers should invoke it whenever an
+// account's runtime is stopped (remove, reconnect).
+func (e *Engine) StopAccount(accountID int64) {
+	e.mirrorMu.Lock()
+	defer e.mirrorMu.Unlock()
+	ch, ok := e.mirror[accountID]
+	if !ok {
+		logging.Trace("syncer: stop account (no mirror queue)", "account", accountID)
+		return
+	}
+	delete(e.mirror, accountID)
+	close(ch)
+	logging.Trace("syncer: stop account (mirror queue closed)", "account", accountID, "queued", len(ch))
+}
+
 // MarkLabelRead marks every unread message in a label as read: optimistically
-// in the store, then mirrored to Gmail with a single batch call.
+// in the store, then mirrored to the provider with a single batch call. The
+// mirror goes through the same per-account FIFO as ModifyLabelsBatch so it
+// cannot overtake (or be overtaken by) an earlier label change or its Undo; a
+// mirror failure is logged and reconciled by the next incremental sync.
 func (e *Engine) MarkLabelRead(ctx context.Context, b backend.Backend, accountID int64, labelID string) error {
 	defer func(start time.Time) {
 		slog.Default().Debug("engine: MarkLabelRead", "label", labelID, "dur", time.Since(start))
@@ -692,9 +720,11 @@ func (e *Engine) MarkLabelRead(ctx context.Context, b backend.Backend, accountID
 	}
 	e.publish(Change{Kind: LabelsSynced, AccountID: accountID})
 	if b != nil {
-		if err := b.ApplyLabels(ctx, ids, nil, []string{model.LabelUnread}); err != nil {
-			return fmt.Errorf("mark label read on server: %w", err)
-		}
+		e.mirrorAsync(accountID, func() {
+			if err := b.ApplyLabels(context.Background(), ids, nil, []string{model.LabelUnread}); err != nil {
+				slog.Default().Warn("mark label read: mirror to provider", "label", labelID, "n", len(ids), "err", err)
+			}
+		})
 	}
 	return nil
 }
