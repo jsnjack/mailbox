@@ -3321,7 +3321,12 @@ func (w *window) renderConversation(msgs []model.Message) {
 					continue
 				}
 				sec, n := conversationSection(m, body, w.cleanHTML, fetchFailed[m.GmailID])
-				fresh[m.GmailID] = cachedSection{html: sec, trackers: n}
+				// A failure section (snippet + "could not be loaded" notice) is
+				// transient — caching it would keep showing the failure after the
+				// body becomes fetchable again. Only real bodies are immutable.
+				if !fetchFailed[m.GmailID] {
+					fresh[m.GmailID] = cachedSection{html: sec, trackers: n}
+				}
 				b.WriteString(sec)
 				blocked += n
 				continue
@@ -3333,7 +3338,11 @@ func (w *window) renderConversation(msgs []model.Message) {
 			}
 			body := w.bodyForRender(ctx, m, refetched)
 			sec, n := conversationSection(m, body, w.cleanHTML, fetchFailed[m.GmailID])
-			fresh[m.GmailID] = cachedSection{html: sec, trackers: n}
+			// Transient failure sections are not cached — see the latest-message
+			// branch above.
+			if !fetchFailed[m.GmailID] {
+				fresh[m.GmailID] = cachedSection{html: sec, trackers: n}
+			}
 			b.WriteString(sec)
 			blocked += n
 		}
