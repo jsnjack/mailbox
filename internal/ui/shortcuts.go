@@ -37,8 +37,8 @@ func (w *window) showShortcuts() {
 	}
 	group("Navigation", [][2]string{
 		{"j  /  k", "Next / previous conversation"},
-		{"/", "Search"},
-		{"Esc", "Back"},
+		{"/  /  Ctrl F", "Search"},
+		{"Esc", "Back / exit selection"},
 	})
 	group("Message", [][2]string{
 		{"r", "Reply"},
@@ -51,13 +51,17 @@ func (w *window) showShortcuts() {
 		{"t", "Translate"},
 	})
 	group("Compose", [][2]string{
-		{"c", "New message"},
+		{"c  /  Ctrl N", "New message"},
 		{"Ctrl + Enter", "Send"},
 	})
 	group("View", [][2]string{
 		{"Ctrl +  /  −", "Zoom in / out"},
 		{"Ctrl 0", "Reset zoom"},
 		{"?  /  Ctrl ?", "This shortcuts list"},
+	})
+	group("Application", [][2]string{
+		{"Ctrl ,", "Preferences"},
+		{"Ctrl W", "Close window"},
 	})
 
 	scroller := gtk.NewScrolledWindow()

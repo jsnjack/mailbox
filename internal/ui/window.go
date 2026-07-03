@@ -487,6 +487,40 @@ func (w *window) addShortcuts() {
 	w.win.AddAction(help)
 	w.app.SetAccelsForAction("win.show-help-overlay", []string{"<Control>question"})
 
+	// Standard GNOME menu accelerators. The single-key scheme below stays intact;
+	// these add the modifier chords a keyboard-first user expects.
+	newMsg := gio.NewSimpleAction("new-message", nil)
+	newMsg.ConnectActivate(func(*glib.Variant) {
+		// Guarded exactly like the New button — no compose without a place to send.
+		if w.newBtn == nil || !w.newBtn.Sensitive() {
+			logging.Trace("ui: new message accel ignored (no account)")
+			return
+		}
+		logging.Trace("ui: new message (accel)", "account", w.activeID)
+		w.openCompose(model.OutgoingMessage{}, "", "New message")
+	})
+	w.win.AddAction(newMsg)
+	w.app.SetAccelsForAction("win.new-message", []string{"<Control>n"})
+
+	focusSearch := gio.NewSimpleAction("focus-search", nil)
+	focusSearch.ConnectActivate(func(*glib.Variant) {
+		logging.Trace("ui: focus search (accel)")
+		w.searchEntry.GrabFocus()
+	})
+	w.win.AddAction(focusSearch)
+	w.app.SetAccelsForAction("win.focus-search", []string{"<Control>f"})
+
+	closeWin := gio.NewSimpleAction("close", nil)
+	closeWin.ConnectActivate(func(*glib.Variant) {
+		logging.Trace("ui: close window (accel)")
+		w.win.Close()
+	})
+	w.win.AddAction(closeWin)
+	w.app.SetAccelsForAction("win.close", []string{"<Control>w"})
+
+	// Preferences action is registered in registerAppMenuActions; bind its chord.
+	w.app.SetAccelsForAction("win.preferences", []string{"<Control>comma"})
+
 	ec := gtk.NewEventControllerKey()
 	ec.SetPropagationPhase(gtk.PhaseCapture)
 	ec.ConnectKeyPressed(func(keyval, keycode uint, state gdk.ModifierType) bool {
