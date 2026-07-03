@@ -209,9 +209,14 @@ type window struct {
 	// in-place translation: a banner offers reverting to the original; the cancel
 	// func aborts an in-flight translation when the user reverts or switches mail;
 	// translationCache memoizes results per message id so re-showing is instant.
+	// translationShown records that the reader currently displays translated
+	// bodies, so a background re-render (a synced reply, the images toggle)
+	// re-applies the translation instead of silently reverting to the original
+	// under a still-revealed "Showing translation" banner.
 	translationBanner *adw.Banner
 	translateCancel   context.CancelFunc
 	translationCache  map[string]string
+	translationShown  bool
 }
 
 func newWindow(app *adw.Application, deps Deps) *window {
@@ -3824,13 +3829,28 @@ func (w *window) setCaution(warnings []string) {
 	w.cautionLabel.SetVisible(true)
 }
 
-// setImagesEnabled toggles remote-image loading and re-renders the open thread.
+// setImagesEnabled toggles remote-image loading and re-renders the open thread
+// (keeping a shown translation shown — see rerenderOpenThread).
 func (w *window) setImagesEnabled(on bool) {
 	w.imagesEnabled = on
 	w.webview.Settings().SetAutoLoadImages(on)
 	if len(w.openThreadMsgs) > 0 {
-		w.renderConversation(w.openThreadMsgs) // re-render only; keep summary as-is
+		w.rerenderOpenThread() // re-render only; keep summary as-is
 	}
+}
+
+// rerenderOpenThread repaints the open conversation in whichever view it is in:
+// translated threads re-apply their translation (cached messages are free; a new
+// reply is translated before the swap), everything else renders the originals.
+// Without this, a background re-render would silently revert a translated thread
+// while the "Showing translation" banner stayed up.
+func (w *window) rerenderOpenThread() {
+	if w.translationShown {
+		logging.Trace("ui: re-render keeps translation", "thread", w.openThreadID)
+		w.onTranslate()
+		return
+	}
+	w.renderConversation(w.openThreadMsgs)
 }
 
 // onTranslate shows an English translation of the whole open conversation in
@@ -3960,6 +3980,7 @@ const translateLang = "English"
 func (w *window) showTranslatedConversation(msgs []model.Message) {
 	w.translationBanner.SetTitle("Showing translation")
 	w.translationBanner.SetRevealed(true)
+	w.translationShown = true
 	var b strings.Builder
 	blocked := 0
 	for i := len(msgs) - 1; i >= 0; i-- {
@@ -4019,6 +4040,7 @@ func (w *window) resetTranslation() {
 		w.translateCancel()
 		w.translateCancel = nil
 	}
+	w.translationShown = false
 	w.translationBanner.SetRevealed(false)
 }
 
@@ -4637,7 +4659,7 @@ func (w *window) refreshOpenThread() {
 	}
 	w.openThreadMsgs = msgs
 	w.openMsg = msgs[len(msgs)-1] // newest, for reply/forward/star/unread
-	w.renderConversation(msgs)
+	w.rerenderOpenThread()        // keeps a shown translation shown
 }
 
 func (w *window) notifyNewMail(accountID int64, m model.Message) {
