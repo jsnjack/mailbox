@@ -350,7 +350,10 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 			strings.TrimSpace(c.Bcc) != strings.TrimSpace(init.Bcc) ||
 			c.Subject != init.Subject ||
 			c.Body != init.Body ||
-			len(c.Attachments) > 0
+			// Compare against the prefilled set — a forward carries the original's
+			// attachments, which are not user changes. (Attachments can only be
+			// added, so a count comparison suffices.)
+			len(c.Attachments) != len(init.Attachments)
 	}
 
 	win.ConnectCloseRequest(func() bool {
