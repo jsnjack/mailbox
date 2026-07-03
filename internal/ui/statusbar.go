@@ -284,25 +284,30 @@ func humanDuration(d time.Duration) string {
 }
 
 // refreshStatusStats fills the popover's session-stats section from deps.Stats.
+// The gathering (a COUNT(*), an os.Stat, a recursive attachment-dir walk) runs
+// off the main thread; only the label update dispatches back.
 func (w *window) refreshStatusStats() {
 	if w.deps.Stats == nil {
 		w.statusStatsLabel.SetText("No connected account.")
 		return
 	}
-	s := w.deps.Stats()
-	var lines []string
-	if s.Requests > 0 {
-		lines = append(lines,
-			fmt.Sprintf("API: %d requests · %d quota units (of 6000/min)", s.Requests, s.QuotaUnits),
-			fmt.Sprintf("Transferred: ↓ %s · ↑ %s", humanBytes(s.BytesIn), humanBytes(s.BytesOut)))
-	}
-	lines = append(lines, fmt.Sprintf("Cache: %s messages · DB %s", humanCount(s.Messages), humanBytes(s.DBBytes)))
-	if s.CacheBytes > 0 {
-		lines = append(lines, fmt.Sprintf("Attachments: %s", humanBytes(s.CacheBytes)))
-	}
-	logging.Trace("ui: refresh session stats", "requests", s.Requests, "quota", s.QuotaUnits,
-		"bytes_in", s.BytesIn, "bytes_out", s.BytesOut, "messages", s.Messages, "db_bytes", s.DBBytes, "cache_bytes", s.CacheBytes)
-	w.statusStatsLabel.SetText(strings.Join(lines, "\n"))
+	go func() {
+		s := w.deps.Stats()
+		var lines []string
+		if s.Requests > 0 {
+			lines = append(lines,
+				fmt.Sprintf("API: %d requests · %d quota units (of 6000/min)", s.Requests, s.QuotaUnits),
+				fmt.Sprintf("Transferred: ↓ %s · ↑ %s", humanBytes(s.BytesIn), humanBytes(s.BytesOut)))
+		}
+		lines = append(lines, fmt.Sprintf("Cache: %s messages · DB %s", humanCount(s.Messages), humanBytes(s.DBBytes)))
+		if s.CacheBytes > 0 {
+			lines = append(lines, fmt.Sprintf("Attachments: %s", humanBytes(s.CacheBytes)))
+		}
+		logging.Trace("ui: refresh session stats", "requests", s.Requests, "quota", s.QuotaUnits,
+			"bytes_in", s.BytesIn, "bytes_out", s.BytesOut, "messages", s.Messages, "db_bytes", s.DBBytes, "cache_bytes", s.CacheBytes)
+		text := strings.Join(lines, "\n")
+		dispatch.Main(func() { w.statusStatsLabel.SetText(text) })
+	}()
 }
 
 // appendLogLine prepends a timestamped line to the activity log, capping the count.

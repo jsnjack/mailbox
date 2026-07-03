@@ -131,6 +131,14 @@ type window struct {
 	// refreshGen increments on every list query; an async query whose result
 	// arrives after a newer one was issued is discarded (last request wins).
 	refreshGen uint64
+	// notifyQueue coalesces new-mail notification checks from a burst of
+	// MessageUpserted events: ids collect here (main thread) and are looked up in
+	// one background pass, instead of one main-thread GetMessage per event.
+	notifyQueue     []notifyCandidate
+	notifyScheduled bool
+	// unreadRefreshPending coalesces per-account unread-pill refreshes triggered
+	// by bursts of sibling-account sync events (the query runs off-thread).
+	unreadRefreshPending bool
 	// afterPopulate runs once after the next list populate, then clears. Used by
 	// launch hooks that must act on the loaded list (now that loads are async).
 	afterPopulate func()
@@ -1397,28 +1405,39 @@ func (w *window) updateSelectionBar() {
 }
 
 // bulkApply applies a label change to every selected conversation in one batch,
-// then leaves selection mode.
+// then leaves selection mode. The per-thread message resolution (one query per
+// selected thread) runs off the main thread; the label change and the undo
+// toast dispatch back once resolved.
 func (w *window) bulkApply(verb string, add, remove []string) {
 	if len(w.selected) == 0 {
 		return
 	}
 	logging.Trace("ui: bulk apply", "verb", verb, "selected", len(w.selected), "add", add, "remove", remove, "account", w.activeID)
-	ctx := context.Background()
-	var msgs []model.Message
-	n := 0
+	ids := make([]string, 0, len(w.selected))
 	for id := range w.selected {
-		if tm, err := w.deps.Store.ListThreadMessages(ctx, w.activeID, id); err == nil {
-			msgs = append(msgs, tm...)
-			n++
-		}
+		ids = append(ids, id)
 	}
+	acctID := w.activeID
 	w.selectBtn.SetActive(false) // exits select mode (clears selection, refreshes)
-	if len(msgs) == 0 {
-		return
-	}
-	logging.Trace("ui: bulk apply resolved", "verb", verb, "threads", n, "messages", len(msgs))
-	w.applyLabels(msgs, add, remove, nil)
-	w.showUndoToast(fmt.Sprintf("%s %d conversations", verb, n), msgs, add, remove)
+	go func() {
+		ctx := context.Background()
+		var msgs []model.Message
+		n := 0
+		for _, id := range ids {
+			if tm, err := w.deps.Store.ListThreadMessages(ctx, acctID, id); err == nil && len(tm) > 0 {
+				msgs = append(msgs, tm...)
+				n++
+			}
+		}
+		logging.Trace("ui: bulk apply resolved", "verb", verb, "threads", n, "messages", len(msgs))
+		if len(msgs) == 0 {
+			return
+		}
+		dispatch.Main(func() {
+			w.applyLabels(msgs, add, remove, nil)
+			w.showUndoToast(fmt.Sprintf("%s %d conversations", verb, n), msgs, add, remove)
+		})
+	}()
 }
 
 // onSearchAllMail runs a Gmail server-side search for the current query, caches
@@ -2718,11 +2737,38 @@ func (w *window) applyAccountUnread(counts map[int64]int) {
 	}
 }
 
+// accountUnreadCoalesceMS is how long pill refreshes wait for a burst of
+// sibling-account sync events to settle before one off-thread query serves
+// them all.
+const accountUnreadCoalesceMS = 300
+
 // refreshAccountUnread fetches the per-account unread-inbox counts and applies
 // them to the pills and title. Used when only sibling-account counts changed
-// (so the active account's sidebar needn't reload).
+// (so the active account's sidebar needn't reload). Calls are coalesced — a
+// sync burst on a non-active account fires this per event — and the count query
+// runs off the main thread.
 func (w *window) refreshAccountUnread() {
-	w.applyAccountUnread(w.accountUnreadInbox(context.Background()))
+	if w.unreadRefreshPending {
+		return
+	}
+	w.unreadRefreshPending = true
+	glib.TimeoutAdd(accountUnreadCoalesceMS, func() bool {
+		w.unreadRefreshPending = false
+		ids := make([]int64, 0, len(w.deps.Accounts))
+		for _, a := range w.deps.Accounts {
+			ids = append(ids, a.ID)
+		}
+		go func() {
+			counts, err := w.deps.Store.UnreadCountByLabelForAccounts(context.Background(), ids, model.LabelInbox)
+			if err != nil {
+				slog.Warn("ui: account unread counts", "err", err)
+				return
+			}
+			logging.Trace("ui: account unread refreshed", "accounts", len(ids))
+			dispatch.Main(func() { w.applyAccountUnread(counts) })
+		}()
+		return false
+	})
 }
 
 // appendFolder adds a selectable folder/label row mapped to id.
@@ -4621,16 +4667,68 @@ func (w *window) onChange(c syncer.Change) {
 	if c.Kind != syncer.MessageUpserted || c.GmailID == "" {
 		return
 	}
-	m, err := w.deps.Store.GetMessage(context.Background(), c.AccountID, c.GmailID)
-	if err != nil || !m.IsUnread || !m.InternalDate.After(w.startTime) {
+	w.queueNewMailCheck(c.AccountID, c.GmailID)
+}
+
+// notifyCandidate is one upserted message queued for the new-mail
+// notification check.
+type notifyCandidate struct {
+	accountID int64
+	gmailID   string
+}
+
+// notifyCoalesceMS is how long queued notification checks wait for a burst of
+// sync events to settle before one background lookup handles them all.
+const notifyCoalesceMS = 300
+
+// queueNewMailCheck collects a MessageUpserted id for the new-mail notification
+// decision. A sync burst upserts many messages; instead of a per-event
+// GetMessage on the GTK loop, ids collect for notifyCoalesceMS and one
+// goroutine looks the batch up. Main thread only.
+func (w *window) queueNewMailCheck(accountID int64, gmailID string) {
+	w.notifyQueue = append(w.notifyQueue, notifyCandidate{accountID: accountID, gmailID: gmailID})
+	if w.notifyScheduled {
 		return
 	}
-	for _, l := range m.Labels {
-		if l == model.LabelInbox {
-			w.notifyNewMail(c.AccountID, m)
-			return
+	w.notifyScheduled = true
+	glib.TimeoutAdd(notifyCoalesceMS, func() bool {
+		batch := w.notifyQueue
+		w.notifyQueue = nil
+		w.notifyScheduled = false
+		logging.Trace("ui: new-mail check batch", "n", len(batch))
+		go w.checkNewMail(batch)
+		return false
+	})
+}
+
+// checkNewMail looks up the batched message ids off the main thread and raises
+// a desktop notification for each genuinely new unread inbox message (arrived
+// after launch). Only the notification dispatch touches the main thread.
+func (w *window) checkNewMail(batch []notifyCandidate) {
+	type hit struct {
+		accountID int64
+		msg       model.Message
+	}
+	ctx := context.Background()
+	var hits []hit
+	for _, c := range batch {
+		m, err := w.deps.Store.GetMessage(ctx, c.accountID, c.gmailID)
+		if err != nil || !m.IsUnread || !m.InternalDate.After(w.startTime) {
+			continue
+		}
+		if hasLabel(m, model.LabelInbox) {
+			hits = append(hits, hit{accountID: c.accountID, msg: m})
 		}
 	}
+	logging.Trace("ui: new-mail check done", "batch", len(batch), "notify", len(hits))
+	if len(hits) == 0 {
+		return
+	}
+	dispatch.Main(func() {
+		for _, h := range hits {
+			w.notifyNewMail(h.accountID, h.msg)
+		}
+	})
 }
 
 // scheduleRefresh coalesces refreshes from a burst of change events: the first
