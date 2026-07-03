@@ -1818,6 +1818,13 @@ func (w *window) categorizeInbox() {
 	if !w.inboxCategories || w.deps.Assistant == nil || w.categorizing || w.current != model.LabelInbox {
 		return
 	}
+	// A search fills threadByID with hits from anywhere (local FTS or a server
+	// search), not the inbox — categorizing those would bill the AI for arbitrary
+	// mail and repeat on every refresh. Only the real inbox listing categorizes.
+	if w.serverSearch || strings.TrimSpace(w.searchEntry.Text()) != "" {
+		logging.Trace("ui: categorize inbox skipped", "reason", "search active", "serverSearch", w.serverSearch)
+		return
+	}
 	// Candidates: inbox threads not yet categorized in memory this session. Built
 	// on the main thread (reads threadByID/categories); the rest runs in the
 	// background and marshals UI updates through dispatch.
