@@ -78,7 +78,7 @@ func (w *window) showRowMenu(row gtk.Widgetter, threadID string, x, y float64) {
 	// File this conversation into a user label (Move to… relocates it out of the
 	// current location; Label… toggles labels without moving it).
 	item(box, "Move to…", func() {
-		w.showMoveToDialog(func(labelID, name string) {
+		w.showMoveToDialog(acct, func(labelID, name string) {
 			w.threadModifyAll(acct, threadID, "Moved to "+name, []string{labelID}, moveLocationRemovals)
 		})
 	})

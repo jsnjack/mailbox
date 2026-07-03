@@ -1440,7 +1440,10 @@ func (w *window) buildSelectionBar() {
 		if len(w.selected) == 0 {
 			return
 		}
-		w.showMoveToDialog(func(labelID, name string) {
+		// Capture the account owning the selection now: a mid-dialog account
+		// switch must not offer another account's labels (their ids are
+		// per-account and wouldn't exist on the selected messages' account).
+		w.showMoveToDialog(w.activeID, func(labelID, name string) {
 			w.bulkApply("Moved to "+name, []string{labelID}, moveLocationRemovals)
 		})
 	})
@@ -3908,7 +3911,13 @@ func (w *window) buildLabelsMenu() gtk.Widgetter {
 		box.Append(gtk.NewLabel("No conversation open"))
 		return box
 	}
-	return w.labelToggleBox(w.openThreadID, w.openThreadMsgs)
+	// Use the open messages' own account, not the live active one — the open
+	// thread survives an account switch until another thread is opened.
+	acct := w.activeID
+	if len(w.openThreadMsgs) > 0 {
+		acct = w.openThreadMsgs[0].AccountID
+	}
+	return w.labelToggleBox(acct, w.openThreadID, w.openThreadMsgs)
 }
 
 // showLabelsDialog opens the label chooser (buildLabelsMenu) as a dialog. Labels

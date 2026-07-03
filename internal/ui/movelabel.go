@@ -9,12 +9,14 @@ import (
 	"github.com/jsnjack/mailbox/internal/model"
 )
 
-// userLabels returns the active account's user labels (system labels excluded),
-// for the move/label pickers. Nil on error (already logged).
-func (w *window) userLabels() []model.Label {
-	labels, err := w.deps.Store.ListLabels(context.Background(), w.activeID)
+// userLabels returns acctID's user labels (system labels excluded), for the
+// move/label pickers. The account is passed in — not read from w.activeID — so
+// a picker opened from a row keeps targeting that row's account even if the
+// active account switches while it is open. Nil on error (already logged).
+func (w *window) userLabels(acctID int64) []model.Label {
+	labels, err := w.deps.Store.ListLabels(context.Background(), acctID)
 	if err != nil {
-		logging.Trace("ui: user labels", "account", w.activeID, "err", err)
+		logging.Trace("ui: user labels", "account", acctID, "err", err)
 		return nil
 	}
 	out := labels[:0:0]
@@ -26,13 +28,14 @@ func (w *window) userLabels() []model.Label {
 	return out
 }
 
-// showMoveToDialog presents the account's user labels; picking one calls onPick
+// showMoveToDialog presents acctID's user labels; picking one calls onPick
 // with that label's id and name. Filing (add label + remove the current
 // location) is done by the caller so it can use the right batch path (a single
-// thread vs. a bulk selection) and show the matching undo toast.
-func (w *window) showMoveToDialog(onPick func(labelID, name string)) {
-	labels := w.userLabels()
-	logging.Trace("ui: move-to dialog", "account", w.activeID, "labels", len(labels))
+// thread vs. a bulk selection) and show the matching undo toast. Label ids are
+// per-account, so acctID must be the account of the messages being filed.
+func (w *window) showMoveToDialog(acctID int64, onPick func(labelID, name string)) {
+	labels := w.userLabels(acctID)
+	logging.Trace("ui: move-to dialog", "account", acctID, "labels", len(labels))
 
 	listBox := gtk.NewListBox()
 	listBox.AddCSSClass("boxed-list")
@@ -83,12 +86,12 @@ func (w *window) showMoveToDialog(onPick func(labelID, name string)) {
 // labelToggleBox builds the user-label checklist for a thread: each user label
 // is a checkbox reflecting whether it's applied to the thread, and toggling it
 // adds/removes that label across all of the thread's messages.
-func (w *window) labelToggleBox(threadID string, msgs []model.Message) gtk.Widgetter {
+func (w *window) labelToggleBox(acctID int64, threadID string, msgs []model.Message) gtk.Widgetter {
 	box := gtk.NewBox(gtk.OrientationVertical, 2)
 	setMargins(box, 8, 8, 8, 8)
 
-	labels := w.userLabels()
-	applied, err := w.deps.Store.ThreadLabels(context.Background(), w.activeID, threadID)
+	labels := w.userLabels(acctID)
+	applied, err := w.deps.Store.ThreadLabels(context.Background(), acctID, threadID)
 	if err != nil {
 		logging.Trace("ui: thread labels", "id", threadID, "err", err)
 		applied = map[string]bool{}
@@ -124,7 +127,7 @@ func (w *window) showThreadLabelsDialog(acctID int64, threadID string) {
 	}
 	scroller := gtk.NewScrolledWindow()
 	scroller.SetPolicy(gtk.PolicyNever, gtk.PolicyAutomatic)
-	scroller.SetChild(w.labelToggleBox(threadID, msgs))
+	scroller.SetChild(w.labelToggleBox(acctID, threadID, msgs))
 	scroller.SetVExpand(true)
 
 	tv := adw.NewToolbarView()
