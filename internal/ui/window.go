@@ -59,7 +59,9 @@ type window struct {
 	statusProgText   map[string]string    // op label → bounded "N/M" progress text
 	statusLogLines   int                  // current number of log rows (capped)
 	activityTimer    glib.SourceHandle
-	lastSyncLabel    string // idle text once a sync has completed
+	markReadTimer    glib.SourceHandle // pending "mark thread read" (cancelled if the user navigates away first)
+	pendingMarkRead  func()            // the deferred mark-read body, so an explicit action can flush it early
+	lastSyncLabel    string            // idle text once a sync has completed
 	accountBox       *gtk.ListBox
 	// accountHeader wraps the switcher list-box and its separator; it is hidden
 	// when no account is connected (zero-account first run) and revealed once the
@@ -1615,6 +1617,7 @@ func (w *window) loadThreads(query func(context.Context) ([]model.ThreadSummary,
 			}
 			if err != nil {
 				slog.Error("ui: load threads", "err", err)
+				w.toast("Couldn't load messages")
 				return
 			}
 			w.showThreads(sums)
@@ -1706,6 +1709,7 @@ func (w *window) showThreads(sums []model.ThreadSummary) {
 	w.threadByID = newByID
 	w.diffThreadModel(oldIDs, ids)
 	w.threadIDs = ids
+	w.updateEmptyFolderBanner(len(ids))
 
 	if len(sums) == 0 {
 		w.emptyPage.SetChild(nil)
@@ -2389,6 +2393,7 @@ func (w *window) onReply() {
 		return
 	}
 	logging.Trace("ui: reply", "id", m.GmailID, "thread", w.openThreadID, "to", replyTarget(m), "account", w.activeID)
+	w.flushMarkRead() // explicit engagement — mark read now, don't wait out the timer
 	w.openCompose(w.replyInit(m), w.threadContextFor(m), "Reply")
 }
 
@@ -2398,6 +2403,7 @@ func (w *window) onReplyAll() {
 		return
 	}
 	logging.Trace("ui: reply all", "id", w.openMsg.GmailID, "thread", w.openThreadID, "to", init.To, "cc", init.Cc, "account", w.activeID)
+	w.flushMarkRead()
 	w.openCompose(init, aiContext, "Reply all")
 }
 
@@ -2572,6 +2578,7 @@ func (w *window) onForward() {
 		return
 	}
 	logging.Trace("ui: forward", "id", m.GmailID, "thread", w.openThreadID, "account", w.activeID)
+	w.flushMarkRead()
 	init := model.OutgoingMessage{
 		Subject: ensureFwdPrefix(m.Subject),
 		Body:    quoteOriginal(m, w.bodyTextFor(m)),
@@ -2861,6 +2868,7 @@ func (w *window) setActiveAccount(a AccountInfo) {
 // clearReader returns the reader to its empty state and forgets the open
 // conversation, so stale actions can't target a thread from another account.
 func (w *window) clearReader() {
+	w.cancelMarkRead() // no thread open → nothing to mark read
 	w.openThreadID = ""
 	w.openThreadMsgs = nil
 	w.openMsg = model.Message{}
@@ -2870,20 +2878,32 @@ func (w *window) clearReader() {
 	w.readerStack.SetVisibleChildName("empty")
 }
 
+// updateEmptyFolderBanner reveals the "Empty now" banner only when the current
+// folder is Trash or Spam and actually holds messages — a destructive CTA over
+// an empty folder is noise. A live search replaces the folder view, so the
+// banner (which empties the whole folder, not the hits) stays hidden then.
+func (w *window) updateEmptyFolderBanner(visible int) {
+	show := w.deps.EmptyFolder != nil &&
+		(w.current == model.LabelTrash || w.current == model.LabelSpam) &&
+		visible > 0 &&
+		w.searchEntry.Text() == ""
+	w.emptyFolderBanner.SetRevealed(show)
+}
+
 func (w *window) selectLabel(labelID string) {
 	logging.Trace("ui: select label", "label", labelID, "account", w.activeID)
 	w.current = labelID
-	// The "empty folder" banner appears only in Trash/Spam.
+	// The "empty folder" banner appears only in Trash/Spam. Hide it here; the
+	// destructive "Empty now" CTA is revealed only once we know the folder is
+	// non-empty (updateEmptyFolderBanner, from showThreads).
 	if w.deps.EmptyFolder != nil && (labelID == model.LabelTrash || labelID == model.LabelSpam) {
 		name := "Trash"
 		if labelID == model.LabelSpam {
 			name = "Spam"
 		}
 		w.emptyFolderBanner.SetTitle(name + " — messages here can be permanently deleted")
-		w.emptyFolderBanner.SetRevealed(true)
-	} else {
-		w.emptyFolderBanner.SetRevealed(false)
 	}
+	w.emptyFolderBanner.SetRevealed(false)
 	// Switching label clears any active search without re-triggering it.
 	w.suppressSearch = true
 	w.searchEntry.SetText("")
@@ -2936,6 +2956,7 @@ func (w *window) showThread(threadID string) {
 	if err != nil || len(msgs) == 0 {
 		if err != nil {
 			slog.Warn("ui: load thread", "thread", threadID, "err", err)
+			w.toast("Couldn't open this conversation")
 		}
 		logging.Trace("ui: show thread empty", "thread", threadID, "n", len(msgs), "err", err)
 		return
@@ -2952,25 +2973,74 @@ func (w *window) showThread(threadID string) {
 
 	w.renderConversation(msgs)
 
-	// Mark unread messages in the thread read — in one batch call.
-	if w.deps.ModifyLabels != nil {
-		var ids []string
-		for _, m := range msgs {
-			if m.IsUnread {
-				ids = append(ids, m.GmailID)
-			}
-		}
-		if len(ids) > 0 {
-			acctID := w.activeID
-			logging.Trace("ui: mark thread read", "thread", threadID, "n", len(ids), "account", acctID)
-			go func() {
-				if err := w.deps.ModifyLabels(context.Background(), acctID, ids, nil, []string{model.LabelUnread}); err != nil {
-					slog.Warn("ui: mark read", "n", len(ids), "err", err)
-				}
-				dispatch.Main(w.loadLabels)
-			}()
+	// Mark the thread read only after it stays open a beat, so j/k skimming past
+	// unread mail doesn't destroy its unread state. The timer is cancelled if the
+	// user navigates to another thread or backs out first.
+	w.scheduleMarkRead(threadID, msgs)
+}
+
+// markReadDelay is how long a thread must stay open before it is marked read, so
+// quick j/k navigation past it leaves the unread state intact.
+const markReadDelay = 1500 // ms
+
+// cancelMarkRead drops any pending "mark thread read" timer (the user navigated
+// away before it fired).
+func (w *window) cancelMarkRead() {
+	if w.markReadTimer != 0 {
+		glib.SourceRemove(w.markReadTimer)
+		w.markReadTimer = 0
+	}
+	w.pendingMarkRead = nil
+}
+
+// flushMarkRead marks the open thread read immediately, if a deferred mark-read
+// is pending. Explicit engagement (reply, forward) shouldn't wait out the timer.
+func (w *window) flushMarkRead() {
+	if w.pendingMarkRead == nil {
+		return
+	}
+	fn := w.pendingMarkRead
+	w.cancelMarkRead()
+	fn()
+}
+
+// scheduleMarkRead arms a timer to mark the thread's unread messages read after
+// markReadDelay, cancelling any previous pending one. No-op when nothing is
+// unread or label edits aren't available.
+func (w *window) scheduleMarkRead(threadID string, msgs []model.Message) {
+	w.cancelMarkRead()
+	if w.deps.ModifyLabels == nil {
+		return
+	}
+	var ids []string
+	for _, m := range msgs {
+		if m.IsUnread {
+			ids = append(ids, m.GmailID)
 		}
 	}
+	if len(ids) == 0 {
+		return
+	}
+	acctID := w.activeID
+	w.pendingMarkRead = func() {
+		logging.Trace("ui: mark thread read", "thread", threadID, "n", len(ids), "account", acctID)
+		go func() {
+			if err := w.deps.ModifyLabels(context.Background(), acctID, ids, nil, []string{model.LabelUnread}); err != nil {
+				slog.Warn("ui: mark read", "n", len(ids), "err", err)
+			}
+			dispatch.Main(w.loadLabels)
+		}()
+	}
+	logging.Trace("ui: schedule mark thread read", "thread", threadID, "n", len(ids), "account", acctID, "delay_ms", markReadDelay)
+	w.markReadTimer = glib.TimeoutAdd(markReadDelay, func() bool {
+		w.markReadTimer = 0
+		if w.pendingMarkRead != nil {
+			fn := w.pendingMarkRead
+			w.pendingMarkRead = nil
+			fn()
+		}
+		return false // one-shot
+	})
 }
 
 // hasLabel reports whether message m carries the given label id.
@@ -4492,12 +4562,18 @@ func (w *window) applyLabels(msgs []model.Message, add, remove []string, after f
 	logging.Trace("ui: apply labels", "n", len(ids), "add", add, "remove", remove, "account", accountID)
 	go func() {
 		start := time.Now()
-		if err := w.deps.ModifyLabels(context.Background(), accountID, ids, add, remove); err != nil {
-			slog.Warn("ui: apply labels", "n", len(ids), "err", err)
+		mirrorErr := w.deps.ModifyLabels(context.Background(), accountID, ids, add, remove)
+		if mirrorErr != nil {
+			slog.Warn("ui: apply labels", "n", len(ids), "err", mirrorErr)
 		}
 		slog.Debug("ui: applyLabels", "n", len(ids), "dur", time.Since(start))
 		dispatch.Main(func() {
 			t := time.Now()
+			// The local change already applied optimistically; only warn (briefly,
+			// non-alarming) that the provider mirror may not have gone through.
+			if mirrorErr != nil {
+				w.toast("Change may not have synced")
+			}
 			w.loadLabels()
 			if after != nil {
 				// after (e.g. advanceSelection) must run once the list has been
