@@ -21,10 +21,13 @@ func (s *Store) ListThreadsByLabel(ctx context.Context, accountID int64, labelID
 	// (internal_date, rowid). The rowid tiebreak avoids duplicate rows when two
 	// messages share a whole-second internal_date, and ordering by rowid means a
 	// thread whose dates are all NULL still resolves to a single latest message.
+	// The ml join binds account_id too so the planner drives from idx_msg_label
+	// (account_id, label_id, …) — visiting only labeled rows — instead of scanning
+	// every message of the account and probing labels per row.
 	rows, err := s.reader.QueryContext(ctx, `
 		SELECT `+msgCols+`
 		FROM messages m
-		JOIN message_labels ml ON ml.message_rowid = m.rowid AND ml.label_id = ?
+		JOIN message_labels ml ON ml.account_id = ? AND ml.message_rowid = m.rowid AND ml.label_id = ?
 		WHERE m.account_id = ? AND m.rowid = (
 			SELECT m2.rowid
 			FROM messages m2
@@ -35,7 +38,7 @@ func (s *Store) ListThreadsByLabel(ctx context.Context, accountID int64, labelID
 		)
 		ORDER BY m.internal_date DESC, m.rowid DESC
 		LIMIT ? OFFSET ?`,
-		labelID, accountID, labelID, limit, offset)
+		accountID, labelID, accountID, labelID, limit, offset)
 	if err != nil {
 		logging.TraceContext(ctx, "store: list threads by label", "account", accountID, "label", labelID, "err", err)
 		return nil, fmt.Errorf("list threads: %w", err)
