@@ -542,13 +542,16 @@ func (e *Engine) RetryOutbox(ctx context.Context, b backend.Backend, accountID, 
 	return err
 }
 
-// DiscardOutbox removes a queued/failed message without sending it.
-func (e *Engine) DiscardOutbox(ctx context.Context, accountID, id int64) error {
-	if err := e.Store.DeleteOutbox(ctx, id); err != nil {
-		return err
+// DiscardOutbox removes a queued/failed message without sending it. It reports
+// whether the message was actually cancelled — false means a sweep already
+// claimed or delivered it, so the caller must not present it as unsent.
+func (e *Engine) DiscardOutbox(ctx context.Context, accountID, id int64) (bool, error) {
+	cancelled, err := e.Store.DeleteOutbox(ctx, id)
+	if err != nil {
+		return false, err
 	}
 	e.publish(Change{Kind: SendStateChanged, AccountID: accountID})
-	return nil
+	return cancelled, nil
 }
 
 // SaveDraft builds an outgoing message and stores it as a Gmail draft. When the
@@ -578,6 +581,12 @@ func (e *Engine) SweepOutbox(ctx context.Context, b backend.Backend, accountID i
 	e.sweepMu.Lock()
 	defer e.sweepMu.Unlock()
 
+	// Any 'sending' row seen here is a leftover claim from a crashed run (live
+	// claims only exist inside a sweep, and sweeps are serialized) — turn it
+	// back into a retryable failure before listing.
+	if err := e.Store.FailInterruptedSends(ctx, accountID); err != nil {
+		return 0, err
+	}
 	items, err := e.Store.ListSendableOutbox(ctx, accountID, maxOutboxAttempts, e.now().Unix())
 	if err != nil {
 		return 0, err
@@ -585,6 +594,15 @@ func (e *Engine) SweepOutbox(ctx context.Context, b backend.Backend, accountID i
 	sent := 0
 	gmailAcct := e.isGmailAccount(ctx, accountID)
 	for _, it := range items {
+		// Claim the row before any provider I/O: from here an undo's
+		// DiscardOutbox reliably reports "too late", and a discard that already
+		// deleted the row (claim fails) reliably stops the send.
+		if claimed, cerr := e.Store.ClaimOutbox(ctx, it.ID); cerr != nil {
+			return sent, cerr
+		} else if !claimed {
+			logging.TraceContext(ctx, "syncer: outbox item discarded before send; skipping", "id", it.ID)
+			continue
+		}
 		// Guard against resending a message a prior attempt already delivered: a
 		// send can succeed at the provider yet return a network error (the response
 		// was lost), which enqueues it here. Before resending, check whether the

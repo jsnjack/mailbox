@@ -81,12 +81,52 @@ func TestOutboxUndoWindow(t *testing.T) {
 		t.Fatalf("DraftID = %q, want draft-9", got[0].DraftID)
 	}
 
-	// Undo removes it before it can be swept.
-	if err := s.DeleteOutbox(ctx, id); err != nil {
-		t.Fatalf("delete: %v", err)
+	// Undo removes it before it can be swept, and reports the cancel won.
+	if ok, err := s.DeleteOutbox(ctx, id); err != nil || !ok {
+		t.Fatalf("delete = %v, %v; want cancelled", ok, err)
 	}
 	if got, _ := s.ListSendableOutbox(ctx, acc, 5, nowT+5); len(got) != 0 {
 		t.Fatalf("after undo sendable = %d, want 0", len(got))
+	}
+}
+
+// Undo-vs-sweep arbitration: a claimed row refuses the discard (the send is in
+// flight — reporting "cancelled" would be a lie), a discarded row refuses the
+// claim (the send must not happen), and an interrupted claim is retryable.
+func TestOutboxClaimVsDiscard(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	acc := seedAccount(t, s)
+
+	// Claim wins: discard after a claim reports not-cancelled.
+	id, _ := s.EnqueueOutbox(ctx, acc, "t1", "", []byte("a"), 0)
+	if ok, err := s.ClaimOutbox(ctx, id); err != nil || !ok {
+		t.Fatalf("claim = %v, %v; want claimed", ok, err)
+	}
+	if ok, err := s.DeleteOutbox(ctx, id); err != nil || ok {
+		t.Fatalf("discard of claimed row = %v, %v; want not-cancelled", ok, err)
+	}
+
+	// Discard wins: claim after a discard reports not-claimed.
+	id2, _ := s.EnqueueOutbox(ctx, acc, "t2", "", []byte("b"), 0)
+	if ok, err := s.DeleteOutbox(ctx, id2); err != nil || !ok {
+		t.Fatalf("discard = %v, %v; want cancelled", ok, err)
+	}
+	if ok, err := s.ClaimOutbox(ctx, id2); err != nil || ok {
+		t.Fatalf("claim of discarded row = %v, %v; want not-claimed", ok, err)
+	}
+
+	// A leftover 'sending' row (crash mid-send) becomes a retryable failure
+	// with the attempt counted.
+	if err := s.FailInterruptedSends(ctx, acc); err != nil {
+		t.Fatalf("fail interrupted: %v", err)
+	}
+	sendable, _ := s.ListSendableOutbox(ctx, acc, 5, nowT)
+	if len(sendable) != 1 || sendable[0].ID != id {
+		t.Fatalf("after recovery sendable = %+v, want the interrupted row", sendable)
+	}
+	if sendable[0].Attempts != 1 || sendable[0].State != "failed" {
+		t.Fatalf("recovered row = state %q attempts %d, want failed/1", sendable[0].State, sendable[0].Attempts)
 	}
 }
 
@@ -131,8 +171,8 @@ func TestOutboxPendingRequeueAndDelete(t *testing.T) {
 	}
 
 	// Delete removes an item entirely.
-	if err := s.DeleteOutbox(ctx, stuck[0].ID); err != nil {
-		t.Fatalf("DeleteOutbox: %v", err)
+	if ok, err := s.DeleteOutbox(ctx, stuck[0].ID); err != nil || !ok {
+		t.Fatalf("DeleteOutbox = %v, %v; want cancelled", ok, err)
 	}
 	if n, _ := s.CountPendingOutbox(ctx, acc, nowT); n != 1 {
 		t.Fatalf("after delete, count = %d, want 1", n)

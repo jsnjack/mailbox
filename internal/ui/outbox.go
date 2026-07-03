@@ -219,13 +219,15 @@ func (w *window) outboxRow(acct AccountInfo, it model.OutboxItem, showAccount bo
 		discard.ConnectClicked(func() {
 			logging.Trace("ui: outbox discard item", "account", acctID, "id", id)
 			go func() {
-				err := w.deps.DiscardOutbox(context.Background(), acctID, id)
+				ok, err := w.deps.DiscardOutbox(context.Background(), acctID, id)
 				dispatch.Main(func() {
 					if err != nil {
 						slog.Warn("ui: discard outbox", "err", err)
 						w.toast("Couldn't discard message")
+					} else if !ok {
+						w.toast("Too late to discard — the message is already being sent")
 					}
-					logging.Trace("ui: outbox discard item done", "account", acctID, "id", id, "err", err)
+					logging.Trace("ui: outbox discard item done", "account", acctID, "id", id, "cancelled", ok, "err", err)
 					rebuild()
 					w.refreshOutbox()
 				})

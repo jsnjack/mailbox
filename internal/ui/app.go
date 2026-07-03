@@ -86,8 +86,13 @@ type LabelReader func(ctx context.Context, accountID int64, labelID string) erro
 // OutboxSweeper attempts to send all of an account's queued messages now.
 type OutboxSweeper func(ctx context.Context, accountID int64) error
 
-// OutboxAction acts on a single outbox item (retry or discard) by id.
+// OutboxAction acts on a single outbox item (retry) by id.
 type OutboxAction func(ctx context.Context, accountID, id int64) error
+
+// OutboxDiscard cancels a single outbox item by id, reporting whether it was
+// still cancellable — false means a sweep already claimed or delivered it, so
+// the caller must not present the message as unsent.
+type OutboxDiscard func(ctx context.Context, accountID, id int64) (bool, error)
 
 // PermanentDeleter permanently deletes messages (bypassing Trash).
 type PermanentDeleter func(ctx context.Context, accountID int64, gmailIDs []string) error
@@ -127,7 +132,7 @@ type Deps struct {
 	MarkAllRead   LabelReader
 	SweepOutbox   OutboxSweeper
 	RetryOutbox   OutboxAction
-	DiscardOutbox OutboxAction
+	DiscardOutbox OutboxDiscard
 	DeleteForever PermanentDeleter
 	EmptyFolder   FolderEmptier
 	Assistant     *ai.Assistant

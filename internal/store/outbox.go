@@ -137,12 +137,55 @@ func (s *Store) RequeueOutbox(ctx context.Context, id int64) error {
 	return nil
 }
 
-// DeleteOutbox discards a queued/failed message without sending it.
-func (s *Store) DeleteOutbox(ctx context.Context, id int64) error {
+// DeleteOutbox discards a queued/failed message without sending it. It reports
+// whether the row was actually cancelled: false means a sweep had already
+// claimed (state 'sending') or completed it — the message is going out (or has
+// gone out), and the caller must not present it as unsent.
+func (s *Store) DeleteOutbox(ctx context.Context, id int64) (bool, error) {
 	logging.TraceContext(ctx, "store: delete outbox", "id", id)
-	if _, err := s.writer.ExecContext(ctx, `DELETE FROM outbox WHERE id = ?`, id); err != nil {
+	res, err := s.writer.ExecContext(ctx,
+		`DELETE FROM outbox WHERE id = ? AND state IN ('queued','failed')`, id)
+	if err != nil {
 		logging.TraceContext(ctx, "store: delete outbox", "id", id, "err", err)
-		return fmt.Errorf("delete outbox: %w", err)
+		return false, fmt.Errorf("delete outbox: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	logging.TraceContext(ctx, "store: delete outbox done", "id", id, "cancelled", n > 0)
+	return n > 0, nil
+}
+
+// ClaimOutbox atomically moves a queued/failed row to 'sending', reporting
+// whether the claim won. A false return means the row vanished (an undo
+// discarded it) — the caller must not send it. Claiming before the network send
+// is what makes undo-vs-sweep authoritative: once claimed, DeleteOutbox refuses
+// the row; before the claim, a successful delete reliably stops the send.
+func (s *Store) ClaimOutbox(ctx context.Context, id int64) (bool, error) {
+	res, err := s.writer.ExecContext(ctx,
+		`UPDATE outbox SET state = 'sending' WHERE id = ? AND state IN ('queued','failed')`, id)
+	if err != nil {
+		logging.TraceContext(ctx, "store: claim outbox", "id", id, "err", err)
+		return false, fmt.Errorf("claim outbox: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	logging.TraceContext(ctx, "store: claim outbox", "id", id, "claimed", n > 0)
+	return n > 0, nil
+}
+
+// FailInterruptedSends converts an account's leftover 'sending' rows (a crash or
+// kill mid-send — while running, claims only live within a sweep, which is
+// serialized) back to 'failed' so the sweeper retries them; the attempt is
+// counted, and the Gmail rfc822msgid dedup keeps a retry of an
+// actually-delivered send from duplicating it.
+func (s *Store) FailInterruptedSends(ctx context.Context, accountID int64) error {
+	res, err := s.writer.ExecContext(ctx, `
+		UPDATE outbox SET state = 'failed', attempts = attempts + 1, last_error = 'send interrupted'
+		WHERE account_id = ? AND state = 'sending'`, accountID)
+	if err != nil {
+		logging.TraceContext(ctx, "store: fail interrupted sends", "account", accountID, "err", err)
+		return fmt.Errorf("fail interrupted sends: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		logging.TraceContext(ctx, "store: fail interrupted sends", "account", accountID, "count", n)
 	}
 	return nil
 }

@@ -4896,14 +4896,28 @@ func (w *window) showSendUndoToast(accountID, outboxID int64, msg model.Outgoing
 		cancelled = true
 		toast.Dismiss()
 		go func() {
-			if err := w.deps.DiscardOutbox(context.Background(), accountID, outboxID); err != nil {
+			ok, err := w.deps.DiscardOutbox(context.Background(), accountID, outboxID)
+			if err != nil {
 				slog.Warn("ui: undo send discard", "id", outboxID, "err", err)
 			}
+			dispatch.Main(func() {
+				// A sweep (the 45s background ticker, or an Outbox "send now")
+				// can claim the row while the toast is still up. When the cancel
+				// lost that race, say so — reopening the compose would present
+				// delivered content as unsent and invite a duplicate send.
+				if !ok && err == nil {
+					logging.Trace("ui: undo send too late", "account", accountID, "id", outboxID)
+					w.toast("Too late to undo — the message was already sent")
+					return
+				}
+				// Reopen the message exactly as it was (no second signature),
+				// from the account it was being sent from, and already "dirty" —
+				// its content is user-authored, so closing it must prompt rather
+				// than silently discard. On a discard error the row is still
+				// queued; reopening keeps the content in front of the user.
+				w.openComposeOpts(msg, "", "Message", composeOpts{fromAccountID: accountID, startDirty: true})
+			})
 		}()
-		// Reopen the message exactly as it was (no second signature), from the
-		// account it was being sent from, and already "dirty" — its content is
-		// user-authored, so closing it must prompt rather than silently discard.
-		w.openComposeOpts(msg, "", "Message", composeOpts{fromAccountID: accountID, startDirty: true})
 	})
 	w.toastOverlay.AddToast(toast)
 

@@ -478,7 +478,7 @@ func launchUI(mailto string) error {
 	}
 	// Discarding needs no Gmail client, so a stuck send can be cleared even
 	// when the account currently has no working connection.
-	deps.DiscardOutbox = func(ctx context.Context, accountID, id int64) error {
+	deps.DiscardOutbox = func(ctx context.Context, accountID, id int64) (bool, error) {
 		return engine.DiscardOutbox(ctx, accountID, id)
 	}
 	deps.DeleteForever = func(ctx context.Context, accountID int64, gmailIDs []string) error {
