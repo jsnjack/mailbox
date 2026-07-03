@@ -266,43 +266,82 @@ func deleteMessageTx(ctx context.Context, tx *sql.Tx, accountID int64, gmailID s
 func (s *Store) ModifyLabels(ctx context.Context, accountID int64, gmailID string, add, remove []string) error {
 	logging.TraceContext(ctx, "store: modify labels", "account", accountID, "id", gmailID, "add", add, "remove", remove)
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
-		var rowID int64
-		err := tx.QueryRowContext(ctx,
-			`SELECT rowid FROM messages WHERE account_id = ? AND gmail_id = ?`,
-			accountID, gmailID).Scan(&rowID)
-		if errors.Is(err, sql.ErrNoRows) {
-			return ErrNotFound
-		}
-		if err != nil {
-			return fmt.Errorf("find message: %w", err)
-		}
-		for _, l := range remove {
-			if _, err := tx.ExecContext(ctx,
-				`DELETE FROM message_labels WHERE message_rowid = ? AND label_id = ?`, rowID, l); err != nil {
-				return fmt.Errorf("remove label %q: %w", l, err)
-			}
-		}
-		for _, l := range add {
-			if _, err := tx.ExecContext(ctx,
-				`INSERT OR IGNORE INTO message_labels (message_rowid, account_id, label_id) VALUES (?,?,?)`,
-				rowID, accountID, l); err != nil {
-				return fmt.Errorf("add label %q: %w", l, err)
-			}
-		}
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE messages SET
-				is_unread  = (SELECT COUNT(*) FROM message_labels WHERE message_rowid = ? AND label_id = ?),
-				is_starred = (SELECT COUNT(*) FROM message_labels WHERE message_rowid = ? AND label_id = ?)
-			WHERE rowid = ?`,
-			rowID, model.LabelUnread, rowID, model.LabelStarred, rowID); err != nil {
-			return fmt.Errorf("recompute flags: %w", err)
-		}
-		return nil
+		return modifyLabelsTx(ctx, tx, accountID, gmailID, add, remove)
 	})
 	if err != nil {
 		logging.TraceContext(ctx, "store: modify labels", "account", accountID, "id", gmailID, "err", err)
 	}
 	return err
+}
+
+// ModifyLabelsBatch applies the same label delta to many messages in a single
+// transaction — one commit/fsync instead of one per message, the dominant cost
+// when a whole conversation or a bulk selection is archived/trashed/marked-read.
+// A missing id is skipped (not an error): a bulk action shouldn't abort because
+// one message was deleted meanwhile. Single-message callers use ModifyLabels.
+func (s *Store) ModifyLabelsBatch(ctx context.Context, accountID int64, gmailIDs []string, add, remove []string) error {
+	if len(gmailIDs) == 0 {
+		return nil
+	}
+	start := time.Now()
+	logging.TraceContext(ctx, "store: modify labels batch", "account", accountID, "n", len(gmailIDs), "add", add, "remove", remove)
+	skipped := 0
+	err := s.withTx(ctx, func(tx *sql.Tx) error {
+		for _, id := range gmailIDs {
+			if err := modifyLabelsTx(ctx, tx, accountID, id, add, remove); err != nil {
+				if errors.Is(err, ErrNotFound) {
+					skipped++
+					continue
+				}
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		logging.TraceContext(ctx, "store: modify labels batch", "account", accountID, "n", len(gmailIDs), "err", err)
+		return err
+	}
+	logging.TraceContext(ctx, "store: modify labels batch done", "account", accountID, "n", len(gmailIDs), "skipped", skipped, "dur", time.Since(start))
+	return nil
+}
+
+// modifyLabelsTx applies a label delta to one message within tx and recomputes
+// its derived unread/starred flags. It returns ErrNotFound when the message isn't
+// cached. Shared by ModifyLabels and ModifyLabelsBatch.
+func modifyLabelsTx(ctx context.Context, tx *sql.Tx, accountID int64, gmailID string, add, remove []string) error {
+	var rowID int64
+	err := tx.QueryRowContext(ctx,
+		`SELECT rowid FROM messages WHERE account_id = ? AND gmail_id = ?`,
+		accountID, gmailID).Scan(&rowID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("find message: %w", err)
+	}
+	for _, l := range remove {
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM message_labels WHERE message_rowid = ? AND label_id = ?`, rowID, l); err != nil {
+			return fmt.Errorf("remove label %q: %w", l, err)
+		}
+	}
+	for _, l := range add {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT OR IGNORE INTO message_labels (message_rowid, account_id, label_id) VALUES (?,?,?)`,
+			rowID, accountID, l); err != nil {
+			return fmt.Errorf("add label %q: %w", l, err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE messages SET
+			is_unread  = (SELECT COUNT(*) FROM message_labels WHERE message_rowid = ? AND label_id = ?),
+			is_starred = (SELECT COUNT(*) FROM message_labels WHERE message_rowid = ? AND label_id = ?)
+		WHERE rowid = ?`,
+		rowID, model.LabelUnread, rowID, model.LabelStarred, rowID); err != nil {
+		return fmt.Errorf("recompute flags: %w", err)
+	}
+	return nil
 }
 
 // UnreadIDsByLabel returns the Gmail ids of unread messages carrying labelID.

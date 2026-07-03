@@ -637,10 +637,10 @@ func (e *Engine) ModifyLabelsBatch(ctx context.Context, b backend.Backend, accou
 		return nil
 	}
 	start := time.Now()
-	for _, id := range gmailIDs {
-		if err := e.Store.ModifyLabels(ctx, accountID, id, add, remove); err != nil {
-			return fmt.Errorf("modify labels (local): %w", err)
-		}
+	// Apply every id in one transaction (one commit/fsync) instead of a tx per
+	// message; missing ids are skipped inside the store.
+	if err := e.Store.ModifyLabelsBatch(ctx, accountID, gmailIDs, add, remove); err != nil {
+		return fmt.Errorf("modify labels (local): %w", err)
 	}
 	// One coarse event (no GmailID) so the UI refreshes once, not per message.
 	e.publish(Change{Kind: MessageUpserted, AccountID: accountID})

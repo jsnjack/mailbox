@@ -445,6 +445,52 @@ func TestModifyLabels(t *testing.T) {
 	}
 }
 
+func TestModifyLabelsBatch(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	acc := seedAccount(t, s)
+
+	for _, id := range []string{"m1", "m2", "m3"} {
+		if _, err := s.UpsertMessage(ctx, model.Message{
+			AccountID: acc, GmailID: id, ThreadID: "t1", Subject: "Hi",
+			IsUnread: true, Labels: []string{"INBOX", "UNREAD"},
+		}); err != nil {
+			t.Fatalf("upsert %s: %v", id, err)
+		}
+	}
+
+	// Archive all three plus a missing id in one call: the missing id is skipped,
+	// the rest are applied.
+	if err := s.ModifyLabelsBatch(ctx, acc, []string{"m1", "m2", "m3", "gone"}, nil, []string{"INBOX"}); err != nil {
+		t.Fatalf("ModifyLabelsBatch: %v", err)
+	}
+	if n, _ := s.CountByLabel(ctx, acc, "INBOX"); n != 0 {
+		t.Fatalf("INBOX count = %d, want 0 after batch archive", n)
+	}
+
+	// Derived flags are recomputed per message: mark all read + star in one batch.
+	if err := s.ModifyLabelsBatch(ctx, acc, []string{"m1", "m2", "m3"}, []string{"STARRED"}, []string{"UNREAD"}); err != nil {
+		t.Fatalf("ModifyLabelsBatch (star): %v", err)
+	}
+	if ids, _ := s.UnreadIDsByLabel(ctx, acc, "STARRED"); len(ids) != 0 {
+		t.Fatalf("expected none unread, got %d", len(ids))
+	}
+	for _, id := range []string{"m1", "m2", "m3"} {
+		m, err := s.GetMessage(ctx, acc, id)
+		if err != nil {
+			t.Fatalf("get %s: %v", id, err)
+		}
+		if m.IsUnread || !m.IsStarred {
+			t.Fatalf("%s: unread=%v starred=%v, want read+starred", id, m.IsUnread, m.IsStarred)
+		}
+	}
+
+	// Empty input is a no-op.
+	if err := s.ModifyLabelsBatch(ctx, acc, nil, []string{"INBOX"}, nil); err != nil {
+		t.Fatalf("ModifyLabelsBatch(nil): %v", err)
+	}
+}
+
 func TestMarkLabelRead(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
