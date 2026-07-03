@@ -95,12 +95,17 @@ the account switcher is plain text (no avatars).
 UI state (implemented): 3-pane shell renders the cached account live; clicking a
 message lazily fetches + sanitizes + renders its body (WebKit; remote images off
 behind a toggle). The reader sanitizes with an email-tuned bluemonday policy
-(`emailPolicy`, keeps inline styles + tables so HTML mail isn't broken) and
-`wrapHTML` injects a fit-to-width script that scales over-wide email to the pane
-(no horizontal scrollbar, no cropping). JavaScript is enabled **only** for that
-script: a strict per-render CSP (`script-src` pinned to a nonce, `default-src
-'none'`) plus the sanitizer mean no email-supplied script can run or reach the
-network. Remote images load by default, but tracking pixels are stripped before
+(`emailPolicy`, keeps inline styles + tables so HTML mail isn't broken). The
+WebView loads **one persistent shell page** (`readerShellHTML`: styles, CSP, and
+a fit-to-width script that scales over-wide email to the pane) and every
+conversation is swapped into it via script (`setReaderHTML` → `__mbSet`, an
+innerHTML swap through a small cgo `evalJS` shim) — **never a navigation**, so
+WebKit never tears down its composited surface and the reader cannot flash
+black between messages (the failure mode of the earlier per-render `LoadHtml` +
+white-cover approaches). JavaScript is enabled **only** for the shell script: a
+strict CSP (`script-src` pinned to the shell's nonce, `default-src 'none'`)
+plus the sanitizer (inserted innerHTML never executes scripts) mean no
+email-supplied script can run or reach the network. Remote images load by default, but tracking pixels are stripped before
 render (`cleanEmailHTML`: 1x1/tiny imgs, 1px-styled imgs, and known open-tracker
 URL patterns) and the count is surfaced as a "🛡 N trackers blocked" indicator.
 A plain-text body (and the snippet fallback) is HTML-escaped into a `<pre>` with
@@ -319,7 +324,7 @@ afterward. The `sync` command and the headless packages build without GTK.
 - Account display names: `~/.local/share/mailbox/accounts.json` (email → name).
 - Default signature: `~/.config/mailbox/signature.txt` (plain text, may be empty); per-account overrides in `~/.config/mailbox/signatures.json` (email → signature).
 - View state (last folder, unread filter, reader zoom): `~/.local/share/mailbox/view.json`.
-- General prefs (e.g. block remote images by default): `~/.config/mailbox/prefs.json`.
+- General prefs (block remote images by default, body retention window): `~/.config/mailbox/prefs.json`. Body retention (Preferences → Storage, default off) prunes cached bodies older than N days (`store.PruneBodies` — metadata/header search kept, body re-fetched on open, body-derived AI caches + attachment rows pruned too); applied on change and by a daily background pass (`backgroundRetention`), with an auto-`Vacuum` after a large prune.
 - Attachment cache: `~/.cache/mailbox/attachments/` (content-addressed by sha256).
 - Secrets (OAuth refresh tokens, AI API keys): OS keyring via Secret Service.
 - Trace log: `/tmp/mailbox.log` (truncated each start; enabled with `--trace`).
@@ -331,7 +336,7 @@ afterward. The `sync` command and the headless packages build without GTK.
 - Gmail REST API, not IMAP — native labels/threads, `history.list` incremental sync, server-side search.
 - Local SQLite + FTS5 as source of truth; metadata separate from bodies; bodies lazy-loaded.
 - Desktop polls `history.list` (no public endpoint for Pub/Sub push). Backfill fetches metadata concurrently (`backfillWorkers`) but commits in `store.UpsertMessages` batches of `backfillBatch` (200) — one transaction/fsync and FTS reindex per batch, not per message; incremental sync likewise batches its deletes (`store.DeleteMessages`) and upserts into one transaction each, then publishes a per-id `MessageUpserted` so new-mail notifications still fire.
-- HTML email rendered in a locked-down WebKitGTK view: email-tuned sanitizer (keeps styling), remote images blocked by default, links open externally. JavaScript is enabled only to run a trusted fit-to-width script, fenced off by a per-render nonce CSP with `default-src 'none'` so no email script can run or phone home. AI translate renders in place (markup-preserving) with a revert toggle.
+- HTML email rendered in a locked-down WebKitGTK view: email-tuned sanitizer (keeps styling), remote images blocked by default, links open externally. One persistent shell page; conversations are swapped in by script, never by navigation (kills WebKit's black content-swap flash). JavaScript is enabled only to run the trusted shell script, fenced off by a nonce CSP with `default-src 'none'` so no email script can run or phone home. AI translate renders in place (markup-preserving) with a revert toggle.
 - AI provider is user-configurable behind one `Provider` interface (OpenAI-compatible covers the LiteLLM proxy + OpenAI; Anthropic direct).
 - Distribution is RPM (GTK4/WebKit cannot be statically linked into a single binary).
 
