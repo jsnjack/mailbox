@@ -159,6 +159,7 @@ type window struct {
 	openThreadID   string
 	openThreadMsgs []model.Message
 	openMsg        model.Message
+	openHeaders    string // raw headers of the open (latest) message, for "View headers"
 	replyBtn       *adw.SplitButton // primary action (Reply); dropdown has Reply all/Forward
 	aiReplyBtn     *gtk.MenuButton  // AI reply: popover of suggestions + intents
 	archiveBtn     *gtk.Button
@@ -2906,6 +2907,7 @@ func (w *window) clearReader() {
 	w.openThreadID = ""
 	w.openThreadMsgs = nil
 	w.openMsg = model.Message{}
+	w.openHeaders = ""
 	w.resetTranslation()
 	w.hideSummary()
 	w.setActionsSensitive(false)
@@ -3277,6 +3279,7 @@ func (w *window) renderConversation(msgs []model.Message) {
 				return // user switched to another conversation while this rendered
 			}
 			w.inlineByCID = inlineImgs // serveCID resolves cid: against this
+			w.openHeaders = latestAuth // raw headers of the latest message (for "View headers")
 			w.setTrackerCount(blocked)
 			w.setAuthBadge(verdict)
 			w.setCaution(warnings)
@@ -3866,6 +3869,9 @@ func (w *window) registerReaderActions() {
 	add("reader-labels", w.showLabelsDialog)
 	add("reader-analyze", w.onAnalyze)
 	add("reader-find-from", func() { w.searchFrom(w.openMsg.FromAddr) })
+	add("reader-copy-sender", w.onCopySender)
+	add("reader-view-headers", w.onViewHeaders)
+	add("reader-print", w.onPrint)
 
 	w.starAction = gio.NewSimpleActionStateful("reader-star", nil, glib.NewVariantBoolean(false))
 	w.starAction.ConnectChangeState(func(v *glib.Variant) {
@@ -3916,12 +3922,24 @@ func (w *window) buildReaderMenuModel() *gio.Menu {
 		sec.Append("Check for phishing", "win.reader-analyze")
 		menu.AppendSection("", sec)
 	}
-	// Find all mail from this sender (Gmail server-side search understands from:).
-	if w.deps.SearchServer != nil && strings.TrimSpace(w.openMsg.FromAddr) != "" {
+	// Sender utilities: copy the address, and (server-search only) find all mail
+	// from it.
+	if strings.TrimSpace(w.openMsg.FromAddr) != "" {
 		sec := gio.NewMenu()
-		sec.Append("Find emails from sender", "win.reader-find-from")
+		sec.Append("Copy sender address", "win.reader-copy-sender")
+		if w.deps.SearchServer != nil {
+			sec.Append("Find emails from sender", "win.reader-find-from")
+		}
 		menu.AppendSection("", sec)
 	}
+	// Message utilities: raw headers and print.
+	util := gio.NewMenu()
+	if strings.TrimSpace(w.openHeaders) != "" {
+		util.Append("View headers", "win.reader-view-headers")
+	}
+	util.Append("Print…", "win.reader-print")
+	menu.AppendSection("", util)
+
 	img := gio.NewMenu()
 	img.Append("Show remote images", "win.reader-images")
 	menu.AppendSection("", img)
@@ -3941,6 +3959,67 @@ func (w *window) searchFrom(addr string) {
 	} else {
 		w.refreshList(q)
 	}
+}
+
+// onCopySender copies the open message's sender address to the system clipboard.
+func (w *window) onCopySender() {
+	addr := strings.TrimSpace(w.openMsg.FromAddr)
+	if addr == "" {
+		return
+	}
+	disp := gdk.DisplayGetDefault()
+	if disp == nil {
+		slog.Warn("ui: copy sender — no display")
+		return
+	}
+	disp.Clipboard().SetText(addr)
+	logging.Trace("ui: copy sender address", "addr", addr, "account", w.activeID)
+	w.toast("Copied " + addr)
+}
+
+// onViewHeaders shows the open message's raw headers in a scrollable monospace
+// dialog. The item is only offered when headers are present (buildReaderMenuModel).
+func (w *window) onViewHeaders() {
+	headers := w.openHeaders
+	if strings.TrimSpace(headers) == "" {
+		return
+	}
+	logging.Trace("ui: view headers", "id", w.openMsg.GmailID, "bytes", len(headers), "account", w.activeID)
+
+	tv := gtk.NewTextView()
+	tv.SetEditable(false)
+	tv.SetCursorVisible(false)
+	tv.SetMonospace(true)
+	tv.SetWrapMode(gtk.WrapWordChar)
+	setMargins(tv, 12, 12, 12, 12)
+	tv.Buffer().SetText(headers)
+
+	scroller := gtk.NewScrolledWindow()
+	scroller.SetPolicy(gtk.PolicyAutomatic, gtk.PolicyAutomatic)
+	scroller.SetChild(tv)
+	scroller.SetVExpand(true)
+
+	toolbar := adw.NewToolbarView()
+	toolbar.AddTopBar(adw.NewHeaderBar())
+	toolbar.SetContent(scroller)
+
+	dialog := adw.NewDialog()
+	dialog.SetTitle("Message Headers")
+	dialog.SetContentWidth(640)
+	dialog.SetContentHeight(560)
+	dialog.SetChild(toolbar)
+	dialog.Present(w.win)
+}
+
+// onPrint runs a WebKit print operation on the reader webview (its native print
+// dialog), so the open conversation prints exactly as rendered.
+func (w *window) onPrint() {
+	if w.webview == nil {
+		return
+	}
+	logging.Trace("ui: print", "thread", w.openThreadID, "account", w.activeID)
+	op := webkit.NewPrintOperation(w.webview)
+	op.RunDialog(&w.win.Window)
 }
 
 // cleanHTML sanitizes email body HTML then strips tracking pixels and collapses
