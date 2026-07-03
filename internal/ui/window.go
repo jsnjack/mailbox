@@ -770,6 +770,9 @@ func (w *window) present() {
 			}
 		}
 	}
+	if os.Getenv("MAILBOX_OPEN_PREFS") == "1" {
+		w.openSettings() // sandbox verification of the Preferences dialog
+	}
 }
 
 // allMailID is the sentinel "folder" id for the All Mail view, which lists every
