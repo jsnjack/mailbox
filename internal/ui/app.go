@@ -59,6 +59,13 @@ type LabelModifier func(ctx context.Context, accountID int64, gmailIDs []string,
 // Sender transmits an outgoing message from the given account.
 type Sender func(ctx context.Context, accountID int64, msg model.OutgoingMessage) error
 
+// SendEnqueuer persists an outgoing message to the outbox with a not_before
+// watermark (unix seconds) and returns its outbox id. The message is durable the
+// instant this returns; the sweeper delivers it once now >= notBefore. Recipient
+// and MIME errors are returned synchronously so the caller can keep the content
+// in front of the user rather than losing it.
+type SendEnqueuer func(ctx context.Context, accountID int64, msg model.OutgoingMessage, notBefore int64) (int64, error)
+
 // AttachmentOpener ensures an attachment is cached locally and returns its path.
 type AttachmentOpener func(ctx context.Context, accountID int64, gmailID string, attID int64) (string, error)
 
@@ -111,6 +118,7 @@ type Deps struct {
 	FetchBody     BodyFetcher
 	ModifyLabels  LabelModifier // batch: applies to a slice of message ids
 	Send          Sender
+	EnqueueSend   SendEnqueuer
 	SaveDraft     Sender
 	FindDraftID   DraftFinder
 	OpenAttach    AttachmentOpener

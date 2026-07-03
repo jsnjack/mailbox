@@ -152,10 +152,12 @@ type OutboxItem struct {
 	LocalUUID string
 	AccountID int64
 	ThreadID  string
+	DraftID   string // source draft to delete once the send succeeds
 	RFC822    []byte
 	State     string // queued | failed
 	Attempts  int
 	LastError string
+	NotBefore int64 // unix seconds; not sendable until now >= NotBefore (0 = ASAP)
 }
 
 // Attachment points to an attachment's bytes; the bytes are stored on disk

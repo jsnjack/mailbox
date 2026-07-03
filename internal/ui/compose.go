@@ -419,15 +419,28 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 				msg := gather()
 				acctID := selectedAccount().ID
 				logging.Trace("ui: compose save draft on close", "account", acctID, "to", msg.To, "subject", msg.Subject)
-				sent = true
-				cancelAI()
+				// Save before closing: only dismiss the window once the draft is
+				// safely stored. If the save fails the window stays open with the
+				// content intact, so a transient failure can't silently drop it.
 				go func() {
-					if err := w.deps.SaveDraft(context.Background(), acctID, msg); err != nil {
-						slog.Warn("ui: save draft on close", "err", err)
-						logging.Trace("ui: compose save draft on close failed", "err", err)
-					}
+					err := w.deps.SaveDraft(context.Background(), acctID, msg)
+					dispatch.Main(func() {
+						if err != nil {
+							slog.Warn("ui: save draft on close", "err", err)
+							logging.Trace("ui: compose save draft on close failed", "err", err)
+							alert := adw.NewAlertDialog("Couldn't save draft",
+								"Saving the draft failed: "+err.Error()+"\n\nThe message is still open, so you can try again.")
+							alert.AddResponse("ok", "OK")
+							alert.SetDefaultResponse("ok")
+							alert.SetCloseResponse("ok")
+							alert.Present(win)
+							return
+						}
+						sent = true // bypass the close guard for the programmatic close
+						cancelAI()
+						win.Close()
+					})
 				}()
-				win.Close()
 			}
 		})
 		confirm.Present(win)

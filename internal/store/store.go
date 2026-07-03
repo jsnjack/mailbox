@@ -98,6 +98,11 @@ func migrate(db *sql.DB) error {
 		// Manual category override: a category the user picked by hand outranks the
 		// automatic "Replied" tag in the list, and must survive a restart.
 		`ALTER TABLE message_categories ADD COLUMN manual INTEGER NOT NULL DEFAULT 0`,
+		// Outbox-first sending: persist the source draft to delete post-send, and a
+		// not_before watermark so a message held for its undo window can't be swept
+		// (or lost on quit) before the window elapses.
+		`ALTER TABLE outbox ADD COLUMN draft_id TEXT`,
+		`ALTER TABLE outbox ADD COLUMN not_before INTEGER NOT NULL DEFAULT 0`,
 	}
 	for _, s := range stmts {
 		if _, err := db.Exec(s); err != nil {

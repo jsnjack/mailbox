@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/mail"
 	"strings"
+	"time"
 
 	"github.com/diamondburned/gotk4-adwaita/pkg/adw"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
@@ -26,7 +27,7 @@ func (w *window) refreshOutbox() {
 		ctx := context.Background()
 		total := 0
 		for _, a := range accounts {
-			n, err := w.deps.Store.CountPendingOutbox(ctx, a.ID)
+			n, err := w.deps.Store.CountPendingOutbox(ctx, a.ID, time.Now().Unix())
 			if err != nil {
 				slog.Warn("ui: count outbox", "account", a.ID, "err", err)
 				continue
@@ -74,7 +75,7 @@ func (w *window) openOutbox() {
 		}
 		total := 0
 		for _, a := range accounts {
-			items, err := w.deps.Store.ListPendingOutbox(context.Background(), a.ID)
+			items, err := w.deps.Store.ListPendingOutbox(context.Background(), a.ID, time.Now().Unix())
 			if err != nil {
 				slog.Warn("ui: list outbox", "account", a.ID, "err", err)
 				continue

@@ -392,6 +392,14 @@ func launchUI(mailto string) error {
 		done(doneNote(err))
 		return err
 	}
+	// EnqueueSend persists the message to the outbox immediately (durable across a
+	// quit) with a not_before undo window; the background sweeper delivers it once
+	// the window elapses. It doesn't need a backend, so it works even for an
+	// account whose backend failed to build — the sweeper picks it up once the
+	// account reconnects, rather than the send being lost.
+	deps.EnqueueSend = func(ctx context.Context, accountID int64, msg model.OutgoingMessage, notBefore int64) (int64, error) {
+		return engine.EnqueueSend(ctx, accountID, msg, notBefore)
+	}
 	deps.SaveDraft = func(ctx context.Context, accountID int64, msg model.OutgoingMessage) error {
 		c, err := clientFor(accountID)
 		if err != nil {

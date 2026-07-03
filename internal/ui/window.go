@@ -93,7 +93,7 @@ type window struct {
 	// during programmatic selection (rebuilds, removals), so restoring the
 	// highlight never re-routes the UI to whatever account occupies that index.
 	suppressAccountSelect bool
-	startTime           time.Time // only mail arriving after this triggers notifications
+	startTime             time.Time // only mail arriving after this triggers notifications
 
 	// virtualized list grouped by conversation: a StringList of thread ids drives
 	// a ListView; the factory builds visible rows from threadByID.
@@ -159,7 +159,7 @@ type window struct {
 	openThreadID   string
 	openThreadMsgs []model.Message
 	openMsg        model.Message
-	openHeaders    string // raw headers of the open (latest) message, for "View headers"
+	openHeaders    string           // raw headers of the open (latest) message, for "View headers"
 	replyBtn       *adw.SplitButton // primary action (Reply); dropdown has Reply all/Forward
 	aiReplyBtn     *gtk.MenuButton  // AI reply: popover of suggestions + intents
 	archiveBtn     *gtk.Button
@@ -4759,20 +4759,48 @@ func (w *window) toast(msg string) {
 // it actually goes out.
 const sendUndoDelay = 5 * time.Second
 
-// deferSend holds an outgoing message for sendUndoDelay, showing an "Undo" toast;
-// if the user doesn't undo, it sends. Undo reopens the message in compose. The
-// compose window has already closed, so this runs at the main-window level.
-// (Caveat: quitting within the window drops the unsent message.)
+// deferSend makes a send crash-safe: it persists the message to the outbox
+// immediately with a not_before watermark one undo-window ahead (so a quit or
+// crash within the window can no longer lose it), shows an "Undo" toast, and —
+// if the user doesn't undo — sweeps the outbox once the window elapses so the
+// message goes out promptly. Undo deletes the queued row and reopens the message
+// in compose. A recipient/MIME/DB error at enqueue time is surfaced with the
+// content reopened intact, never silently dropped. The compose window has
+// already closed, so this runs at the main-window level.
 func (w *window) deferSend(accountID int64, msg model.OutgoingMessage) {
 	logging.Trace("ui: defer send", "account", accountID, "to", msg.To, "cc", msg.Cc, "subject", msg.Subject)
+	notBefore := time.Now().Add(sendUndoDelay).Unix()
+	go func() {
+		id, err := w.deps.EnqueueSend(context.Background(), accountID, msg, notBefore)
+		logging.Trace("ui: enqueue send done", "account", accountID, "id", id, "err", err)
+		dispatch.Main(func() {
+			if err != nil {
+				w.reopenUnsent(accountID, msg, err)
+				return
+			}
+			w.showSendUndoToast(accountID, id, msg)
+		})
+	}()
+}
+
+// showSendUndoToast presents the "Sending…"/Undo toast for a message already
+// queued in the outbox (id). If the undo window elapses without an undo, it
+// sweeps the outbox to deliver the message. Undo discards the queued row and
+// reopens the message in compose so it isn't lost.
+func (w *window) showSendUndoToast(accountID, outboxID int64, msg model.OutgoingMessage) {
 	cancelled := false
 	toast := adw.NewToast("Sending…")
 	toast.SetButtonLabel("Undo")
 	toast.SetTimeout(0) // we control the lifetime via the timer below
 	toast.ConnectButtonClicked(func() {
-		logging.Trace("ui: undo send", "account", accountID, "subject", msg.Subject)
+		logging.Trace("ui: undo send", "account", accountID, "id", outboxID, "subject", msg.Subject)
 		cancelled = true
 		toast.Dismiss()
+		go func() {
+			if err := w.deps.DiscardOutbox(context.Background(), accountID, outboxID); err != nil {
+				slog.Warn("ui: undo send discard", "id", outboxID, "err", err)
+			}
+		}()
 		// Reopen the message exactly as it was (no second signature), from the
 		// account it was being sent from, and already "dirty" — its content is
 		// user-authored, so closing it must prompt rather than silently discard.
@@ -4781,55 +4809,40 @@ func (w *window) deferSend(accountID int64, msg model.OutgoingMessage) {
 	w.toastOverlay.AddToast(toast)
 
 	go func() {
-		time.Sleep(sendUndoDelay)
+		// A small margin past not_before guarantees the item is sweepable.
+		time.Sleep(sendUndoDelay + 250*time.Millisecond)
 		dispatch.Main(func() {
 			if cancelled {
 				return
 			}
 			toast.Dismiss()
-			w.reallySend(accountID, msg)
+			if w.deps.SweepOutbox == nil {
+				return
+			}
+			go func() {
+				if err := w.deps.SweepOutbox(context.Background(), accountID); err != nil {
+					slog.Warn("ui: send sweep", "account", accountID, "err", err)
+				}
+				dispatch.Main(w.refreshOutbox)
+			}()
 		})
 	}()
 }
 
-// reallySend performs the actual send (after the undo window elapsed). When the
-// provider send fails, engine.Send queues the message to the outbox (surfaced
-// via the banner) — but an error BEFORE that enqueue (empty To, a MIME build
-// failure, no backend for the account, the queue write itself failing) stores
-// the message nowhere, so claiming "kept in Outbox" would silently drop mail.
-// That case reopens the compose with the content intact and says so plainly.
-func (w *window) reallySend(accountID int64, msg model.OutgoingMessage) {
-	logging.Trace("ui: send", "account", accountID, "to", msg.To, "subject", msg.Subject)
-	go func() {
-		err := w.deps.Send(context.Background(), accountID, msg)
-		logging.Trace("ui: send done", "account", accountID, "subject", msg.Subject, "err", err)
-		dispatch.Main(func() {
-			switch {
-			case err == nil:
-				w.toast("Message sent")
-			case strings.Contains(err.Error(), "queued for retry"):
-				// engine.Send enqueued it; the background sweeper will retry.
-				// (Core follow-up: the engine should export a sentinel error for
-				// "queued" instead of this message match.)
-				slog.Warn("ui: send queued to outbox", "err", err)
-				w.toast("Send failed — kept in Outbox")
-				w.refreshOutbox()
-			default:
-				slog.Warn("ui: send failed before outbox enqueue", "err", err)
-				logging.Trace("ui: send failed pre-queue, reopening compose", "account", accountID, "subject", msg.Subject)
-				// Nothing was stored anywhere — put the message back in front of the
-				// user so it isn't lost, from the account it was being sent from.
-				w.openComposeOpts(msg, "", "Message", composeOpts{fromAccountID: accountID, startDirty: true})
-				alert := adw.NewAlertDialog("Message not sent",
-					"Sending failed: "+err.Error()+"\n\nThe message could not be kept in the Outbox, "+
-						"so it has been reopened — try again or save it as a draft.")
-				alert.AddResponse("ok", "OK")
-				alert.SetDefaultResponse("ok")
-				alert.SetCloseResponse("ok")
-				alert.Present(w.win)
-			}
-		})
-	}()
+// reopenUnsent puts a message that could not be queued back in front of the user
+// (its content is user-authored and was stored nowhere) and explains why, so it
+// is never silently dropped.
+func (w *window) reopenUnsent(accountID int64, msg model.OutgoingMessage, cause error) {
+	slog.Warn("ui: send not queued", "err", cause)
+	logging.Trace("ui: send enqueue failed, reopening compose", "account", accountID, "subject", msg.Subject, "err", cause)
+	w.openComposeOpts(msg, "", "Message", composeOpts{fromAccountID: accountID, startDirty: true})
+	alert := adw.NewAlertDialog("Message not sent",
+		"Sending failed: "+cause.Error()+"\n\nThe message could not be queued, so it has been "+
+			"reopened — try again or save it as a draft.")
+	alert.AddResponse("ok", "OK")
+	alert.SetDefaultResponse("ok")
+	alert.SetCloseResponse("ok")
+	alert.Present(w.win)
 }
 
 // showUndoToast presents an undo toast that reverses the add/remove applied to

@@ -99,6 +99,8 @@ CREATE TABLE IF NOT EXISTS outbox (
   state           TEXT NOT NULL DEFAULT 'queued',  -- queued|sending|sent|failed
   attempts        INTEGER NOT NULL DEFAULT 0,
   last_error      TEXT,
+  draft_id        TEXT,                            -- source draft to delete after a successful send
+  not_before      INTEGER NOT NULL DEFAULT 0,      -- unix seconds; a send held for its undo window is invisible to the sweeper until now >= not_before (0 = send ASAP)
   created_at      INTEGER NOT NULL DEFAULT (unixepoch())
 );
 

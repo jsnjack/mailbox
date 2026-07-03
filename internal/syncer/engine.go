@@ -53,6 +53,18 @@ type Engine struct {
 	// action and its Undo can't reach the provider out of order. See mirrorAsync.
 	mirrorMu sync.Mutex
 	mirror   map[int64]chan func()
+
+	// Now returns the current time; overridable in tests to drive the outbox
+	// not_before undo-window logic deterministically. nil means time.Now.
+	Now func() time.Time
+}
+
+// now returns the engine's clock (time.Now unless overridden for tests).
+func (e *Engine) now() time.Time {
+	if e.Now != nil {
+		return e.Now()
+	}
+	return time.Now()
 }
 
 // NewEngine returns an engine writing to st and publishing to hub (hub may be nil).
@@ -457,38 +469,35 @@ const maxOutboxAttempts = 5
 // retry, and returns the error so the caller can inform the user. After a
 // successful send the message arrives in the local cache via incremental sync.
 func (e *Engine) Send(ctx context.Context, b backend.Backend, accountID int64, msg model.OutgoingMessage) error {
-	if strings.TrimSpace(msg.To) == "" {
-		return fmt.Errorf("message has no recipient")
+	if _, err := e.EnqueueSend(ctx, accountID, msg, 0); err != nil {
+		return err
+	}
+	_, err := e.SweepOutbox(ctx, b, accountID)
+	return err
+}
+
+// EnqueueSend validates and builds an outgoing message, then persists it to the
+// outbox with the given not_before watermark (unix seconds; 0 = send ASAP),
+// returning the new outbox id. The message is durable the instant this returns:
+// the sweeper delivers it once now >= notBefore, so a quit or crash during a
+// send's undo window can no longer lose it. Recipient and MIME errors are
+// returned synchronously so the caller can keep the message in front of the user
+// rather than dropping it.
+func (e *Engine) EnqueueSend(ctx context.Context, accountID int64, msg model.OutgoingMessage, notBefore int64) (int64, error) {
+	if strings.TrimSpace(msg.To) == "" && strings.TrimSpace(msg.Cc) == "" && strings.TrimSpace(msg.Bcc) == "" {
+		return 0, fmt.Errorf("message has no recipient")
 	}
 	raw, err := backend.BuildMIME(msg)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	sentID, err := b.Send(ctx, raw, msg.ThreadID)
+	id, err := e.Store.EnqueueOutbox(ctx, accountID, msg.ThreadID, msg.DraftID, raw, notBefore)
 	if err != nil {
-		if qerr := e.Store.EnqueueOutbox(ctx, accountID, msg.ThreadID, raw); qerr != nil {
-			return fmt.Errorf("send failed (%v) and could not queue: %w", err, qerr)
-		}
-		// The message left the drafts for the outbox; drop the source draft so it
-		// doesn't linger and duplicate the queued send.
-		if msg.DraftID != "" {
-			if derr := b.DeleteDraft(ctx, msg.DraftID); derr != nil {
-				slog.Default().Warn("send: delete source draft after queue", "id", msg.DraftID, "err", derr)
-			}
-		}
-		e.publish(Change{Kind: SendStateChanged, AccountID: accountID})
-		return fmt.Errorf("send failed, queued for retry: %w", err)
+		return 0, err
 	}
-	// Sending an edited draft creates a new message; remove the original draft.
-	if msg.DraftID != "" {
-		if err := b.DeleteDraft(ctx, msg.DraftID); err != nil {
-			slog.Default().Warn("send: delete source draft", "id", msg.DraftID, "err", err)
-		}
-	}
-	// Reflect the sent message in the local cache so it joins the conversation
-	// immediately, rather than only after the next incremental sync.
-	e.storeSentMessage(ctx, b, accountID, sentID)
-	return nil
+	logging.TraceContext(ctx, "syncer: enqueue send", "account", accountID, "id", id, "not_before", notBefore, "draft", msg.DraftID)
+	e.publish(Change{Kind: SendStateChanged, AccountID: accountID})
+	return id, nil
 }
 
 // storeSentMessage fetches a just-sent message's metadata and upserts it, then
@@ -502,6 +511,12 @@ func (e *Engine) storeSentMessage(ctx context.Context, b backend.Backend, accoun
 	m, err := b.FetchMetadata(ctx, id)
 	if err != nil {
 		slog.Default().Warn("send: fetch sent message", "id", id, "err", err)
+		return
+	}
+	if m.GmailID == "" {
+		// Backend returned no usable metadata (e.g. an IMAP send with no APPEND
+		// echo); leave it to the next incremental sync rather than upsert a blank row.
+		logging.TraceContext(ctx, "syncer: sent message has no metadata; deferring to sync", "id", id)
 		return
 	}
 	if err := e.Store.UpsertMessages(ctx, []model.Message{m}); err != nil {
@@ -562,7 +577,7 @@ func (e *Engine) SweepOutbox(ctx context.Context, b backend.Backend, accountID i
 	e.sweepMu.Lock()
 	defer e.sweepMu.Unlock()
 
-	items, err := e.Store.ListSendableOutbox(ctx, accountID, maxOutboxAttempts)
+	items, err := e.Store.ListSendableOutbox(ctx, accountID, maxOutboxAttempts, e.now().Unix())
 	if err != nil {
 		return 0, err
 	}
@@ -589,7 +604,8 @@ func (e *Engine) SweepOutbox(ctx context.Context, b backend.Backend, accountID i
 				}
 			}
 		}
-		if _, err := b.Send(ctx, it.RFC822, it.ThreadID); err != nil {
+		sentID, err := b.Send(ctx, it.RFC822, it.ThreadID)
+		if err != nil {
 			if mErr := e.Store.MarkOutboxFailed(ctx, it.ID, err.Error()); mErr != nil {
 				return sent, mErr
 			}
@@ -599,6 +615,16 @@ func (e *Engine) SweepOutbox(ctx context.Context, b backend.Backend, accountID i
 		if err := e.Store.MarkOutboxSent(ctx, it.ID); err != nil {
 			return sent, err
 		}
+		// The message left the drafts for the outbox; drop the source draft now that
+		// it has been delivered, so it doesn't linger as a duplicate.
+		if it.DraftID != "" {
+			if derr := b.DeleteDraft(ctx, it.DraftID); derr != nil {
+				slog.Default().Warn("outbox: delete source draft after send", "id", it.DraftID, "err", derr)
+			}
+		}
+		// Reflect the sent message in the local cache so it joins the conversation
+		// immediately, rather than only after the next incremental sync.
+		e.storeSentMessage(ctx, b, accountID, sentID)
 		e.publish(Change{Kind: SendStateChanged, AccountID: accountID})
 		sent++
 	}
