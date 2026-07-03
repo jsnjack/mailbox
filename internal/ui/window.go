@@ -3186,6 +3186,23 @@ type cachedSection struct {
 // sectionCacheCap bounds how many rendered sections are kept in memory.
 const sectionCacheCap = 400
 
+// aiCacheCap bounds the session AI caches (per-message translations, per-thread
+// summaries/analyses) the same way sectionCacheCap bounds rendered sections —
+// they hold full bodies, so an unbounded session would grow without limit. An
+// eviction is just a future cache miss (both are also persisted in the store).
+const aiCacheCap = 400
+
+// capCache evicts arbitrary entries until m holds at most max. Main-thread only
+// (all session caches are main-thread confined).
+func capCache(m map[string]string, max int) {
+	for len(m) > max {
+		for k := range m {
+			delete(m, k)
+			break
+		}
+	}
+}
+
 // cachedSectionsFor returns the cached sections for the given messages (main
 // thread); the result is handed to the render goroutine, which reuses hits and
 // sanitizes only the misses.
@@ -4011,6 +4028,7 @@ func (w *window) onTranslate() {
 			for id, out := range results {
 				w.translationCache[id] = out
 			}
+			capCache(w.translationCache, aiCacheCap)
 			w.showTranslatedConversation(msgs)
 		})
 	}()
@@ -4160,6 +4178,7 @@ func (w *window) onSummarize() {
 	if fp, sum, ok, err := w.deps.Store.ThreadSummary(context.Background(), w.activeID, w.openThreadID); err == nil && ok && fp == key {
 		logging.Trace("ui: summarize cache hit (persisted)", "thread", w.openThreadID)
 		w.summaryCache[key] = sum
+		capCache(w.summaryCache, aiCacheCap)
 		w.summaryLabel.SetText(sum)
 		return
 	}
@@ -4213,6 +4232,7 @@ func (w *window) onSummarize() {
 			}
 			if final != "" {
 				w.summaryCache[key] = final
+				capCache(w.summaryCache, aiCacheCap)
 				w.summaryLabel.SetText(final)
 			}
 		})
@@ -4259,6 +4279,7 @@ func (w *window) onAnalyze() {
 	if a, ok, err := w.deps.Store.Analysis(context.Background(), w.activeID, m.GmailID); err == nil && ok {
 		logging.Trace("ui: analyze cache hit (persisted)", "id", m.GmailID)
 		w.summaryCache[key] = a
+		capCache(w.summaryCache, aiCacheCap)
 		w.summaryLabel.SetText(a)
 		return
 	}
@@ -4313,6 +4334,7 @@ func (w *window) onAnalyze() {
 			}
 			if final != "" {
 				w.summaryCache[key] = final
+				capCache(w.summaryCache, aiCacheCap)
 				w.summaryLabel.SetText(final)
 			}
 		})
