@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/diamondburned/gotk4-adwaita/pkg/adw"
+	"github.com/diamondburned/gotk4-webkitgtk/pkg/javascriptcore/v6"
 	webkit "github.com/diamondburned/gotk4-webkitgtk/pkg/webkit/v6"
 	coreglib "github.com/diamondburned/gotk4/pkg/core/glib"
 	"github.com/diamondburned/gotk4/pkg/gdk/v4"
@@ -2228,13 +2229,29 @@ func (w *window) buildReader() *adw.NavigationPage {
 	// While a page loads, WebKit's content swap can flash black at the widget
 	// level (the page background-color above doesn't cover it). Keep the WebView
 	// mapped (so it keeps rendering) and mask the swap with an opaque white cover
-	// shown during the load and hidden once it finishes painting.
+	// shown during the load and hidden once the new page has PAINTED.
+	//
+	// The reveal must be first-paint-driven: LoadCommitted fires before WebKit
+	// composites a single frame of the new page (revealing there flashes the
+	// cleared-black GL surface — the flicker this cover exists to prevent), while
+	// LoadFinished waits for every subresource (a slow remote image would pin the
+	// cover long after the text is readable). WebKitGTK has no first-paint
+	// signal, so the injected page script reports it: two requestAnimationFrames
+	// after setup — i.e. one full composited frame — it posts to the "painted"
+	// message handler (see wrapHTML/loadingHTML), and the cover drops onto a
+	// frame that provably exists.
+	ucm := w.webview.UserContentManager()
+	ucm.RegisterScriptMessageHandler(paintedHandler, "")
+	ucm.ConnectScriptMessageReceived(func(*javascriptcore.Value) {
+		logging.Trace("ui: reader first paint; dropping swap cover")
+		if w.readerCover != nil {
+			w.readerCover.SetVisible(false)
+		}
+	})
 	w.webview.ConnectLoadChanged(func(e webkit.LoadEvent) {
-		// Hide the swap-cover once the new document is committed (its white bg is
-		// painting) rather than at LoadFinished — the latter waits for every
-		// subresource, so a big inline image would keep the cover (and the reader)
-		// "loading" long after the text is readable.
-		if (e == webkit.LoadCommitted || e == webkit.LoadFinished) && w.readerCover != nil {
+		// Fallback only: a page whose script never ran (a load error page, the
+		// initial about:blank) still releases the cover at LoadFinished.
+		if e == webkit.LoadFinished && w.readerCover != nil {
 			w.readerCover.SetVisible(false)
 		}
 	})
@@ -3416,6 +3433,18 @@ func (w *window) loadReaderHTML(full string) {
 	w.webview.LoadHtml(full, "about:blank")
 }
 
+// paintedHandler is the script-message channel every reader page reports its
+// first composited frame on; buildReader drops the swap cover when it fires.
+const paintedHandler = "painted"
+
+// paintedJS posts to the painted handler two requestAnimationFrames from now —
+// the second rAF can only run after the first frame was actually composited,
+// so receiving it proves the page is on screen and the cover can drop without
+// exposing WebKit's cleared-black surface. try/catch keeps the page harmless
+// in a view with no handler registered.
+const paintedJS = `var p=function(){try{window.webkit.messageHandlers.painted.postMessage(true);}catch(e){}};` +
+	`requestAnimationFrame(function(){requestAnimationFrame(p);});`
+
 // loadingHTML returns a minimal, themed "Loading…" page shown while message
 // bodies are being fetched. It keeps the user informed instead of leaving the
 // previous message visible during a potentially long network fetch.
@@ -3423,7 +3452,7 @@ func loadingHTML() string {
 	return `<!DOCTYPE html><html><head><meta charset="utf-8">
 <style>body{display:flex;align-items:center;justify-content:center;height:100vh;margin:0;
 font-family:sans-serif;color:#888;font-size:14px}</style></head>
-<body>Loading message…</body></html>`
+<body>Loading message…<script>` + paintedJS + `</script></body></html>`
 }
 
 // cachedSection is a message's rendered (sanitized, de-tracked, quote-collapsed)
@@ -5414,7 +5443,10 @@ pre{font-family:monospace;white-space:pre-wrap}`
 		`wrap.style.transform='none';wrap.style.width='auto';var avail=b.clientWidth,natural=wrap.scrollWidth;` +
 		`if(natural>avail+1&&natural>0){var s=avail/natural;wrap.style.width=natural+'px';wrap.style.transformOrigin='top left';wrap.style.transform='scale('+s+')';b.style.height=(wrap.offsetHeight*s)+'px';}else{b.style.height='';}}` +
 		`function setup(){var b=document.body;if(!b)return;wrap=document.createElement('div');while(b.firstChild){wrap.appendChild(b.firstChild);}b.appendChild(wrap);b.style.overflowX='hidden';fit();window.addEventListener('resize',fit);}` +
-		`if(document.readyState!=='loading'){setup();}else{document.addEventListener('DOMContentLoaded',setup);}window.addEventListener('load',fit);})();</script>`
+		`if(document.readyState!=='loading'){setup();}else{document.addEventListener('DOMContentLoaded',setup);}window.addEventListener('load',fit);` +
+		// Report first paint so the swap cover drops onto a composited frame
+		// (see buildReader) — after setup, so the fitted layout is what shows.
+		paintedJS + `})();</script>`
 
 	csp := "default-src 'none'; img-src http: https: data: cid:; media-src http: https: data:; " +
 		"style-src 'unsafe-inline'; script-src 'nonce-" + nonce + "'; font-src http: https: data:"
