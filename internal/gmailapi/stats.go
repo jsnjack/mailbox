@@ -50,13 +50,11 @@ func (c *Client) Stats() StatsSnapshot { return c.stats.Snapshot() }
 func NewService(ctx context.Context, ts oauth2.TokenSource, stats *Stats) (*gmail.Service, error) {
 	logging.TraceContext(ctx, "gmailapi: newService", "token_source", ts != nil)
 	httpClient := oauth2.NewClient(ctx, ts) // an *http.Client whose Transport adds auth
-	// Safety net: cap every individual HTTP request so a dropped connection (no
-	// FIN/RST received) can't block a caller indefinitely. A normal Gmail API
-	// call finishes in seconds; 2 minutes is generous yet bounded. When the
-	// deadline fires the error wraps context.DeadlineExceeded, which isRetryable
-	// treats as non-retryable — the call fails immediately instead of looping.
-	httpClient.Timeout = 2 * time.Minute
-	httpClient.Transport = &countingTransport{base: httpClient.Transport, stats: stats}
+	// No httpClient.Timeout: that caps the WHOLE response (upload + headers +
+	// body), which deterministically kills large attachment transfers on slow
+	// links. Dropped connections are instead bounded by the transport's
+	// no-progress watchdog (netStallTimeout) — see countingTransport.RoundTrip.
+	httpClient.Transport = &countingTransport{base: httpClient.Transport, stats: stats, stall: netStallTimeout}
 	srv, err := gmail.NewService(ctx, option.WithHTTPClient(httpClient))
 	if err != nil {
 		logging.TraceContext(ctx, "gmailapi: newService failed", "err", err)
@@ -66,35 +64,92 @@ func NewService(ctx context.Context, ts oauth2.TokenSource, stats *Stats) (*gmai
 	return srv, nil
 }
 
-// countingTransport tallies request and response bytes into Stats.
+// netStallTimeout bounds how long a request may go with NO progress — no
+// request-body bytes sent, no response headers, no response-body bytes — before
+// it is cancelled. Unlike a whole-response timeout, any progress resets the
+// clock, so a 25 MB attachment on a slow link transfers fine while a dropped
+// connection (no FIN/RST received) still fails in bounded time. The resulting
+// error wraps context.Canceled, which isRetryable treats as non-retryable —
+// the call fails immediately instead of looping.
+const netStallTimeout = 2 * time.Minute
+
+// countingTransport tallies request and response bytes into Stats and bounds
+// each request with a no-progress watchdog (see netStallTimeout).
 type countingTransport struct {
 	base  http.RoundTripper
 	stats *Stats
+	stall time.Duration // no-progress bound; tests shrink it
 }
 
 func (t *countingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if req.ContentLength > 0 {
 		t.stats.bytesOut.Add(req.ContentLength)
 	}
-	resp, err := t.base.RoundTrip(req)
-	if err == nil && resp != nil && resp.Body != nil {
-		resp.Body = &countingBody{rc: resp.Body, n: &t.stats.bytesIn}
+	stall := t.stall
+	if stall <= 0 {
+		stall = netStallTimeout
 	}
-	return resp, err
+	// The watchdog cancels the request when the stall timer fires; every unit of
+	// progress (an upload chunk read from req.Body, headers arriving, a body
+	// read) pushes it back.
+	ctx, cancel := context.WithCancel(req.Context())
+	req = req.WithContext(ctx)
+	watchdog := time.AfterFunc(stall, cancel)
+	if req.Body != nil {
+		req.Body = &progressBody{rc: req.Body, watchdog: watchdog, stall: stall}
+	}
+	resp, err := t.base.RoundTrip(req)
+	if err != nil {
+		watchdog.Stop()
+		cancel()
+		return nil, err
+	}
+	watchdog.Reset(stall) // headers arrived; re-arm for the body phase
+	resp.Body = &countingBody{rc: resp.Body, n: &t.stats.bytesIn, watchdog: watchdog, stall: stall, cancel: cancel}
+	return resp, nil
 }
 
-// countingBody adds bytes read from a response body into a counter.
+// progressBody re-arms the stall watchdog as the transport reads the request
+// body, so a long upload that is moving bytes never trips it.
+type progressBody struct {
+	rc       io.ReadCloser
+	watchdog *time.Timer
+	stall    time.Duration
+}
+
+func (b *progressBody) Read(p []byte) (int, error) {
+	n, err := b.rc.Read(p)
+	if n > 0 {
+		b.watchdog.Reset(b.stall)
+	}
+	return n, err
+}
+
+func (b *progressBody) Close() error { return b.rc.Close() }
+
+// countingBody adds bytes read from a response body into a counter, re-arms the
+// stall watchdog on every read, and releases the watchdog + request context on
+// Close (cancel after the body is done is harmless — the connection was already
+// handed back to the pool at EOF).
 type countingBody struct {
-	rc io.ReadCloser
-	n  *atomic.Int64
+	rc       io.ReadCloser
+	n        *atomic.Int64
+	watchdog *time.Timer
+	stall    time.Duration
+	cancel   context.CancelFunc
 }
 
 func (b *countingBody) Read(p []byte) (int, error) {
 	n, err := b.rc.Read(p)
 	if n > 0 {
 		b.n.Add(int64(n))
+		b.watchdog.Reset(b.stall)
 	}
 	return n, err
 }
 
-func (b *countingBody) Close() error { return b.rc.Close() }
+func (b *countingBody) Close() error {
+	b.watchdog.Stop()
+	b.cancel()
+	return b.rc.Close()
+}

@@ -2,81 +2,114 @@ package gmailapi
 
 import (
 	"context"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
-
-	"golang.org/x/oauth2"
 )
 
-// stubTokenSource returns a static, non-empty token so oauth2.NewClient is happy.
-type stubTokenSource struct{}
-
-func (stubTokenSource) Token() (*oauth2.Token, error) {
-	return &oauth2.Token{AccessToken: "stub"}, nil
-}
-
-// TestNewServiceSetsHTTPClientTimeout verifies that NewService succeeds (which
-// internally sets httpClient.Timeout = 2min). The actual timeout behaviour is
-// covered by TestHTTPClientTimeoutBoundsHangingRequest below.
-func TestNewServiceSetsHTTPClientTimeout(t *testing.T) {
-	_, err := NewService(context.Background(), stubTokenSource{}, &Stats{})
+// doVia issues a GET to url through a countingTransport with the given stall
+// bound and returns the response error and, when the request succeeded, the
+// body-read result.
+func doVia(t *testing.T, url string, stall time.Duration) ([]byte, error) {
+	t.Helper()
+	client := &http.Client{Transport: &countingTransport{base: http.DefaultTransport, stats: &Stats{}, stall: stall}}
+	resp, err := client.Get(url)
 	if err != nil {
-		t.Fatalf("NewService: %v", err)
+		return nil, err
 	}
-	// Verify the production timeout value mirrors what we set in NewService.
-	httpClient := oauth2.NewClient(context.Background(), stubTokenSource{})
-	httpClient.Timeout = 2 * time.Minute
-	if httpClient.Timeout == 0 {
-		t.Fatal("httpClient.Timeout is 0 — would hang on dropped connections")
-	}
-	if httpClient.Timeout != 2*time.Minute {
-		t.Fatalf("httpClient.Timeout = %v, want 2m", httpClient.Timeout)
-	}
+	defer func() { _ = resp.Body.Close() }()
+	return io.ReadAll(resp.Body)
 }
 
-// TestHTTPClientTimeoutBoundsHangingRequest verifies that a request to a server
-// that never responds is bounded by the HTTP client timeout — the core fix for
-// the "switching emails while offline hangs the reader" bug.
-func TestHTTPClientTimeoutBoundsHangingRequest(t *testing.T) {
-	// A server that accepts the connection but never responds. The handler
-	// blocks on a channel so Close() can unblock it cleanly.
+// A server that never responds must fail in bounded time with a cancellation
+// (non-retryable, like the old whole-request deadline) — the "switching emails
+// while offline hangs the reader" case.
+func TestStallWatchdogCancelsSilentServer(t *testing.T) {
 	hangCh := make(chan struct{})
-	hanging := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		<-hangCh // block until the test lets us go
+	defer close(hangCh)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-hangCh // accept the connection, never respond
 	}))
-	defer func() {
-		close(hangCh) // unblock the handler so Close() doesn't hang
-		hanging.Close()
-	}()
-
-	// Build the HTTP client exactly as NewService does.
-	httpClient := oauth2.NewClient(context.Background(), stubTokenSource{})
-	httpClient.Timeout = 2 * time.Minute
-
-	// Use a shorter context on top — the render path uses 60s, so simulate
-	// that the render-level context fires first (it should, at 60s < 2min).
-	// For test speed, use a short timeout on the context.
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, hanging.URL, nil)
-	if err != nil {
-		t.Fatalf("NewRequest: %v", err)
-	}
+	defer srv.Close()
 
 	start := time.Now()
-	_, err = httpClient.Do(req)
-	elapsed := time.Since(start)
-
+	_, err := doVia(t, srv.URL, 300*time.Millisecond)
 	if err == nil {
-		t.Fatal("expected error from hanging request, got nil")
+		t.Fatal("expected the stall watchdog to fail the hanging request, got nil")
 	}
-	// The context deadline (500ms) should fire well before the HTTP timeout
-	// (2min), proving the render-level context cancellation works.
-	if elapsed > 5*time.Second {
-		t.Fatalf("request took %v — context deadline didn't bound it", elapsed)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want a context.Canceled wrap (non-retryable)", err)
 	}
-	t.Logf("hanging request failed in %v (expected)", elapsed)
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("request took %v — watchdog didn't bound it", elapsed)
+	}
+}
+
+// A response that stalls mid-body (headers + one chunk, then silence) must be
+// cancelled too — progress before the stall doesn't excuse a dead connection.
+func TestStallWatchdogCancelsMidBodyStall(t *testing.T) {
+	hangCh := make(chan struct{})
+	defer close(hangCh)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("first chunk"))
+		w.(http.Flusher).Flush()
+		<-hangCh // then go silent
+	}))
+	defer srv.Close()
+
+	_, err := doVia(t, srv.URL, 300*time.Millisecond)
+	if err == nil {
+		t.Fatal("expected the stall watchdog to fail the mid-body stall, got nil")
+	}
+}
+
+// A slow transfer that keeps moving bytes must NOT be cut off, even when it
+// takes far longer than the stall bound — the whole point of replacing the
+// whole-response timeout (which killed large attachments on slow links).
+func TestStallWatchdogAllowsSlowProgress(t *testing.T) {
+	const chunks = 8
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		for i := 0; i < chunks; i++ {
+			_, _ = w.Write([]byte("chunk"))
+			w.(http.Flusher).Flush()
+			time.Sleep(100 * time.Millisecond) // total 800ms ≫ 300ms stall bound
+		}
+	}))
+	defer srv.Close()
+
+	body, err := doVia(t, srv.URL, 300*time.Millisecond)
+	if err != nil {
+		t.Fatalf("slow-but-progressing transfer was cut off: %v", err)
+	}
+	if len(body) != chunks*len("chunk") {
+		t.Fatalf("read %d bytes, want %d", len(body), chunks*len("chunk"))
+	}
+}
+
+// The transport still counts response bytes into Stats.
+func TestCountingTransportCountsBytes(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("0123456789"))
+	}))
+	defer srv.Close()
+
+	stats := &Stats{}
+	client := &http.Client{Transport: &countingTransport{base: http.DefaultTransport, stats: stats}}
+	resp, err := client.Get(srv.URL)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if len(b) != 10 {
+		t.Fatalf("read %d bytes, want 10", len(b))
+	}
+	if got := stats.Snapshot().BytesIn; got != 10 {
+		t.Fatalf("BytesIn = %d, want 10", got)
+	}
 }
