@@ -220,24 +220,32 @@ func (e *Engine) SearchServer(ctx context.Context, b backend.Backend, accountID 
 	if err != nil {
 		return nil, fmt.Errorf("search list ids: %w", err)
 	}
-	var fetched []model.Message
+	if len(ids) == 0 {
+		return ids, nil
+	}
+	// Existence check in one IN-query instead of a GetMessage per hit, then fetch
+	// only the misses — concurrently, and batched for a backend that supports it
+	// (IMAP) — rather than a serial FetchMetadata per uncached id.
+	existing, err := e.Store.ExistingMessageIDs(ctx, accountID, ids)
+	if err != nil {
+		return nil, fmt.Errorf("search existence check: %w", err)
+	}
+	missing := make([]string, 0, len(ids))
 	for _, id := range ids {
-		if _, err := e.Store.GetMessage(ctx, accountID, id); err == nil {
-			continue // already cached
+		if !existing[id] {
+			missing = append(missing, id)
 		}
-		msg, err := b.FetchMetadata(ctx, id)
-		if err != nil {
-			slog.Default().Warn("search: fetch metadata", "id", id, "err", err)
-			continue
-		}
-		fetched = append(fetched, msg)
 	}
-	if len(fetched) > 0 {
-		if err := e.Store.UpsertMessages(ctx, fetched); err != nil {
-			return nil, fmt.Errorf("search upsert: %w", err)
+	if len(missing) > 0 {
+		fetched, _, _ := e.fetchMetadataConcurrent(ctx, b, missing)
+		if len(fetched) > 0 {
+			if err := e.Store.UpsertMessages(ctx, fetched); err != nil {
+				return nil, fmt.Errorf("search upsert: %w", err)
+			}
+			e.publish(Change{Kind: MessageUpserted, AccountID: accountID})
 		}
-		e.publish(Change{Kind: MessageUpserted, AccountID: accountID})
 	}
+	logging.TraceContext(ctx, "syncer: SearchServer done", "account", accountID, "query", query, "hits", len(ids), "cached", len(ids)-len(missing), "fetched_misses", len(missing))
 	return ids, nil
 }
 
