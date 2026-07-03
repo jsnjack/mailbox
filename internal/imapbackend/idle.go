@@ -60,7 +60,9 @@ func (b *Backend) idleOnce(ctx context.Context, onChange func()) error {
 			onChange()
 		},
 	}
-	cl, err := b.dial(handler)
+	// The raw conn is deliberately unused: IDLE blocks legitimately for minutes,
+	// so this dedicated connection must never carry the pooled-op deadline.
+	cl, _, err := b.dial(handler)
 	if err != nil {
 		return err
 	}

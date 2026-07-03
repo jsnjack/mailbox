@@ -65,10 +65,22 @@ const (
 	loginTimeout = 30 * time.Second
 )
 
+// pooledOpTimeout bounds one pooled operation (a withConn fn — a SELECT+FETCH
+// group, a folder sweep, an APPEND). Without it a server that stalls mid-reply
+// after login would wedge a pool slot forever (dial clears its deadline after
+// login). Generous, because a single fn may sweep every folder of a large
+// account; it only needs to beat "forever". The dedicated IDLE connection is
+// NOT pooled and never gets this deadline — IDLE legitimately blocks for
+// minutes (see idle.go).
+const pooledOpTimeout = 5 * time.Minute
+
 // conn is one pooled IMAP connection plus the mailbox it currently has SELECTed
 // (cached so a fan-out of fetches against the same folder skips re-SELECTing).
+// raw is the underlying net.Conn so withConn can bound each pooled operation
+// with a deadline.
 type conn struct {
 	cl       *imapclient.Client
+	raw      net.Conn
 	selected string
 	selData  *imap.SelectData
 }
@@ -110,9 +122,11 @@ var _ backend.Backend = (*Backend)(nil)
 
 // --- connection pool ---
 
-// dial opens and logs in a new connection. handler, when non-nil, receives
-// unsolicited server data (used by Watch for IDLE).
-func (b *Backend) dial(handler *imapclient.UnilateralDataHandler) (*imapclient.Client, error) {
+// dial opens and logs in a new connection, returning the client and the raw
+// net.Conn beneath it (deadline-bindable by the caller; nil only on error).
+// handler, when non-nil, receives unsolicited server data (used by Watch for
+// IDLE — which must NOT set deadlines on the returned conn).
+func (b *Backend) dial(handler *imapclient.UnilateralDataHandler) (*imapclient.Client, net.Conn, error) {
 	start := time.Now()
 	addr := net.JoinHostPort(b.cfg.Host, strconv.Itoa(b.cfg.Port))
 	tlsCfg := &tls.Config{ServerName: b.cfg.Host}
@@ -153,11 +167,11 @@ func (b *Backend) dial(handler *imapclient.UnilateralDataHandler) (*imapclient.C
 			cl, err = imapclient.NewStartTLS(raw, opts)
 		}
 	default:
-		return nil, fmt.Errorf("imap: unknown security %q", b.cfg.Security)
+		return nil, nil, fmt.Errorf("imap: unknown security %q", b.cfg.Security)
 	}
 	if err != nil {
 		logging.Trace("imapbackend: dial failed", "account", b.cfg.Email, "addr", addr, "dur", time.Since(start), "err", err)
-		return nil, fmt.Errorf("imap dial %s: %w", addr, err)
+		return nil, nil, fmt.Errorf("imap dial %s: %w", addr, err)
 	}
 	// Bound login (greeting + LOGIN/AUTHENTICATE) with a deadline, then clear it so
 	// long-lived pooled/IDLE reads aren't affected.
@@ -170,7 +184,7 @@ func (b *Backend) dial(handler *imapclient.UnilateralDataHandler) (*imapclient.C
 	}
 	if loginErr != nil {
 		_ = cl.Close()
-		return nil, loginError(loginErr)
+		return nil, nil, loginError(loginErr)
 	}
 	logging.Trace("imapbackend: connected",
 		"account", b.cfg.Email, "addr", addr, "dur", time.Since(start),
@@ -178,7 +192,7 @@ func (b *Backend) dial(handler *imapclient.UnilateralDataHandler) (*imapclient.C
 		"condstore", cl.Caps().Has(imap.CapCondStore),
 		"qresync", cl.Caps().Has(imap.CapQResync),
 		"uidplus", cl.Caps().Has(imap.CapUIDPlus))
-	return cl, nil
+	return cl, raw, nil
 }
 
 // loginError wraps an IMAP login failure, tagging credential rejections with
@@ -237,13 +251,13 @@ func (b *Backend) acquire() (*conn, error) {
 		return c, nil
 	default:
 	}
-	cl, err := b.dial(nil)
+	cl, raw, err := b.dial(nil)
 	if err != nil {
 		<-b.sem
 		return nil, err
 	}
 	logging.Trace("imapbackend: pool acquire (new conn)", "account", b.cfg.Email)
-	return &conn{cl: cl}, nil
+	return &conn{cl: cl, raw: raw}, nil
 }
 
 // release returns a healthy connection to the pool, or closes a failed one (so
@@ -268,15 +282,27 @@ func (b *Backend) release(c *conn, healthy bool) {
 // on success and closed on any error (conservative — an error may have left it in
 // a bad state). release runs via defer so a panic in fn still returns the pool
 // token (otherwise repeated panics would starve the pool and deadlock all I/O).
+//
+// Each fn runs under a conn deadline (pooledOpTimeout) so a server that stalls
+// mid-command can't wedge a pool slot forever; the deadline is cleared on
+// success before the conn is repooled, so an idle pooled connection doesn't
+// expire while waiting for its next use. (The dedicated IDLE connection never
+// passes through here.)
 func (b *Backend) withConn(fn func(*conn) error) (err error) {
 	c, aerr := b.acquire()
 	if aerr != nil {
 		return aerr
 	}
+	if c.raw != nil {
+		_ = c.raw.SetDeadline(time.Now().Add(pooledOpTimeout))
+	}
 	healthy := false
 	defer func() { b.release(c, healthy) }()
 	err = fn(c)
 	healthy = err == nil
+	if healthy && c.raw != nil {
+		_ = c.raw.SetDeadline(time.Time{})
+	}
 	return err
 }
 
@@ -530,8 +556,11 @@ func (b *Backend) FetchMetadata(ctx context.Context, id string) (model.Message, 
 			return err
 		}
 		if sel.UIDValidity != uidv {
+			// A stale-epoch id names a message that no longer exists under that
+			// number: ErrNotFound so the engine skips it instead of holding the
+			// cursor forever on a "transient" failure.
 			logging.Trace("imapbackend: fetch metadata stale id", "id", id, "uidvalidity", uidv, "current", sel.UIDValidity)
-			return fmt.Errorf("imap: stale id %q (uidvalidity %d != %d)", id, uidv, sel.UIDValidity)
+			return fmt.Errorf("%w: stale id %q (uidvalidity %d != %d)", backend.ErrNotFound, id, uidv, sel.UIDValidity)
 		}
 		// References isn't part of the IMAP ENVELOPE, so fetch that one header too
 		// — it carries the thread's ancestry (used to compute a stable thread root).
@@ -548,8 +577,10 @@ func (b *Backend) FetchMetadata(ctx context.Context, id string) (model.Message, 
 			return fmt.Errorf("imap fetch metadata: %w", err)
 		}
 		if len(bufs) == 0 {
+			// The message vanished between listing and fetch: genuinely gone, not a
+			// transient failure — don't stall the engine's cursor on it.
 			logging.Trace("imapbackend: fetch metadata not found", "mailbox", mailbox, "uid", uint32(uid))
-			return fmt.Errorf("imap: uid %d not found in %q", uid, mailbox)
+			return fmt.Errorf("%w: uid %d in %q", backend.ErrNotFound, uid, mailbox)
 		}
 		refs := parseReferences(bufs[0].FindBodySection(refSection))
 		out = b.toMessage(mailbox, uidv, bufs[0], refs)

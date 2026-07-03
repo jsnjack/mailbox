@@ -202,7 +202,7 @@ func (b *Backend) Send(ctx context.Context, raw []byte, threadID string) (string
 		return "", fmt.Errorf("imap send: no recipients")
 	}
 	logging.Trace("imapbackend: send envelope", "from", from, "to", to, "recipients", len(to))
-	if err := b.smtpSend(from, to, cleaned); err != nil {
+	if err := b.smtpSend(ctx, from, to, cleaned); err != nil {
 		logging.TraceContext(ctx, "imapbackend: send failed", "account", b.cfg.Email, "err", err)
 		return "", err
 	}
@@ -261,14 +261,18 @@ func stripHeader(raw []byte, name string) []byte {
 	return append(bytes.Join(kept, []byte("\r\n")), body...)
 }
 
-func (b *Backend) smtpSend(from string, to []string, msg []byte) error {
+func (b *Backend) smtpSend(ctx context.Context, from string, to []string, msg []byte) error {
 	start := time.Now()
 	addr := net.JoinHostPort(b.cfg.SMTPHost, strconv.Itoa(b.cfg.SMTPPort))
 	tlsCfg := &tls.Config{ServerName: b.cfg.SMTPHost}
-	logging.Trace("imapbackend: smtp dial", "addr", addr, "security", string(b.cfg.SMTPSecurity))
+	logging.Trace("imapbackend: smtp dial", "addr", addr, "security", string(b.cfg.SMTPSecurity), "dialTimeout", dialTimeout)
 	// Dial raw + count (below TLS), then build the SMTP client over the wrapped
-	// conn so SMTP traffic is included in the byte stats.
-	raw, err := net.Dial("tcp", addr)
+	// conn so SMTP traffic is included in the byte stats. The dialer bounds the
+	// connect with a timeout and honors ctx (like the IMAP dial), so a wrong or
+	// unreachable SMTP host fails fast instead of hanging a send on the OS TCP
+	// timeout.
+	dialer := &net.Dialer{Timeout: dialTimeout}
+	raw, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return fmt.Errorf("smtp dial %s: %w", addr, err)
 	}
