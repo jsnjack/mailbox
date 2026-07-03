@@ -16,31 +16,46 @@ import (
 	"github.com/jsnjack/mailbox/internal/model"
 )
 
-// refreshOutbox reveals the banner when the active account has messages waiting
-// to send (queued or failed), and hides it otherwise.
+// refreshOutbox reveals the banner when any account has messages waiting to
+// send (queued or failed), and hides it otherwise. A send stuck on a non-active
+// account must be just as visible as one on the active account. The counts are
+// gathered off the main thread.
 func (w *window) refreshOutbox() {
-	n, err := w.deps.Store.CountPendingOutbox(context.Background(), w.activeID)
-	if err != nil {
-		slog.Warn("ui: count outbox", "err", err)
-		return
-	}
-	logging.Trace("ui: refresh outbox", "account", w.activeID, "pending", n)
-	if n == 0 {
-		w.outboxBanner.SetRevealed(false)
-		return
-	}
-	noun := "message"
-	if n != 1 {
-		noun = "messages"
-	}
-	w.outboxBanner.SetTitle(fmt.Sprintf("%d %s waiting to send", n, noun))
-	w.outboxBanner.SetRevealed(true)
+	accounts := append([]AccountInfo(nil), w.deps.Accounts...)
+	go func() {
+		ctx := context.Background()
+		total := 0
+		for _, a := range accounts {
+			n, err := w.deps.Store.CountPendingOutbox(ctx, a.ID)
+			if err != nil {
+				slog.Warn("ui: count outbox", "account", a.ID, "err", err)
+				continue
+			}
+			total += n
+		}
+		logging.Trace("ui: refresh outbox", "accounts", len(accounts), "pending", total)
+		dispatch.Main(func() {
+			if total == 0 {
+				w.outboxBanner.SetRevealed(false)
+				return
+			}
+			noun := "message"
+			if total != 1 {
+				noun = "messages"
+			}
+			w.outboxBanner.SetTitle(fmt.Sprintf("%d %s waiting to send", total, noun))
+			w.outboxBanner.SetRevealed(true)
+		})
+	}()
 }
 
-// openOutbox shows a dialog listing the account's queued/failed sends, with
-// per-item retry/discard and a "Send now" action that sweeps the whole outbox.
+// openOutbox shows a dialog listing every account's queued/failed sends, with
+// per-item retry/discard and a "Send now" action that sweeps all outboxes. The
+// account set is captured at open, so the actions keep targeting the accounts
+// the rows were listed for even if the active account changes while it's open.
 func (w *window) openOutbox() {
-	logging.Trace("ui: open outbox dialog", "account", w.activeID)
+	accounts := append([]AccountInfo(nil), w.deps.Accounts...)
+	logging.Trace("ui: open outbox dialog", "accounts", len(accounts))
 	listBox := gtk.NewListBox()
 	listBox.AddCSSClass("boxed-list")
 	listBox.SetSelectionMode(gtk.SelectionNone)
@@ -51,24 +66,30 @@ func (w *window) openOutbox() {
 	scroller.SetChild(listBox)
 	setMargins(scroller, 12, 12, 12, 12)
 
+	showAccount := len(accounts) > 1
 	var rebuild func()
 	rebuild = func() {
 		for child := listBox.FirstChild(); child != nil; child = listBox.FirstChild() {
 			listBox.Remove(child)
 		}
-		items, err := w.deps.Store.ListPendingOutbox(context.Background(), w.activeID)
-		if err != nil {
-			slog.Warn("ui: list outbox", "err", err)
+		total := 0
+		for _, a := range accounts {
+			items, err := w.deps.Store.ListPendingOutbox(context.Background(), a.ID)
+			if err != nil {
+				slog.Warn("ui: list outbox", "account", a.ID, "err", err)
+				continue
+			}
+			for _, it := range items {
+				listBox.Append(w.outboxRow(a, it, showAccount, rebuild))
+				total++
+			}
 		}
-		if len(items) == 0 {
+		logging.Trace("ui: outbox dialog listed", "accounts", len(accounts), "items", total)
+		if total == 0 {
 			empty := gtk.NewLabel("The outbox is empty.")
 			empty.AddCSSClass("dim-label")
 			setMargins(empty, 12, 12, 18, 18)
 			listBox.Append(empty)
-			return
-		}
-		for _, it := range items {
-			listBox.Append(w.outboxRow(it, rebuild))
 		}
 	}
 	rebuild()
@@ -78,16 +99,22 @@ func (w *window) openOutbox() {
 		sendNow := gtk.NewButtonWithLabel("Send now")
 		sendNow.AddCSSClass("suggested-action")
 		sendNow.ConnectClicked(func() {
-			acctID := w.activeID
-			logging.Trace("ui: outbox send now", "account", acctID)
+			logging.Trace("ui: outbox send now", "accounts", len(accounts))
 			go func() {
-				err := w.deps.SweepOutbox(context.Background(), acctID)
+				var firstErr error
+				for _, a := range accounts {
+					if err := w.deps.SweepOutbox(context.Background(), a.ID); err != nil {
+						slog.Warn("ui: sweep outbox", "account", a.ID, "err", err)
+						if firstErr == nil {
+							firstErr = err
+						}
+					}
+				}
+				logging.Trace("ui: outbox send now done", "accounts", len(accounts), "err", firstErr)
 				dispatch.Main(func() {
-					if err != nil {
-						slog.Warn("ui: sweep outbox", "err", err)
+					if firstErr != nil {
 						w.toast("Couldn't send — messages stay queued")
 					}
-					logging.Trace("ui: outbox send now done", "account", acctID, "err", err)
 					rebuild()
 					w.refreshOutbox()
 				})
@@ -108,9 +135,12 @@ func (w *window) openOutbox() {
 	dialog.Present(w.win)
 }
 
-// outboxRow renders one queued/failed message with retry and discard actions.
-// rebuild refreshes the list after an action completes.
-func (w *window) outboxRow(it model.OutboxItem, rebuild func()) *gtk.Box {
+// outboxRow renders one queued/failed message with retry and discard actions,
+// bound to the account it was listed for (acct — not whatever account is active
+// when the button is clicked). showAccount adds the account email, so multi-
+// account users can tell whose outbox an item sits in. rebuild refreshes the
+// list after an action completes.
+func (w *window) outboxRow(acct AccountInfo, it model.OutboxItem, showAccount bool, rebuild func()) *gtk.Box {
 	to, subject := outboxHeaders(it.RFC822)
 	if subject == "" {
 		subject = "(no subject)"
@@ -128,7 +158,11 @@ func (w *window) outboxRow(it model.OutboxItem, rebuild func()) *gtk.Box {
 	title.SetEllipsize(pango.EllipsizeEnd)
 	info.Append(title)
 
-	toLbl := gtk.NewLabel("To " + to)
+	toText := "To " + to
+	if showAccount {
+		toText += " — from " + acct.Email
+	}
+	toLbl := gtk.NewLabel(toText)
 	toLbl.SetXAlign(0)
 	toLbl.AddCSSClass("dim-label")
 	toLbl.AddCSSClass("caption")
@@ -151,13 +185,14 @@ func (w *window) outboxRow(it model.OutboxItem, rebuild func()) *gtk.Box {
 	row.Append(info)
 
 	id := it.ID
+	acctID := acct.ID // the account these rows were listed for
 	if w.deps.RetryOutbox != nil {
 		retry := gtk.NewButtonFromIconName("view-refresh-symbolic")
 		retry.SetTooltipText("Retry now")
+		a11yLabel(retry, "Retry now")
 		retry.SetVAlign(gtk.AlignCenter)
 		retry.AddCSSClass("flat")
 		retry.ConnectClicked(func() {
-			acctID := w.activeID
 			logging.Trace("ui: outbox retry item", "account", acctID, "id", id)
 			go func() {
 				err := w.deps.RetryOutbox(context.Background(), acctID, id)
@@ -177,10 +212,10 @@ func (w *window) outboxRow(it model.OutboxItem, rebuild func()) *gtk.Box {
 	if w.deps.DiscardOutbox != nil {
 		discard := gtk.NewButtonFromIconName("user-trash-symbolic")
 		discard.SetTooltipText("Discard")
+		a11yLabel(discard, "Discard")
 		discard.SetVAlign(gtk.AlignCenter)
 		discard.AddCSSClass("flat")
 		discard.ConnectClicked(func() {
-			acctID := w.activeID
 			logging.Trace("ui: outbox discard item", "account", acctID, "id", id)
 			go func() {
 				err := w.deps.DiscardOutbox(context.Background(), acctID, id)

@@ -4577,9 +4577,7 @@ func (w *window) onChange(c syncer.Change) {
 			w.refreshAccountUnread()
 		}
 	case syncer.SendStateChanged:
-		if c.AccountID == w.activeID {
-			w.refreshOutbox()
-		}
+		w.refreshOutbox() // the banner counts every account's outbox
 	case syncer.AuthExpired:
 		// The account's sign-in expired/was revoked; surface it (it won't recover
 		// without re-login) and name the account so multi-account users know which.
@@ -4873,6 +4871,16 @@ func setMargins(w gtk.Widgetter, start, end, top, bottom int) {
 	base.SetMarginEnd(end)
 	base.SetMarginTop(top)
 	base.SetMarginBottom(bottom)
+}
+
+// a11yLabel gives an icon-only control an accessible name so assistive
+// technologies announce its purpose (a symbolic icon carries no text of its
+// own; tooltips are not reliably exposed as names).
+func a11yLabel(w gtk.Widgetter, name string) {
+	gtk.BaseWidget(w).UpdateProperty(
+		[]gtk.AccessibleProperty{gtk.AccessiblePropertyLabel},
+		[]coreglib.Value{*coreglib.NewValue(name)},
+	)
 }
 
 func wrapHTML(inner string) string {
