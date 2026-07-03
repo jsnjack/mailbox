@@ -157,7 +157,7 @@ type window struct {
 	openThreadID   string
 	openThreadMsgs []model.Message
 	openMsg        model.Message
-	replyAllBtn    *adw.SplitButton // primary action; dropdown has Reply/Forward
+	replyBtn       *adw.SplitButton // primary action (Reply); dropdown has Reply all/Forward
 	aiReplyBtn     *gtk.MenuButton  // AI reply: popover of suggestions + intents
 	archiveBtn     *gtk.Button
 	translateBtn   *gtk.Button
@@ -542,7 +542,13 @@ func (w *window) addShortcuts() {
 		case '/':
 			w.searchEntry.GrabFocus()
 		case gdk.KEY_Escape:
-			w.goBack()
+			// Esc unwinds one layer at a time: selection mode first, then the
+			// collapsed-pane back navigation.
+			if w.selectMode && w.selectBtn != nil {
+				w.selectBtn.SetActive(false)
+			} else {
+				w.goBack()
+			}
 		case '?':
 			w.showShortcuts()
 		default:
@@ -1100,6 +1106,15 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 	w.searchEntry.SetPlaceholderText("Search cached messages")
 	setMargins(w.searchEntry, 6, 6, 6, 6)
 	w.searchEntry.ConnectSearchChanged(w.onSearchChanged)
+	// Esc in the search entry (stop-search) clears it, returning the list to the
+	// current label (the cleared text fires search-changed → refreshList("")).
+	w.searchEntry.ConnectStopSearch(func() {
+		if w.searchEntry.Text() == "" {
+			return
+		}
+		logging.Trace("ui: search cleared via Esc")
+		w.searchEntry.SetText("")
+	})
 
 	w.outboxBanner = adw.NewBanner("")
 	w.outboxBanner.SetButtonLabel("Outbox")
@@ -2259,17 +2274,19 @@ func (w *window) buildReader() *adw.NavigationPage {
 	hb := adw.NewHeaderBar()
 	hb.SetShowTitle(false) // "Reader" is redundant — drop it for a cleaner header
 
-	// Reply-all is the primary action; its dropdown offers Reply and Forward as a
-	// native menu model (so the items show their accelerators and read normally).
+	// Reply is the primary one-click action (every reference client defaults to
+	// Reply); Reply all and Forward live in the SplitButton's dropdown as a
+	// native menu model.
 	replyMenu := gio.NewMenu()
-	replyMenu.Append("Reply", "win.reader-reply")
+	replyMenu.Append("Reply all", "win.reader-reply-all")
 	replyMenu.Append("Forward", "win.reader-forward")
 
-	w.replyAllBtn = adw.NewSplitButton()
-	w.replyAllBtn.SetIconName("mail-reply-all-symbolic")
-	w.replyAllBtn.SetTooltipText("Reply all (dropdown: Reply, Forward)")
-	w.replyAllBtn.ConnectClicked(w.onReplyAll)
-	w.replyAllBtn.SetMenuModel(replyMenu)
+	w.replyBtn = adw.NewSplitButton()
+	w.replyBtn.SetIconName("mail-reply-sender-symbolic")
+	w.replyBtn.SetTooltipText("Reply (r) — dropdown: Reply all, Forward")
+	a11yLabel(w.replyBtn, "Reply")
+	w.replyBtn.ConnectClicked(w.onReply)
+	w.replyBtn.SetMenuModel(replyMenu)
 
 	w.archiveBtn = gtk.NewButtonFromIconName("mail-archive-symbolic")
 	w.archiveBtn.SetTooltipText("Archive (a)")
@@ -2308,7 +2325,7 @@ func (w *window) buildReader() *adw.NavigationPage {
 		btn.SetPopover(gtk.NewPopoverMenuFromModel(w.buildReaderMenuModel()))
 	})
 
-	hb.PackStart(w.replyAllBtn)
+	hb.PackStart(w.replyBtn)
 	if w.deps.Assistant != nil {
 		hb.PackStart(w.aiReplyBtn)
 	}
@@ -2329,7 +2346,7 @@ func (w *window) buildReader() *adw.NavigationPage {
 func (w *window) setActionsSensitive(on bool) {
 	canModify := on && w.deps.ModifyLabels != nil
 	w.archiveBtn.SetSensitive(canModify)
-	w.replyAllBtn.SetSensitive(on && w.deps.Send != nil)
+	w.replyBtn.SetSensitive(on && w.deps.Send != nil)
 	canAI := on && w.deps.Assistant != nil
 	w.translateBtn.SetSensitive(canAI)
 	if w.summaryBtn != nil {
@@ -3734,6 +3751,7 @@ func (w *window) registerReaderActions() {
 		w.win.AddAction(act)
 	}
 	add("reader-reply", w.onReply)
+	add("reader-reply-all", w.onReplyAll)
 	add("reader-forward", w.onForward)
 	add("reader-unread", w.onMarkUnread)
 	add("reader-move-inbox", w.onMoveToInbox)
