@@ -491,6 +491,12 @@ func TestIMAPCloseBarrier(t *testing.T) {
 	if _, err := b.FetchMetadata(ctx, ids[0]); err == nil {
 		t.Fatal("FetchMetadata succeeded after Close; expected a closed-backend error")
 	}
+	// And no release racing Close may have repooled a live connection into the
+	// drained pool — that would leak an authenticated session for the process
+	// lifetime (release/Close are serialized by closeMu).
+	if n := len(b.idle); n != 0 {
+		t.Fatalf("idle pool holds %d connections after Close and all releases; leaked", n)
+	}
 }
 
 func TestIMAPWatchStopsOnCancel(t *testing.T) {

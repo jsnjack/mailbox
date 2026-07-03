@@ -95,6 +95,11 @@ type Backend struct {
 	sem    chan struct{} // bounds live connections to poolSize
 	idle   chan *conn    // reusable idle connections
 	closed atomic.Bool   // set by Close so in-flight releases don't repool
+	// closeMu makes release's closed-check + repool atomic against Close's
+	// set-closed + drain. Without it a release racing Close can push a live,
+	// authenticated connection into the already-drained pool, leaking it (and
+	// its server-side session) for the life of the process.
+	closeMu sync.Mutex
 	stats  *Stats        // wire bytes transferred (IMAP + SMTP)
 
 	folderMu      sync.Mutex        // guards the folder caches below
@@ -268,14 +273,23 @@ func (b *Backend) acquire() (*conn, error) {
 // the next acquire re-dials). A connection released after Close is closed too,
 // not leaked into a drained pool.
 func (b *Backend) release(c *conn, healthy bool) {
-	if healthy && !b.closed.Load() {
-		select {
-		case b.idle <- c:
-			logging.Trace("imapbackend: pool release (repooled)", "account", b.cfg.Email, "selected", c.selected)
-			<-b.sem
-			return
-		default:
+	if healthy {
+		// The closed-check and the repool must be one atomic step with respect
+		// to Close (see closeMu): a push that lands before Close takes the lock
+		// is seen by its drain; after Close, the check below fails and the
+		// connection is closed here instead of leaking into a drained pool.
+		b.closeMu.Lock()
+		if !b.closed.Load() {
+			select {
+			case b.idle <- c:
+				b.closeMu.Unlock()
+				logging.Trace("imapbackend: pool release (repooled)", "account", b.cfg.Email, "selected", c.selected)
+				<-b.sem
+				return
+			default:
+			}
 		}
+		b.closeMu.Unlock()
 	}
 	logging.Trace("imapbackend: pool release (closing conn)", "account", b.cfg.Email, "healthy", healthy, "closed", b.closed.Load())
 	_ = c.cl.Close()
@@ -348,7 +362,11 @@ func (c *conn) reselect(mailbox string, condStore bool) (*imap.SelectData, error
 // goroutine and closes when its context is cancelled.
 func (b *Backend) Close() {
 	logging.Trace("imapbackend: close (draining pool)", "account", b.cfg.Email)
+	// Set closed under closeMu so no release can repool after the drain below
+	// starts — see release.
+	b.closeMu.Lock()
 	b.closed.Store(true)
+	b.closeMu.Unlock()
 	drained := 0
 	for {
 		select {
