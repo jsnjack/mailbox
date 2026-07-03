@@ -528,7 +528,7 @@ func (w *window) addShortcuts() {
 		case 't':
 			w.onTranslate()
 		case 'c':
-			if w.deps.Send != nil {
+			if w.deps.Send != nil && len(w.deps.Accounts) > 0 {
 				w.openCompose(model.OutgoingMessage{}, "", "New message")
 			}
 		case '/':
@@ -4501,21 +4501,42 @@ func (w *window) deferSend(accountID int64, msg model.OutgoingMessage) {
 	}()
 }
 
-// reallySend performs the actual send (after the undo window elapsed). On
-// failure engine.Send queues it to the outbox, surfaced via the outbox banner.
+// reallySend performs the actual send (after the undo window elapsed). When the
+// provider send fails, engine.Send queues the message to the outbox (surfaced
+// via the banner) — but an error BEFORE that enqueue (empty To, a MIME build
+// failure, no backend for the account, the queue write itself failing) stores
+// the message nowhere, so claiming "kept in Outbox" would silently drop mail.
+// That case reopens the compose with the content intact and says so plainly.
 func (w *window) reallySend(accountID int64, msg model.OutgoingMessage) {
 	logging.Trace("ui: send", "account", accountID, "to", msg.To, "subject", msg.Subject)
 	go func() {
 		err := w.deps.Send(context.Background(), accountID, msg)
 		logging.Trace("ui: send done", "account", accountID, "subject", msg.Subject, "err", err)
 		dispatch.Main(func() {
-			if err != nil {
-				slog.Warn("ui: send", "err", err)
+			switch {
+			case err == nil:
+				w.toast("Message sent")
+			case strings.Contains(err.Error(), "queued for retry"):
+				// engine.Send enqueued it; the background sweeper will retry.
+				// (Core follow-up: the engine should export a sentinel error for
+				// "queued" instead of this message match.)
+				slog.Warn("ui: send queued to outbox", "err", err)
 				w.toast("Send failed — kept in Outbox")
 				w.refreshOutbox()
-				return
+			default:
+				slog.Warn("ui: send failed before outbox enqueue", "err", err)
+				logging.Trace("ui: send failed pre-queue, reopening compose", "account", accountID, "subject", msg.Subject)
+				// Nothing was stored anywhere — put the message back in front of the
+				// user so it isn't lost, from the account it was being sent from.
+				w.openComposeOpts(msg, "", "Message", composeOpts{fromAccountID: accountID, startDirty: true})
+				alert := adw.NewAlertDialog("Message not sent",
+					"Sending failed: "+err.Error()+"\n\nThe message could not be kept in the Outbox, "+
+						"so it has been reopened — try again or save it as a draft.")
+				alert.AddResponse("ok", "OK")
+				alert.SetDefaultResponse("ok")
+				alert.SetCloseResponse("ok")
+				alert.Present(w.win)
 			}
-			w.toast("Message sent")
 		})
 	}()
 }

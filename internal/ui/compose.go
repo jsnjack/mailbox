@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"mime"
+	"net/mail"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -55,6 +56,13 @@ func (w *window) composeFromMailto(uri string) {
 	if !ok {
 		slog.Debug("ui: ignoring non-mailto open", "uri", uri)
 		logging.Trace("ui: compose from mailto ignored", "uri", uri)
+		return
+	}
+	// Zero-account (or read-only) state: openComposeOpts would silently no-op,
+	// which for an externally-clicked mailto: link looks like the app is broken.
+	if w.deps.Send == nil || len(w.deps.Accounts) == 0 {
+		logging.Trace("ui: compose from mailto skipped", "has_sender", w.deps.Send != nil, "accounts", len(w.deps.Accounts))
+		w.toast("Connect an account to send mail")
 		return
 	}
 	logging.Trace("ui: compose from mailto", "uri", uri, "to", msg.To, "subject", msg.Subject)
@@ -453,7 +461,40 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 		}
 		return ""
 	}
+	// recipientsError blocks the send outright (unlike preSendWarning, which only
+	// asks for confirmation): with no valid To the engine fails before its outbox
+	// enqueue, so the message would be silently lost after the window closed.
+	recipientsError := func() string {
+		to := strings.TrimSpace(toEntry.Text())
+		if to == "" {
+			return "Add at least one recipient in the To field."
+		}
+		for _, f := range []struct{ name, val string }{
+			{"To", to},
+			{"Cc", strings.TrimSpace(ccEntry.Text())},
+			{"Bcc", strings.TrimSpace(bccEntry.Text())},
+		} {
+			// A trailing comma (autocomplete inserts "addr, ") is not an error.
+			val := strings.Trim(f.val, ", ")
+			if val == "" {
+				continue
+			}
+			if _, err := mail.ParseAddressList(val); err != nil {
+				return fmt.Sprintf("The %s field has an invalid address (%q).", f.name, val)
+			}
+		}
+		return ""
+	}
 	send.ConnectClicked(func() {
+		if reason := recipientsError(); reason != "" {
+			logging.Trace("ui: compose send blocked", "reason", reason)
+			alert := adw.NewAlertDialog("Can't send yet", reason)
+			alert.AddResponse("ok", "OK")
+			alert.SetDefaultResponse("ok")
+			alert.SetCloseResponse("ok")
+			alert.Present(win)
+			return
+		}
 		if warn := preSendWarning(); warn != "" {
 			logging.Trace("ui: compose pre-send warning", "warning", warn)
 			confirm := adw.NewAlertDialog("Send anyway?", warn)
