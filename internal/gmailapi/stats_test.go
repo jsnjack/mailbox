@@ -29,11 +29,13 @@ func doVia(t *testing.T, url string, stall time.Duration) ([]byte, error) {
 // while offline hangs the reader" case.
 func TestStallWatchdogCancelsSilentServer(t *testing.T) {
 	hangCh := make(chan struct{})
-	defer close(hangCh)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		<-hangCh // accept the connection, never respond
 	}))
+	// Unblock the handler BEFORE srv.Close() (defers run LIFO) — Close waits
+	// for in-flight handlers, so the reverse order deadlocks the test.
 	defer srv.Close()
+	defer close(hangCh)
 
 	start := time.Now()
 	_, err := doVia(t, srv.URL, 300*time.Millisecond)
@@ -52,14 +54,15 @@ func TestStallWatchdogCancelsSilentServer(t *testing.T) {
 // cancelled too — progress before the stall doesn't excuse a dead connection.
 func TestStallWatchdogCancelsMidBodyStall(t *testing.T) {
 	hangCh := make(chan struct{})
-	defer close(hangCh)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("first chunk"))
 		w.(http.Flusher).Flush()
 		<-hangCh // then go silent
 	}))
+	// Unblock the handler before Close — see TestStallWatchdogCancelsSilentServer.
 	defer srv.Close()
+	defer close(hangCh)
 
 	_, err := doVia(t, srv.URL, 300*time.Millisecond)
 	if err == nil {
