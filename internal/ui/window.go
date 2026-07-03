@@ -159,17 +159,23 @@ type window struct {
 	openThreadID   string
 	openThreadMsgs []model.Message
 	openMsg        model.Message
-	openHeaders    string           // raw headers of the open (latest) message, for "View headers"
-	replyBtn       *adw.SplitButton // primary action (Reply); dropdown has Reply all/Forward
-	aiReplyBtn     *gtk.MenuButton  // AI reply: popover of suggestions + intents
-	archiveBtn     *gtk.Button
-	translateBtn   *gtk.Button
-	overflowBtn    *gtk.MenuButton   // star/unread/trash/images live here (native menu model)
-	starAction     *gio.SimpleAction // stateful: the open message's Starred toggle
-	imagesAction   *gio.SimpleAction // stateful: the reader's remote-images toggle
-	unreadAction   *gio.SimpleAction // stateful: the thread-list "show unread only" filter
-	imagesEnabled  bool              // whether remote images are loaded in the reader
-	blockImages    bool              // global default: block remote images (Preferences)
+	// renderCancel cancels an in-flight render goroutine when the user opens
+	// another thread or backs out — so a hung body fetch can't pin a stale
+	// goroutine for the full fetch timeout. Main-thread only (set/cancelled
+	// in renderConversation and clearReader, which both run on the main thread).
+	renderCancel    context.CancelFunc
+	openHeaders     string           // raw headers of the open (latest) message, for "View headers"
+	lastFetchFailed bool             // true if the last render had fetch failures (for retry menu item)
+	replyBtn        *adw.SplitButton // primary action (Reply); dropdown has Reply all/Forward
+	aiReplyBtn      *gtk.MenuButton  // AI reply: popover of suggestions + intents
+	archiveBtn      *gtk.Button
+	translateBtn    *gtk.Button
+	overflowBtn     *gtk.MenuButton   // star/unread/trash/images live here (native menu model)
+	starAction      *gio.SimpleAction // stateful: the open message's Starred toggle
+	imagesAction    *gio.SimpleAction // stateful: the reader's remote-images toggle
+	unreadAction    *gio.SimpleAction // stateful: the thread-list "show unread only" filter
+	imagesEnabled   bool              // whether remote images are loaded in the reader
+	blockImages     bool              // global default: block remote images (Preferences)
 
 	// AI inbox categorization: per-thread category cache (thread id → category),
 	// computed in the background for the inbox. inboxCategories gates it.
@@ -2932,6 +2938,10 @@ func (w *window) setActiveAccount(a AccountInfo) {
 // conversation, so stale actions can't target a thread from another account.
 func (w *window) clearReader() {
 	w.cancelMarkRead() // no thread open → nothing to mark read
+	if w.renderCancel != nil {
+		w.renderCancel()
+		w.renderCancel = nil
+	}
 	w.openThreadID = ""
 	w.openThreadMsgs = nil
 	w.openMsg = model.Message{}
@@ -3143,9 +3153,11 @@ func (w *window) openDraftForEdit(threadID string) {
 	go func() {
 		ctx := context.Background()
 		if !dm.BodyFetched && w.deps.FetchBody != nil {
-			if err := w.deps.FetchBody(ctx, dm.AccountID, dm.GmailID); err != nil {
+			fetchCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+			if err := w.deps.FetchBody(fetchCtx, dm.AccountID, dm.GmailID); err != nil {
 				slog.Warn("ui: fetch draft body", "id", dm.GmailID, "err", err)
 			}
+			cancel()
 		}
 		// Our drafts are text/plain — use the text verbatim so re-editing is
 		// lossless; fall back to HTML-reduced-to-text or the snippet.
@@ -3198,9 +3210,21 @@ func (w *window) renderConversation(msgs []model.Message) {
 		title += fmt.Sprintf("\n<span size=\"small\">%d messages</span>", len(msgs))
 	}
 	w.header.SetMarkup(title)
-	// No "Loading…" placeholder: the previous message stays put while bodies are
-	// fetched (the status bar reports progress), then loadReaderHTML swaps to the
-	// rendered thread behind the cover — so there's no blank/black flash.
+	// Show a loading placeholder immediately when bodies need fetching (not all
+	// cached), so the user sees their click registered instead of staring at the
+	// previous message for up to the fetch timeout. When all bodies are cached
+	// (the common case) the previous message stays (no flash) and the rendered
+	// thread swaps in near-instantly behind the cover.
+	needsFetch := w.deps.FetchBody != nil
+	for _, m := range msgs {
+		if !m.BodyFetched {
+			needsFetch = true
+			break
+		}
+	}
+	if needsFetch {
+		w.loadReaderHTML(loadingHTML())
+	}
 
 	threadID := w.openThreadID // guard against a newer thread being opened mid-render
 	// Snapshot already-rendered sections on the main thread; the goroutine reuses
@@ -3217,12 +3241,31 @@ func (w *window) renderConversation(msgs []model.Message) {
 		}
 	}
 	logging.Trace("ui: render conversation", "thread", threadID, "msgs", len(msgs), "cachedSections", len(cached))
+	// Cancel a still-running previous render (rapid thread open, a background
+	// refresh, a re-render) so its in-flight body fetches abort immediately
+	// instead of consuming a fetch-timeout of stale work.
+	if w.renderCancel != nil {
+		w.renderCancel()
+	}
+	renderCtx, cancelRender := context.WithCancel(context.Background())
+	w.renderCancel = cancelRender
 	go func() {
+		defer cancelRender()
 		start := time.Now()
-		ctx := context.Background()
-		// Fetch missing bodies concurrently (bounded); the Gmail client also caps
-		// in-flight requests and quota use.
+		// Bodies are fetched with a bounded timeout so a hung network call can't
+		// pin the reader on the previous message indefinitely — a dropped
+		// connection with no RST would otherwise block until the OS TCP keepalive
+		// reaps it (2+ hours). The HTTP client also has its own per-request timeout
+		// (see gmailapi.NewService); this render-level deadline recovers faster.
+		// renderCtx is cancelled when the user opens another thread, so in-flight
+		// fetches abort immediately on navigation.
+		// Local cache reads below use a fresh unbounded context: SQLite never
+		// blocks on the network, so a timed-out/cancelled fetch must not starve
+		// cached-body reads.
+		fetchCtx, cancelFetch := context.WithTimeout(renderCtx, 60*time.Second)
+		defer cancelFetch()
 		fetched := 0
+		fetchFailed := map[string]bool{} // gmailID → true when its body fetch failed
 		if w.deps.FetchBody != nil {
 			sem := make(chan struct{}, 6)
 			var wg sync.WaitGroup
@@ -3237,13 +3280,21 @@ func (w *window) renderConversation(msgs []model.Message) {
 					defer wg.Done()
 					defer func() { <-sem }()
 					logging.Trace("ui: fetch body", "id", m.GmailID, "account", m.AccountID)
-					if err := w.deps.FetchBody(ctx, m.AccountID, m.GmailID); err != nil {
+					if err := w.deps.FetchBody(fetchCtx, m.AccountID, m.GmailID); err != nil {
 						slog.Warn("ui: fetch body", "id", m.GmailID, "err", err)
+						fetchFailed[m.GmailID] = true
 					}
 				}(m)
 			}
 			wg.Wait()
 		}
+		// If a newer thread was opened (renderCtx cancelled), bail before the
+		// sanitization + UI swap — the newer render owns the reader.
+		if renderCtx.Err() != nil {
+			logging.Trace("ui: render conversation cancelled", "thread", threadID, "fetched", fetched)
+			return
+		}
+		ctx := context.Background()
 		fetchDur := time.Since(start)
 		sanitizeStart := time.Now()
 		var b strings.Builder
@@ -3264,7 +3315,7 @@ func (w *window) renderConversation(msgs []model.Message) {
 					blocked += cs.trackers
 					continue
 				}
-				sec, n := conversationSection(m, body, w.cleanHTML)
+				sec, n := conversationSection(m, body, w.cleanHTML, fetchFailed[m.GmailID])
 				fresh[m.GmailID] = cachedSection{html: sec, trackers: n}
 				b.WriteString(sec)
 				blocked += n
@@ -3276,7 +3327,7 @@ func (w *window) renderConversation(msgs []model.Message) {
 				continue
 			}
 			body := w.bodyForRender(ctx, m, refetched)
-			sec, n := conversationSection(m, body, w.cleanHTML)
+			sec, n := conversationSection(m, body, w.cleanHTML, fetchFailed[m.GmailID])
 			fresh[m.GmailID] = cachedSection{html: sec, trackers: n}
 			b.WriteString(sec)
 			blocked += n
@@ -3308,11 +3359,15 @@ func (w *window) renderConversation(msgs []model.Message) {
 			}
 			w.inlineByCID = inlineImgs // serveCID resolves cid: against this
 			w.openHeaders = latestAuth // raw headers of the latest message (for "View headers")
+			w.lastFetchFailed = len(fetchFailed) > 0
 			w.setTrackerCount(blocked)
 			w.setAuthBadge(verdict)
 			w.setCaution(warnings)
 			w.loadReaderHTML(wrapHTML(out))
 			w.showThreadAttachments(atts)
+			if w.lastFetchFailed {
+				w.toast("Couldn't load some message bodies — offline?")
+			}
 		})
 	}()
 }
@@ -3325,6 +3380,16 @@ func (w *window) loadReaderHTML(full string) {
 		w.readerCover.SetVisible(true)
 	}
 	w.webview.LoadHtml(full, "about:blank")
+}
+
+// loadingHTML returns a minimal, themed "Loading…" page shown while message
+// bodies are being fetched. It keeps the user informed instead of leaving the
+// previous message visible during a potentially long network fetch.
+func loadingHTML() string {
+	return `<!DOCTYPE html><html><head><meta charset="utf-8">
+<style>body{display:flex;align-items:center;justify-content:center;height:100vh;margin:0;
+font-family:sans-serif;color:#888;font-size:14px}</style></head>
+<body>Loading message…</body></html>`
 }
 
 // cachedSection is a message's rendered (sanitized, de-tracked, quote-collapsed)
@@ -3393,7 +3458,9 @@ func (w *window) invalidateSection(gmailID string) {
 
 // conversationSection renders one message's header + body and returns the HTML
 // plus how many trackers were stripped from it. clean sanitizes+de-tracks HTML.
-func conversationSection(m model.Message, body model.MessageBody, clean func(string) (string, int)) (string, int) {
+// fetchFailed, when true, inserts a styled notice that the body couldn't be
+// loaded (network error/timeout) so the snippet fallback isn't silent.
+func conversationSection(m model.Message, body model.MessageBody, clean func(string) (string, int), fetchFailed bool) (string, int) {
 	var hb strings.Builder
 	hb.WriteString(`<div style="border-top:1px solid #ddd;margin-top:18px;padding-top:8px;color:#555;font-size:90%">`)
 	fmt.Fprintf(&hb, `<b>%s</b>`, html.EscapeString(displayFrom(m)))
@@ -3417,7 +3484,11 @@ func conversationSection(m model.Message, body model.MessageBody, clean func(str
 	case body.Text != "":
 		return header + "<pre style=\"white-space:pre-wrap\">" + linkifyText(body.Text) + "</pre>", 0
 	default:
-		return header + "<p>" + linkifyText(m.Snippet) + "</p>", 0
+		notice := ""
+		if fetchFailed {
+			notice = `<p style="color:#a00;font-style:italic;margin-bottom:8px">⚠ Message body could not be loaded — you may be offline. Select "Retry loading" from the menu to try again.</p>`
+		}
+		return header + notice + "<p>" + linkifyText(m.Snippet) + "</p>", 0
 	}
 }
 
@@ -3431,11 +3502,16 @@ func (w *window) bodyForRender(ctx context.Context, m model.Message, refetched m
 	if w.needsInlineRefetch(ctx, m, body, refetched) {
 		logging.Trace("ui: inline re-fetch", "id", m.GmailID, "account", m.AccountID)
 		refetched[m.GmailID] = true
-		if err := w.deps.FetchBody(ctx, m.AccountID, m.GmailID); err != nil {
+		// Bound this ad-hoc refetch so a hung network call doesn't block the
+		// render indefinitely — ctx is unbounded (local SQLite reads), so a
+		// fresh deadline is created here for the one network hop.
+		fetchCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		if err := w.deps.FetchBody(fetchCtx, m.AccountID, m.GmailID); err != nil {
 			slog.Warn("ui: inline re-fetch", "id", m.GmailID, "err", err)
 		} else {
 			body, _ = w.deps.Store.GetBody(ctx, m.RowID)
 		}
+		cancel()
 	}
 	return body
 }
@@ -3866,6 +3942,7 @@ func (w *window) registerReaderActions() {
 	add("reader-copy-sender", w.onCopySender)
 	add("reader-view-headers", w.onViewHeaders)
 	add("reader-print", w.onPrint)
+	add("reader-retry", w.onRetryLoading)
 
 	w.starAction = gio.NewSimpleActionStateful("reader-star", nil, glib.NewVariantBoolean(false))
 	w.starAction.ConnectChangeState(func(v *glib.Variant) {
@@ -3933,6 +4010,11 @@ func (w *window) buildReaderMenuModel() *gio.Menu {
 	}
 	util.Append("Print…", "win.reader-print")
 	menu.AppendSection("", util)
+	if w.lastFetchFailed {
+		retry := gio.NewMenu()
+		retry.Append("Retry loading", "win.reader-retry")
+		menu.AppendSection("", retry)
+	}
 
 	img := gio.NewMenu()
 	img.Append("Show remote images", "win.reader-images")
@@ -4111,6 +4193,21 @@ func (w *window) rerenderOpenThread() {
 	w.renderConversation(w.openThreadMsgs)
 }
 
+// onRetryLoading re-opens the current thread to re-fetch bodies that failed on
+// the last render (network timeout, offline). Section cache entries for the
+// thread's messages are invalidated so the error-notice sections don't persist.
+func (w *window) onRetryLoading() {
+	if w.openThreadID == "" || len(w.openThreadMsgs) == 0 {
+		return
+	}
+	logging.Trace("ui: retry loading", "thread", w.openThreadID, "msgs", len(w.openThreadMsgs))
+	for _, m := range w.openThreadMsgs {
+		w.invalidateSection(m.GmailID)
+	}
+	w.lastFetchFailed = false
+	w.renderConversation(w.openThreadMsgs)
+}
+
 // onTranslate shows an English translation of the whole open conversation in
 // place, preserving each message's markup. Every message is translated and
 // cached per message id, so re-opening, reverting, or re-translating reuses the
@@ -4245,7 +4342,7 @@ func (w *window) showTranslatedConversation(msgs []model.Message) {
 	for i := len(msgs) - 1; i >= 0; i-- {
 		m := msgs[i]
 		body := model.MessageBody{HTML: w.translationCache[m.GmailID]}
-		sec, n := conversationSection(m, body, w.cleanHTML)
+		sec, n := conversationSection(m, body, w.cleanHTML, false)
 		b.WriteString(sec)
 		blocked += n
 	}

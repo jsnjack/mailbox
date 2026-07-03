@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"sync/atomic"
+	"time"
 
 	"github.com/jsnjack/mailbox/internal/logging"
 	"golang.org/x/oauth2"
@@ -49,6 +50,12 @@ func (c *Client) Stats() StatsSnapshot { return c.stats.Snapshot() }
 func NewService(ctx context.Context, ts oauth2.TokenSource, stats *Stats) (*gmail.Service, error) {
 	logging.TraceContext(ctx, "gmailapi: newService", "token_source", ts != nil)
 	httpClient := oauth2.NewClient(ctx, ts) // an *http.Client whose Transport adds auth
+	// Safety net: cap every individual HTTP request so a dropped connection (no
+	// FIN/RST received) can't block a caller indefinitely. A normal Gmail API
+	// call finishes in seconds; 2 minutes is generous yet bounded. When the
+	// deadline fires the error wraps context.DeadlineExceeded, which isRetryable
+	// treats as non-retryable — the call fails immediately instead of looping.
+	httpClient.Timeout = 2 * time.Minute
 	httpClient.Transport = &countingTransport{base: httpClient.Transport, stats: stats}
 	srv, err := gmail.NewService(ctx, option.WithHTTPClient(httpClient))
 	if err != nil {
