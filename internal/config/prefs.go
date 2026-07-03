@@ -21,6 +21,10 @@ type Prefs struct {
 	// of inbox mail. Default false (categorization on), stored inverted so the
 	// out-of-the-box behaviour is the zero value's opposite.
 	DisableInboxCategories bool `json:"disable_inbox_categories"`
+	// BodyRetentionDays prunes cached message bodies older than this many days
+	// (metadata is kept forever; a pruned body is re-fetched on open). 0 — the
+	// default — keeps bodies forever.
+	BodyRetentionDays int `json:"body_retention_days,omitempty"`
 }
 
 func prefsPath() (string, error) {

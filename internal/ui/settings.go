@@ -276,8 +276,46 @@ func (w *window) openSettings() {
 	})
 	dbRow.AddSuffix(compactBtn)
 
+	// Storage: body retention — prune cached bodies of old mail (metadata and
+	// header search stay; a pruned message re-fetches its body on open). The
+	// options map to days; index 0 keeps everything forever (the default).
+	retentionDays := []int{0, 365, 2 * 365, 5 * 365}
+	retentionRow := adw.NewComboRow()
+	retentionRow.SetTitle("Keep message bodies")
+	retentionRow.SetSubtitle("Older bodies are removed from the cache and re-downloaded when opened. Headers and search by sender/subject always stay.")
+	retentionRow.SetModel(gtk.NewStringList([]string{"Forever", "1 year", "2 years", "5 years"}))
+	prefs, _ := config.LoadPrefs()
+	for i, d := range retentionDays {
+		if d == prefs.BodyRetentionDays {
+			retentionRow.SetSelected(uint(i))
+		}
+	}
+	retentionRow.Connect("notify::selected", func() {
+		sel := int(retentionRow.Selected())
+		if sel < 0 || sel >= len(retentionDays) {
+			return
+		}
+		days := retentionDays[sel]
+		logging.Trace("ui: setting changed", "pref", "body_retention_days", "new", days)
+		savePref(func(p *config.Prefs) { p.BodyRetentionDays = days })
+		if days > 0 {
+			// Apply right away (the daily background pass also picks it up):
+			// prune in the background so the dialog stays responsive.
+			cutoff := time.Now().AddDate(0, 0, -days).Unix()
+			go func() {
+				n, err := w.deps.Store.PruneBodies(context.Background(), cutoff)
+				if err != nil {
+					slog.Warn("ui: prune bodies", "err", err)
+					return
+				}
+				logging.Trace("ui: prune bodies done", "count", n, "days", days)
+			}()
+		}
+	})
+
 	storageGroup := adw.NewPreferencesGroup()
 	storageGroup.SetTitle("Storage")
+	storageGroup.Add(retentionRow)
 	storageGroup.Add(clearRow)
 	storageGroup.Add(dbRow)
 

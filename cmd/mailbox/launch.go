@@ -223,6 +223,10 @@ func launchUI(mailto string) error {
 		}
 	}
 
+	// Body retention: when configured (Preferences → Storage), prune cached
+	// bodies older than the window shortly after launch and then daily.
+	go backgroundRetention(ctx, st)
+
 	// Cumulative metrics for the status bar: cache sizes + per-account API stats.
 	deps.Stats = func() ui.StatusStats {
 		s := ui.StatusStats{}
@@ -691,6 +695,64 @@ func backgroundSweep(ctx context.Context, engine *syncer.Engine, b backend.Backe
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+		}
+	}
+}
+
+// retentionDelay defers the first retention pass past launch so it never
+// competes with startup sync for the write lock; retentionInterval re-runs it
+// daily for a long-lived session. The pref is re-read every pass, so a changed
+// setting applies without a restart (Preferences also triggers an immediate
+// pass on change).
+const (
+	retentionDelay    = 2 * time.Minute
+	retentionInterval = 24 * time.Hour
+	// retentionVacuumMin is the pruned-message count from which a pass is worth
+	// a follow-up Vacuum — below it the freed pages aren't worth rewriting the
+	// whole DB file for; they'll be reused by new mail anyway.
+	retentionVacuumMin = 200
+)
+
+// backgroundRetention applies the body-retention preference (see
+// store.PruneBodies): old message bodies are cleared, metadata kept.
+func backgroundRetention(ctx context.Context, st *store.Store) {
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(retentionDelay):
+	}
+	ticker := time.NewTicker(retentionInterval)
+	defer ticker.Stop()
+	for {
+		runRetentionPass(ctx, st)
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// runRetentionPass prunes bodies older than the configured window (no-op when
+// retention is off) and compacts the DB when the pass freed enough to matter.
+func runRetentionPass(ctx context.Context, st *store.Store) {
+	prefs, err := config.LoadPrefs()
+	if err != nil || prefs.BodyRetentionDays <= 0 {
+		return
+	}
+	cutoff := time.Now().AddDate(0, 0, -prefs.BodyRetentionDays).Unix()
+	n, err := st.PruneBodies(ctx, cutoff)
+	if err != nil {
+		slog.Warn("body retention: prune", "err", err)
+		return
+	}
+	if n == 0 {
+		return
+	}
+	slog.Info("body retention: pruned old message bodies", "count", n, "days", prefs.BodyRetentionDays)
+	if n >= retentionVacuumMin {
+		if err := st.Vacuum(ctx); err != nil {
+			slog.Warn("body retention: vacuum", "err", err)
 		}
 	}
 }
