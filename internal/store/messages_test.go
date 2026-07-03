@@ -115,6 +115,64 @@ func TestUpsertMessagesBatch(t *testing.T) {
 	}
 }
 
+// TestUpsertSkipsFTSReindexOnLabelOnlyChange asserts a re-upsert that changes
+// only labels/flags (a mark-read/archive/star synced from another device) does
+// not re-tokenize the body, while a subject change and a body upsert still do.
+func TestUpsertSkipsFTSReindexOnLabelOnlyChange(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	acc := seedAccount(t, s)
+
+	var reindexed []int64
+	reindexFTSHook = func(rowID int64) { reindexed = append(reindexed, rowID) }
+	t.Cleanup(func() { reindexFTSHook = nil })
+
+	base := model.Message{
+		AccountID: acc, GmailID: "m1", ThreadID: "t1", InternalDate: time.Unix(100, 0),
+		Subject: "quarterly report", FromName: "Bob", FromAddr: "bob@example.com",
+		Snippet: "the numbers", Labels: []string{"INBOX", "UNREAD"}, IsUnread: true,
+	}
+	rowid, err := s.UpsertMessage(ctx, base)
+	if err != nil {
+		t.Fatalf("initial upsert: %v", err)
+	}
+	if len(reindexed) != 1 || reindexed[0] != rowid {
+		t.Fatalf("initial upsert should reindex once for rowid %d, got %v", rowid, reindexed)
+	}
+
+	// Attach a body so we can later confirm a skipped reindex leaves it searchable.
+	if err := s.UpsertBody(ctx, model.MessageBody{MessageRowID: rowid, Text: "supercalifragilistic body text"}); err != nil {
+		t.Fatalf("upsert body: %v", err)
+	}
+	reindexed = nil
+
+	// Re-upsert with only labels/flags changed (mark read): FTS columns identical,
+	// so no reindex.
+	labelOnly := base
+	labelOnly.Labels = []string{"INBOX"}
+	labelOnly.IsUnread = false
+	if _, err := s.UpsertMessage(ctx, labelOnly); err != nil {
+		t.Fatalf("label-only upsert: %v", err)
+	}
+	if len(reindexed) != 0 {
+		t.Fatalf("label-only re-upsert must not reindex FTS, got %v", reindexed)
+	}
+	// The body indexed by UpsertBody is intact (the skipped reindex didn't drop it).
+	if hits, err := s.Search(ctx, acc, "supercalifragilistic", 10); err != nil || len(hits) != 1 {
+		t.Fatalf("body search after label-only upsert: hits=%d err=%v", len(hits), err)
+	}
+
+	// A subject change is an FTS-relevant change, so it reindexes.
+	subjChange := labelOnly
+	subjChange.Subject = "annual report"
+	if _, err := s.UpsertMessage(ctx, subjChange); err != nil {
+		t.Fatalf("subject-change upsert: %v", err)
+	}
+	if len(reindexed) != 1 {
+		t.Fatalf("subject change must reindex once, got %v", reindexed)
+	}
+}
+
 func TestDeleteMessagesBatch(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()

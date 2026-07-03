@@ -72,8 +72,29 @@ func upsertMessageTx(ctx context.Context, tx *sql.Tx, m model.Message) (int64, e
 	if !m.InternalDate.IsZero() {
 		idate = m.InternalDate.Unix()
 	}
-	var rowid int64
+	// Read the current FTS-relevant columns (if the row exists) before the upsert
+	// so we can skip re-tokenizing when only labels/flags changed — the common case
+	// for a mark-read/archive/star synced from another device. A label-only
+	// re-upsert would otherwise re-index the full body every time.
+	var (
+		oldSubject, oldFromName, oldFromAddr, oldSnippet string
+		existed                                          bool
+	)
 	err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(subject,''), COALESCE(from_name,''), COALESCE(from_addr,''), COALESCE(snippet,'')
+		FROM messages WHERE account_id = ? AND gmail_id = ?`,
+		m.AccountID, m.GmailID).Scan(&oldSubject, &oldFromName, &oldFromAddr, &oldSnippet)
+	switch {
+	case err == nil:
+		existed = true
+	case errors.Is(err, sql.ErrNoRows):
+		existed = false
+	default:
+		return 0, fmt.Errorf("read prior fts columns %q: %w", m.GmailID, err)
+	}
+
+	var rowid int64
+	err = tx.QueryRowContext(ctx, `
 		INSERT INTO messages (
 			account_id, gmail_id, thread_id, internal_date, from_name, from_addr,
 			reply_to, to_addrs, cc_addrs, subject, snippet, rfc822_msgid, in_reply_to,
@@ -107,8 +128,18 @@ func upsertMessageTx(ctx context.Context, tx *sql.Tx, m model.Message) (int64, e
 			return 0, fmt.Errorf("insert label %q: %w", lbl, err)
 		}
 	}
-	if err := reindexFTS(ctx, tx, rowid); err != nil {
-		return 0, err
+	// Only re-index when a searchable column actually changed (or the message is
+	// new). The body isn't touched here, so if subject/from/snippet are unchanged
+	// the existing FTS row is already correct — skipping the DELETE+INSERT avoids
+	// re-tokenizing the full body on a label-only re-upsert. UpsertBody still
+	// reindexes unconditionally when body text arrives.
+	ftsChanged := !existed ||
+		oldSubject != m.Subject || oldFromName != m.FromName ||
+		oldFromAddr != m.FromAddr || oldSnippet != m.Snippet
+	if ftsChanged {
+		if err := reindexFTS(ctx, tx, rowid); err != nil {
+			return 0, err
+		}
 	}
 	return rowid, nil
 }
@@ -693,9 +724,17 @@ func (s *Store) loadLabels(ctx context.Context, rowID int64) ([]string, error) {
 	return out, rows.Err()
 }
 
+// reindexFTSHook, when non-nil, is called with each rowid reindexFTS runs for.
+// It is a test-only seam (nil in production, so a plain nil check per call) that
+// lets tests assert a label-only re-upsert does not re-tokenize the body.
+var reindexFTSHook func(rowID int64)
+
 // reindexFTS rebuilds the FTS row for a message from the current messages +
 // message_bodies state, so it stays correct whether metadata or body changed.
 func reindexFTS(ctx context.Context, tx *sql.Tx, rowID int64) error {
+	if reindexFTSHook != nil {
+		reindexFTSHook(rowID)
+	}
 	var subject, fromName, fromAddr, snippet, body sql.NullString
 	err := tx.QueryRowContext(ctx, `
 		SELECT m.subject, m.from_name, m.from_addr, m.snippet, COALESCE(b.body_text, '')
