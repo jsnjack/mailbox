@@ -98,12 +98,19 @@ func (e *Engine) SyncLabels(ctx context.Context, b backend.Backend, accountID in
 // max (0 = all), fetches each message's metadata concurrently, and upserts it.
 // Individual fetch failures are logged and skipped; it returns the number stored.
 func (e *Engine) Backfill(ctx context.Context, b backend.Backend, accountID int64, query string, max int) (int, error) {
+	stored, err := e.backfill(ctx, b, accountID, query, max)
+	return len(stored), err
+}
+
+// backfill is Backfill's body; it returns the ids actually committed so Resync
+// can seed an honest cursor (see backend.CursorSeeder).
+func (e *Engine) backfill(ctx context.Context, b backend.Backend, accountID int64, query string, max int) ([]string, error) {
 	start := time.Now()
 	logging.TraceContext(ctx, "syncer: Backfill start", "account", accountID, "query", query, "max", max, "workers", backfillWorkers)
 	ids, err := b.SearchIDs(ctx, query, max)
 	if err != nil {
 		logging.TraceContext(ctx, "syncer: Backfill list ids failed", "account", accountID, "query", query, "err", err)
-		return 0, fmt.Errorf("list message ids: %w", err)
+		return nil, fmt.Errorf("list message ids: %w", err)
 	}
 	logging.TraceContext(ctx, "syncer: Backfill listed ids", "account", accountID, "count", len(ids))
 
@@ -152,7 +159,7 @@ func (e *Engine) Backfill(ctx context.Context, b backend.Backend, accountID int6
 		}
 	}()
 
-	stored := 0
+	var stored []string
 	batch := make([]model.Message, 0, backfillBatch)
 	flush := func() error {
 		if len(batch) == 0 {
@@ -162,9 +169,11 @@ func (e *Engine) Backfill(ctx context.Context, b backend.Backend, accountID int6
 		if err := e.Store.UpsertMessages(ctx, batch); err != nil {
 			return fmt.Errorf("backfill upsert: %w", err)
 		}
-		stored += len(batch)
-		logging.TraceContext(ctx, "syncer: Backfill batch committed", "account", accountID, "batch", len(batch), "stored", stored, "dur", time.Since(bstart))
-		e.publish(Change{Kind: BackfillProgress, AccountID: accountID, Count: stored})
+		for _, m := range batch {
+			stored = append(stored, m.GmailID)
+		}
+		logging.TraceContext(ctx, "syncer: Backfill batch committed", "account", accountID, "batch", len(batch), "stored", len(stored), "dur", time.Since(bstart))
+		e.publish(Change{Kind: BackfillProgress, AccountID: accountID, Count: len(stored)})
 		batch = batch[:0]
 		return nil
 	}
@@ -181,16 +190,16 @@ func (e *Engine) Backfill(ctx context.Context, b backend.Backend, accountID int6
 		}
 	}
 	if flushErr != nil {
-		logging.TraceContext(ctx, "syncer: Backfill aborted", "account", accountID, "stored", stored, "dur", time.Since(start), "err", flushErr)
+		logging.TraceContext(ctx, "syncer: Backfill aborted", "account", accountID, "stored", len(stored), "dur", time.Since(start), "err", flushErr)
 		return stored, flushErr
 	}
 	if err := flush(); err != nil {
-		logging.TraceContext(ctx, "syncer: Backfill final flush failed", "account", accountID, "stored", stored, "dur", time.Since(start), "err", err)
+		logging.TraceContext(ctx, "syncer: Backfill final flush failed", "account", accountID, "stored", len(stored), "dur", time.Since(start), "err", err)
 		return stored, err
 	}
 
-	e.publish(Change{Kind: BackfillComplete, AccountID: accountID, Count: stored})
-	logging.TraceContext(ctx, "syncer: Backfill complete", "account", accountID, "total", stored, "dur", time.Since(start), "ctxErr", ctx.Err())
+	e.publish(Change{Kind: BackfillComplete, AccountID: accountID, Count: len(stored)})
+	logging.TraceContext(ctx, "syncer: Backfill complete", "account", accountID, "total", len(stored), "dur", time.Since(start), "ctxErr", ctx.Err())
 	return stored, ctx.Err()
 }
 
@@ -789,6 +798,11 @@ func (e *Engine) Incremental(ctx context.Context, b backend.Backend, accountID i
 // never advances past un-fetched history). Deletions made while the watermark was
 // expired aren't reconciled — incremental handles deletions going forward, and a
 // full-mailbox id diff isn't worth its cost here.
+//
+// A backend whose cursor enumerates message state rather than a change log
+// (backend.CursorSeeder — IMAP) instead gets its cursor built from exactly the
+// ids the backfill stored: seeding from the pre-backfill Profile snapshot would
+// mark every UID the cap skipped as already-seen, hiding them forever.
 func (e *Engine) Resync(ctx context.Context, b backend.Backend, accountID int64, max int) (int, error) {
 	start := time.Now()
 	logging.TraceContext(ctx, "syncer: Resync start", "account", accountID, "max", max)
@@ -799,10 +813,20 @@ func (e *Engine) Resync(ctx context.Context, b backend.Backend, accountID int64,
 	}
 	watermark := prof.Cursor
 	logging.TraceContext(ctx, "syncer: Resync captured watermark", "account", accountID, "historyId", watermark)
-	n, err := e.Backfill(ctx, b, accountID, "", max)
+	storedIDs, err := e.backfill(ctx, b, accountID, "", max)
+	n := len(storedIDs)
 	if err != nil {
 		logging.TraceContext(ctx, "syncer: Resync backfill failed", "account", accountID, "stored", n, "err", err)
 		return n, fmt.Errorf("resync: backfill: %w", err)
+	}
+	if seeder, ok := b.(backend.CursorSeeder); ok {
+		cur, serr := seeder.SeedCursor(ctx, storedIDs)
+		if serr != nil {
+			logging.TraceContext(ctx, "syncer: Resync seed cursor failed", "account", accountID, "err", serr)
+			return n, fmt.Errorf("resync: seed cursor: %w", serr)
+		}
+		logging.TraceContext(ctx, "syncer: Resync using seeded cursor (backfilled ids only)", "account", accountID, "stored", n, "cursor_bytes", len(cur))
+		watermark = cur
 	}
 	if err := e.Store.SetSyncCursor(ctx, accountID, watermark); err != nil {
 		logging.TraceContext(ctx, "syncer: Resync set cursor failed", "account", accountID, "historyId", watermark, "err", err)

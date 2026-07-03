@@ -37,6 +37,21 @@ type Profile struct {
 	Cursor string // opaque incremental-sync watermark (Gmail: historyId)
 }
 
+// CursorSeeder is an optional Backend capability for providers whose sync
+// cursor enumerates message state (IMAP's per-folder UID sets) rather than
+// naming a point in a server-side change log (Gmail's historyId). After an
+// initial — possibly capped — backfill, SeedCursor builds a cursor covering
+// exactly the ids that were actually stored, so anything the cap skipped
+// surfaces as "new" on the next incremental pass instead of being marked
+// already-seen and swallowed forever. Backends without it (Gmail) keep the
+// Profile cursor, which is safe there: history replays changes regardless of
+// what was backfilled.
+type CursorSeeder interface {
+	// SeedCursor returns the cursor to persist after backfilling exactly
+	// backfilledIDs.
+	SeedCursor(ctx context.Context, backfilledIDs []string) (string, error)
+}
+
 // Watcher is an optional Backend capability: a provider that can push change
 // notifications (IMAP IDLE) implements it so the app reacts in near-real-time
 // instead of waiting for the next poll. Providers without it (Gmail REST) are

@@ -1,6 +1,7 @@
 package imapbackend
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -154,6 +155,40 @@ func (b *Backend) buildProfileCursor(c *conn) (string, error) {
 		}
 		cur.Folders[f] = st
 	}
+	return cur.encode(), nil
+}
+
+// SeedCursor implements backend.CursorSeeder: it builds the initial sync cursor
+// from exactly the ids the engine backfilled, so the per-folder UID sets are
+// honest — a message the backfill cap skipped is absent from the cursor and
+// surfaces as "new" on the next incremental pass, instead of being marked
+// already-seen and hidden forever (the failure mode of seeding from Profile's
+// full-mailbox snapshot). Folders with nothing backfilled simply have no entry:
+// their whole content diffs as new later. ModSeq is left 0, so the first
+// incremental uses the full-diff path rather than trusting a pre-backfill
+// CONDSTORE watermark.
+func (b *Backend) SeedCursor(ctx context.Context, backfilledIDs []string) (string, error) {
+	logging.TraceContext(ctx, "imapbackend: seed cursor", "account", b.cfg.Email, "n", len(backfilledIDs))
+	cur := cursor{Folders: map[string]folderState{}}
+	epochs := map[string]int{} // per-mailbox distinct-epoch count, for the sanity trace
+	for key, uids := range groupByFolder(backfilledIDs) {
+		epochs[key.mailbox]++
+		st, ok := cur.Folders[key.mailbox]
+		// A mailbox should only ever appear under one UIDVALIDITY in a single
+		// backfill; if a mid-backfill renumber produced two epochs, keep the larger
+		// set (the next incremental's UIDVALIDITY check reconciles either way).
+		if ok && len(decodeUIDs(st.UIDs)) >= len(uids) {
+			continue
+		}
+		sort.Slice(uids, func(i, j int) bool { return uids[i] < uids[j] })
+		cur.Folders[key.mailbox] = folderState{UIDValidity: key.uidv, UIDs: encodeUIDs(uids)}
+	}
+	for mb, n := range epochs {
+		if n > 1 {
+			logging.TraceContext(ctx, "imapbackend: seed cursor saw multiple uidvalidity epochs; kept largest", "account", b.cfg.Email, "mailbox", mb, "epochs", n)
+		}
+	}
+	logging.TraceContext(ctx, "imapbackend: seed cursor ok", "account", b.cfg.Email, "folders", len(cur.Folders))
 	return cur.encode(), nil
 }
 

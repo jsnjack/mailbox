@@ -151,6 +151,39 @@ func TestSearchIDsFromCriteria(t *testing.T) {
 	}
 }
 
+// A cursor seeded from a capped backfill must cover only the backfilled ids:
+// the first incremental pass then surfaces every skipped message as new,
+// instead of the old Profile-snapshot seeding that marked them already-seen
+// (invisible forever).
+func TestSeedCursorSurfacesSkippedMessages(t *testing.T) {
+	b := startSearchServer(t) // 5 messages: INBOX×2 (priority), Work×1, AAA×2
+	ctx := context.Background()
+
+	backfilled, err := b.SearchIDs(ctx, "", 2) // capped: INBOX only
+	if err != nil {
+		t.Fatalf("SearchIDs capped: %v", err)
+	}
+	cur, err := b.SeedCursor(ctx, backfilled)
+	if err != nil {
+		t.Fatalf("SeedCursor: %v", err)
+	}
+	up, del, _, err := b.Changes(ctx, cur)
+	if err != nil {
+		t.Fatalf("Changes: %v", err)
+	}
+	if len(del) != 0 {
+		t.Fatalf("first incremental reported deletes %v, want none", del)
+	}
+	if len(up) != 3 {
+		t.Fatalf("first incremental surfaced %d new ids %v, want the 3 the cap skipped", len(up), up)
+	}
+	for _, id := range up {
+		if strings.HasSuffix(id, ":INBOX") {
+			t.Fatalf("already-backfilled INBOX id %q re-reported as new (ids=%v)", id, up)
+		}
+	}
+}
+
 // A capped backfill must fill with INBOX before alphabetically-earlier folders,
 // or a fresh account's cap can be eaten entirely by an archive folder and the
 // inbox never appears.
