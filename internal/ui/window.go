@@ -133,6 +133,9 @@ type window struct {
 	// refreshGen increments on every list query; an async query whose result
 	// arrives after a newer one was issued is discarded (last request wins).
 	refreshGen uint64
+	// labelsGen is the same last-request-wins guard for loadLabels, whose store
+	// queries run off the main thread.
+	labelsGen uint64
 	// notifyQueue coalesces new-mail notification checks from a burst of
 	// MessageUpserted events: ids collect here (main thread) and are looked up in
 	// one background pass, instead of one main-thread GetMessage per event.
@@ -2714,23 +2717,51 @@ func (w *window) forwardAttachments(ctx context.Context, m model.Message) []mode
 
 // loadLabels rebuilds the sidebar: the curated standard folders first (only those
 // the account actually has), then the user's own labels under a heading. Raw
-// Gmail system labels that aren't folders are omitted.
+// Gmail system labels that aren't folders are omitted. The store queries run off
+// the main thread (this fires on every coalesced sync refresh, and main-thread
+// SQL stalls scale with mailbox size); the widget rebuild is dispatched back,
+// guarded by labelsGen so overlapping reloads apply last-request-wins.
 func (w *window) loadLabels() {
-	defer func(start time.Time) { slog.Debug("ui: loadLabels", "dur", time.Since(start)) }(time.Now())
-	ctx := context.Background()
-	labels, err := w.deps.Store.ListLabels(ctx, w.activeID)
-	if err != nil {
-		slog.Error("ui: load labels", "err", err)
-		return
+	w.labelsGen++
+	gen := w.labelsGen
+	acct := w.activeID
+	ids := make([]int64, 0, len(w.deps.Accounts))
+	for _, a := range w.deps.Accounts {
+		ids = append(ids, a.ID)
 	}
+	go func() {
+		start := time.Now()
+		ctx := context.Background()
+		labels, err := w.deps.Store.ListLabels(ctx, acct)
+		if err != nil {
+			slog.Error("ui: load labels", "err", err)
+			return
+		}
+		// Per-account unread-inbox counts in one query (feeds the inbox badge,
+		// the account pills, and the title).
+		counts, err := w.deps.Store.UnreadCountByLabelForAccounts(ctx, ids, model.LabelInbox)
+		if err != nil {
+			slog.Warn("ui: account unread counts", "err", err)
+			counts = map[int64]int{}
+		}
+		dispatch.Main(func() {
+			slog.Debug("ui: loadLabels", "dur", time.Since(start))
+			if gen != w.labelsGen || acct != w.activeID {
+				logging.Trace("ui: load labels superseded", "gen", gen, "account", acct)
+				return // a newer reload (or an account switch) owns the sidebar
+			}
+			w.applySidebar(labels, counts)
+		})
+	}()
+}
+
+// applySidebar renders loadLabels' query results into the sidebar widgets.
+// Main thread only.
+func (w *window) applySidebar(labels []model.Label, counts map[int64]int) {
 	have := make(map[string]bool, len(labels))
 	for _, l := range labels {
 		have[l.GmailID] = true
 	}
-
-	// Per-account unread-inbox counts in one query (feeds the inbox badge, the
-	// account pills, and the title).
-	counts := w.accountUnreadInbox(ctx)
 	inboxCount := counts[w.activeID]
 
 	// Rebuild the sidebar widgets only when its structure or the inbox badge
@@ -2794,20 +2825,6 @@ func (w *window) sidebarSignature(labels []model.Label, have map[string]bool, in
 		}
 	}
 	return b.String()
-}
-
-// accountUnreadInbox returns each account's unread-inbox count (one query).
-func (w *window) accountUnreadInbox(ctx context.Context) map[int64]int {
-	ids := make([]int64, 0, len(w.deps.Accounts))
-	for _, a := range w.deps.Accounts {
-		ids = append(ids, a.ID)
-	}
-	counts, err := w.deps.Store.UnreadCountByLabelForAccounts(ctx, ids, model.LabelInbox)
-	if err != nil {
-		slog.Warn("ui: account unread counts", "err", err)
-		return map[int64]int{}
-	}
-	return counts
 }
 
 // applyAccountUnread updates the per-account pills and the window title from a
