@@ -10,6 +10,7 @@ import (
 	"github.com/jsnjack/mailbox/internal/config"
 	"github.com/jsnjack/mailbox/internal/gmailapi"
 	"github.com/jsnjack/mailbox/internal/gmailbackend"
+	"github.com/jsnjack/mailbox/internal/logging"
 	"github.com/jsnjack/mailbox/internal/model"
 	"github.com/jsnjack/mailbox/internal/store"
 	"github.com/jsnjack/mailbox/internal/syncer"
@@ -72,11 +73,23 @@ func runSync(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	accID, err := st.UpsertAccount(ctx, model.Account{
+	// Only seed the cursor for a brand-new account. An existing account keeps its
+	// stored watermark (same rule as the launcher's upsertAccountKeepingCursor):
+	// overwriting it with the current historyId would silently skip every change
+	// between the old watermark and now.
+	acct := model.Account{
 		Email:      email,
 		Type:       model.AccountGmail,
 		SyncCursor: fmt.Sprintf("%d", prof.HistoryId),
-	})
+	}
+	if existing, err := st.GetAccountByEmail(ctx, email); err == nil {
+		logging.Trace("sync: existing account; keeping stored cursor", "account", email, "cursor", existing.SyncCursor)
+		acct = existing // preserve cursor, backfilled_at, scopes, display name
+		acct.Type = model.AccountGmail
+	} else {
+		logging.Trace("sync: new account; seeding cursor from profile", "account", email, "historyId", prof.HistoryId)
+	}
+	accID, err := st.UpsertAccount(ctx, acct)
 	if err != nil {
 		return err
 	}
