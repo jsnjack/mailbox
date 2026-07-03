@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"html"
 	"log/slog"
@@ -104,9 +105,13 @@ type window struct {
 	threadStack *gtk.Stack      // "list" vs "empty" placeholder
 	emptyPage   *adw.StatusPage // the "empty" placeholder (text set per context)
 	readerStack *gtk.Stack      // "message" vs "empty" placeholder
-	readerCover *gtk.Box        // opaque cover over the webview during a load (hides the swap flash)
-	listMenuBtn *gtk.MenuButton // thread-list overflow (unread-only filter + mark-all-read)
-	unreadOnly  bool
+	// readerReady flips when the shell page reports __mbSet is installed;
+	// content set before that is parked in pendingReaderHTML (latest wins) and
+	// flushed by the shell-ready handler in buildReader.
+	readerReady       bool
+	pendingReaderHTML *string
+	listMenuBtn       *gtk.MenuButton // thread-list overflow (unread-only filter + mark-all-read)
+	unreadOnly        bool
 	// multi-select triage: a selection mode with per-row checkboxes and a bulk
 	// action bar.
 	selectBtn         *gtk.ToggleButton
@@ -2222,43 +2227,35 @@ func (w *window) buildReader() *adw.NavigationPage {
 	// otherwise inflate the page to tens of MB and stall WebKit's parse.
 	w.webview.Context().RegisterURIScheme("cid", w.serveCID)
 	w.sectionCache = make(map[string]cachedSection)
-	// Paint an opaque white page background (matches email content + the light
-	// wrapper). The cover (below) hides the widget-level swap flash.
+	// Paint an opaque white page background (matches email content + the shell).
 	white := gdk.NewRGBA(1, 1, 1, 1)
 	w.webview.SetBackgroundColor(&white)
-	// While a page loads, WebKit's content swap can flash black at the widget
-	// level (the page background-color above doesn't cover it). Keep the WebView
-	// mapped (so it keeps rendering) and mask the swap with an opaque white cover
-	// shown during the load and hidden once the new page has PAINTED.
-	//
-	// The reveal must be first-paint-driven: LoadCommitted fires before WebKit
-	// composites a single frame of the new page (revealing there flashes the
-	// cleared-black GL surface — the flicker this cover exists to prevent), while
-	// LoadFinished waits for every subresource (a slow remote image would pin the
-	// cover long after the text is readable). WebKitGTK has no first-paint
-	// signal, so the injected page script reports it: two requestAnimationFrames
-	// after setup — i.e. one full composited frame — it posts to the "painted"
-	// message handler (see wrapHTML/loadingHTML), and the cover drops onto a
-	// frame that provably exists.
+	// The reader never navigates after this one shell load. A LoadHtml per
+	// conversation made WebKit tear down the page's composited layer tree and
+	// hand GTK an empty (black) GPU buffer until the new page's first frame
+	// arrived — the flicker two earlier fixes (a white view background, then a
+	// white cover over the swap) could only partially mask, because the black
+	// frame sits below every background color and no reveal signal is exactly
+	// first-paint. Instead the shell page loads once, and each conversation is
+	// swapped into it via script (setReaderHTML → __mbSet, an innerHTML swap):
+	// no navigation, no surface teardown, nothing to flash. The shell reports
+	// readiness on the script-message channel; content set before that is
+	// queued and flushed here.
 	ucm := w.webview.UserContentManager()
-	ucm.RegisterScriptMessageHandler(paintedHandler, "")
+	ucm.RegisterScriptMessageHandler(shellReadyHandler, "")
 	ucm.ConnectScriptMessageReceived(func(*javascriptcore.Value) {
-		logging.Trace("ui: reader first paint; dropping swap cover")
-		if w.readerCover != nil {
-			w.readerCover.SetVisible(false)
-		}
-	})
-	w.webview.ConnectLoadChanged(func(e webkit.LoadEvent) {
-		// Fallback only: a page whose script never ran (a load error page, the
-		// initial about:blank) still releases the cover at LoadFinished.
-		if e == webkit.LoadFinished && w.readerCover != nil {
-			w.readerCover.SetVisible(false)
+		logging.Trace("ui: reader shell ready", "pending", w.pendingReaderHTML != nil)
+		w.readerReady = true
+		if w.pendingReaderHTML != nil {
+			inner := *w.pendingReaderHTML
+			w.pendingReaderHTML = nil
+			w.setReaderHTML(inner)
 		}
 	})
 	settings := w.webview.Settings()
 	// JavaScript is enabled only so the injected fit-to-width script can run.
 	// Defense in depth keeps it safe: bodies are sanitized (no email scripts
-	// survive), and wrapHTML sets a strict CSP — script-src is locked to our
+	// survive), and the shell page (readerShellHTML) sets a strict CSP — script-src is locked to our
 	// per-render nonce and default-src 'none' blocks all network (no fetch/XHR
 	// exfiltration, no iframes), so only our own script ever executes.
 	settings.SetEnableJavascript(true)
@@ -2333,20 +2330,11 @@ func (w *window) buildReader() *adw.NavigationPage {
 	box.Append(w.cautionLabel)
 	box.Append(w.trackerLabel)
 
-	// The WebView sits under an opaque cover (shown during loads) so a content
-	// swap never flashes black; the WebView stays mapped so it keeps rendering.
-	w.readerCover = gtk.NewBox(gtk.OrientationVertical, 0)
-	w.readerCover.AddCSSClass("reader-cover")
-	w.readerCover.SetHAlign(gtk.AlignFill)
-	w.readerCover.SetVAlign(gtk.AlignFill)
-	w.readerCover.SetCanTarget(false) // never intercept input
-	w.readerCover.SetVisible(false)
-	overlay := gtk.NewOverlay()
-	overlay.SetVExpand(true)
-	overlay.SetHExpand(true)
-	overlay.SetChild(w.webview)
-	overlay.AddOverlay(w.readerCover)
-	box.Append(overlay)
+	box.Append(w.webview)
+
+	// The one and only navigation: load the empty shell page that every
+	// conversation is swapped into (see setReaderHTML).
+	w.webview.LoadHtml(readerShellHTML(), "about:blank")
 
 	// The reader's empty state is just a centered, dimmed envelope — no text.
 	empty := gtk.NewImageFromIconName("mail-unread-symbolic")
@@ -3262,7 +3250,7 @@ func (w *window) renderConversation(msgs []model.Message) {
 		}
 	}
 	if needsFetch {
-		w.loadReaderHTML(loadingHTML())
+		w.setReaderHTML(loadingInner)
 	}
 
 	threadID := w.openThreadID // guard against a newer thread being opened mid-render
@@ -3414,7 +3402,7 @@ func (w *window) renderConversation(msgs []model.Message) {
 			w.setTrackerCount(blocked)
 			w.setAuthBadge(verdict)
 			w.setCaution(warnings)
-			w.loadReaderHTML(wrapHTML(out))
+			w.setReaderHTML(out)
 			w.showThreadAttachments(atts)
 			if w.lastFetchFailed {
 				w.toast("Couldn't load some message bodies — offline?")
@@ -3423,37 +3411,35 @@ func (w *window) renderConversation(msgs []model.Message) {
 	}()
 }
 
-// loadReaderHTML loads fully-wrapped HTML into the reader, raising the opaque
-// cover first so WebKit's content swap doesn't flash black; the cover is dropped
-// when the load finishes (see the load-changed handler in buildReader).
-func (w *window) loadReaderHTML(full string) {
-	if w.readerCover != nil {
-		w.readerCover.SetVisible(true)
+// setReaderHTML swaps inner (sanitized conversation HTML) into the persistent
+// shell page via script — an innerHTML swap, never a navigation, so WebKit
+// never tears down its composited surface and the reader cannot flash black
+// (see buildReader). Content set before the shell reported ready is queued;
+// only the latest queued content matters, so a newer set replaces it.
+func (w *window) setReaderHTML(inner string) {
+	if !w.readerReady {
+		logging.Trace("ui: reader shell not ready; queueing content", "bytes", len(inner))
+		w.pendingReaderHTML = &inner
+		return
 	}
-	w.webview.LoadHtml(full, "about:blank")
+	// json.Marshal produces a valid JS string literal (quotes, escapes, and
+	// HTML-unsafe characters like <, U+2028/9 escaped), so the HTML rides into
+	// __mbSet as data with nothing to inject.
+	quoted, err := json.Marshal(inner)
+	if err != nil { // can't happen for a string; keep the reader honest anyway
+		slog.Error("ui: set reader html", "err", err)
+		return
+	}
+	evalJS(w.webview, "window.__mbSet("+string(quoted)+");")
 }
 
-// paintedHandler is the script-message channel every reader page reports its
-// first composited frame on; buildReader drops the swap cover when it fires.
-const paintedHandler = "painted"
+// shellReadyHandler is the script-message channel the reader shell announces
+// itself on once __mbSet is installed; buildReader flushes queued content then.
+const shellReadyHandler = "shellready"
 
-// paintedJS posts to the painted handler two requestAnimationFrames from now —
-// the second rAF can only run after the first frame was actually composited,
-// so receiving it proves the page is on screen and the cover can drop without
-// exposing WebKit's cleared-black surface. try/catch keeps the page harmless
-// in a view with no handler registered.
-const paintedJS = `var p=function(){try{window.webkit.messageHandlers.painted.postMessage(true);}catch(e){}};` +
-	`requestAnimationFrame(function(){requestAnimationFrame(p);});`
-
-// loadingHTML returns a minimal, themed "Loading…" page shown while message
-// bodies are being fetched. It keeps the user informed instead of leaving the
-// previous message visible during a potentially long network fetch.
-func loadingHTML() string {
-	return `<!DOCTYPE html><html><head><meta charset="utf-8">
-<style>body{display:flex;align-items:center;justify-content:center;height:100vh;margin:0;
-font-family:sans-serif;color:#888;font-size:14px}</style></head>
-<body>Loading message…<script>` + paintedJS + `</script></body></html>`
-}
+// loadingInner is the reader content shown while message bodies are being
+// fetched — swapped into the shell like any conversation, so no navigation.
+const loadingInner = `<div style="display:flex;align-items:center;justify-content:center;height:80vh;color:#888;font-size:14px">Loading message…</div>`
 
 // cachedSection is a message's rendered (sanitized, de-tracked, quote-collapsed)
 // section HTML plus its blocked-tracker count. Sections are immutable once a
@@ -4313,7 +4299,7 @@ func (w *window) onTranslate() {
 	w.translationBanner.SetTitle("Translating…")
 	w.translationBanner.SetRevealed(true)
 	// Keep the original showing while translating (the banner says "Translating…");
-	// loadReaderHTML swaps to the translation behind the cover when it's ready.
+	// setReaderHTML swaps to the translation in place when it's ready.
 	done := w.aiActivity("Translating")
 
 	go func() {
@@ -4380,7 +4366,7 @@ func (w *window) onTranslate() {
 				return // user switched conversations or reverted
 			}
 			if firstErr != nil {
-				w.loadReaderHTML(wrapHTML("<p>Translation failed: " + html.EscapeString(firstErr.Error()) + "</p>"))
+				w.setReaderHTML("<p>Translation failed: " + html.EscapeString(firstErr.Error()) + "</p>")
 				return
 			}
 			for id, out := range seeded {
@@ -4418,7 +4404,7 @@ func (w *window) showTranslatedConversation(msgs []model.Message) {
 	w.setTrackerCount(blocked)
 	// cid: images resolve via w.inlineByCID, already populated by the original
 	// render of this thread (serveCID).
-	w.loadReaderHTML(wrapHTML(b.String()))
+	w.setReaderHTML(b.String())
 }
 
 // bodyHTMLFor returns the open message's HTML body for translation (sanitized),
@@ -5421,7 +5407,11 @@ func a11yLabel(w gtk.Widgetter, name string) {
 	)
 }
 
-func wrapHTML(inner string) string {
+// readerShellHTML is the reader's single, persistent page: styles, CSP, and the
+// script that owns content swaps (__mbSet) and fit-to-width scaling. It loads
+// once in buildReader; conversations are swapped in via setReaderHTML — never a
+// navigation, so WebKit's composited surface survives and nothing flashes.
+func readerShellHTML() string {
 	// CSS keeps the common overflow culprits in check (images capped to the
 	// width, long URLs wrapped); the script then scales down anything still too
 	// wide — chiefly fixed-width newsletter tables that CSS cannot shrink below
@@ -5432,28 +5422,35 @@ body{font-family:sans-serif;margin:16px;color:#222;line-height:1.4;overflow-wrap
 img,video{max-width:100%!important;height:auto!important}
 pre{font-family:monospace;white-space:pre-wrap}`
 
-	// Scale wide content down to fit the reader. WebKitGTK ignores CSS `zoom`, so
-	// we wrap the body in a div and apply transform:scale (origin top-left).
-	// Because transform doesn't shrink the layout box, the wrapper is pinned to
-	// its natural width, the body height is collapsed to the scaled height (no
-	// trailing gap), and overflow-x is clipped. Measured before scaling so it
-	// never feeds back on itself; re-runs on load and resize.
+	// Fit-to-width: scale wide content down to fit the reader. WebKitGTK ignores
+	// CSS `zoom`, so content lives in a wrap div scaled with transform:scale
+	// (origin top-left). Because transform doesn't shrink the layout box, the
+	// wrapper is pinned to its natural width, the body height is collapsed to
+	// the scaled height (no trailing gap), and overflow-x is clipped. Measured
+	// before scaling so it never feeds back on itself; re-runs on resize, after
+	// every content swap, and as each image of the swapped content loads (a
+	// navigation's window.load re-ran it before; a swap has no load event).
+	//
+	// __mbSet is the app's content channel (setReaderHTML): an innerHTML swap of
+	// sanitized HTML — inserted markup never executes scripts, and the CSP keeps
+	// covering everything the content references. The ready postMessage lets the
+	// app know __mbSet exists before it starts swapping.
 	nonce := randNonce()
 	script := `<script nonce="` + nonce + `">(function(){var wrap;function fit(){var b=document.body;if(!b||!wrap)return;` +
 		`wrap.style.transform='none';wrap.style.width='auto';var avail=b.clientWidth,natural=wrap.scrollWidth;` +
 		`if(natural>avail+1&&natural>0){var s=avail/natural;wrap.style.width=natural+'px';wrap.style.transformOrigin='top left';wrap.style.transform='scale('+s+')';b.style.height=(wrap.offsetHeight*s)+'px';}else{b.style.height='';}}` +
-		`function setup(){var b=document.body;if(!b)return;wrap=document.createElement('div');while(b.firstChild){wrap.appendChild(b.firstChild);}b.appendChild(wrap);b.style.overflowX='hidden';fit();window.addEventListener('resize',fit);}` +
-		`if(document.readyState!=='loading'){setup();}else{document.addEventListener('DOMContentLoaded',setup);}window.addEventListener('load',fit);` +
-		// Report first paint so the swap cover drops onto a composited frame
-		// (see buildReader) — after setup, so the fitted layout is what shows.
-		paintedJS + `})();</script>`
+		`function setup(){var b=document.body;if(!b)return;wrap=document.createElement('div');b.appendChild(wrap);b.style.overflowX='hidden';window.addEventListener('resize',fit);` +
+		`window.__mbSet=function(h){wrap.innerHTML=h;window.scrollTo(0,0);fit();` +
+		`wrap.querySelectorAll('img').forEach(function(i){if(!i.complete){i.addEventListener('load',fit,{once:true});}});};` +
+		`try{window.webkit.messageHandlers.` + shellReadyHandler + `.postMessage(true);}catch(e){}}` +
+		`if(document.readyState!=='loading'){setup();}else{document.addEventListener('DOMContentLoaded',setup);}})();</script>`
 
 	csp := "default-src 'none'; img-src http: https: data: cid:; media-src http: https: data:; " +
 		"style-src 'unsafe-inline'; script-src 'nonce-" + nonce + "'; font-src http: https: data:"
 
 	return `<!doctype html><html><head><meta charset="utf-8">` +
 		`<meta http-equiv="Content-Security-Policy" content="` + csp + `">` +
-		`<style>` + style + `</style></head><body>` + inner + script + `</body></html>`
+		`<style>` + style + `</style></head><body>` + script + `</body></html>`
 }
 
 // randNonce returns a random CSP nonce so only our injected script may run.

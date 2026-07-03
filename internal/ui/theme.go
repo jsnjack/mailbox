@@ -129,10 +129,6 @@ const appCSS = `
 	color: @warning_color;
 }
 
-/* Opaque cover shown over the message view while it loads, so WebKit's
-   content-swap never flashes black through. White matches email content. */
-.reader-cover { background-color: #ffffff; }
-
 /* Bottom status bar: a quiet strip set off by a hairline top border. */
 .status-bar {
 	border-top: 1px solid alpha(@card_fg_color, 0.12);
