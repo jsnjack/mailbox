@@ -8,6 +8,7 @@ import (
 	"io"
 	"mime"
 	"mime/multipart"
+	"net/mail"
 	"net/textproto"
 	"strings"
 	"time"
@@ -33,16 +34,16 @@ func BuildMIME(m model.OutgoingMessage) ([]byte, error) {
 	stripCRLF := strings.NewReplacer("\r", "", "\n", "")
 	header := func(k, v string) { fmt.Fprintf(&b, "%s: %s\r\n", k, stripCRLF.Replace(v)) }
 
-	header("From", m.From)
+	header("From", encodeAddressList(m.From))
 	if strings.TrimSpace(m.To) != "" {
-		header("To", m.To)
+		header("To", encodeAddressList(m.To))
 	}
 	if strings.TrimSpace(m.Cc) != "" {
-		header("Cc", m.Cc)
+		header("Cc", encodeAddressList(m.Cc))
 	}
 	// Gmail honors a Bcc header for delivery and strips it from recipients' copies.
 	if strings.TrimSpace(m.Bcc) != "" {
-		header("Bcc", m.Bcc)
+		header("Bcc", encodeAddressList(m.Bcc))
 	}
 	header("Subject", mime.QEncoding.Encode("utf-8", m.Subject))
 	header("Date", time.Now().Format(time.RFC1123Z))
@@ -130,6 +131,31 @@ func writeWrappedBase64(w io.Writer, data []byte) error {
 		}
 	}
 	return nil
+}
+
+// encodeAddressList re-renders a comma-separated address list with each display
+// name RFC-2047-encoded when it contains non-ASCII (net/mail's Address.String
+// does the encoding), so "Jürgen <j@x.de>" doesn't put raw UTF-8 on the wire in
+// a structured header. Input that net/mail can't parse is passed through
+// unchanged — better an oddly-encoded name than a dropped recipient (the
+// address part of unparseable input was never separable anyway).
+func encodeAddressList(list string) string {
+	addrs, err := mail.ParseAddressList(list)
+	if err != nil {
+		logging.Trace("backend: address list unparseable; passing through", "list", list, "err", err)
+		return list
+	}
+	parts := make([]string, 0, len(addrs))
+	for _, a := range addrs {
+		if a.Name == "" {
+			// Keep a bare address bare ("me@x.com", not "<me@x.com>") — both are
+			// valid, but this preserves the historical wire format.
+			parts = append(parts, a.Address)
+			continue
+		}
+		parts = append(parts, a.String())
+	}
+	return strings.Join(parts, ", ")
 }
 
 // generateMessageID returns a unique Message-ID using the sender's domain.

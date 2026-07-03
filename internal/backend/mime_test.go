@@ -129,3 +129,50 @@ func TestBuildMIMENoHeaderInjection(t *testing.T) {
 		t.Fatalf("legitimate Cc dropped:\n%s", headers)
 	}
 }
+
+func TestBuildMIMEEncodesNonASCIIDisplayNames(t *testing.T) {
+	raw, err := BuildMIME(model.OutgoingMessage{
+		From:    `Jürgen Müller <j@example.de>`,
+		To:      `Ünal Ö <u@example.com>, Plain Name <p@example.com>`,
+		Cc:      `Zoë <z@example.com>`,
+		Subject: "hi",
+		Body:    "b",
+	})
+	if err != nil {
+		t.Fatalf("BuildMIME: %v", err)
+	}
+	s := string(raw)
+	head := s[:strings.Index(s, "\r\n\r\n")]
+	// No raw non-ASCII may appear in the address headers (RFC 5322 headers are
+	// ASCII; non-ASCII display names must be RFC-2047 encoded-words).
+	for _, r := range head {
+		if r > 127 {
+			t.Fatalf("raw non-ASCII rune %q in headers:\n%s", r, head)
+		}
+	}
+	for _, want := range []string{
+		"From: =?utf-8?", // Jürgen Müller encoded
+		"<j@example.de>",
+		"<u@example.com>",
+		"Cc: =?utf-8?", // Zoë encoded
+	} {
+		if !strings.Contains(head, want) {
+			t.Errorf("missing %q in headers:\n%s", want, head)
+		}
+	}
+	// The ASCII display name survives readable (net/mail quotes it at most).
+	if !strings.Contains(head, "Plain Name") && !strings.Contains(head, `"Plain Name"`) {
+		t.Errorf("ASCII display name mangled:\n%s", head)
+	}
+}
+
+func TestEncodeAddressListPassthroughOnUnparseable(t *testing.T) {
+	in := "totally --not-- an address list"
+	if got := encodeAddressList(in); got != in {
+		t.Errorf("unparseable input rewritten: %q -> %q", in, got)
+	}
+	// A bare address stays a bare address (historical wire format).
+	if got := encodeAddressList("a@b.com"); got != "a@b.com" {
+		t.Errorf("bare address mangled: %q", got)
+	}
+}
