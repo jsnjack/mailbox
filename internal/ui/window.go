@@ -835,6 +835,7 @@ func (w *window) buildSidebar() *adw.NavigationPage {
 	hb := adw.NewHeaderBar()
 	w.newBtn = gtk.NewButtonFromIconName("mail-message-new-symbolic")
 	w.newBtn.SetTooltipText("New message")
+	a11yLabel(w.newBtn, "New message")
 	w.newBtn.SetSensitive(w.deps.Send != nil && len(w.deps.Accounts) > 0)
 	w.newBtn.ConnectClicked(func() {
 		logging.Trace("ui: new message", "account", w.activeID)
@@ -844,6 +845,7 @@ func (w *window) buildSidebar() *adw.NavigationPage {
 
 	w.refreshBtn = gtk.NewButtonFromIconName("view-refresh-symbolic")
 	w.refreshBtn.SetTooltipText("Sync now")
+	a11yLabel(w.refreshBtn, "Sync now")
 	w.refreshBtn.SetSensitive(w.deps.Sync != nil && len(w.deps.Accounts) > 0)
 	w.refreshBtn.ConnectClicked(w.onRefresh)
 
@@ -869,6 +871,7 @@ func (w *window) buildSidebar() *adw.NavigationPage {
 	primaryBtn := gtk.NewMenuButton()
 	primaryBtn.SetIconName("open-menu-symbolic")
 	primaryBtn.SetTooltipText("Main menu")
+	a11yLabel(primaryBtn, "Main menu")
 	primaryBtn.SetMenuModel(menu)
 	// PackEnd is right-to-left: the primary menu sits at the trailing edge (GNOME
 	// convention), with refresh — or its sync spinner — to its left.
@@ -1199,6 +1202,7 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 	w.listMenuBtn = gtk.NewMenuButton()
 	w.listMenuBtn.SetIconName("view-more-symbolic")
 	w.listMenuBtn.SetTooltipText("View options")
+	a11yLabel(w.listMenuBtn, "View options")
 	// Native menu model: a check item for the unread filter, mark-all-read where
 	// it applies. Rebuilt per open (the folder gates mark-all-read), with the
 	// toggle state synced first.
@@ -1213,6 +1217,7 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 		w.selectBtn = gtk.NewToggleButton()
 		w.selectBtn.SetIconName("selection-mode-symbolic")
 		w.selectBtn.SetTooltipText("Select multiple")
+		a11yLabel(w.selectBtn, "Select multiple")
 		w.selectBtn.ConnectToggled(func() { w.setSelectMode(w.selectBtn.Active()) })
 		hb.PackEnd(w.selectBtn)
 	}
@@ -1394,6 +1399,7 @@ func (w *window) buildSelectionBar() {
 
 	selectAll := gtk.NewButtonFromIconName("edit-select-all-symbolic")
 	selectAll.SetTooltipText("Select all / none")
+	a11yLabel(selectAll, "Select all / none")
 	selectAll.ConnectClicked(func() {
 		allSelected := len(w.threadByID) > 0 && len(w.selected) >= len(w.threadByID)
 		w.selected = map[string]bool{}
@@ -1408,19 +1414,23 @@ func (w *window) buildSelectionBar() {
 
 	archive := gtk.NewButtonFromIconName("mail-archive-symbolic")
 	archive.SetTooltipText("Archive selected")
+	a11yLabel(archive, "Archive selected")
 	archive.ConnectClicked(func() { w.bulkApply("Archived", nil, []string{model.LabelInbox}) })
 
 	trash := gtk.NewButtonFromIconName("user-trash-symbolic")
 	trash.SetTooltipText("Move selected to Trash")
+	a11yLabel(trash, "Move selected to Trash")
 	trash.ConnectClicked(func() { w.bulkApply("Trashed", []string{model.LabelTrash}, []string{model.LabelInbox}) })
 
 	read := gtk.NewButtonFromIconName("mail-read-symbolic")
 	read.SetTooltipText("Mark selected as read")
+	a11yLabel(read, "Mark selected as read")
 	read.ConnectClicked(func() { w.bulkApply("Marked read", nil, []string{model.LabelUnread}) })
 
 	cancel := gtk.NewButtonFromIconName("window-close-symbolic")
 	cancel.AddCSSClass("flat")
 	cancel.SetTooltipText("Cancel")
+	a11yLabel(cancel, "Cancel selection")
 	cancel.ConnectClicked(func() { w.selectBtn.SetActive(false) })
 
 	w.selectionBar = gtk.NewBox(gtk.OrientationHorizontal, 6)
@@ -2329,15 +2339,18 @@ func (w *window) buildReader() *adw.NavigationPage {
 
 	w.archiveBtn = gtk.NewButtonFromIconName("mail-archive-symbolic")
 	w.archiveBtn.SetTooltipText("Archive (a)")
+	a11yLabel(w.archiveBtn, "Archive")
 	w.archiveBtn.ConnectClicked(w.onArchive)
 
 	// AI actions (only useful when an assistant is configured).
 	w.translateBtn = gtk.NewButtonFromIconName("translate-symbolic")
 	w.translateBtn.SetTooltipText("Translate to English (t)")
+	a11yLabel(w.translateBtn, "Translate to English")
 	w.translateBtn.ConnectClicked(w.onTranslate)
 
 	w.summaryBtn = gtk.NewButtonFromIconName("view-list-bullet-symbolic")
 	w.summaryBtn.SetTooltipText("Summarize thread with AI")
+	a11yLabel(w.summaryBtn, "Summarize thread with AI")
 	w.summaryBtn.ConnectClicked(w.onSummarize)
 
 	// AI reply: a popover of AI-suggested quick replies plus reply intents. The
@@ -2345,6 +2358,7 @@ func (w *window) buildReader() *adw.NavigationPage {
 	w.aiReplyBtn = gtk.NewMenuButton()
 	w.aiReplyBtn.SetIconName("sparkle-symbolic")
 	w.aiReplyBtn.SetTooltipText("AI reply")
+	a11yLabel(w.aiReplyBtn, "AI reply")
 	w.aiReplyBtn.SetCreatePopupFunc(func(btn *gtk.MenuButton) {
 		btn.SetPopover(w.buildAIReplyPopover())
 	})
@@ -2354,6 +2368,7 @@ func (w *window) buildReader() *adw.NavigationPage {
 	w.overflowBtn = gtk.NewMenuButton()
 	w.overflowBtn.SetIconName("view-more-symbolic")
 	w.overflowBtn.SetTooltipText("More actions")
+	a11yLabel(w.overflowBtn, "More actions")
 	// A native menu model (standard GTK4): normal-weight rows, native checkmarks
 	// for the toggles, automatic separators. Rebuilt on each open so the dynamic
 	// items (spam/not-spam, delete-forever, find-from-sender) match the context,
@@ -4326,6 +4341,7 @@ func (w *window) buildSummaryCard() *gtk.Revealer {
 	closeBtn.AddCSSClass("flat")
 	closeBtn.AddCSSClass("circular")
 	closeBtn.SetTooltipText("Hide")
+	a11yLabel(closeBtn, "Hide summary")
 	closeBtn.ConnectClicked(w.hideSummary)
 
 	titleRow := gtk.NewBox(gtk.OrientationHorizontal, 6)
@@ -5080,10 +5096,12 @@ func threadRow(t model.ThreadSummary, outgoing bool, category string, manualCat 
 
 	top := gtk.NewBox(gtk.OrientationHorizontal, 6)
 	if unread {
-		// A small accent dot marks an unread conversation at a glance.
+		// A small accent dot marks an unread conversation at a glance. The "●"
+		// glyph is meaningless to a screen reader, so give it a proper name.
 		dot := gtk.NewLabel("●")
 		dot.AddCSSClass("unread-dot")
 		dot.SetVAlign(gtk.AlignCenter)
+		a11yLabel(dot, "Unread")
 		top.Append(dot)
 	}
 	// In Sent/Drafts the sender is always you, so show the recipient instead.

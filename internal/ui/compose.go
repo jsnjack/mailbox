@@ -246,6 +246,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 		subjEntry.SetHExpand(true)
 		subjBtn := gtk.NewButtonFromIconName("sparkle-symbolic")
 		subjBtn.SetTooltipText("Generate a subject from the email (AI)")
+		a11yLabel(subjBtn, "Generate a subject with AI")
 		subjBtn.AddCSSClass("flat")
 		subjBtn.SetVAlign(gtk.AlignCenter)
 		subjBtn.ConnectClicked(func() {
@@ -325,6 +326,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 
 	attachBtn := gtk.NewButtonFromIconName("mail-attachment-symbolic")
 	attachBtn.SetTooltipText("Attach a file")
+	a11yLabel(attachBtn, "Attach a file")
 	hb.PackEnd(attachBtn)
 
 	tv := adw.NewToolbarView()
@@ -637,6 +639,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 		// (preserving quotes and signature).
 		grammarBtn := gtk.NewButtonFromIconName("tools-check-spelling-symbolic")
 		grammarBtn.SetTooltipText("Check spelling & grammar with AI")
+		a11yLabel(grammarBtn, "Check spelling and grammar with AI")
 		grammarBtn.ConnectClicked(func() {
 			// Proofread only the user's own writing: the selection if there is one,
 			// otherwise the text above the signature/quote. The signature and the

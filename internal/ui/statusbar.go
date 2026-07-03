@@ -88,6 +88,7 @@ func (w *window) buildActivityLogButton() gtk.Widgetter {
 	btn := gtk.NewMenuButton()
 	btn.SetIconName("view-list-symbolic")
 	btn.SetTooltipText("Activity log & stats")
+	a11yLabel(btn, "Activity log and stats")
 	btn.AddCSSClass("flat")
 	btn.SetPopover(pop)
 	w.statusLogBtn = btn
