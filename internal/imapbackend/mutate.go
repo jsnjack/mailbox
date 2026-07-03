@@ -22,26 +22,29 @@ import (
 	"github.com/jsnjack/mailbox/internal/model"
 )
 
-// folderUIDs groups a folder's UIDs with the UIDVALIDITY the ids were minted at.
-type folderUIDs struct {
-	uidv uint32
-	uids []imap.UID
+// folderKey identifies the epoch a batch of UIDs belongs to: a UID is only
+// meaningful within its mailbox's UIDVALIDITY.
+type folderKey struct {
+	mailbox string
+	uidv    uint32
 }
 
-// groupByFolder parses provider ids and buckets their UIDs by mailbox.
-func groupByFolder(ids []string) map[string]*folderUIDs {
-	out := map[string]*folderUIDs{}
+// groupByFolder parses provider ids and buckets their UIDs by (mailbox,
+// UIDVALIDITY). Ids minted under different epochs of the same mailbox land in
+// separate groups, so after a server-side renumber a stale-epoch UID can never
+// be flag-stored/moved/expunged against whatever message currently holds that
+// number — the executing code compares each group's uidv to the freshly
+// SELECTed mailbox and skips mismatches.
+func groupByFolder(ids []string) map[folderKey][]imap.UID {
+	out := map[folderKey][]imap.UID{}
 	for _, id := range ids {
 		mailbox, uidv, uid, err := parseMsgID(id)
 		if err != nil {
+			logging.Trace("imapbackend: group by folder skipping unparseable id", "id", id, "err", err)
 			continue
 		}
-		g := out[mailbox]
-		if g == nil {
-			g = &folderUIDs{uidv: uidv}
-			out[mailbox] = g
-		}
-		g.uids = append(g.uids, uid)
+		k := folderKey{mailbox: mailbox, uidv: uidv}
+		out[k] = append(out[k], uid)
 	}
 	return out
 }
@@ -89,30 +92,30 @@ func (b *Backend) ApplyLabels(ctx context.Context, ids []string, add, remove []s
 		dest := b.moveDest(add, remove)
 		logging.Trace("imapbackend: apply labels resolved", "addFlags", addFlags, "delFlags", delFlags, "moveDest", dest)
 
-		for folder, g := range groupByFolder(ids) {
-			sel, err := c.reselect(folder, false) // fresh SELECT: a move is destructive
+		for key, uids := range groupByFolder(ids) {
+			sel, err := c.reselect(key.mailbox, false) // fresh SELECT: a move is destructive
 			if err != nil {
 				return err
 			}
-			if sel.UIDValidity != g.uidv {
-				logging.Trace("imapbackend: apply labels skip stale folder", "folder", folder, "uidvalidity", g.uidv, "current", sel.UIDValidity)
-				continue // stale ids; the next incremental reconciles
+			if sel.UIDValidity != key.uidv {
+				logging.Trace("imapbackend: apply labels skip stale group", "folder", key.mailbox, "uidvalidity", key.uidv, "current", sel.UIDValidity, "n", len(uids))
+				continue // stale-epoch ids; the next incremental reconciles
 			}
-			set := uidSetOf(g.uids)
+			set := uidSetOf(uids)
 			if len(addFlags) > 0 {
-				logging.Trace("imapbackend: store +flags", "folder", folder, "n", len(g.uids), "flags", addFlags)
+				logging.Trace("imapbackend: store +flags", "folder", key.mailbox, "n", len(uids), "flags", addFlags)
 				if err := c.cl.Store(set, &imap.StoreFlags{Op: imap.StoreFlagsAdd, Flags: addFlags}, nil).Close(); err != nil {
 					return fmt.Errorf("imap store +flags: %w", err)
 				}
 			}
 			if len(delFlags) > 0 {
-				logging.Trace("imapbackend: store -flags", "folder", folder, "n", len(g.uids), "flags", delFlags)
+				logging.Trace("imapbackend: store -flags", "folder", key.mailbox, "n", len(uids), "flags", delFlags)
 				if err := c.cl.Store(set, &imap.StoreFlags{Op: imap.StoreFlagsDel, Flags: delFlags}, nil).Close(); err != nil {
 					return fmt.Errorf("imap store -flags: %w", err)
 				}
 			}
-			if dest != "" && dest != folder {
-				logging.Trace("imapbackend: move", "folder", folder, "dest", dest, "n", len(g.uids))
+			if dest != "" && dest != key.mailbox {
+				logging.Trace("imapbackend: move", "folder", key.mailbox, "dest", dest, "n", len(uids))
 				if _, err := c.cl.Move(set, dest).Wait(); err != nil {
 					return fmt.Errorf("imap move to %q: %w", dest, err)
 				}
@@ -147,17 +150,17 @@ func (b *Backend) moveDest(add, remove []string) string {
 func (b *Backend) Delete(ctx context.Context, ids []string) error {
 	logging.TraceContext(ctx, "imapbackend: delete", "account", b.cfg.Email, "ids", len(ids))
 	return b.withConn(func(c *conn) error {
-		for folder, g := range groupByFolder(ids) {
-			sel, err := c.reselect(folder, false) // fresh SELECT: EXPUNGE is irreversible
+		for key, uids := range groupByFolder(ids) {
+			sel, err := c.reselect(key.mailbox, false) // fresh SELECT: EXPUNGE is irreversible
 			if err != nil {
 				return err
 			}
-			if sel.UIDValidity != g.uidv {
-				logging.Trace("imapbackend: delete skip stale folder", "folder", folder, "uidvalidity", g.uidv, "current", sel.UIDValidity)
+			if sel.UIDValidity != key.uidv {
+				logging.Trace("imapbackend: delete skip stale group", "folder", key.mailbox, "uidvalidity", key.uidv, "current", sel.UIDValidity, "n", len(uids))
 				continue
 			}
-			set := uidSetOf(g.uids)
-			logging.Trace("imapbackend: store \\Deleted + expunge", "folder", folder, "n", len(g.uids))
+			set := uidSetOf(uids)
+			logging.Trace("imapbackend: store \\Deleted + expunge", "folder", key.mailbox, "n", len(uids))
 			if err := c.cl.Store(set, &imap.StoreFlags{Op: imap.StoreFlagsAdd, Flags: []imap.Flag{imap.FlagDeleted}}, nil).Close(); err != nil {
 				return fmt.Errorf("imap store \\Deleted: %w", err)
 			}
@@ -366,13 +369,23 @@ func (b *Backend) SaveDraft(ctx context.Context, raw []byte, threadID string) (s
 	return draftID, err
 }
 
-// UpdateDraft replaces an existing draft: IMAP has no in-place edit, so delete
-// the old message and append the new one.
+// UpdateDraft replaces an existing draft: IMAP has no in-place edit, so append
+// the replacement FIRST and only then delete the old message — if the append
+// fails the user still has the old draft, and if the delete fails the worst
+// case is a duplicate draft, never a lost one.
 func (b *Backend) UpdateDraft(ctx context.Context, draftID string, raw []byte, threadID string) (string, error) {
-	if err := b.DeleteDraft(ctx, draftID); err != nil {
+	logging.TraceContext(ctx, "imapbackend: update draft", "account", b.cfg.Email, "draftID", draftID, "bytes", len(raw))
+	newID, err := b.SaveDraft(ctx, raw, threadID)
+	if err != nil {
+		logging.TraceContext(ctx, "imapbackend: update draft append failed (old draft kept)", "draftID", draftID, "err", err)
 		return "", err
 	}
-	return b.SaveDraft(ctx, raw, threadID)
+	if err := b.DeleteDraft(ctx, draftID); err != nil {
+		// Non-fatal: the new draft is safely stored; a stale duplicate may remain
+		// until the user deletes it or the next update succeeds.
+		logging.TraceContext(ctx, "imapbackend: update draft: delete of old draft failed (duplicate may remain)", "draftID", draftID, "newID", newID, "err", err)
+	}
+	return newID, nil
 }
 
 // DeleteDraft removes a draft by its provider id (the draft is the message).
