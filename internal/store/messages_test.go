@@ -577,6 +577,82 @@ func TestSearchSubjectAndBody(t *testing.T) {
 // TestSearchMalformedInputDoesNotError guards the FTS5 query builder: arbitrary
 // user input (operators, punctuation, smart quotes) must produce a valid MATCH
 // expression, never an FTS syntax error.
+func TestSearchOperators(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	acc := seedAccount(t, s)
+
+	seed := func(id, from, fromName, to, subj, snip string, hasAtt bool, labels ...string) {
+		if _, err := s.UpsertMessage(ctx, model.Message{
+			AccountID: acc, GmailID: id, ThreadID: id, FromAddr: from, FromName: fromName,
+			ToAddrs: to, Subject: subj, Snippet: snip, HasAttachments: hasAtt, Labels: labels,
+		}); err != nil {
+			t.Fatalf("seed %s: %v", id, err)
+		}
+	}
+	seed("m1", "alice@example.com", "Alice Smith", "bob@example.com", "Invoice for June", "here is the invoice", true, "INBOX")
+	seed("m2", "carol@example.com", "Carol", "alice@example.com", "Lunch plans", "let us meet", false, "INBOX", "SENT")
+	seed("m3", "dave@work.com", "Dave", "team@work.com", "Deploy report", "the invoice pipeline ran", false, "INBOX")
+
+	ids := func(q string) []string {
+		msgs, err := s.Search(ctx, acc, q, 50)
+		if err != nil {
+			t.Fatalf("Search(%q): %v", q, err)
+		}
+		var got []string
+		for _, m := range msgs {
+			got = append(got, m.GmailID)
+		}
+		return got
+	}
+	has := func(got []string, want ...string) bool {
+		if len(got) != len(want) {
+			return false
+		}
+		set := map[string]bool{}
+		for _, g := range got {
+			set[g] = true
+		}
+		for _, w := range want {
+			if !set[w] {
+				return false
+			}
+		}
+		return true
+	}
+
+	if got := ids("from:alice"); !has(got, "m1") {
+		t.Errorf("from:alice = %v, want [m1]", got)
+	}
+	if got := ids("from:Alice"); !has(got, "m1") { // display name, case-insensitive
+		t.Errorf("from:Alice = %v, want [m1]", got)
+	}
+	if got := ids("to:alice"); !has(got, "m2") {
+		t.Errorf("to:alice = %v, want [m2]", got)
+	}
+	if got := ids("subject:invoice"); !has(got, "m1") {
+		t.Errorf("subject:invoice = %v, want [m1] (not the body match m3)", got)
+	}
+	if got := ids("has:attachment"); !has(got, "m1") {
+		t.Errorf("has:attachment = %v, want [m1]", got)
+	}
+	if got := ids("in:sent"); !has(got, "m2") {
+		t.Errorf("in:sent = %v, want [m2]", got)
+	}
+	// Operator + free text: invoice (FTS, matches m1 subject and m3 body) scoped to from:dave.
+	if got := ids("from:dave invoice"); !has(got, "m3") {
+		t.Errorf("from:dave invoice = %v, want [m3]", got)
+	}
+	// Combined operators AND together.
+	if got := ids("in:inbox has:attachment"); !has(got, "m1") {
+		t.Errorf("in:inbox has:attachment = %v, want [m1]", got)
+	}
+	// Unknown operator key stays free text (matches nothing here, no error).
+	if got := ids("foo:bar"); len(got) != 0 {
+		t.Errorf("foo:bar = %v, want []", got)
+	}
+}
+
 func TestSearchMalformedInputDoesNotError(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()

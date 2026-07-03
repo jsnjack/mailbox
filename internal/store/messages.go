@@ -501,18 +501,49 @@ func (s *Store) ListByLabel(ctx context.Context, accountID int64, labelID string
 // quoted and made a prefix match), so arbitrary input cannot break the syntax.
 func (s *Store) Search(ctx context.Context, accountID int64, query string, limit int) ([]model.Message, error) {
 	start := time.Now()
-	match := ftsQuery(query)
-	logging.TraceContext(ctx, "store: search", "account", accountID, "query", query, "match", match, "limit", limit)
-	if match == "" {
+	filter := parseSearch(query)
+	match := ftsQuery(filter.freeText)
+	preds, predArgs := filter.buildFilterPredicates()
+	logging.TraceContext(ctx, "store: search", "account", accountID, "query", query, "match", match, "operators", len(preds), "limit", limit)
+
+	// Nothing to match on (blank, or only unmatchable free text like "*"): return
+	// no results rather than every message.
+	if match == "" && len(preds) == 0 {
 		logging.TraceContext(ctx, "store: search", "account", accountID, "query", query, "count", 0, "reason", "blank match")
 		return nil, nil
 	}
-	rows, err := s.reader.QueryContext(ctx, `
-		SELECT `+msgCols+`
-		FROM messages_fts JOIN messages m ON m.rowid = messages_fts.rowid
-		WHERE messages_fts MATCH ? AND m.account_id = ?
-		ORDER BY rank
-		LIMIT ?`, match, accountID, limit)
+
+	var (
+		sqlText string
+		args    []any
+	)
+	predSQL := ""
+	if len(preds) > 0 {
+		predSQL = " AND " + strings.Join(preds, " AND ")
+	}
+	if match != "" {
+		// Free text present: rank by FTS relevance, AND-ed with any field operators.
+		args = append(args, match, accountID)
+		args = append(args, predArgs...)
+		sqlText = `SELECT ` + msgCols + `
+			FROM messages_fts JOIN messages m ON m.rowid = messages_fts.rowid
+			WHERE messages_fts MATCH ? AND m.account_id = ?` + predSQL + `
+			ORDER BY rank
+			LIMIT ?`
+	} else {
+		// Operators only (e.g. "from:alice has:attachment"): query messages
+		// directly, newest first, since there is no FTS rank to order by.
+		args = append(args, accountID)
+		args = append(args, predArgs...)
+		sqlText = `SELECT ` + msgCols + `
+			FROM messages m
+			WHERE m.account_id = ?` + predSQL + `
+			ORDER BY m.internal_date DESC, m.rowid DESC
+			LIMIT ?`
+	}
+	args = append(args, limit)
+
+	rows, err := s.reader.QueryContext(ctx, sqlText, args...)
 	if err != nil {
 		logging.TraceContext(ctx, "store: search", "account", accountID, "query", query, "err", err)
 		return nil, fmt.Errorf("search: %w", err)

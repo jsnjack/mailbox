@@ -75,6 +75,14 @@ func (w *window) showRowMenu(row gtk.Widgetter, threadID string, x, y float64) {
 	} else {
 		item(box, "Archive", func() { w.threadModifyAll(acct, threadID, "Archived", nil, []string{model.LabelInbox}) })
 	}
+	// File this conversation into a user label (Move to… relocates it out of the
+	// current location; Label… toggles labels without moving it).
+	item(box, "Move to…", func() {
+		w.showMoveToDialog(func(labelID, name string) {
+			w.threadModifyAll(acct, threadID, "Moved to "+name, []string{labelID}, moveLocationRemovals)
+		})
+	})
+	item(box, "Label…", func() { w.showThreadLabelsDialog(acct, threadID) })
 	sep()
 
 	if t.Latest.IsStarred {

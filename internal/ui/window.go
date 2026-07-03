@@ -1427,6 +1427,18 @@ func (w *window) buildSelectionBar() {
 	a11yLabel(read, "Mark selected as read")
 	read.ConnectClicked(func() { w.bulkApply("Marked read", nil, []string{model.LabelUnread}) })
 
+	moveTo := gtk.NewButtonFromIconName("folder-symbolic")
+	moveTo.SetTooltipText("Move selected to a label")
+	a11yLabel(moveTo, "Move selected to a label")
+	moveTo.ConnectClicked(func() {
+		if len(w.selected) == 0 {
+			return
+		}
+		w.showMoveToDialog(func(labelID, name string) {
+			w.bulkApply("Moved to "+name, []string{labelID}, moveLocationRemovals)
+		})
+	})
+
 	cancel := gtk.NewButtonFromIconName("window-close-symbolic")
 	cancel.AddCSSClass("flat")
 	cancel.SetTooltipText("Cancel")
@@ -1441,6 +1453,7 @@ func (w *window) buildSelectionBar() {
 	w.selectionBar.Append(archive)
 	w.selectionBar.Append(trash)
 	w.selectionBar.Append(read)
+	w.selectionBar.Append(moveTo)
 	w.selectionBar.Append(cancel)
 	w.selectionBar.SetVisible(false)
 }
@@ -3799,47 +3812,13 @@ func (w *window) onMarkUnread() {
 // per user label, ticked when the open thread already carries it. Toggling
 // applies or removes that label across the whole conversation.
 func (w *window) buildLabelsMenu() gtk.Widgetter {
-	box := gtk.NewBox(gtk.OrientationVertical, 2)
-	setMargins(box, 8, 8, 8, 8)
 	if w.openThreadID == "" {
+		box := gtk.NewBox(gtk.OrientationVertical, 2)
+		setMargins(box, 8, 8, 8, 8)
 		box.Append(gtk.NewLabel("No conversation open"))
 		return box
 	}
-	ctx := context.Background()
-	labels, err := w.deps.Store.ListLabels(ctx, w.activeID)
-	if err != nil {
-		slog.Warn("ui: labels menu", "err", err)
-		box.Append(gtk.NewLabel("Could not load labels"))
-		return box
-	}
-	applied, err := w.deps.Store.ThreadLabels(ctx, w.activeID, w.openThreadID)
-	if err != nil {
-		slog.Warn("ui: thread labels", "err", err)
-		applied = map[string]bool{}
-	}
-	msgs := w.openThreadMsgs
-	any := false
-	for _, l := range labels {
-		if l.Type != model.LabelUser {
-			continue
-		}
-		any = true
-		labelID := l.GmailID
-		cb := gtk.NewCheckButtonWithLabel(l.Name)
-		cb.SetActive(applied[labelID]) // set before connecting so it doesn't self-fire
-		cb.ConnectToggled(func() {
-			if cb.Active() {
-				w.applyLabels(msgs, []string{labelID}, nil, nil)
-			} else {
-				w.applyLabels(msgs, nil, []string{labelID}, nil)
-			}
-		})
-		box.Append(cb)
-	}
-	if !any {
-		box.Append(gtk.NewLabel("No labels"))
-	}
-	return box
+	return w.labelToggleBox(w.openThreadID, w.openThreadMsgs)
 }
 
 // showLabelsDialog opens the label chooser (buildLabelsMenu) as a dialog. Labels
