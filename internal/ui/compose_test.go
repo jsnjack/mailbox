@@ -130,6 +130,31 @@ func TestParseMailto(t *testing.T) {
 		},
 		{"uppercase scheme", "MAILTO:eve@example.com", true, "eve@example.com", "", "", "", ""},
 		{
+			// RFC 6068 uses percent-encoding only: "+" is a literal plus, so a
+			// plus-addressed recipient must survive intact.
+			"plus-addressed recipient",
+			"mailto:user+news@example.com",
+			true, "user+news@example.com", "", "", "", "",
+		},
+		{
+			// "+" in query values (cc addresses, subject, body) is literal too —
+			// url.Values-style decoding would corrupt these into spaces.
+			"plus preserved in query values",
+			"mailto:a@x.com?cc=user+tag@example.com&subject=1+1%3D2&body=x+y%20z",
+			true, "a@x.com", "user+tag@example.com", "", "1+1=2", "x+y z",
+		},
+		{
+			"percent-encoded plus recipient",
+			"mailto:user%2Bnews@example.com?to=other+one@y.com",
+			true, "user+news@example.com, other+one@y.com", "", "", "", "",
+		},
+		{
+			// Header names are case-insensitive per RFC 6068.
+			"case-insensitive header names",
+			"mailto:a@x.com?Subject=Hi&CC=b@y.com",
+			true, "a@x.com", "b@y.com", "", "Hi", "",
+		},
+		{
 			// GIO normalises a command-line mailto into this hierarchical form; the
 			// recipient is in the path, not the opaque part.
 			"gio-normalised triple-slash form",

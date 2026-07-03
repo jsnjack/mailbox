@@ -900,6 +900,11 @@ func composeBodyWithSignature(quote, sig string) string {
 // recipients before the "?" become To (comma-separated, percent-decoded); the
 // query supplies subject, body, cc, bcc, and any additional to. Returns false if
 // the string isn't a mailto: URI or can't be parsed.
+//
+// RFC 6068 uses percent-encoding only — "+" is a literal plus, common in
+// plus-addressed recipients (user+tag@example.com) and body text. So both the
+// addr-spec part and the header values are decoded with PathUnescape (never
+// QueryUnescape, which turns "+" into a space).
 func parseMailto(uri string) (model.OutgoingMessage, bool) {
 	if !strings.HasPrefix(strings.ToLower(uri), "mailto:") {
 		return model.OutgoingMessage{}, false
@@ -921,22 +926,52 @@ func parseMailto(uri string) (model.OutgoingMessage, bool) {
 		if raw == "" {
 			continue
 		}
-		if dec, err := url.QueryUnescape(raw); err == nil {
+		if dec, err := url.PathUnescape(raw); err == nil {
 			to = append(to, dec)
 		} else {
 			to = append(to, raw)
 		}
 	}
-	q := u.Query()
+	q := parseMailtoQuery(u.RawQuery)
 	to = append(to, q["to"]...)
 	msg := model.OutgoingMessage{
 		To:      strings.Join(to, ", "),
 		Cc:      strings.Join(q["cc"], ", "),
 		Bcc:     strings.Join(q["bcc"], ", "),
-		Subject: q.Get("subject"),
-		Body:    q.Get("body"),
+		Subject: first(q["subject"]),
+		Body:    first(q["body"]),
 	}
 	return msg, true
+}
+
+// parseMailtoQuery decodes a mailto: query per RFC 6068: percent-encoding only,
+// with "+" kept literal (url.Values would decode it to a space). Header names
+// are matched case-insensitively.
+func parseMailtoQuery(rawQuery string) map[string][]string {
+	out := map[string][]string{}
+	for _, pair := range strings.Split(rawQuery, "&") {
+		if pair == "" {
+			continue
+		}
+		key, val, _ := strings.Cut(pair, "=")
+		if dec, err := url.PathUnescape(key); err == nil {
+			key = dec
+		}
+		if dec, err := url.PathUnescape(val); err == nil {
+			val = dec
+		}
+		key = strings.ToLower(key)
+		out[key] = append(out[key], val)
+	}
+	return out
+}
+
+// first returns the first element of xs, or "" when empty.
+func first(xs []string) string {
+	if len(xs) == 0 {
+		return ""
+	}
+	return xs[0]
 }
 
 // mentionsAttachment reports whether the body text suggests the user meant to
