@@ -4453,8 +4453,10 @@ func (w *window) deferSend(accountID int64, msg model.OutgoingMessage) {
 		logging.Trace("ui: undo send", "account", accountID, "subject", msg.Subject)
 		cancelled = true
 		toast.Dismiss()
-		// Reopen the message exactly as it was (no second signature).
-		w.openComposeOpts(msg, "", "Message", false)
+		// Reopen the message exactly as it was (no second signature), from the
+		// account it was being sent from, and already "dirty" — its content is
+		// user-authored, so closing it must prompt rather than silently discard.
+		w.openComposeOpts(msg, "", "Message", composeOpts{fromAccountID: accountID, startDirty: true})
 	})
 	w.toastOverlay.AddToast(toast)
 

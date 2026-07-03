@@ -24,13 +24,27 @@ import (
 	"github.com/jsnjack/mailbox/internal/model"
 )
 
+// composeOpts tunes how a compose window opens beyond its prefilled content.
+type composeOpts struct {
+	// addSignature appends the configured signature to the body (fresh composes;
+	// an existing draft or a reopened message already carries its body verbatim).
+	addSignature bool
+	// fromAccountID preselects this account in the From dropdown (0 = the active
+	// account) — an undo-send reopen must keep the account it was sending from.
+	fromAccountID int64
+	// startDirty treats the compose as already user-modified, so closing it
+	// prompts to save/discard even though it equals its init (an undo-send reopen
+	// holds user-authored content that must not be silently discarded).
+	startDirty bool
+}
+
 // openCompose opens a compose window prefilled from init. aiContext, when
 // non-empty and an assistant is configured, enables an "AI draft" button that
 // streams a drafted reply into the body. title labels the window.
 func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string, auto ...composeAutoAI) {
 	// Fresh composes/replies/forwards get the default signature; an existing
 	// draft or a reopened (undone) message already contains its body verbatim.
-	w.openComposeOpts(init, aiContext, title, init.DraftID == "", auto...)
+	w.openComposeOpts(init, aiContext, title, composeOpts{addSignature: init.DraftID == ""}, auto...)
 }
 
 // composeFromMailto opens a compose window prefilled from a mailto: URI (clicked
@@ -82,14 +96,16 @@ func newMsgPresets() []aiPreset {
 	}
 }
 
-func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title string, addSignature bool, auto ...composeAutoAI) {
-	if w.deps.Send == nil {
-		logging.Trace("ui: open compose skipped", "reason", "no sender")
+func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title string, opts composeOpts, auto ...composeAutoAI) {
+	if w.deps.Send == nil || len(w.deps.Accounts) == 0 {
+		logging.Trace("ui: open compose skipped", "has_sender", w.deps.Send != nil, "accounts", len(w.deps.Accounts))
 		return
 	}
+	addSignature := opts.addSignature
 	logging.Trace("ui: open compose", "title", title, "to", init.To, "subject", init.Subject,
 		"draft_id", init.DraftID, "in_reply_to", init.InReplyTo, "thread_id", init.ThreadID,
-		"is_reply", aiContext != "", "attachments", len(init.Attachments), "add_signature", addSignature)
+		"is_reply", aiContext != "", "attachments", len(init.Attachments), "add_signature", addSignature,
+		"from_account", opts.fromAccountID, "start_dirty", opts.startDirty)
 
 	// Append the configured default signature: below the cursor area for a new
 	// message, between the reply area and the quoted history for a reply/forward.
@@ -238,11 +254,17 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 	box.Append(status)
 
 	if len(accounts) > 1 {
+		// The From account: the caller's explicit account (undo-send reopen keeps
+		// the account the message was being sent from), else the active one.
+		fromID := opts.fromAccountID
+		if fromID == 0 {
+			fromID = w.activeID
+		}
 		emails := make([]string, len(accounts))
 		active := 0
 		for i, a := range accounts {
 			emails[i] = a.Email
-			if a.ID == w.activeID {
+			if a.ID == fromID {
 				active = i
 			}
 		}
@@ -315,8 +337,13 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 	}
 
 	// dirty reports whether the user has changed anything from the initial draft
-	// (a reply/forward starts with prefilled, unedited content).
+	// (a reply/forward starts with prefilled, unedited content). An undo-send
+	// reopen starts dirty: its init IS user-authored content, so closing it
+	// unchanged must still prompt rather than silently discard.
 	dirty := func() bool {
+		if opts.startDirty {
+			return true
+		}
 		c := gather()
 		return strings.TrimSpace(c.To) != strings.TrimSpace(init.To) ||
 			strings.TrimSpace(c.Cc) != strings.TrimSpace(init.Cc) ||
