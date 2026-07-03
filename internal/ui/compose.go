@@ -182,6 +182,32 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 		attachRow.Append(chip)
 		attachRow.SetVisible(true)
 	}
+	// attachFile reads a file from disk off the main thread and adds it as an
+	// attachment (chip + payload). Shared by the file picker and drag-and-drop.
+	attachFile := func(path string) {
+		if path == "" {
+			return
+		}
+		go func() {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				slog.Warn("ui: read attachment", "path", path, "err", err)
+				logging.Trace("ui: compose attachment read failed", "path", path, "err", err)
+				return
+			}
+			name := filepath.Base(path)
+			mtype := mime.TypeByExtension(filepath.Ext(name))
+			if mtype == "" {
+				mtype = "application/octet-stream"
+			}
+			dispatch.Main(func() {
+				attachments = append(attachments, model.OutgoingAttachment{Filename: name, MimeType: mtype, Data: data})
+				logging.Trace("ui: compose attachment added", "name", name, "mime", mtype, "bytes", len(data), "total", len(attachments))
+				addChip(name)
+			})
+		}()
+	}
+
 	// Carry over any attachments from init (e.g. a reopened/undone message).
 	attachments = append(attachments, init.Attachments...)
 	for _, a := range init.Attachments {
@@ -414,30 +440,26 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 			if err != nil || file == nil {
 				return // cancelled
 			}
-			path := file.Path()
-			if path == "" {
-				return
-			}
-			go func() {
-				data, err := os.ReadFile(path)
-				if err != nil {
-					slog.Warn("ui: read attachment", "path", path, "err", err)
-					logging.Trace("ui: compose attachment read failed", "path", path, "err", err)
-					return
-				}
-				name := filepath.Base(path)
-				mtype := mime.TypeByExtension(filepath.Ext(name))
-				if mtype == "" {
-					mtype = "application/octet-stream"
-				}
-				dispatch.Main(func() {
-					attachments = append(attachments, model.OutgoingAttachment{Filename: name, MimeType: mtype, Data: data})
-					logging.Trace("ui: compose attachment added", "name", name, "mime", mtype, "bytes", len(data), "total", len(attachments))
-					addChip(name)
-				})
-			}()
+			attachFile(file.Path())
 		})
 	})
+
+	// Drag-and-drop a file (or several) from the file manager onto the compose
+	// window to attach it — routed through the same attachFile path as the picker.
+	drop := gtk.NewDropTarget(gdk.GTypeFileList, gdk.ActionCopy)
+	drop.ConnectDrop(func(value *coreglib.Value, _, _ float64) bool {
+		fl, ok := value.GoValue().(*gdk.FileList)
+		if !ok || fl == nil {
+			return false
+		}
+		files := fl.Files()
+		logging.Trace("ui: compose files dropped", "n", len(files))
+		for _, f := range files {
+			attachFile(f.Path())
+		}
+		return len(files) > 0
+	})
+	win.AddController(drop)
 
 	doSend := func() {
 		msg := gather() // reads the selected account on the main thread
