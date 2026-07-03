@@ -575,9 +575,6 @@ func (e *Engine) SweepOutbox(ctx context.Context, b backend.Backend, accountID i
 	// Serialize sweeps: the lock spans the list→send→mark loop so a second sweep
 	// blocks until the first finishes, then re-lists and sees the items already
 	// sent (no duplicate delivery). See sweepMu.
-	// Serialize sweeps: the lock spans the list→send→mark loop so a second sweep
-	// blocks until the first finishes, then re-lists and sees the items already
-	// sent (no duplicate delivery). See sweepMu.
 	e.sweepMu.Lock()
 	defer e.sweepMu.Unlock()
 
@@ -601,6 +598,16 @@ func (e *Engine) SweepOutbox(ctx context.Context, b backend.Backend, accountID i
 					if err := e.Store.MarkOutboxSent(ctx, it.ID); err != nil {
 						return sent, err
 					}
+					// The delivery this dedup detected never ran the success path
+					// below, so finish its bookkeeping here too: drop the source
+					// draft (else it lingers in Drafts duplicating the sent mail)
+					// and cache the sent message.
+					if it.DraftID != "" {
+						if derr := b.DeleteDraft(ctx, it.DraftID); derr != nil {
+							slog.Default().Warn("outbox: delete source draft after dedup", "id", it.DraftID, "err", derr)
+						}
+					}
+					e.storeSentMessage(ctx, b, accountID, ids[0])
 					e.publish(Change{Kind: SendStateChanged, AccountID: accountID})
 					continue
 				} else if serr != nil {

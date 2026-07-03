@@ -184,7 +184,7 @@ func TestSweepOutboxSkipsAlreadySent(t *testing.T) {
 		t.Fatalf("upsert account: %v", err)
 	}
 	rfc := []byte("Message-ID: <dedup-test@example.com>\r\nFrom: a@example.com\r\n\r\nhi")
-	if _, err := s.EnqueueOutbox(ctx, acct, "thread-1", "", rfc, 0); err != nil {
+	if _, err := s.EnqueueOutbox(ctx, acct, "thread-1", "draft-1", rfc, 0); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
@@ -202,5 +202,10 @@ func TestSweepOutboxSkipsAlreadySent(t *testing.T) {
 	}
 	if len(left) != 0 {
 		t.Fatalf("outbox still has %d sendable items, want 0 (should be marked sent)", len(left))
+	}
+	// The dedup path must still clean up the source draft the delivered message
+	// came from — otherwise it lingers in Drafts duplicating the sent mail.
+	if got := be.draftDeletes.Load(); got != 1 {
+		t.Fatalf("DeleteDraft called %d times, want 1 (dedup must clean up the source draft)", got)
 	}
 }
