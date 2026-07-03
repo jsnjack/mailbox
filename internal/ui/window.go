@@ -3266,6 +3266,7 @@ func (w *window) renderConversation(msgs []model.Message) {
 		defer cancelFetch()
 		fetched := 0
 		fetchFailed := map[string]bool{} // gmailID → true when its body fetch failed
+		var fetchFailedMu sync.Mutex     // guards fetchFailed across the fetch goroutines
 		if w.deps.FetchBody != nil {
 			sem := make(chan struct{}, 6)
 			var wg sync.WaitGroup
@@ -3282,7 +3283,9 @@ func (w *window) renderConversation(msgs []model.Message) {
 					logging.Trace("ui: fetch body", "id", m.GmailID, "account", m.AccountID)
 					if err := w.deps.FetchBody(fetchCtx, m.AccountID, m.GmailID); err != nil {
 						slog.Warn("ui: fetch body", "id", m.GmailID, "err", err)
+						fetchFailedMu.Lock()
 						fetchFailed[m.GmailID] = true
+						fetchFailedMu.Unlock()
 					}
 				}(m)
 			}
