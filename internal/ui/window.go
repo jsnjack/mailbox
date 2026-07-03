@@ -87,6 +87,10 @@ type window struct {
 	// restores the visual highlight, so a background refresh doesn't reset the
 	// list or clear an active search.
 	suppressLabelSelect bool
+	// suppressAccountSelect guards the account switcher's row-selected handler
+	// during programmatic selection (rebuilds, removals), so restoring the
+	// highlight never re-routes the UI to whatever account occupies that index.
+	suppressAccountSelect bool
 	startTime           time.Time // only mail arriving after this triggers notifications
 
 	// virtualized list grouped by conversation: a StringList of thread ids drives
@@ -757,16 +761,14 @@ func (w *window) buildSidebar() *adw.NavigationPage {
 		w.accountBox.Append(w.accountSwitcherRow(a))
 	}
 	w.accountBox.ConnectRowSelected(func(row *gtk.ListBoxRow) {
-		if row == nil {
+		if row == nil || w.suppressAccountSelect {
 			return
 		}
 		if i := row.Index(); i >= 0 && i < len(w.deps.Accounts) {
 			w.setActiveAccount(w.deps.Accounts[i])
 		}
 	})
-	if r := w.accountBox.RowAtIndex(0); r != nil {
-		w.accountBox.SelectRow(r)
-	}
+	w.selectAccountRow(w.activeID)
 	w.accountHeader = gtk.NewBox(gtk.OrientationVertical, 0)
 	w.accountHeader.Append(w.accountBox)
 	w.accountHeader.Append(gtk.NewSeparator(gtk.OrientationHorizontal))
@@ -875,30 +877,47 @@ func (w *window) hasCustomName(email string) bool {
 }
 
 // rebuildAccountSwitcher re-renders the multi-account switcher rows (after a
-// rename), preserving the current selection. Single-account naming applies on
-// next launch.
+// rename, add, or removal), restoring the selection to the active account by
+// its id — never by row index, which shifts when the list changes. The rebuild
+// and re-selection are programmatic, so the row-selected handler is suppressed
+// (it would otherwise route the UI to whatever account landed on that index).
 func (w *window) rebuildAccountSwitcher() {
 	if w.accountBox == nil {
 		return
 	}
-	selIdx := -1
-	if r := w.accountBox.SelectedRow(); r != nil {
-		selIdx = r.Index()
-	}
+	w.suppressAccountSelect = true
 	w.accountBox.RemoveAll()
 	w.accountBadges = map[int64]*gtk.Label{}
 	for _, a := range w.deps.Accounts {
 		w.accountBox.Append(w.accountSwitcherRow(a))
 	}
-	if selIdx >= 0 {
-		if r := w.accountBox.RowAtIndex(selIdx); r != nil {
-			w.accountBox.SelectRow(r)
-		}
-	}
+	w.suppressAccountSelect = false
+	w.selectAccountRow(w.activeID)
 	if w.accountHeader != nil {
 		w.accountHeader.SetVisible(len(w.deps.Accounts) >= 1)
 	}
 	w.refreshAccountUnread()
+}
+
+// selectAccountRow highlights the switcher row for the given account id without
+// firing the row-selected handler (programmatic selection must not re-route the
+// UI). A no-op when the id isn't in the switcher.
+func (w *window) selectAccountRow(id int64) {
+	if w.accountBox == nil {
+		return
+	}
+	for i, a := range w.deps.Accounts {
+		if a.ID != id {
+			continue
+		}
+		if r := w.accountBox.RowAtIndex(i); r != nil {
+			w.suppressAccountSelect = true
+			w.accountBox.SelectRow(r)
+			w.suppressAccountSelect = false
+		}
+		return
+	}
+	logging.Trace("ui: select account row not found", "account", id)
 }
 
 // addAccount registers a just-added account in the switcher live — it's already
@@ -932,9 +951,7 @@ func (w *window) addAccount(a AccountInfo) {
 		}
 		w.activeID = 0
 		w.setActiveAccount(a)
-		if r := w.accountBox.RowAtIndex(0); r != nil {
-			w.accountBox.SelectRow(r)
-		}
+		w.selectAccountRow(a.ID)
 	}
 }
 
@@ -955,7 +972,7 @@ func (w *window) removeAccountFromUI(id int64) {
 	}
 	wasActive := w.activeID == id
 	w.deps.Accounts = append(w.deps.Accounts[:idx], w.deps.Accounts[idx+1:]...)
-	w.rebuildAccountSwitcher() // re-renders rows + hides the header when none remain
+	w.rebuildAccountSwitcher() // re-renders rows; restores the highlight by account id
 	if id == w.authExpiredID {
 		w.authExpiredID = 0
 		w.authBanner.SetRevealed(false)
@@ -979,9 +996,7 @@ func (w *window) removeAccountFromUI(id int64) {
 		// already matches, so clear it first).
 		w.activeID = 0
 		w.setActiveAccount(w.deps.Accounts[0])
-		if r := w.accountBox.RowAtIndex(0); r != nil {
-			w.accountBox.SelectRow(r)
-		}
+		w.selectAccountRow(w.deps.Accounts[0].ID)
 	}
 }
 
