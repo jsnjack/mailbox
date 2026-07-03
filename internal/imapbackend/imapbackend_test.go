@@ -557,6 +557,95 @@ func TestLoginErrorClassification(t *testing.T) {
 	}
 }
 
+func TestFetchMetadataBatch(t *testing.T) {
+	mem := imapmemserver.New()
+	user := imapmemserver.NewUser("alice@example.com", "secret")
+	for _, f := range []string{"INBOX", "Archive"} {
+		if err := user.Create(f, nil); err != nil {
+			t.Fatalf("create %s: %v", f, err)
+		}
+	}
+	appendMsg := func(mailbox, subject string) {
+		raw := "From: bob@example.com\r\nSubject: " + subject + "\r\n" +
+			"Message-ID: <" + subject + "@x>\r\n" +
+			"Date: Mon, 02 Jan 2006 15:04:05 -0700\r\nContent-Type: text/plain\r\n\r\nbody\r\n"
+		if _, err := user.Append(mailbox, bytes.NewReader([]byte(raw)), &imap.AppendOptions{}); err != nil {
+			t.Fatalf("append to %s: %v", mailbox, err)
+		}
+	}
+	for i := 0; i < 3; i++ {
+		appendMsg("INBOX", fmt.Sprintf("inbox-%d", i))
+	}
+	appendMsg("Archive", "arch-0")
+	appendMsg("Archive", "arch-1")
+	mem.AddUser(user)
+
+	srv := imapserver.New(&imapserver.Options{
+		NewSession: func(*imapserver.Conn) (imapserver.Session, *imapserver.GreetingData, error) {
+			return mem.NewSession(), nil, nil
+		},
+		InsecureAuth: true,
+		Caps:         imap.CapSet{imap.CapIMAP4rev2: {}},
+	})
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close(); _ = ln.Close() })
+	h, p, _ := net.SplitHostPort(ln.Addr().String())
+	port, _ := strconv.Atoi(p)
+
+	b := New(Config{Host: h, Port: port, Security: SecurityNone, Username: "alice@example.com", Email: "alice@example.com"}, 1, PasswordAuth("alice@example.com", "secret"))
+	t.Cleanup(b.Close)
+	ctx := context.Background()
+
+	ids, err := b.SearchIDs(ctx, "", 0)
+	if err != nil || len(ids) != 5 {
+		t.Fatalf("SearchIDs: %v, %d ids (want 5 across two folders)", err, len(ids))
+	}
+
+	// Empty input is a no-op.
+	if msgs, err := b.FetchMetadataBatch(ctx, nil); err != nil || msgs != nil {
+		t.Fatalf("FetchMetadataBatch(nil) = %v, %v", msgs, err)
+	}
+
+	// Derive two ids the batch must skip (not fail on): a phantom UID in a real
+	// folder (absent from the FETCH response) and a stale-epoch id (wrong
+	// uidvalidity → whole group skipped).
+	mailbox, uidv, uid, err := parseMsgID(ids[0])
+	if err != nil {
+		t.Fatalf("parseMsgID: %v", err)
+	}
+	phantom := msgID(mailbox, uidv, 999999)
+	stale := msgID(mailbox, uidv+100, uid)
+
+	// Batch across both folders plus the two skippable ids. All five real messages
+	// come back (grouped by folder), the two bad ids are silently skipped.
+	req := append(append([]string{}, ids...), phantom, stale)
+	msgs, err := b.FetchMetadataBatch(ctx, req)
+	if err != nil {
+		t.Fatalf("FetchMetadataBatch: %v", err)
+	}
+	if len(msgs) != 5 {
+		t.Fatalf("got %d messages, want 5 (phantom + stale skipped)", len(msgs))
+	}
+	subjects := map[string]bool{}
+	labels := map[string]bool{}
+	for _, m := range msgs {
+		subjects[m.Subject] = true
+		for _, l := range m.Labels {
+			labels[l] = true
+		}
+	}
+	for _, want := range []string{"inbox-0", "inbox-1", "inbox-2", "arch-0", "arch-1"} {
+		if !subjects[want] {
+			t.Errorf("missing subject %q in batch result %v", want, subjects)
+		}
+	}
+	// Grouping actually spanned both folders (INBOX + a mapped Archive label).
+	if !labels[model.LabelInbox] {
+		t.Errorf("expected an INBOX-labeled message; labels seen: %v", labels)
+	}
+}
+
 func hasLabelID(ls []model.Label, id string) bool {
 	for _, l := range ls {
 		if l.GmailID == id {

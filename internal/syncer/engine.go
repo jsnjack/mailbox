@@ -125,36 +125,44 @@ func (e *Engine) backfill(ctx context.Context, b backend.Backend, accountID int6
 	// full buffer — guaranteeing every goroutine unwinds.
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	// A batch-capable backend (IMAP) fetches a whole chunk in one round-trip, so
+	// feed chunks of metadataBatchSize; a per-id backend (Gmail) keeps chunkSize 1
+	// so the workers stay 20-wide over individual fetches, exactly as before.
+	chunkSize := 1
+	if _, ok := b.(backend.BatchMetadataFetcher); ok {
+		chunkSize = metadataBatchSize
+	}
 	var (
 		wg    sync.WaitGroup
-		idCh  = make(chan string)
+		idCh  = make(chan []string)
 		resCh = make(chan model.Message, backfillWorkers)
 	)
 	for i := 0; i < backfillWorkers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for id := range idCh {
-				msg, err := b.FetchMetadata(ctx, id)
-				if err != nil {
-					slog.Default().Warn("backfill: fetch metadata", "id", id, "err", err)
-					continue
+			for chunk := range idCh {
+				for _, m := range e.fetchChunk(ctx, b, chunk) {
+					resCh <- m
 				}
-				resCh <- msg
 			}
 		}()
 	}
 	go func() { wg.Wait(); close(resCh) }() // close results once all fetchers done
 
-	// Feed ids on a goroutine so the collector below runs concurrently and the
-	// bounded resCh never deadlocks.
+	// Feed id chunks on a goroutine so the collector below runs concurrently and
+	// the bounded resCh never deadlocks.
 	go func() {
 		defer close(idCh)
-		for _, id := range ids {
+		for start := 0; start < len(ids); start += chunkSize {
+			end := start + chunkSize
+			if end > len(ids) {
+				end = len(ids)
+			}
 			select {
 			case <-ctx.Done():
 				return
-			case idCh <- id:
+			case idCh <- ids[start:end]:
 			}
 		}
 	}()
@@ -874,6 +882,15 @@ func (e *Engine) Resync(ctx context.Context, b backend.Backend, accountID int64,
 // cursor past a message it hasn't actually stored yet. Each goroutine writes its
 // own slot, so there is no shared-state contention.
 func (e *Engine) fetchMetadataConcurrent(ctx context.Context, b backend.Backend, ids []string) (msgs []model.Message, fetchedIDs []string, transientFail bool) {
+	if len(ids) == 0 {
+		return nil, nil, false
+	}
+	// Prefer a batched fetch when the backend supports it (IMAP: one FETCH per
+	// ~200 ids per folder instead of one round-trip per message). Gmail has no
+	// batch metadata endpoint and falls through to the per-id path below.
+	if bf, ok := b.(backend.BatchMetadataFetcher); ok {
+		return e.fetchMetadataBatched(ctx, bf, ids)
+	}
 	type slot struct {
 		msg       model.Message
 		ok        bool
@@ -909,6 +926,91 @@ func (e *Engine) fetchMetadataConcurrent(ctx context.Context, b backend.Backend,
 		}
 		if s.transient {
 			transientFail = true
+		}
+	}
+	return msgs, fetchedIDs, transientFail
+}
+
+// fetchChunk fetches metadata for a chunk of ids for backfill, using the
+// backend's batch fetcher when it has one (IMAP: one FETCH per chunk) and falling
+// back to a per-id loop otherwise (Gmail). Fetch failures are logged and skipped —
+// backfill is best-effort: a skipped id simply isn't stored this pass and
+// resurfaces on a later sync (Resync seeds its cursor from the ids actually
+// stored, so nothing is silently marked already-seen).
+func (e *Engine) fetchChunk(ctx context.Context, b backend.Backend, ids []string) []model.Message {
+	if bf, ok := b.(backend.BatchMetadataFetcher); ok {
+		msgs, err := bf.FetchMetadataBatch(ctx, ids)
+		if err != nil {
+			slog.Default().Warn("backfill: fetch metadata batch", "n", len(ids), "err", err)
+			return nil
+		}
+		return msgs
+	}
+	out := make([]model.Message, 0, len(ids))
+	for _, id := range ids {
+		msg, err := b.FetchMetadata(ctx, id)
+		if err != nil {
+			slog.Default().Warn("backfill: fetch metadata", "id", id, "err", err)
+			continue
+		}
+		out = append(out, msg)
+	}
+	return out
+}
+
+// metadataBatchSize is how many ids each batched metadata call requests. Chunking
+// lets the calls run concurrently (using the backend's connection pool) and bounds
+// any single provider operation.
+const metadataBatchSize = 200
+
+// fetchMetadataBatched fetches ids via the backend's batch fetcher, splitting them
+// into fixed-size chunks fetched concurrently. A chunk that fails at the transport
+// layer sets transientFail (so the caller holds the sync cursor and retries),
+// while ids simply absent from a successful chunk's result are treated as gone —
+// mirroring the per-id path's ErrNotFound handling. fetchedIDs is built from the
+// returned messages so it stays parallel to msgs.
+func (e *Engine) fetchMetadataBatched(ctx context.Context, bf backend.BatchMetadataFetcher, ids []string) (msgs []model.Message, fetchedIDs []string, transientFail bool) {
+	var chunks [][]string
+	for start := 0; start < len(ids); start += metadataBatchSize {
+		end := start + metadataBatchSize
+		if end > len(ids) {
+			end = len(ids)
+		}
+		chunks = append(chunks, ids[start:end])
+	}
+	type result struct {
+		msgs      []model.Message
+		transient bool
+	}
+	results := make([]result, len(chunks))
+	sem := make(chan struct{}, backfillWorkers)
+	var wg sync.WaitGroup
+	for i, chunk := range chunks {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, chunk []string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			got, err := bf.FetchMetadataBatch(ctx, chunk)
+			if err != nil {
+				slog.Default().Warn("incremental: fetch metadata batch", "n", len(chunk), "err", err)
+				results[i] = result{transient: true}
+				return
+			}
+			results[i] = result{msgs: got}
+		}(i, chunk)
+	}
+	wg.Wait()
+
+	msgs = make([]model.Message, 0, len(ids))
+	fetchedIDs = make([]string, 0, len(ids))
+	for _, r := range results {
+		if r.transient {
+			transientFail = true
+		}
+		for _, m := range r.msgs {
+			msgs = append(msgs, m)
+			fetchedIDs = append(fetchedIDs, m.GmailID)
 		}
 	}
 	return msgs, fetchedIDs, transientFail

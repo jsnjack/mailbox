@@ -52,6 +52,21 @@ type CursorSeeder interface {
 	SeedCursor(ctx context.Context, backfilledIDs []string) (string, error)
 }
 
+// BatchMetadataFetcher is an optional Backend capability: a provider that can
+// fetch many messages' metadata in far fewer round-trips than one FetchMetadata
+// per id implements it, so the engine's metadata fan-out (backfill, incremental,
+// server-search hydration) batches instead of issuing a request per message. IMAP
+// implements it (one UID-set FETCH per ~200 ids per folder); Gmail REST has no
+// batch metadata endpoint and keeps the per-id path.
+type BatchMetadataFetcher interface {
+	// FetchMetadataBatch fetches metadata for the given ids and returns the
+	// messages in no guaranteed order. An id whose message no longer exists is
+	// skipped (not an error), so len(result) may be < len(ids); a transport failure
+	// returns an error for the whole call. The caller reconciles which ids came
+	// back (by matching returned GmailID against the requested ids).
+	FetchMetadataBatch(ctx context.Context, ids []string) ([]model.Message, error)
+}
+
 // Watcher is an optional Backend capability: a provider that can push change
 // notifications (IMAP IDLE) implements it so the app reacts in near-real-time
 // instead of waiting for the next poll. Providers without it (Gmail REST) are

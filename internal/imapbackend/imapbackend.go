@@ -106,6 +106,10 @@ type Backend struct {
 	foldersLoaded bool              // LIST done
 }
 
+// Compile-time assertion: the engine's metadata fan-out uses the batch path when
+// a backend implements this.
+var _ backend.BatchMetadataFetcher = (*Backend)(nil)
+
 // New builds an IMAP backend. cred authenticates both the IMAP and SMTP
 // connections (PasswordAuth or OAuthAuth).
 func New(cfg Config, accountID int64, cred Credential) *Backend {
@@ -590,6 +594,113 @@ func (b *Backend) FetchMetadata(ctx context.Context, id string) (model.Message, 
 		return nil
 	})
 	return out, err
+}
+
+// metadataFetchChunk bounds how many UIDs one metadata FETCH requests. IMAP
+// servers accept large UID sets, but a bound keeps a single command (and its
+// response buffering) reasonable; the engine typically calls with ~200 already.
+const metadataFetchChunk = 200
+
+// FetchMetadataBatch implements backend.BatchMetadataFetcher: it fetches metadata
+// for many messages in far fewer round-trips than one FetchMetadata per id by
+// grouping the ids by (mailbox, uidvalidity) — one SELECT + UID-set FETCH per
+// group, chunked to metadataFetchChunk UIDs. A UID missing from the response (or a
+// whole stale-epoch group) is skipped and counted, never failing the batch; a
+// transport error fails the whole call so the caller can hold its sync cursor. The
+// returned messages are in no guaranteed order.
+func (b *Backend) FetchMetadataBatch(ctx context.Context, ids []string) ([]model.Message, error) {
+	logging.TraceContext(ctx, "imapbackend: fetch metadata batch", "account", b.cfg.Email, "n", len(ids))
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	// Group by (mailbox, uidvalidity), preserving first-seen order for stable tracing.
+	type groupKey struct {
+		mailbox string
+		uidv    uint32
+	}
+	groups := map[groupKey][]imap.UID{}
+	var order []groupKey
+	skipped := 0
+	for _, id := range ids {
+		mailbox, uidv, uid, err := parseMsgID(id)
+		if err != nil {
+			logging.TraceContext(ctx, "imapbackend: fetch metadata batch bad id", "id", id, "err", err)
+			skipped++
+			continue
+		}
+		k := groupKey{mailbox, uidv}
+		if _, ok := groups[k]; !ok {
+			order = append(order, k)
+		}
+		groups[k] = append(groups[k], uid)
+	}
+
+	out := make([]model.Message, 0, len(ids))
+	err := b.withConn(func(c *conn) error {
+		for _, k := range order {
+			uids := groups[k]
+			sel, err := c.selectMailbox(k.mailbox, false)
+			if err != nil {
+				return err
+			}
+			if sel.UIDValidity != k.uidv {
+				// Stale-epoch ids name messages that no longer exist under that number:
+				// skip the group (counted) rather than fetch the wrong messages.
+				logging.Trace("imapbackend: fetch metadata batch stale group",
+					"mailbox", k.mailbox, "uidvalidity", k.uidv, "current", sel.UIDValidity, "n", len(uids))
+				skipped += len(uids)
+				continue
+			}
+			for start := 0; start < len(uids); start += metadataFetchChunk {
+				end := start + metadataFetchChunk
+				if end > len(uids) {
+					end = len(uids)
+				}
+				chunk := uids[start:end]
+				got, ferr := b.fetchMetaChunk(c, k.mailbox, k.uidv, chunk)
+				if ferr != nil {
+					return ferr
+				}
+				out = append(out, got...)
+				skipped += len(chunk) - len(got) // UIDs absent from the response are gone
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		logging.TraceContext(ctx, "imapbackend: fetch metadata batch failed", "account", b.cfg.Email, "err", err)
+		return nil, err
+	}
+	logging.TraceContext(ctx, "imapbackend: fetch metadata batch ok",
+		"account", b.cfg.Email, "requested", len(ids), "fetched", len(out), "skipped", skipped)
+	return out, nil
+}
+
+// fetchMetaChunk issues one UID-set metadata FETCH (envelope, flags, dates,
+// References header) against the already-selected mailbox and converts each
+// returned buffer. The caller guarantees the connection has mailbox SELECTed at
+// uidv. Fewer buffers than uids means some UIDs vanished between listing and fetch.
+func (b *Backend) fetchMetaChunk(c *conn, mailbox string, uidv uint32, uids []imap.UID) ([]model.Message, error) {
+	refSection := &imap.FetchItemBodySection{
+		Specifier: imap.PartSpecifierHeader, HeaderFields: []string{"References"}, Peek: true,
+	}
+	set := uidSetOf(uids)
+	start := time.Now()
+	bufs, err := c.cl.Fetch(set, &imap.FetchOptions{
+		Envelope: true, Flags: true, InternalDate: true, RFC822Size: true, UID: true,
+		BodySection: []*imap.FetchItemBodySection{refSection},
+	}).Collect()
+	if err != nil {
+		logging.Trace("imapbackend: fetch metadata batch chunk failed", "mailbox", mailbox, "n", len(uids), "dur", time.Since(start), "err", err)
+		return nil, fmt.Errorf("imap fetch metadata batch %q: %w", mailbox, err)
+	}
+	out := make([]model.Message, 0, len(bufs))
+	for _, buf := range bufs {
+		refs := parseReferences(buf.FindBodySection(refSection))
+		out = append(out, b.toMessage(mailbox, uidv, buf, refs))
+	}
+	logging.Trace("imapbackend: fetch metadata batch chunk", "mailbox", mailbox, "requested", len(uids), "fetched", len(out), "dur", time.Since(start))
+	return out, nil
 }
 
 // FetchBody fetches and parses a message's full body + attachment metadata.
