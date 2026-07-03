@@ -45,7 +45,15 @@ func (s *Store) ListThreadsByLabel(ctx context.Context, accountID int64, labelID
 		return nil, err
 	}
 
-	counts, err := s.threadCounts(ctx, accountID, labelID)
+	// Count only the threads on this page (a capped LIMIT/OFFSET), not every
+	// labeled message in the account. Counts stay label-scoped (labeled messages
+	// per thread) — the page ids just bound the GROUP BY instead of a full-account
+	// scan.
+	ids := make([]string, len(latest))
+	for i, m := range latest {
+		ids[i] = m.ThreadID
+	}
+	counts, err := s.threadCountsForIDsWithLabel(ctx, accountID, labelID, ids)
 	if err != nil {
 		return nil, err
 	}
@@ -389,16 +397,38 @@ func (s *Store) threadsRepliedByMe(ctx context.Context, accountID int64, ids []s
 	return out, nil
 }
 
-func (s *Store) threadCounts(ctx context.Context, accountID int64, labelID string) (map[string]threadCount, error) {
-	rows, err := s.reader.QueryContext(ctx, `
-		SELECT m.thread_id, COUNT(*), COALESCE(SUM(m.is_unread),0)
-		FROM messages m
-		JOIN message_labels ml ON ml.message_rowid = m.rowid AND ml.label_id = ?
-		WHERE m.account_id = ?
-		GROUP BY m.thread_id`, labelID, accountID)
-	if err != nil {
-		return nil, fmt.Errorf("thread counts: %w", err)
+// threadCountsForIDsWithLabel returns per-thread total/unread counts of the
+// messages carrying labelID, restricted to the given thread ids (a page), chunked
+// to stay under the bind-variable ceiling. Like threadCountsForIDs but label-
+// scoped: it counts only the labeled messages in each thread, so the label-view
+// counts match what the pre-page-scoped threadCounts returned — just without the
+// full-account GROUP BY.
+func (s *Store) threadCountsForIDsWithLabel(ctx context.Context, accountID int64, labelID string, ids []string) (map[string]threadCount, error) {
+	out := make(map[string]threadCount, len(ids))
+	const chunk = 500
+	for start := 0; start < len(ids); start += chunk {
+		end := start + chunk
+		if end > len(ids) {
+			end = len(ids)
+		}
+		batch := ids[start:end]
+		args := make([]any, 0, len(batch)+2)
+		args = append(args, labelID, accountID)
+		for _, id := range batch {
+			args = append(args, id)
+		}
+		rows, err := s.reader.QueryContext(ctx, `
+			SELECT m.thread_id, COUNT(*), COALESCE(SUM(m.is_unread),0)
+			FROM messages m
+			JOIN message_labels ml ON ml.message_rowid = m.rowid AND ml.label_id = ?
+			WHERE m.account_id = ? AND m.thread_id IN (`+placeholders(len(batch))+`)
+			GROUP BY m.thread_id`, args...)
+		if err != nil {
+			return nil, fmt.Errorf("thread counts for ids (labeled): %w", err)
+		}
+		if err := scanThreadCountsInto(rows, out); err != nil {
+			return nil, err
+		}
 	}
-	out := make(map[string]threadCount)
-	return out, scanThreadCountsInto(rows, out)
+	return out, nil
 }

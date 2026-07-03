@@ -59,6 +59,45 @@ func TestListThreadsByLabel(t *testing.T) {
 	}
 }
 
+// TestListThreadsByLabelCountsAreLabelScoped locks in that the per-label path
+// counts only the labeled messages in each thread (not every message), so the
+// page-scoped count helper matches the counts the app showed before P11.
+func TestListThreadsByLabelCountsAreLabelScoped(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	acc := seedAccount(t, s)
+
+	// Thread A carries 3 messages but only 2 are in INBOX (a3 is SENT-only, e.g.
+	// an archived reply). The INBOX row must count 2 total / 1 unread — the labeled
+	// messages — not all 3. Thread B is a single INBOX message.
+	msgs := []model.Message{
+		{AccountID: acc, GmailID: "a1", ThreadID: "A", InternalDate: time.Unix(100, 0), Subject: "A first", Labels: []string{"INBOX"}},
+		{AccountID: acc, GmailID: "a2", ThreadID: "A", InternalDate: time.Unix(300, 0), Subject: "A unread", IsUnread: true, Labels: []string{"INBOX", "UNREAD"}},
+		{AccountID: acc, GmailID: "a3", ThreadID: "A", InternalDate: time.Unix(200, 0), Subject: "A archived reply", Labels: []string{"SENT"}},
+		{AccountID: acc, GmailID: "b1", ThreadID: "B", InternalDate: time.Unix(150, 0), Subject: "B only", Labels: []string{"INBOX"}},
+	}
+	for _, m := range msgs {
+		if _, err := s.UpsertMessage(ctx, m); err != nil {
+			t.Fatalf("upsert %s: %v", m.GmailID, err)
+		}
+	}
+
+	threads, err := s.ListThreadsByLabel(ctx, acc, "INBOX", 50, 0)
+	if err != nil {
+		t.Fatalf("ListThreadsByLabel: %v", err)
+	}
+	byID := map[string]model.ThreadSummary{}
+	for _, th := range threads {
+		byID[th.ThreadID] = th
+	}
+	if a, ok := byID["A"]; !ok || a.Count != 2 || a.UnreadCount != 1 {
+		t.Fatalf("thread A label-scoped counts wrong: %+v (want Count=2, Unread=1)", byID["A"])
+	}
+	if b, ok := byID["B"]; !ok || b.Count != 1 || b.UnreadCount != 0 {
+		t.Fatalf("thread B counts wrong: %+v (want Count=1, Unread=0)", byID["B"])
+	}
+}
+
 func TestGetThreadSummaries(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
