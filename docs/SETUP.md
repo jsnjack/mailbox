@@ -1,128 +1,143 @@
 # Setup
 
-How to build Mailbox, connect accounts (Gmail and IMAP), and turn on the AI features.
+Build the app, connect your mail, and (optionally) turn on the AI.
 
-## Build dependencies (Fedora)
+## 1. Build
+
+Dependencies (Fedora):
 
 ```bash
 sudo dnf install golang gtk4-devel libadwaita-devel webkitgtk6.0-devel libsoup3-devel libsecret-devel
 ```
 
-## Build
-
 ```bash
 make build    # compiles to bin/mailbox
 ```
 
-The first build compiles the GTK4/WebKit cgo bindings and is slow (~10–15 min); subsequent builds are cached.
+The first build compiles the GTK4/WebKit bindings and takes a while (~10–15
+minutes); every build after that is cached and fast.
 
-On Fedora you can instead build and install an RPM (which pulls the runtime libraries automatically):
+On Fedora you can instead build and install an RPM, which pulls the runtime
+libraries automatically:
 
 ```bash
 make rpm
 sudo dnf install ./rpmbuild/RPMS/x86_64/mailbox-*.rpm
 ```
 
-## Connect your first account (Gmail)
-
-Mailbox needs one account to launch; connect it from the command line as below.
-Once the app is running, add any others — Gmail or IMAP — from **Add account…**
-in the main (☰) menu (see [Add more accounts](#add-more-accounts)).
-
-### 1. Set up a Google OAuth client
-
-You can reuse an existing Google Cloud project — you don't need a new one. In the
-[Google Cloud Console](https://console.cloud.google.com), make sure that project has:
-
-- **The Gmail API enabled** (APIs & Services → Library → Gmail API → Enable).
-- An **OAuth consent screen** configured, with your Gmail address listed under **Test users**.
-- An **OAuth client ID** of type **Desktop app** (reuse one if you have it, otherwise add one to
-  the same project). Download its JSON to `~/.config/mailbox/credentials.json`.
-
-> **Why your own OAuth client?** Mailbox uses Gmail's *restricted* scopes (read/modify/send).
-> Google only lets an app request those from arbitrary users after a paid annual security
-> assessment (CASA), which this hobby project doesn't have. So instead of one published app for
-> everyone, you run your own OAuth client. A client in **Testing** mode allows up to **100 Test
-> users** — enough to share one client among yourself, family, or a small team: add each address
-> under the consent screen's *Test users*, and everyone authorizes their own Google account against
-> it. Each person's token is theirs and stays in their own keyring.
-
-### 2. Add your account
-
-```bash
-./bin/mailbox sync --account your@gmail.com --credentials ~/.config/mailbox/credentials.json
-```
-
-This opens a browser for OAuth login, then syncs your mail. (`--credentials` is optional once the
-file is at the default path above.)
-
-### 3. Launch
+## 2. First launch
 
 ```bash
 ./bin/mailbox
 ```
 
-After the first sync you can just run `./bin/mailbox` — the refresh token is stored in the OS
-keyring and the config is persisted.
+The app opens to a welcome screen. Everything else happens from the main (☰)
+menu → **Add account…**: pick a provider, fill in the form, **Test & Add** —
+the account starts syncing immediately, no restart. Add as many accounts as
+you like the same way.
 
-## Add more accounts
+## 3. Connect an account — pick your path
 
-With Mailbox running, open the main (☰) menu → **Add account…**. Pick a provider, fill in the
-form, and click **Test & Add** — the account starts syncing right away (no restart) and appears
-in the sidebar switcher. The connection secret (app password or OAuth refresh token) goes to the
-OS keyring; per-account server settings are stored in `~/.local/share/mailbox/imap-accounts.json`.
+| You have | Easiest path | You'll need |
+|---|---|---|
+| Yahoo, iCloud, Fastmail, or any IMAP server | **App password** (below) | An app password from your provider |
+| Gmail | **Gmail, native API** (below) | A one-time Google OAuth client |
+| Outlook / Office 365 | **Outlook** (below) | A one-time Azure app registration |
 
-| Provider | How it connects |
-|---|---|
-| **Gmail** | Sign in with Google (native Gmail API — same as the CLI flow above). Needs `credentials.json`. |
-| **Gmail (IMAP)** | Sign in with Google; connects over IMAP/SMTP with the full-mailbox scope instead of the API. |
-| **Outlook / Office 365** | Sign in with Microsoft (OAuth). Requires an Azure app client id — see below. |
-| **Yahoo, iCloud, Fastmail** | Enter your email and an **app password** (not your normal password); the dialog links to where each provider creates one. |
-| **Other (IMAP)** | Enter the email, password, and IMAP/SMTP host/port/security under **Advanced**. |
+### App password — Yahoo, iCloud, Fastmail, any IMAP server
 
-Most providers require an **app-specific password** rather than your account password (and may need
-IMAP enabled in their settings first):
+The simplest path: no client setup at all. Create an **app password** with
+your provider (your normal password won't work, and some providers also want
+IMAP switched on in their settings):
 
 - **Yahoo** — [account security → app passwords](https://login.yahoo.com/account/security/app-passwords)
 - **iCloud** — [account.apple.com](https://account.apple.com/account/manage) → App-Specific Passwords
 - **Fastmail** — [Settings → Privacy & Security → app passwords](https://www.fastmail.com/settings/security/devicekeys)
 
-### Outlook / Office 365 (Azure app id)
+Then **Add account…** → pick the provider → email + app password → **Test &
+Add**. For a self-hosted or unlisted server, choose **Other (IMAP)** and enter
+the IMAP/SMTP host, port, and security under **Advanced**.
 
-Outlook OAuth needs a public client id from an [Azure app registration](https://portal.azure.com)
-(Microsoft Entra ID → App registrations → New registration). Under **Authentication**, add a
-**Mobile and desktop applications** platform with a loopback redirect — Mailbox redirects to
-`http://127.0.0.1/callback` on a per-login port — and grant the delegated Graph/IMAP permissions
-`IMAP.AccessAsUser.All`, `SMTP.Send`, and `offline_access`. Then point Mailbox at the client id:
+### Gmail — native API
+
+The best way to use Gmail: real labels, server-side search, and fast
+incremental sync. It needs a one-time setup of your own Google OAuth client:
+
+1. In the [Google Cloud Console](https://console.cloud.google.com) (any
+   project, new or existing):
+   - enable the **Gmail API** (APIs & Services → Library),
+   - configure the **OAuth consent screen** and add your Gmail address under
+     **Test users**,
+   - create an **OAuth client ID** of type **Desktop app** and download its
+     JSON to `~/.config/mailbox/credentials.json`.
+2. **Add account…** → **Gmail** → sign in with Google.
+
+> **Why your own client?** Mailbox asks for Gmail's restricted scopes
+> (read/modify/send). Google only grants those to published apps after a paid
+> annual security review, which this project doesn't have — so you run your
+> own client instead. A client in Testing mode allows up to 100 test users, so
+> one client can serve your family or team: list each address under *Test
+> users*, and each person signs in with their own Google account. Tokens stay
+> in each person's own keyring.
+
+Prefer the terminal? The same flow works headlessly and does the first sync in
+one go:
+
+```bash
+./bin/mailbox sync --account your@gmail.com --credentials ~/.config/mailbox/credentials.json
+```
+
+### Gmail — over IMAP
+
+**Add account…** also offers **Gmail (IMAP)**: the same Google sign-in and the
+same `credentials.json`, but mail flows over IMAP/SMTP instead of the API.
+Pick it if you specifically want the IMAP behavior; otherwise the native API
+above is faster and more capable.
+
+### Outlook / Office 365
+
+Microsoft sign-in needs a public client id from a one-time
+[Azure app registration](https://portal.azure.com) (Microsoft Entra ID → App
+registrations → New registration):
+
+1. Under **Authentication**, add a **Mobile and desktop applications**
+   platform with a loopback redirect — Mailbox uses
+   `http://127.0.0.1/callback` on a per-login port.
+2. Grant the delegated permissions `IMAP.AccessAsUser.All`, `SMTP.Send`, and
+   `offline_access`.
+3. Point Mailbox at the client id and add the account:
 
 ```bash
 export MAILBOX_MS_CLIENT_ID=<your-application-client-id>
 ./bin/mailbox
 ```
 
-## Enable the AI features (optional)
+## 4. Turn on the AI (optional)
 
-The AI features stay dormant until a provider is configured. Set the provider/endpoint/model in
-**Preferences → AI** (or via the `MAILBOX_AI_*` env vars), then store the key:
+Without a provider the AI features stay dormant and out of the way. To enable
+them, set the provider, endpoint, and model in **Preferences → AI** (or the
+`MAILBOX_AI_*` environment variables), then store the key:
 
 ```bash
 printf '%s' "$YOUR_API_KEY" | ./bin/mailbox set-ai-key
 ```
 
-Any OpenAI-compatible endpoint (OpenAI, a LiteLLM proxy, etc.) or Anthropic works; the key lives
-only in the OS keyring.
+Anything OpenAI-compatible works (OpenAI itself, a LiteLLM proxy, a local
+model behind one), as does Anthropic directly. The key lives only in the OS
+keyring — never in a config file.
 
-## Configuration
+## Where things live
 
 | What | Where |
 |---|---|
 | Config | `~/.config/mailbox/config.toml` |
-| Database | `~/.local/share/mailbox/mailbox.db` |
+| Database (mail cache) | `~/.local/share/mailbox/mailbox.db` |
 | Gmail OAuth client | `~/.config/mailbox/credentials.json` |
 | IMAP account servers | `~/.local/share/mailbox/imap-accounts.json` |
-| Account secrets | OS keyring — Gmail tokens under `mailbox`, IMAP app passwords / OAuth tokens under `mailbox-imap` |
+| Account secrets | OS keyring — Gmail tokens under `mailbox`, IMAP passwords/tokens under `mailbox-imap` |
 | AI key | OS keyring (`mailbox set-ai-key`) |
 | Signature | `~/.config/mailbox/signature.txt` |
+| Keyboard shortcuts | `~/.config/mailbox/shortcuts.json` |
 
-Env vars: AI provider — `MAILBOX_AI_PROVIDER`, `MAILBOX_AI_ENDPOINT`, `MAILBOX_AI_MODEL`,
-`MAILBOX_AI_KEY`; Outlook OAuth — `MAILBOX_MS_CLIENT_ID`.
+Environment variables: `MAILBOX_AI_PROVIDER`, `MAILBOX_AI_ENDPOINT`,
+`MAILBOX_AI_MODEL`, `MAILBOX_AI_KEY` (AI); `MAILBOX_MS_CLIENT_ID` (Outlook).

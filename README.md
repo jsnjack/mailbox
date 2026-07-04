@@ -1,34 +1,67 @@
 # Mailbox
 
-A native, fast email client for Linux/GNOME, with AI built in.
-Gmail through its API (fastest), plus IMAP for Yahoo, iCloud, Fastmail, Outlook,
-and any other IMAP server. Written in Go with GTK4 + libadwaita.
+A fast, native mail client for GNOME — local mail, useful AI, no bloat.
 
 ![Mailbox](screenshots/main.png)
 
-## Why
+Mailbox is a small GTK4 app for people who live on Linux and want their mail
+quick, local, and private. Gmail connects through its own API; everything else
+speaks IMAP. An AI layer takes over the busywork — sorting, summarizing,
+drafting, translating — using whatever model you point it at, including one
+running on your own machine.
 
-GNOME lacks a modern, fast, native email client — Geary is buggy, Thunderbird is heavy, and the rest are Electron or web wrappers. Mailbox is a small native GTK4 app that feels at home on GNOME, with AI as a genuine productivity layer. Gmail is first-class via the Gmail API; everyone else connects over IMAP/SMTP.
+## How it's different
+
+- **Native and light.** Go + GTK4/libadwaita, at home on GNOME. Not a web page
+  in a frame.
+- **Local first.** Your mail lives in a local database: search answers as you
+  type, reading works offline, and the interface never waits for a server.
+- **AI on your terms.** Any OpenAI-compatible or Anthropic endpoint works —
+  including a local model. Every result is cached, so nothing is analyzed or
+  paid for twice. Without a configured provider the app is simply a complete
+  mail client; nothing nags.
+- **Private by default.** Tracking pixels are stripped before rendering, email
+  can never run scripts, forged senders are flagged, and every secret stays in
+  the system keyring.
 
 ## Features
 
-**AI** — inbox auto-categorization (Needs reply, Travel, Receipt, …), one-click thread summaries, contextual draft replies with quick-reply suggestions, subject generation, grammar check, in-place translation, and on-demand phishing analysis. Bring your own provider (OpenAI-compatible or Anthropic); the key stays in the OS keyring.
+**Triage**
 
-**Security** — per-message SPF/DKIM/DMARC verdicts, display-name/deceptive-link detection, tracking-pixel stripping, and sandboxed rendering (no email-supplied JavaScript runs).
+- Inbox auto-sorted into action tags: Needs reply, Receipt, Travel, Newsletter, …
+- Snooze — quick presets, a calendar, or let the AI read the mail and suggest
+  the moment ("day before the deadline")
+- One-click unsubscribe, plus a dashboard of every list you're on, sorted by
+  how much they send
+- Keyboard-driven throughout; shortcuts are rebindable
 
-**Accounts** — Gmail via its native API (incremental `history` sync, server threads & search) and any IMAP provider (Yahoo, iCloud, Fastmail, Outlook/Office 365, self-hosted) over IMAP + SMTP, with CONDSTORE incremental sync, IDLE push for near-real-time mail, and client-side conversation threading. App-password or OAuth (Google/Microsoft XOAUTH2) per account. Add accounts from a provider-preset dialog.
+**Reading & writing**
 
-**Core** — multiple accounts with per-account unread counts, instant FTS5 search (with a server-side fallback), conversation view, selection-mode bulk actions, Undo Send with a retrying outbox, attachments, resumable drafts, a configurable signature, recipient autocomplete, and keyboard-first navigation (`j`/`k`, `r`, `a`, `c`, `/`). Responsive three-pane layout that collapses on narrow windows.
+- Conversation view that folds older messages out of the way
+- Meeting invites become a card: Accept / Maybe / Decline without leaving mail
+- Thread summaries, drafted replies, translation, and proofreading on demand
+- Undo send, backed by an outbox that survives crashes and retries failures
+- New-mail notifications carry a one-line AI gist and quick actions
 
-## Install & setup
+**Accounts**
 
-Needs Linux with GTK4, libadwaita, WebKitGTK 6.0, and libsecret.
+- Gmail through its native API: real labels, server search, instant incremental sync
+- Yahoo, iCloud, Fastmail, Outlook, and any IMAP server — with live push where
+  the server supports it
+- Any number of accounts side by side, each with its own identity and signature
+
+## Get started
 
 ```bash
-make build        # → bin/mailbox
+sudo dnf install golang gtk4-devel libadwaita-devel webkitgtk6.0-devel libsoup3-devel libsecret-devel
+make build
+./bin/mailbox
 ```
 
-See **[docs/SETUP.md](docs/SETUP.md)** for build dependencies, connecting accounts (Gmail and IMAP), and enabling the AI features.
+The app opens to a welcome screen and **Add account…** takes it from there.
+IMAP providers need only an app password; Gmail's API and Outlook need a
+one-time client setup. **[docs/SETUP.md](docs/SETUP.md)** walks through every
+option, including turning on the AI.
 
 ## License
 
