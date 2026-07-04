@@ -1167,7 +1167,7 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 	w.threadStack.SetVisibleChildName("list")
 
 	w.searchEntry = gtk.NewSearchEntry()
-	w.searchEntry.SetPlaceholderText("Search cached messages")
+	w.searchEntry.SetPlaceholderText("Search")
 	setMargins(w.searchEntry, 6, 6, 6, 6)
 	w.searchEntry.ConnectSearchChanged(w.onSearchChanged)
 	// Esc in the search entry (stop-search) clears it, returning the list to the
@@ -5368,7 +5368,11 @@ func (w *window) snoozeUntil(acctID int64, threadID string, t time.Time) {
 			return
 		}
 		dispatch.Main(func() {
-			w.toast("Snoozed until " + t.Format("Mon 15:04"))
+			toast := adw.NewToast("Snoozed until " + t.Format("Mon 15:04"))
+			toast.SetButtonLabel("Undo")
+			toast.SetTimeout(6)
+			toast.ConnectButtonClicked(func() { w.unsnooze(acctID, threadID) })
+			w.toastOverlay.AddToast(toast)
 			w.refreshList(w.searchEntry.Text())
 			w.loadLabels() // the Snoozed badge counts one more
 		})
