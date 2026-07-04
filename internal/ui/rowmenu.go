@@ -4,6 +4,8 @@ import (
 	"context"
 	"time"
 
+	"github.com/jsnjack/mailbox/internal/dispatch"
+
 	"github.com/diamondburned/gotk4/pkg/gdk/v4"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 	"github.com/jsnjack/mailbox/internal/ai"
@@ -84,6 +86,27 @@ func (w *window) showRowMenu(row gtk.Widgetter, threadID string, x, y float64) {
 		})
 	})
 	item(box, "Label…", func() { w.showThreadLabelsDialog(acct, threadID) })
+	// flyoutBtn builds a menu item that opens a nested popover, marked with a
+	// trailing chevron so it reads as "leads to more choices" (the plain items
+	// act immediately; dialogs use the "…" convention).
+	flyoutBtn := func(label string, pop *gtk.Popover) *gtk.Button {
+		lbl := gtk.NewLabel(label)
+		lbl.SetXAlign(0)
+		lbl.SetHExpand(true)
+		row := gtk.NewBox(gtk.OrientationHorizontal, 6)
+		row.Append(lbl)
+		row.Append(gtk.NewImageFromIconName("pan-end-symbolic"))
+		btn := gtk.NewButton()
+		btn.SetChild(row)
+		btn.AddCSSClass("flat")
+		btn.ConnectClicked(func() {
+			pop.SetParent(btn)
+			pop.Popup()
+		})
+		pop.ConnectClosed(func() { pop.Unparent() })
+		return btn
+	}
+
 	// Snooze: hide the conversation until a quick wake time (nested popover of
 	// presets, like "Categorize as"); in the Snoozed view offer the reverse.
 	if w.current == snoozedID {
@@ -95,6 +118,21 @@ func (w *window) showRowMenu(row gtk.Widgetter, threadID string, x, y float64) {
 		snBox := gtk.NewBox(gtk.OrientationVertical, 0)
 		snBox.AddCSSClass("menu")
 		snBox.AddCSSClass("rowmenu")
+		// The AI suggestion leads the flyout: it starts fetching when the
+		// flyout opens and becomes clickable once the email implies a time
+		// (see updateSnoozeSuggestion); silently disappears when it doesn't.
+		var aiBtn *gtk.Button
+		var aiFetched bool
+		if w.deps.Assistant != nil {
+			aiLbl := gtk.NewLabel("✨ Suggesting…")
+			aiLbl.SetXAlign(0)
+			aiLbl.SetHExpand(true)
+			aiBtn = gtk.NewButton()
+			aiBtn.SetChild(aiLbl)
+			aiBtn.AddCSSClass("flat")
+			aiBtn.SetSensitive(false)
+			snBox.Append(aiBtn)
+		}
 		for _, p := range snoozePresets(time.Now()) {
 			p := p
 			item(snBox, p.label+" ("+p.t.Format("Mon 15:04")+")", func() {
@@ -107,17 +145,33 @@ func (w *window) showRowMenu(row gtk.Widgetter, threadID string, x, y float64) {
 			w.openSnoozeDialog(acct, threadID)
 		})
 		snPop.SetChild(snBox)
-		lbl := gtk.NewLabel("Snooze")
-		lbl.SetXAlign(0)
-		lbl.SetHExpand(true)
-		snBtn := gtk.NewButton()
-		snBtn.SetChild(lbl)
-		snBtn.AddCSSClass("flat")
+		snBtn := flyoutBtn("Snooze", snPop)
 		snBtn.ConnectClicked(func() {
-			snPop.SetParent(snBtn)
-			snPop.Popup()
+			if aiBtn == nil || aiFetched {
+				return
+			}
+			aiFetched = true
+			go func() {
+				t, reason, err := w.suggestSnoozeFor(acct, threadID)
+				dispatch.Main(func() {
+					if err != nil || t.IsZero() {
+						aiBtn.SetVisible(false)
+						return
+					}
+					label := "✨ " + t.Format("Mon, Jan 2 15:04")
+					if reason != "" {
+						label += " — " + reason
+					}
+					aiBtn.SetChild(gtk.NewLabel(label))
+					aiBtn.SetSensitive(true)
+					aiBtn.ConnectClicked(func() {
+						snPop.Popdown()
+						pop.Popdown()
+						w.snoozeUntil(acct, threadID, t)
+					})
+				})
+			}()
 		})
-		snPop.ConnectClosed(func() { snPop.Unparent() })
 		box.Append(snBtn)
 	}
 	sep()
@@ -158,19 +212,7 @@ func (w *window) showRowMenu(row gtk.Widgetter, threadID string, x, y float64) {
 		}
 		setCat("None", "")
 		catPop.SetChild(catBox)
-
-		lbl := gtk.NewLabel("Categorize as")
-		lbl.SetXAlign(0)
-		lbl.SetHExpand(true)
-		catBtn := gtk.NewButton()
-		catBtn.SetChild(lbl)
-		catBtn.AddCSSClass("flat")
-		catBtn.ConnectClicked(func() {
-			catPop.SetParent(catBtn)
-			catPop.Popup()
-		})
-		catPop.ConnectClosed(func() { catPop.Unparent() })
-		box.Append(catBtn)
+		box.Append(flyoutBtn("Categorize as", catPop))
 
 		if w.deps.Assistant != nil {
 			item(box, "Re-categorize with AI", func() { w.recategorizeThread(threadID) })

@@ -19,7 +19,8 @@ func (w *window) openSnoozeDialog(acctID int64, threadID string) {
 
 	dialog := adw.NewDialog()
 	dialog.SetTitle("Snooze until…")
-	dialog.SetContentWidth(360)
+	dialog.SetContentWidth(400)
+	dialog.SetContentHeight(680)
 
 	apply := func(t time.Time) {
 		dialog.Close()
