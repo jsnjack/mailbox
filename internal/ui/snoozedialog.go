@@ -58,7 +58,7 @@ func (w *window) openSnoozeDialog(acctID int64, threadID string) {
 				}
 				for _, sug := range suggestions {
 					sug := sug
-					label := "✨ " + sug.At.Format("Mon, Jan 2 15:04")
+					label := "✨ " + formatWakeTime(sug.At, time.Now())
 					if sug.Reason != "" {
 						label += " — " + sug.Reason
 					}

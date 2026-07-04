@@ -164,7 +164,7 @@ func (w *window) showRowMenu(row gtk.Widgetter, threadID string, x, y float64) {
 					}
 					for _, sug := range suggestions {
 						sug := sug
-						label := "✨ " + sug.At.Format("Mon, Jan 2 15:04")
+						label := "✨ " + formatWakeTime(sug.At, time.Now())
 						if sug.Reason != "" {
 							label += " — " + sug.Reason
 						}

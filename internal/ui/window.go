@@ -1619,7 +1619,7 @@ func (w *window) bulkSnooze(t time.Time) {
 			}
 		}
 		dispatch.Main(func() {
-			toast := adw.NewToast(fmt.Sprintf("Snoozed %d conversations until %s", len(ids), t.Format("Mon 15:04")))
+			toast := adw.NewToast(fmt.Sprintf("Snoozed %d conversations until %s", len(ids), formatWakeTime(t, time.Now())))
 			toast.SetButtonLabel("Undo")
 			toast.SetTimeout(6)
 			toast.ConnectButtonClicked(func() {
@@ -5632,6 +5632,20 @@ func snoozePresets(now time.Time) []snoozePreset {
 	}
 }
 
+// formatWakeTime renders a snooze wake time at the precision its distance
+// needs: weekday+time within the week, date+time within the year, full date
+// beyond — "until Tue 09:00" would be a lie for a September snooze.
+func formatWakeTime(t, now time.Time) string {
+	switch {
+	case t.Sub(now) < 6*24*time.Hour:
+		return t.Format("Mon 15:04")
+	case t.Year() == now.Year():
+		return t.Format("Mon, Jan 2 15:04")
+	default:
+		return t.Format("Jan 2, 2006 15:04")
+	}
+}
+
 // snoozeUntil hides a conversation until t (a local snooze — labels untouched,
 // so nothing syncs to the provider and other clients are unaffected).
 func (w *window) snoozeUntil(acctID int64, threadID string, t time.Time) {
@@ -5642,7 +5656,7 @@ func (w *window) snoozeUntil(acctID int64, threadID string, t time.Time) {
 			return
 		}
 		dispatch.Main(func() {
-			toast := adw.NewToast("Snoozed until " + t.Format("Mon 15:04"))
+			toast := adw.NewToast("Snoozed until " + formatWakeTime(t, time.Now()))
 			toast.SetButtonLabel("Undo")
 			toast.SetTimeout(6)
 			toast.ConnectButtonClicked(func() { w.unsnooze(acctID, threadID) })
@@ -5779,7 +5793,7 @@ func threadRow(t model.ThreadSummary, outgoing bool, category string, manualCat 
 	}
 	stamp := ""
 	if t.SnoozedUntil > 0 {
-		stamp = "until " + time.Unix(t.SnoozedUntil, 0).Format("Mon 15:04")
+		stamp = "until " + formatWakeTime(time.Unix(t.SnoozedUntil, 0), time.Now())
 	} else {
 		stamp = relativeDate(m.InternalDate, time.Now())
 	}
