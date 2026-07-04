@@ -691,3 +691,27 @@ func contains(ss []string, want string) bool {
 	}
 	return false
 }
+
+// parseMetaHeaders must split the multi-header HEADER.FIELDS block into
+// references, the unsubscribe target, and the one-click marker — including
+// folded continuation lines.
+func TestParseMetaHeaders(t *testing.T) {
+	raw := "References: <a@x>\r\n <b@y>\r\n" +
+		"List-Unsubscribe: <https://l.example.com/u?t=1>,\r\n <mailto:leave@l.example.com>\r\n" +
+		"List-Unsubscribe-Post: List-Unsubscribe=One-Click\r\n\r\n"
+	mh := parseMetaHeaders([]byte(raw))
+	if len(mh.refs) != 2 || mh.refs[0] != "a@x" || mh.refs[1] != "b@y" {
+		t.Fatalf("refs = %v", mh.refs)
+	}
+	if mh.unsub != "<https://l.example.com/u?t=1>, <mailto:leave@l.example.com>" {
+		t.Fatalf("unsub = %q", mh.unsub)
+	}
+	if !mh.oneClick {
+		t.Fatal("oneClick = false, want true")
+	}
+	// References-only block (the pre-unsubscribe shape) still parses.
+	mh = parseMetaHeaders([]byte("References: <r@z>\r\n"))
+	if len(mh.refs) != 1 || mh.unsub != "" || mh.oneClick {
+		t.Fatalf("refs-only = %+v", mh)
+	}
+}

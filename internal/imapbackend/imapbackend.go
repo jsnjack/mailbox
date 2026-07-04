@@ -587,7 +587,7 @@ func (b *Backend) FetchMetadata(ctx context.Context, id string) (model.Message, 
 		// References isn't part of the IMAP ENVELOPE, so fetch that one header too
 		// — it carries the thread's ancestry (used to compute a stable thread root).
 		refSection := &imap.FetchItemBodySection{
-			Specifier: imap.PartSpecifierHeader, HeaderFields: []string{"References"}, Peek: true,
+			Specifier: imap.PartSpecifierHeader, HeaderFields: metaHeaderFields, Peek: true,
 		}
 		start := time.Now()
 		bufs, err := c.cl.Fetch(imap.UIDSetNum(uid), &imap.FetchOptions{
@@ -604,8 +604,8 @@ func (b *Backend) FetchMetadata(ctx context.Context, id string) (model.Message, 
 			logging.Trace("imapbackend: fetch metadata not found", "mailbox", mailbox, "uid", uint32(uid))
 			return fmt.Errorf("%w: uid %d in %q", backend.ErrNotFound, uid, mailbox)
 		}
-		refs := parseReferences(bufs[0].FindBodySection(refSection))
-		out = b.toMessage(mailbox, uidv, bufs[0], refs)
+		mh := parseMetaHeaders(bufs[0].FindBodySection(refSection))
+		out = b.toMessage(mailbox, uidv, bufs[0], mh)
 		logging.Trace("imapbackend: fetch metadata ok",
 			"id", id, "subject", out.Subject, "from", out.FromAddr, "unread", out.IsUnread,
 			"starred", out.IsStarred, "size", out.SizeEstimate, "dur", time.Since(start))
@@ -700,7 +700,7 @@ func (b *Backend) FetchMetadataBatch(ctx context.Context, ids []string) ([]model
 // uidv. Fewer buffers than uids means some UIDs vanished between listing and fetch.
 func (b *Backend) fetchMetaChunk(c *conn, mailbox string, uidv uint32, uids []imap.UID) ([]model.Message, error) {
 	refSection := &imap.FetchItemBodySection{
-		Specifier: imap.PartSpecifierHeader, HeaderFields: []string{"References"}, Peek: true,
+		Specifier: imap.PartSpecifierHeader, HeaderFields: metaHeaderFields, Peek: true,
 	}
 	set := uidSetOf(uids)
 	start := time.Now()
@@ -714,8 +714,8 @@ func (b *Backend) fetchMetaChunk(c *conn, mailbox string, uidv uint32, uids []im
 	}
 	out := make([]model.Message, 0, len(bufs))
 	for _, buf := range bufs {
-		refs := parseReferences(buf.FindBodySection(refSection))
-		out = append(out, b.toMessage(mailbox, uidv, buf, refs))
+		mh := parseMetaHeaders(buf.FindBodySection(refSection))
+		out = append(out, b.toMessage(mailbox, uidv, buf, mh))
 	}
 	logging.Trace("imapbackend: fetch metadata batch chunk", "mailbox", mailbox, "requested", len(uids), "fetched", len(out), "dur", time.Since(start))
 	return out, nil
@@ -795,14 +795,17 @@ func (b *Backend) Changes(ctx context.Context, cur string) (upserts, deletes []s
 
 // toMessage converts a fetched message into the domain model. Caller holds mu
 // (it reads folderToLabel).
-func (b *Backend) toMessage(mailbox string, uidv uint32, buf *imapclient.FetchMessageBuffer, refs []string) model.Message {
+func (b *Backend) toMessage(mailbox string, uidv uint32, buf *imapclient.FetchMessageBuffer, mh metaHeaders) model.Message {
 	id := msgID(mailbox, uidv, buf.UID)
+	refs := mh.refs
 	m := model.Message{
-		AccountID:    b.accountID,
-		GmailID:      id,
-		ThreadID:     id, // overridden below once the reference chain is known
-		InternalDate: buf.InternalDate,
-		SizeEstimate: buf.RFC822Size,
+		AccountID:         b.accountID,
+		GmailID:           id,
+		ThreadID:          id, // overridden below once the reference chain is known
+		InternalDate:      buf.InternalDate,
+		SizeEstimate:      buf.RFC822Size,
+		ListUnsubscribe:   mh.unsub,
+		ListUnsubOneClick: mh.oneClick,
 	}
 	if env := buf.Envelope; env != nil {
 		m.Subject = env.Subject
@@ -1003,20 +1006,53 @@ func addrList(as []imap.Address) string {
 	return strings.Join(parts, ", ")
 }
 
-// parseReferences extracts the (bracket-stripped) message-ids from a raw
-// "References: <a@x> <b@y>" header section, oldest-first.
-func parseReferences(headerBytes []byte) []string {
-	s := string(headerBytes)
-	if i := strings.IndexByte(s, ':'); i >= 0 {
-		s = s[i+1:] // drop the "References:" name
-	}
-	var out []string
-	for _, tok := range strings.Fields(s) {
-		if id := strings.Trim(tok, "<>"); id != "" {
-			out = append(out, id)
+// metaHeaderFields are the headers the metadata FETCH requests beyond the
+// envelope: threading ancestry plus the unsubscribe capability.
+var metaHeaderFields = []string{"References", "List-Unsubscribe", "List-Unsubscribe-Post"}
+
+// metaHeaders is the parsed form of the metaHeaderFields section.
+type metaHeaders struct {
+	refs     []string // bracket-stripped References message-ids, oldest-first
+	unsub    string   // List-Unsubscribe value ("" = none)
+	oneClick bool     // List-Unsubscribe-Post offered RFC 8058 one-click
+}
+
+// parseMetaHeaders parses the fetched HEADER.FIELDS block (multiple headers,
+// possibly folded across lines) into its typed parts.
+func parseMetaHeaders(headerBytes []byte) metaHeaders {
+	var mh metaHeaders
+	// Unfold: a line starting with space/tab continues the previous header.
+	raw := strings.Split(strings.ReplaceAll(string(headerBytes), "\r\n", "\n"), "\n")
+	var lines []string
+	for _, l := range raw {
+		if (strings.HasPrefix(l, " ") || strings.HasPrefix(l, "\t")) && len(lines) > 0 {
+			lines[len(lines)-1] += " " + strings.TrimSpace(l)
+			continue
+		}
+		if strings.TrimSpace(l) != "" {
+			lines = append(lines, l)
 		}
 	}
-	return out
+	for _, l := range lines {
+		name, val, ok := strings.Cut(l, ":")
+		if !ok {
+			continue
+		}
+		val = strings.TrimSpace(val)
+		switch strings.ToLower(strings.TrimSpace(name)) {
+		case "references":
+			for _, tok := range strings.Fields(val) {
+				if id := strings.Trim(tok, "<>"); id != "" {
+					mh.refs = append(mh.refs, id)
+				}
+			}
+		case "list-unsubscribe":
+			mh.unsub = val
+		case "list-unsubscribe-post":
+			mh.oneClick = strings.Contains(strings.ToLower(val), "one-click")
+		}
+	}
+	return mh
 }
 
 // threadRoot returns the conversation's root id: the oldest References ancestor
