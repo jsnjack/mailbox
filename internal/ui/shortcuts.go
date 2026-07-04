@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"log/slog"
 	"strings"
 
 	"github.com/diamondburned/gotk4-adwaita/pkg/adw"
@@ -94,80 +95,116 @@ func (w *window) rebuildKeymap() {
 	logging.Trace("ui: keymap rebuilt", "keys", len(w.keymap))
 }
 
-// showShortcuts presents a keyboard-shortcuts cheat sheet (the single-key
-// actions are otherwise undiscoverable). Bound to "?".
+// showShortcuts presents the keyboard-shortcuts dialog — cheat sheet and
+// editor in one (Preferences deliberately has no second copy). The single-key
+// actions are editable in place; chords and structural keys are fixed.
 func (w *window) showShortcuts() {
 	logging.Trace("ui: show shortcuts dialog")
 	box := gtk.NewBox(gtk.OrientationVertical, 18)
 	setMargins(box, 18, 18, 14, 18)
 
-	group := func(title string, rows [][2]string) {
+	hint := gtk.NewLabel("Click a key field to rebind (several characters act as aliases, e.g. \"ae\"; empty disables). Press Enter to apply.")
+	hint.SetXAlign(0)
+	hint.SetWrap(true)
+	hint.AddCSSClass("dim-label")
+	hint.AddCSSClass("caption")
+	box.Append(hint)
+
+	overrides, _ := config.LoadShortcuts()
+	defByID := map[string]shortcutDef{}
+	for _, def := range shortcutDefs {
+		defByID[def.id] = def
+	}
+
+	var grid *gtk.Grid
+	row := 0
+	newGroup := func(title string) {
 		h := gtk.NewLabel(title)
 		h.SetXAlign(0)
 		h.AddCSSClass("heading")
 		box.Append(h)
-		grid := gtk.NewGrid()
+		grid = gtk.NewGrid()
 		grid.SetRowSpacing(6)
 		grid.SetColumnSpacing(20)
-		for i, r := range rows {
-			key := gtk.NewLabel(r[0])
-			key.SetXAlign(1)
-			key.SetHAlign(gtk.AlignEnd)
-			key.AddCSSClass("dim-label")
-			act := gtk.NewLabel(r[1])
-			act.SetXAlign(0)
-			act.SetHExpand(true)
-			grid.Attach(key, 0, i, 1, 1)
-			grid.Attach(act, 1, i, 1, 1)
-		}
 		box.Append(grid)
+		row = 0
 	}
-	overrides, _ := config.LoadShortcuts()
-	keysFor := func(id string) string {
-		for _, def := range shortcutDefs {
-			if def.id != id {
-				continue
+	fixed := func(keys, label string) {
+		k := gtk.NewLabel(keys)
+		k.SetXAlign(1)
+		k.SetHAlign(gtk.AlignEnd)
+		k.AddCSSClass("dim-label")
+		l := gtk.NewLabel(label)
+		l.SetXAlign(0)
+		l.SetHExpand(true)
+		grid.Attach(k, 0, row, 1, 1)
+		grid.Attach(l, 1, row, 1, 1)
+		row++
+	}
+	// editable puts the action's keys in a small entry; Enter saves the
+	// override and rebuilds the live keymap immediately. suffix names any
+	// fixed alias (Del, Ctrl F, …) that always applies on top.
+	editable := func(id, suffix string) {
+		def := defByID[id]
+		e := gtk.NewEntry()
+		e.SetText(effectiveKeys(overrides, def))
+		e.SetWidthChars(5)
+		e.SetMaxWidthChars(5)
+		e.SetAlignment(1)
+		e.SetPlaceholderText("—")
+		e.SetTooltipText("Type keys, press Enter")
+		e.ConnectActivate(func() {
+			keys := sanitizeKeys(e.Text())
+			e.SetText(keys)
+			m, _ := config.LoadShortcuts()
+			m[def.id] = keys
+			if err := config.SaveShortcuts(m); err != nil {
+				slog.Warn("ui: save shortcuts", "err", err)
 			}
-			keys := effectiveKeys(overrides, def)
-			if keys == "" {
-				return "—"
-			}
-			parts := make([]string, 0, len(keys))
-			for _, r := range keys {
-				parts = append(parts, string(r))
-			}
-			return strings.Join(parts, "  /  ")
+			logging.Trace("ui: shortcut rebound", "action", def.id, "keys", keys)
+			w.rebuildKeymap()
+			w.toast("Shortcut updated")
+		})
+		grid.Attach(e, 0, row, 1, 1)
+		label := def.label
+		if suffix != "" {
+			label += "  (also " + suffix + ")"
 		}
-		return ""
+		l := gtk.NewLabel(label)
+		l.SetXAlign(0)
+		l.SetHExpand(true)
+		grid.Attach(l, 1, row, 1, 1)
+		row++
 	}
-	group("Navigation", [][2]string{
-		{keysFor("next") + "  /  " + keysFor("prev"), "Next / previous conversation"},
-		{keysFor("search") + "  /  Ctrl F", "Search"},
-		{"Esc", "Back / exit selection"},
-	})
-	group("Message", [][2]string{
-		{keysFor("reply"), "Reply"},
-		{keysFor("forward"), "Forward"},
-		{keysFor("archive"), "Archive"},
-		{keysFor("trash") + "  /  Del", "Move to Trash"},
-		{keysFor("star"), "Star"},
-		{keysFor("unread"), "Mark unread"},
-		{keysFor("spam"), "Report spam / Not spam"},
-		{keysFor("translate"), "Translate"},
-	})
-	group("Compose", [][2]string{
-		{keysFor("compose") + "  /  Ctrl N", "New message"},
-		{"Ctrl + Enter", "Send"},
-	})
-	group("View", [][2]string{
-		{"Ctrl +  /  −", "Zoom in / out"},
-		{"Ctrl 0", "Reset zoom"},
-		{"?  /  Ctrl ?", "This shortcuts list"},
-	})
-	group("Application", [][2]string{
-		{"Ctrl ,", "Preferences"},
-		{"Ctrl W", "Close window"},
-	})
+
+	newGroup("Navigation")
+	editable("next", "")
+	editable("prev", "")
+	editable("search", "Ctrl F")
+	fixed("Esc", "Back / exit selection")
+
+	newGroup("Message")
+	editable("reply", "")
+	editable("forward", "")
+	editable("archive", "")
+	editable("trash", "Del")
+	editable("star", "")
+	editable("unread", "")
+	editable("spam", "")
+	editable("translate", "")
+
+	newGroup("Compose")
+	editable("compose", "Ctrl N")
+	fixed("Ctrl + Enter", "Send")
+
+	newGroup("View")
+	fixed("Ctrl +  /  −", "Zoom in / out")
+	fixed("Ctrl 0", "Reset zoom")
+	fixed("?", "This shortcuts list")
+
+	newGroup("Application")
+	fixed("Ctrl ,", "Preferences")
+	fixed("Ctrl W", "Close window")
 
 	scroller := gtk.NewScrolledWindow()
 	scroller.SetPolicy(gtk.PolicyNever, gtk.PolicyAutomatic)

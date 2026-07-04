@@ -340,32 +340,6 @@ func (w *window) openSettings() {
 	sendGroup.SetTitle("Sending")
 	sendGroup.Add(undoRow)
 
-	// Keyboard: the single-key shortcuts are rebindable (shortcuts.json);
-	// changes apply immediately and show up in the "?" cheat sheet.
-	kbGroup := adw.NewPreferencesGroup()
-	kbGroup.SetTitle("Keyboard")
-	kbGroup.SetDescription("Single-key shortcuts. Several characters act as aliases (e.g. \"ae\"); clear a field to disable. Press Enter to apply.")
-	kbOverrides, _ := config.LoadShortcuts()
-	for _, def := range shortcutDefs {
-		def := def
-		row := adw.NewEntryRow()
-		row.SetTitle(def.label)
-		row.SetText(effectiveKeys(kbOverrides, def))
-		row.SetShowApplyButton(true)
-		row.ConnectApply(func() {
-			keys := sanitizeKeys(row.Text())
-			row.SetText(keys)
-			m, _ := config.LoadShortcuts()
-			m[def.id] = keys
-			if err := config.SaveShortcuts(m); err != nil {
-				slog.Warn("ui: save shortcuts", "err", err)
-			}
-			logging.Trace("ui: setting changed", "pref", "shortcut."+def.id, "new", keys)
-			w.rebuildKeymap()
-		})
-		kbGroup.Add(row)
-	}
-
 	storageGroup := adw.NewPreferencesGroup()
 	storageGroup.SetTitle("Storage")
 	storageGroup.SetDescription("Bodies older than the retention window are removed from the cache and re-downloaded when opened. Headers and search by sender or subject always stay.")
@@ -381,7 +355,6 @@ func (w *window) openSettings() {
 	page.Add(sigGroup)
 	page.Add(privacyGroup)
 	page.Add(sendGroup)
-	page.Add(kbGroup)
 	page.Add(storageGroup)
 
 	dialog := adw.NewPreferencesDialog()
