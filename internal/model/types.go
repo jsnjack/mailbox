@@ -108,6 +108,9 @@ type ThreadSummary struct {
 	// RepliedByMe is true when the thread's most recent message (any label) was
 	// sent by this account — i.e. you had the last word, so it needs no reply.
 	RepliedByMe bool
+	// SnoozedUntil is the wake time (unix seconds) when this summary is shown in
+	// the Snoozed view; 0 everywhere else. Rows show it in place of the date.
+	SnoozedUntil int64
 }
 
 // MessageBody holds the lazily-fetched body parts of a message.

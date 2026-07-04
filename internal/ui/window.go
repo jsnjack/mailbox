@@ -1928,9 +1928,9 @@ func (w *window) renderSig(id string) string {
 			sel = "s"
 		}
 	}
-	return fmt.Sprintf("%s\x1f%d\x1f%d\x1f%s\x1f%t\x1f%s\x1f%s\x1f%d\x1f%t\x1f%t\x1f%t\x1f%s",
+	return fmt.Sprintf("%s\x1f%d\x1f%d\x1f%s\x1f%t\x1f%s\x1f%s\x1f%d\x1f%t\x1f%t\x1f%t\x1f%d\x1f%s",
 		sel, t.UnreadCount, t.Count, w.categories[id], w.manualCat[id], who, m.Subject,
-		m.InternalDate.Unix(), m.HasAttachments, m.IsStarred, t.RepliedByMe, m.Snippet)
+		m.InternalDate.Unix(), m.HasAttachments, m.IsStarred, t.RepliedByMe, t.SnoozedUntil, m.Snippet)
 }
 
 // maxCategorize bounds how many of the newest inbox threads are auto-categorized,
@@ -5330,10 +5330,21 @@ func (w *window) snoozedSummaries(ctx context.Context, acct int64) ([]model.Thre
 		return nil, err
 	}
 	ids := make([]string, len(sns))
+	until := make(map[string]int64, len(sns))
 	for i, sn := range sns {
 		ids[i] = sn.ThreadID
+		until[sn.ThreadID] = sn.Until
 	}
-	return w.deps.Store.GetThreadSummaries(ctx, acct, ids)
+	sums, err := w.deps.Store.GetThreadSummaries(ctx, acct, ids)
+	if err != nil {
+		return nil, err
+	}
+	// Rows in the Snoozed view show when the thread comes back, not when its
+	// last message arrived.
+	for i := range sums {
+		sums[i].SnoozedUntil = until[sums[i].ThreadID]
+	}
+	return sums, nil
 }
 
 // snoozePreset is one quick snooze choice offered by the row menu.
@@ -5503,8 +5514,14 @@ func threadRow(t model.ThreadSummary, outgoing bool, category string, manualCat 
 	if m.IsStarred {
 		top.Append(gtk.NewImageFromIconName("starred-symbolic"))
 	}
-	if d := relativeDate(m.InternalDate, time.Now()); d != "" {
-		date := gtk.NewLabel(d)
+	stamp := ""
+	if t.SnoozedUntil > 0 {
+		stamp = "until " + time.Unix(t.SnoozedUntil, 0).Format("Mon 15:04")
+	} else {
+		stamp = relativeDate(m.InternalDate, time.Now())
+	}
+	if stamp != "" {
+		date := gtk.NewLabel(stamp)
 		date.AddCSSClass("dim-label")
 		date.AddCSSClass("caption")
 		top.Append(date)
