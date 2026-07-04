@@ -1,9 +1,9 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" fill="#2e3436">
-  <!-- Two speech bubbles: the back one carries a bold "A", the front reply
-       bubble stays empty — only one letterform to resolve, so it reads clean
-       at 16px. Outlines on the pixel grid; the bubbles never overlap. -->
+  <!-- One full-size conversation bubble with a bold "T" cut out (even-odd) —
+       the same bubble geometry as sparkle-symbolic, so the two AI tools read
+       as a family. Big single glyph instead of two tiny bubbles: legible at
+       16px. All edges on the pixel grid. -->
   <path fill-rule="evenodd" d="
-    M2.5 1 h6 A1.5 1.5 0 0 1 10 2.5 v3 A1.5 1.5 0 0 1 8.5 7 h-3 L3 9.5 V7 h-0.5 A1.5 1.5 0 0 1 1 5.5 v-3 A1.5 1.5 0 0 1 2.5 1 Z
-    M5.5 2 L3.4 6.4 h1.3 l0.35 -0.9 h1.7 l0.35 0.9 h1.3 Z M5.5 3.6 l0.5 1.1 h-1 Z"/>
-  <path d="M8.5 8 h5 A1.5 1.5 0 0 1 15 9.5 v3 a1.5 1.5 0 0 1 -1.5 1.5 H12 v2 l-2.5 -2 h-1 A1.5 1.5 0 0 1 7 12.5 v-3 A1.5 1.5 0 0 1 8.5 8 Z"/>
+    M3 2 h10 a2 2 0 0 1 2 2 v6 a2 2 0 0 1 -2 2 h-4.5 L5 15 V12 H3 a2 2 0 0 1 -2 -2 V4 a2 2 0 0 1 2 -2 Z
+    M5 4.5 h6 v2 h-2 v4 h-2 v-4 h-2 Z"/>
 </svg>
