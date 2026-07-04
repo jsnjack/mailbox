@@ -2401,7 +2401,7 @@ func (w *window) buildReader() *adw.NavigationPage {
 	a11yLabel(w.translateBtn, "Translate to English")
 	w.translateBtn.ConnectClicked(w.onTranslate)
 
-	w.summaryBtn = gtk.NewButtonFromIconName("view-list-bullet-symbolic")
+	w.summaryBtn = gtk.NewButtonFromIconName("summarize-symbolic")
 	w.summaryBtn.SetTooltipText("Summarize thread with AI")
 	a11yLabel(w.summaryBtn, "Summarize thread with AI")
 	w.summaryBtn.ConnectClicked(w.onSummarize)

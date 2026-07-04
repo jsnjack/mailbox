@@ -29,6 +29,9 @@ var sparkleSVG []byte
 //go:embed icons/translate-symbolic.svg
 var translateSVG []byte
 
+//go:embed icons/summarize-symbolic.svg
+var summarizeSVG []byte
+
 // appIconSVG is the application icon, bundled so it resolves by name even when
 // running from ./bin (a packaged install puts it under /usr/share/icons, but a
 // dev run has no installed icon — without this the About dialog shows a broken
@@ -43,6 +46,7 @@ var bundledIcons = map[string][]byte{
 	"mail-archive-symbolic": mailArchiveSVG,
 	"sparkle-symbolic":      sparkleSVG,
 	"translate-symbolic":    translateSVG,
+	"summarize-symbolic":    summarizeSVG,
 }
 
 // registerCustomIcons installs the bundled symbolic icons into a cache icon

@@ -1,12 +1,9 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" fill="#2e3436">
-  <!-- Back bubble (top-left) with a bold "A"; outlines snapped to the pixel
-       grid. The bubbles no longer overlap: a clear diagonal gap separates
-       them, which reads much crisper at 16px than the old merged shapes. -->
+  <!-- Two speech bubbles: the back one carries a bold "A", the front reply
+       bubble stays empty — only one letterform to resolve, so it reads clean
+       at 16px. Outlines on the pixel grid; the bubbles never overlap. -->
   <path fill-rule="evenodd" d="
     M2.5 1 h6 A1.5 1.5 0 0 1 10 2.5 v3 A1.5 1.5 0 0 1 8.5 7 h-3 L3 9.5 V7 h-0.5 A1.5 1.5 0 0 1 1 5.5 v-3 A1.5 1.5 0 0 1 2.5 1 Z
     M5.5 2 L3.4 6.4 h1.3 l0.35 -0.9 h1.7 l0.35 0.9 h1.3 Z M5.5 3.6 l0.5 1.1 h-1 Z"/>
-  <!-- Front bubble (bottom-right) with two text bars on integer bounds. -->
-  <path fill-rule="evenodd" d="
-    M8.5 8 h5 A1.5 1.5 0 0 1 15 9.5 v3 a1.5 1.5 0 0 1 -1.5 1.5 H12 v2 l-2.5 -2 h-1 A1.5 1.5 0 0 1 7 12.5 v-3 A1.5 1.5 0 0 1 8.5 8 Z
-    M9 10 h4 v1 h-4 Z M9 12 h2.5 v1 h-2.5 Z"/>
+  <path d="M8.5 8 h5 A1.5 1.5 0 0 1 15 9.5 v3 a1.5 1.5 0 0 1 -1.5 1.5 H12 v2 l-2.5 -2 h-1 A1.5 1.5 0 0 1 7 12.5 v-3 A1.5 1.5 0 0 1 8.5 8 Z"/>
 </svg>
