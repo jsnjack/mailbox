@@ -57,3 +57,25 @@ func TestParseListUnsubscribe(t *testing.T) {
 		})
 	}
 }
+
+// formatRawHeaders must label Gmail's bare Authentication-Results value and
+// split its clauses, while passing proper header lines through unfolded.
+func TestFormatRawHeaders(t *testing.T) {
+	bare := "mx.google.com;       dkim=pass header.i=@bol.com header.s=bol_com header.b=uX4wl6xQ;       spf=pass (google.com: domain of automail@bol.com designates 185.14.169.141 as permitted sender) smtp.mailfrom=automail@bol.com;       dmarc=pass (p=QUARANTINE sp=QUARANTINE dis=NONE) header.from=bol.com"
+	got := formatRawHeaders(bare)
+	want := "Authentication-Results:\n" +
+		"  mx.google.com;\n" +
+		"  dkim=pass header.i=@bol.com header.s=bol_com header.b=uX4wl6xQ;\n" +
+		"  spf=pass (google.com: domain of automail@bol.com designates 185.14.169.141 as permitted sender) smtp.mailfrom=automail@bol.com;\n" +
+		"  dmarc=pass (p=QUARANTINE sp=QUARANTINE dis=NONE) header.from=bol.com"
+	if got != want {
+		t.Fatalf("bare value formatting:\n%s", got)
+	}
+
+	named := "Authentication-Results: mx.google.com;\n dkim=pass\nList-Unsubscribe: <https://x>"
+	got = formatRawHeaders(named)
+	want = "Authentication-Results: mx.google.com; dkim=pass\nList-Unsubscribe: <https://x>"
+	if got != want {
+		t.Fatalf("named headers formatting:\n%s", got)
+	}
+}

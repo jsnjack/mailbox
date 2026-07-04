@@ -4152,6 +4152,38 @@ func (w *window) onCopySender() {
 	w.toast("Copied " + addr)
 }
 
+// formatRawHeaders pretty-prints the stored header blob for the dialog. The
+// Gmail path stores the bare Authentication-Results value (no header name, with
+// the wire's whitespace runs), which reads best labeled with one verdict clause
+// per line; proper "Name: value" header lines are unfolded and kept, with
+// whitespace runs collapsed.
+func formatRawHeaders(raw string) string {
+	raw = strings.TrimSpace(raw)
+	first, _, _ := strings.Cut(raw, "\n")
+	if name, _, ok := strings.Cut(first, ":"); ok && !strings.ContainsAny(strings.TrimSpace(name), " \t(") {
+		// Named header lines: join folded continuations, collapse runs.
+		var out []string
+		for _, l := range strings.Split(raw, "\n") {
+			folded := strings.HasPrefix(l, " ") || strings.HasPrefix(l, "\t")
+			l = strings.Join(strings.Fields(l), " ")
+			if folded && len(out) > 0 {
+				out[len(out)-1] += " " + l
+				continue
+			}
+			out = append(out, l)
+		}
+		return strings.Join(out, "\n")
+	}
+	// Bare Authentication-Results value: label it, one ";" clause per line.
+	var clauses []string
+	for _, cl := range strings.Split(raw, ";") {
+		if cl = strings.Join(strings.Fields(cl), " "); cl != "" {
+			clauses = append(clauses, "  "+cl)
+		}
+	}
+	return "Authentication-Results:\n" + strings.Join(clauses, ";\n")
+}
+
 // onViewHeaders shows the open message's raw headers in a scrollable monospace
 // dialog. The item is only offered when headers are present (buildReaderMenuModel).
 func (w *window) onViewHeaders() {
@@ -4167,7 +4199,7 @@ func (w *window) onViewHeaders() {
 	tv.SetMonospace(true)
 	tv.SetWrapMode(gtk.WrapWordChar)
 	setMargins(tv, 12, 12, 12, 12)
-	tv.Buffer().SetText(headers)
+	tv.Buffer().SetText(formatRawHeaders(headers))
 
 	scroller := gtk.NewScrolledWindow()
 	scroller.SetPolicy(gtk.PolicyAutomatic, gtk.PolicyAutomatic)
