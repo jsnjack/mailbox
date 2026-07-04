@@ -222,6 +222,7 @@ type window struct {
 	aiFailedAt      time.Time
 	inboxCategories bool
 	sendUndoSecs    int             // undo-send window in seconds (0 = default 5)
+	keymap          map[uint]func() // single-key shortcuts (configurable; see shortcuts.go)
 	trustedImgs     map[string]bool // lowercased senders whose images always load
 
 	// AI thread summary: a button reveals a card that streams a summary in.
@@ -266,6 +267,7 @@ func newWindow(app *adw.Application, deps Deps) *window {
 		inlineRefetched:  map[string]bool{},
 	}
 	w.accountNames, _ = config.LoadAccountNames()
+	w.rebuildKeymap()
 	w.trustedImgs = map[string]bool{}
 	if p, err := config.LoadPrefs(); err == nil {
 		w.blockImages = p.BlockRemoteImages
@@ -570,37 +572,14 @@ func (w *window) addShortcuts() {
 		case *gtk.Text, *gtk.TextView:
 			return false // user is typing in a field; don't hijack the key
 		}
+		// The customizable single-key actions (Preferences → Keyboard).
+		if fn, ok := w.keymap[gdk.KeyvalToLower(keyval)]; ok {
+			fn()
+			return true
+		}
 		switch keyval {
-		case 'j':
-			w.selectAdjacent(1)
-		case 'k':
-			w.selectAdjacent(-1)
-		case 'r':
-			w.onReply()
-		case 'f':
-			w.onForward()
-		case 'a', 'e':
-			w.onArchive()
-		case '#', gdk.KEY_Delete:
+		case gdk.KEY_Delete:
 			w.onTrash()
-		case '!':
-			if w.current == model.LabelSpam {
-				w.onNotSpam()
-			} else {
-				w.onReportSpam()
-			}
-		case 's':
-			w.toggleStar()
-		case 'u':
-			w.onMarkUnread()
-		case 't':
-			w.onTranslate()
-		case 'c':
-			if w.deps.Send != nil && len(w.deps.Accounts) > 0 {
-				w.openCompose(model.OutgoingMessage{}, "", "New message")
-			}
-		case '/':
-			w.searchEntry.GrabFocus()
 		case gdk.KEY_Escape:
 			// Esc unwinds one layer at a time: selection mode first, then the
 			// collapsed-pane back navigation.
