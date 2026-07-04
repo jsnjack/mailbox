@@ -61,6 +61,8 @@ CREATE TABLE IF NOT EXISTS messages (
   -- build before externalized-HTML support, 2 = fetched with it. Read as "fetched"
   -- via != 0 everywhere; the difference only drives the one-time HTML backfill.
   body_fetched    INTEGER NOT NULL DEFAULT 0,
+  list_unsubscribe TEXT NOT NULL DEFAULT '',   -- List-Unsubscribe header value ('' = none)
+  list_unsub_post  INTEGER NOT NULL DEFAULT 0, -- 1 when List-Unsubscribe-Post offers RFC 8058 one-click
   UNIQUE (account_id, gmail_id)
 );
 

@@ -87,6 +87,10 @@ func (s *Store) Close() error {
 func migrate(db *sql.DB) error {
 	stmts := []string{
 		`ALTER TABLE messages ADD COLUMN reply_to TEXT`,
+		// Unsubscribe support: the List-Unsubscribe header (captured at metadata
+		// fetch) and whether List-Unsubscribe-Post offered RFC 8058 one-click.
+		"ALTER TABLE messages ADD COLUMN list_unsubscribe TEXT NOT NULL DEFAULT ''",
+		`ALTER TABLE messages ADD COLUMN list_unsub_post INTEGER NOT NULL DEFAULT 0`,
 		// Multi-provider groundwork: tag each account with its backend, and rename
 		// the Gmail-specific historyId watermark to an opaque cursor (IMAP stores a
 		// per-folder UIDVALIDITY/MODSEQ summary here instead).

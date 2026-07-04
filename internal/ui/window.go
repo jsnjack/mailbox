@@ -1275,6 +1275,10 @@ func (w *window) registerListActions() {
 	recat := gio.NewSimpleAction("list-recategorize", nil)
 	recat.ConnectActivate(func(*glib.Variant) { w.onRecategorize() })
 	w.win.AddAction(recat)
+
+	subs := gio.NewSimpleAction("list-subscriptions", nil)
+	subs.ConnectActivate(func(*glib.Variant) { w.openSubscriptions() })
+	w.win.AddAction(subs)
 	// The per-row context-menu actions live in a dedicated group built per popup
 	// in showRowMenu (parameter-less closures), not here — see the comment there.
 }
@@ -1365,6 +1369,10 @@ func (w *window) buildListMenuModel() *gio.Menu {
 		sec.Append("Re-categorize inbox", "win.list-recategorize")
 		menu.AppendSection("", sec)
 	}
+	// Mailing-list housekeeping: every unsubscribe-capable sender in one place.
+	subsSec := gio.NewMenu()
+	subsSec.Append("Subscriptions…", "win.list-subscriptions")
+	menu.AppendSection("", subsSec)
 	return menu
 }
 
@@ -4011,6 +4019,7 @@ func (w *window) registerReaderActions() {
 	add("reader-delete-forever", w.onDeleteForever)
 	add("reader-labels", w.showLabelsDialog)
 	add("reader-analyze", w.onAnalyze)
+	add("reader-unsubscribe", w.onUnsubscribe)
 	add("reader-find-from", func() { w.searchFrom(w.openMsg.FromAddr) })
 	add("reader-copy-sender", w.onCopySender)
 	add("reader-view-headers", w.onViewHeaders)
@@ -4073,6 +4082,9 @@ func (w *window) buildReaderMenuModel() *gio.Menu {
 		sec.Append("Copy sender address", "win.reader-copy-sender")
 		if w.deps.SearchServer != nil {
 			sec.Append("Find emails from sender", "win.reader-find-from")
+		}
+		if w.openMsg.ListUnsubscribe != "" {
+			sec.Append("Unsubscribe", "win.reader-unsubscribe")
 		}
 		menu.AppendSection("", sec)
 	}

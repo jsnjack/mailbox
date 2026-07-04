@@ -39,7 +39,11 @@ func ToMessage(accountID int64, m *gmail.Message) model.Message {
 		IsStarred:      starred,
 		HasAttachments: m.Payload != nil && hasAttachments(m.Payload),
 		SizeEstimate:   m.SizeEstimate,
-		Labels:         m.LabelIds,
+		// Unsubscribe support: RFC 8058 one-click needs the exact token
+		// "List-Unsubscribe=One-Click" in List-Unsubscribe-Post.
+		ListUnsubscribe:   headerValue(headers, "List-Unsubscribe"),
+		ListUnsubOneClick: strings.Contains(strings.ToLower(headerValue(headers, "List-Unsubscribe-Post")), "one-click"),
+		Labels:            m.LabelIds,
 	}
 }
 

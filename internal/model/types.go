@@ -91,7 +91,11 @@ type Message struct {
 	HasAttachments bool
 	SizeEstimate   int64
 	BodyFetched    bool
-	Labels         []string
+	// ListUnsubscribe is the List-Unsubscribe header value ("" = none);
+	// ListUnsubOneClick reports an RFC 8058 List-Unsubscribe-Post companion.
+	ListUnsubscribe   string
+	ListUnsubOneClick bool
+	Labels            []string
 }
 
 // ThreadSummary describes a conversation for the thread list: its newest message

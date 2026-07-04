@@ -215,7 +215,7 @@ func (c *Client) ListMessageIDs(ctx context.Context, query string, max int) ([]s
 	return ids, nil
 }
 
-var metadataHeaders = []string{"From", "Reply-To", "To", "Cc", "Subject", "Date", "Message-ID", "In-Reply-To", "References"}
+var metadataHeaders = []string{"From", "Reply-To", "To", "Cc", "Subject", "Date", "Message-ID", "In-Reply-To", "References", "List-Unsubscribe", "List-Unsubscribe-Post"}
 
 // GetMessageMetadata fetches a message in metadata format (headers + labels, no body).
 func (c *Client) GetMessageMetadata(ctx context.Context, id string) (*gmail.Message, error) {
