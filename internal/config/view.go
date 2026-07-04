@@ -14,6 +14,7 @@ import (
 // where the user left off.
 type ViewState struct {
 	Folder        string  `json:"folder"`
+	OpenThread    string  `json:"open_thread,omitempty"` // conversation open when last saved
 	UnreadOnly    bool    `json:"unread_only"`
 	Zoom          float64 `json:"zoom"` // reader zoom level (0 = default 1.0)
 	ComposeWidth  int     `json:"compose_width"`

@@ -738,8 +738,9 @@ func (w *window) present() {
 	w.win.SetVisible(true)
 	w.loadLabels()
 	w.subscribe()
-	// Reopen where the user left off (folder + unread filter).
-	if vs, err := config.LoadViewState(); err == nil {
+	// Reopen where the user left off (folder + unread filter + open thread).
+	vs, vsErr := config.LoadViewState()
+	if vsErr == nil {
 		if vs.Folder != "" {
 			w.current = vs.Folder
 		}
@@ -753,6 +754,22 @@ func (w *window) present() {
 	w.webview.SetZoomLevel(w.readerZoom)
 	w.selectLabel(w.current)
 	w.refreshOutbox()
+	if vsErr == nil && vs.OpenThread != "" {
+		// Re-open the conversation that was open at last save, once the list has
+		// populated (loads are async). Selecting the row opens it, so keyboard
+		// navigation continues from there. A vanished thread is just skipped.
+		tid := vs.OpenThread
+		w.afterPopulate = func() {
+			for i := uint(0); i < uint(w.threadModel.NItems()); i++ {
+				if w.threadModel.String(i) == tid {
+					logging.Trace("ui: restore open thread", "thread", tid, "row", i)
+					w.threadSel.SetSelected(i)
+					return
+				}
+			}
+			logging.Trace("ui: restore open thread not in list", "thread", tid)
+		}
+	}
 
 	// Test hooks (off by default).
 	if q := os.Getenv("MAILBOX_SEARCH"); q != "" {
@@ -3129,6 +3146,7 @@ func (w *window) saveViewState() {
 	// Load-modify-save so we preserve fields written elsewhere (compose size).
 	vs, _ := config.LoadViewState()
 	vs.Folder, vs.UnreadOnly, vs.Zoom = w.current, w.unreadOnly, w.readerZoom
+	vs.OpenThread = w.openThreadID // "" when nothing is open
 	if err := config.SaveViewState(vs); err != nil {
 		slog.Warn("ui: save view state", "err", err)
 	}
