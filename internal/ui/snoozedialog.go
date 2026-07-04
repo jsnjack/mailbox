@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jsnjack/mailbox/internal/ai"
+
 	"github.com/diamondburned/gotk4-adwaita/pkg/adw"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 	"github.com/jsnjack/mailbox/internal/dispatch"
@@ -38,27 +40,32 @@ func (w *window) openSnoozeDialog(acctID int64, threadID string) {
 		box.Append(b)
 	}
 
-	// AI suggestion: read the conversation and propose a moment (a deadline →
-	// the day before). Loads in the background; the row only appears when the
-	// email actually implies a time.
+	// AI suggestions: read the conversation and propose the useful moments (an
+	// hour before a meeting, the day before a deadline). Load in the
+	// background; the rows only appear when the email actually implies times.
 	if w.deps.Assistant != nil {
-		aiRow := gtk.NewButtonWithLabel("Reading the email…")
-		aiRow.SetSensitive(false)
-		box.Append(aiRow)
+		aiBox := gtk.NewBox(gtk.OrientationVertical, 10)
+		placeholder := gtk.NewButtonWithLabel("Reading the email…")
+		placeholder.SetSensitive(false)
+		aiBox.Append(placeholder)
+		box.Append(aiBox)
 		go func() {
-			t, reason, err := w.suggestSnoozeFor(acctID, threadID)
+			suggestions, err := w.suggestSnoozeFor(acctID, threadID)
 			dispatch.Main(func() {
-				if err != nil || t.IsZero() {
-					aiRow.SetVisible(false) // nothing useful — no dead row
+				aiBox.Remove(placeholder)
+				if err != nil {
 					return
 				}
-				label := "✨ " + t.Format("Mon, Jan 2 15:04")
-				if reason != "" {
-					label += " — " + reason
+				for _, sug := range suggestions {
+					sug := sug
+					label := "✨ " + sug.At.Format("Mon, Jan 2 15:04")
+					if sug.Reason != "" {
+						label += " — " + sug.Reason
+					}
+					b := gtk.NewButtonWithLabel(label)
+					b.ConnectClicked(func() { apply(sug.At) })
+					aiBox.Append(b)
 				}
-				aiRow.SetLabel(label)
-				aiRow.SetSensitive(true)
-				aiRow.ConnectClicked(func() { apply(t) })
 			})
 		}()
 	}
@@ -109,19 +116,19 @@ func (w *window) openSnoozeDialog(acctID int64, threadID string) {
 }
 
 // suggestSnoozeFor builds the newest message's context off the main thread and
-// asks the AI for a wake time. Zero time = no usable suggestion.
-func (w *window) suggestSnoozeFor(acctID int64, threadID string) (time.Time, string, error) {
+// asks the AI for wake times. An empty slice = no usable suggestion.
+func (w *window) suggestSnoozeFor(acctID int64, threadID string) ([]ai.SnoozeSuggestion, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
 	msgs, err := w.deps.Store.ListThreadMessages(ctx, acctID, threadID)
 	if err != nil || len(msgs) == 0 {
-		return time.Time{}, "", err
+		return nil, err
 	}
 	m := msgs[len(msgs)-1]
 	emailContext := fmt.Sprintf("From: %s\nDate: %s\nSubject: %s\n\n%s",
 		displayFrom(m), m.InternalDate.Format("Mon, 2 Jan 2006 15:04"), m.Subject, w.bodyTextFor(m))
 	done := w.aiActivity("Suggesting snooze time")
-	t, reason, err := w.deps.Assistant.SuggestSnooze(ctx, time.Now(), emailContext)
+	suggestions, err := w.deps.Assistant.SuggestSnooze(ctx, time.Now(), emailContext)
 	dispatch.Main(func() { done(doneErrCtx(ctx, err)) })
-	return t, reason, err
+	return suggestions, err
 }

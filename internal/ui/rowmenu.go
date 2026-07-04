@@ -118,20 +118,24 @@ func (w *window) showRowMenu(row gtk.Widgetter, threadID string, x, y float64) {
 		snBox := gtk.NewBox(gtk.OrientationVertical, 0)
 		snBox.AddCSSClass("menu")
 		snBox.AddCSSClass("rowmenu")
-		// The AI suggestion leads the flyout: it starts fetching when the
-		// flyout opens and becomes clickable once the email implies a time
-		// (see updateSnoozeSuggestion); silently disappears when it doesn't.
-		var aiBtn *gtk.Button
+		// The AI suggestions lead the flyout: fetching starts when the flyout
+		// opens and each moment the email implies (an hour before a meeting,
+		// the day before a deadline) becomes its own clickable item; the
+		// placeholder silently disappears when the email implies nothing.
+		var aiBox *gtk.Box
+		var aiPlaceholder *gtk.Button
 		var aiFetched bool
 		if w.deps.Assistant != nil {
+			aiBox = gtk.NewBox(gtk.OrientationVertical, 0)
 			aiLbl := gtk.NewLabel("✨ Suggesting…")
 			aiLbl.SetXAlign(0)
 			aiLbl.SetHExpand(true)
-			aiBtn = gtk.NewButton()
-			aiBtn.SetChild(aiLbl)
-			aiBtn.AddCSSClass("flat")
-			aiBtn.SetSensitive(false)
-			snBox.Append(aiBtn)
+			aiPlaceholder = gtk.NewButton()
+			aiPlaceholder.SetChild(aiLbl)
+			aiPlaceholder.AddCSSClass("flat")
+			aiPlaceholder.SetSensitive(false)
+			aiBox.Append(aiPlaceholder)
+			snBox.Append(aiBox)
 		}
 		for _, p := range snoozePresets(time.Now()) {
 			p := p
@@ -147,28 +151,36 @@ func (w *window) showRowMenu(row gtk.Widgetter, threadID string, x, y float64) {
 		snPop.SetChild(snBox)
 		snBtn := flyoutBtn("Snooze", snPop)
 		snBtn.ConnectClicked(func() {
-			if aiBtn == nil || aiFetched {
+			if aiBox == nil || aiFetched {
 				return
 			}
 			aiFetched = true
 			go func() {
-				t, reason, err := w.suggestSnoozeFor(acct, threadID)
+				suggestions, err := w.suggestSnoozeFor(acct, threadID)
 				dispatch.Main(func() {
-					if err != nil || t.IsZero() {
-						aiBtn.SetVisible(false)
+					aiBox.Remove(aiPlaceholder)
+					if err != nil {
 						return
 					}
-					label := "✨ " + t.Format("Mon, Jan 2 15:04")
-					if reason != "" {
-						label += " — " + reason
+					for _, sug := range suggestions {
+						sug := sug
+						label := "✨ " + sug.At.Format("Mon, Jan 2 15:04")
+						if sug.Reason != "" {
+							label += " — " + sug.Reason
+						}
+						lbl := gtk.NewLabel(label)
+						lbl.SetXAlign(0)
+						lbl.SetHExpand(true)
+						b := gtk.NewButton()
+						b.SetChild(lbl)
+						b.AddCSSClass("flat")
+						b.ConnectClicked(func() {
+							snPop.Popdown()
+							pop.Popdown()
+							w.snoozeUntil(acct, threadID, sug.At)
+						})
+						aiBox.Append(b)
 					}
-					aiBtn.SetChild(gtk.NewLabel(label))
-					aiBtn.SetSensitive(true)
-					aiBtn.ConnectClicked(func() {
-						snPop.Popdown()
-						pop.Popdown()
-						w.snoozeUntil(acct, threadID, t)
-					})
 				})
 			}()
 		})

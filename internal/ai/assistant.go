@@ -430,51 +430,64 @@ func (a *Assistant) DraftReply(ctx context.Context, threadContext, instruction s
 	return a.p.Stream(ctx, system, []Msg{{Role: RoleUser, Content: user}})
 }
 
+// SnoozeSuggestion is one AI-proposed wake time with its rationale.
+type SnoozeSuggestion struct {
+	At     time.Time
+	Reason string
+}
+
 // SuggestSnooze proposes when a snoozed email should return, based on what the
-// email says (a deadline → the day before at 09:00, an event → that morning, a
-// delivery → that evening). now anchors "today" for the model and validation.
-// A zero time with nil error means the email suggests nothing usable.
-func (a *Assistant) SuggestSnooze(ctx context.Context, now time.Time, emailContext string) (time.Time, string, error) {
+// email says. An email with a concrete event time yields several useful
+// moments (an hour before AND the day before); a deadline yields the day
+// before. now anchors "today" for the model and validation. An empty slice
+// with nil error means the email suggests nothing usable.
+func (a *Assistant) SuggestSnooze(ctx context.Context, now time.Time, emailContext string) ([]SnoozeSuggestion, error) {
 	start := time.Now()
 	logging.Trace("ai: suggest snooze", "op", "SuggestSnooze", "provider", a.p.Name(), "bytes", len(emailContext))
 	system := "The user snoozes an email to deal with it at the right moment. Today is " +
 		now.Format("Monday, 2 January 2006, 15:04") + " (local time). " +
-		"If the email implies a good time to resurface it — a deadline (the day before at 09:00), " +
-		"an event or meeting (that morning at 09:00, or one hour before when the time is known), " +
-		"a delivery or travel date (that morning) — reply with EXACTLY one line in the form " +
-		"YYYY-MM-DD HH:MM|reason, where reason is under 8 words, in the email's language. " +
-		"The time must be in the future. If the email suggests no particular time, reply exactly: none"
+		"If the email implies good times to resurface it, reply with one to three lines, most useful " +
+		"first, each EXACTLY in the form YYYY-MM-DD HH:MM|reason (reason under 8 words, in the email's " +
+		"language). For an event or meeting with a known time, offer BOTH one hour before AND the day " +
+		"before at 09:00. For a deadline, the day before at 09:00. For a delivery or travel date, that " +
+		"morning. Every time must be in the future. If the email suggests no particular time, reply " +
+		"exactly: none"
 	ch, err := a.p.Stream(ctx, system, []Msg{{Role: RoleUser, Content: emailContext}})
 	if err != nil {
 		logging.Trace("ai: suggest snooze failed", "op", "SuggestSnooze", "err", err)
-		return time.Time{}, "", err
+		return nil, err
 	}
 	var b strings.Builder
 	for c := range ch {
 		if c.Err != nil {
 			logging.Trace("ai: suggest snooze failed", "op", "SuggestSnooze", "err", c.Err)
-			return time.Time{}, "", c.Err
+			return nil, c.Err
 		}
 		b.WriteString(c.Text)
 	}
-	t, reason := parseSnoozeSuggestion(b.String(), now)
-	logging.Trace("ai: suggest snooze done", "op", "SuggestSnooze", "until", t, "reason", reason,
+	suggestions := parseSnoozeSuggestions(b.String(), now)
+	logging.Trace("ai: suggest snooze done", "op", "SuggestSnooze", "count", len(suggestions),
 		"raw", logging.Body(b.String()), "dur", time.Since(start))
-	return t, reason, nil
+	return suggestions, nil
 }
 
-// parseSnoozeSuggestion parses "YYYY-MM-DD HH:MM|reason" in local time. A
-// malformed, past, or "none" reply yields a zero time — the caller just
-// doesn't offer a suggestion, never an error the user has to see.
-func parseSnoozeSuggestion(s string, now time.Time) (time.Time, string) {
-	s = strings.TrimSpace(s)
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		s = strings.TrimSpace(s[:i])
+// parseSnoozeSuggestions parses up to three "YYYY-MM-DD HH:MM|reason" lines in
+// local time. Malformed, past, or duplicate lines are skipped — the caller
+// just offers fewer suggestions, never an error the user has to see.
+func parseSnoozeSuggestions(s string, now time.Time) []SnoozeSuggestion {
+	var out []SnoozeSuggestion
+	seen := map[int64]bool{}
+	for _, line := range strings.Split(s, "\n") {
+		stamp, reason, _ := strings.Cut(strings.TrimSpace(line), "|")
+		t, err := time.ParseInLocation("2006-01-02 15:04", strings.TrimSpace(stamp), now.Location())
+		if err != nil || !t.After(now) || seen[t.Unix()] {
+			continue
+		}
+		seen[t.Unix()] = true
+		out = append(out, SnoozeSuggestion{At: t, Reason: strings.TrimSpace(reason)})
+		if len(out) == 3 {
+			break
+		}
 	}
-	stamp, reason, _ := strings.Cut(s, "|")
-	t, err := time.ParseInLocation("2006-01-02 15:04", strings.TrimSpace(stamp), now.Location())
-	if err != nil || !t.After(now) {
-		return time.Time{}, ""
-	}
-	return t, strings.TrimSpace(reason)
+	return out
 }
