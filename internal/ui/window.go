@@ -3497,20 +3497,28 @@ func (w *window) renderConversation(msgs []model.Message) {
 				blocked += n
 				continue
 			}
+			var sec string
 			if cs, ok := cached[m.GmailID]; ok {
-				b.WriteString(cs.html)
+				sec = cs.html
 				blocked += cs.trackers
-				continue
+			} else {
+				body := w.bodyForRender(ctx, m, refetched)
+				s2, n := conversationSection(m, body, w.cleanHTML, fetchFailed[m.GmailID])
+				// Transient failure sections are not cached — see the
+				// latest-message branch above.
+				if !fetchFailed[m.GmailID] {
+					fresh[m.GmailID] = cachedSection{html: s2, trackers: n}
+				}
+				sec = s2
+				blocked += n
 			}
-			body := w.bodyForRender(ctx, m, refetched)
-			sec, n := conversationSection(m, body, w.cleanHTML, fetchFailed[m.GmailID])
-			// Transient failure sections are not cached — see the latest-message
-			// branch above.
-			if !fetchFailed[m.GmailID] {
-				fresh[m.GmailID] = cachedSection{html: sec, trackers: n}
+			// In longer threads the history opens collapsed (newest message
+			// expanded, older ones a one-line <details> each) — a 30-message
+			// thread reads as a list, not a wall. Native disclosure, no JS.
+			if len(msgs) > 2 {
+				sec = collapsedSection(m, sec)
 			}
 			b.WriteString(sec)
-			blocked += n
 		}
 		out := b.String()
 		verdict := parseAuthResults(latestAuth)
@@ -3579,6 +3587,22 @@ func (w *window) setReaderHTML(inner string) {
 // shellReadyHandler is the script-message channel the reader shell announces
 // itself on once __mbSet is installed; buildReader flushes queued content then.
 const shellReadyHandler = "shellready"
+
+// collapsedSection wraps an older message's rendered section in a native
+// <details>, summarized as "sender · date — preview" (the preview hides once
+// expanded — the section carries its own full header).
+func collapsedSection(m model.Message, section string) string {
+	preview := strings.TrimSpace(m.Snippet)
+	if r := []rune(preview); len(r) > 80 {
+		preview = string(r[:79]) + "…"
+	}
+	date := ""
+	if !m.InternalDate.IsZero() {
+		date = " · " + m.InternalDate.Format("Jan 2")
+	}
+	return `<details class="mbmsg"><summary><b>` + html.EscapeString(displayFrom(m)) + `</b>` + date +
+		` <span class="mbprev">` + html.EscapeString(preview) + `</span></summary>` + section + `</details>`
+}
 
 // loadingInner is the reader content shown while message bodies are being
 // fetched — swapped into the shell like any conversation, so no navigation.
@@ -5794,7 +5818,13 @@ func readerShellHTML() string {
 	const style = `
 body{font-family:sans-serif;margin:16px;color:#222;line-height:1.4;overflow-wrap:anywhere}
 img,video{max-width:100%!important;height:auto!important}
-pre{font-family:monospace;white-space:pre-wrap}`
+pre{font-family:monospace;white-space:pre-wrap}
+details.mbmsg>summary{cursor:pointer;list-style:none;color:#555;font-size:90%;border-top:1px solid #ddd;margin-top:18px;padding:8px 0 2px}
+details.mbmsg>summary::-webkit-details-marker{display:none}
+details.mbmsg>summary::before{content:"▸ ";color:#999}
+details.mbmsg[open]>summary::before{content:"▾ ";color:#999}
+details.mbmsg[open]>summary .mbprev{display:none}
+.mbprev{color:#888}`
 
 	// Fit-to-width: scale wide content down to fit the reader. WebKitGTK ignores
 	// CSS `zoom`, so content lives in a wrap div scaled with transform:scale
