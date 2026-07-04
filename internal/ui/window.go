@@ -1459,6 +1459,39 @@ func (w *window) buildSelectionBar() {
 	a11yLabel(read, "Mark selected as read")
 	read.ConnectClicked(func() { w.bulkApply("Marked read", nil, []string{model.LabelUnread}) })
 
+	// Bulk snooze: a popover of the quick presets, applied to every selected
+	// conversation (Monday-morning triage in one sweep).
+	snooze := gtk.NewButtonFromIconName("alarm-symbolic")
+	snooze.SetTooltipText("Snooze selected")
+	a11yLabel(snooze, "Snooze selected")
+	snooze.ConnectClicked(func() {
+		if len(w.selected) == 0 {
+			return
+		}
+		pop := gtk.NewPopover()
+		pop.SetParent(snooze)
+		pbox := gtk.NewBox(gtk.OrientationVertical, 0)
+		pbox.AddCSSClass("menu")
+		pbox.AddCSSClass("rowmenu")
+		for _, p := range snoozePresets(time.Now()) {
+			p := p
+			lbl := gtk.NewLabel(p.label + " (" + p.t.Format("Mon 15:04") + ")")
+			lbl.SetXAlign(0)
+			lbl.SetHExpand(true)
+			b := gtk.NewButton()
+			b.SetChild(lbl)
+			b.AddCSSClass("flat")
+			b.ConnectClicked(func() {
+				pop.Popdown()
+				w.bulkSnooze(p.t)
+			})
+			pbox.Append(b)
+		}
+		pop.SetChild(pbox)
+		pop.ConnectClosed(func() { pop.Unparent() })
+		pop.Popup()
+	})
+
 	moveTo := gtk.NewButtonFromIconName("folder-symbolic")
 	moveTo.SetTooltipText("Move selected to a label")
 	a11yLabel(moveTo, "Move selected to a label")
@@ -1487,6 +1520,7 @@ func (w *window) buildSelectionBar() {
 	w.selectionBar.Append(selectAll)
 	w.selectionBar.Append(archive)
 	w.selectionBar.Append(trash)
+	w.selectionBar.Append(snooze)
 	w.selectionBar.Append(read)
 	w.selectionBar.Append(moveTo)
 	w.selectionBar.Append(cancel)
@@ -1516,6 +1550,50 @@ func (w *window) updateSelectionBar() {
 
 // bulkApply applies a label change to every selected conversation in one batch,
 // then leaves selection mode. The per-thread message resolution (one query per
+// bulkSnooze hides every selected conversation until t (local snooze, like the
+// row menu's), then exits selection mode and refreshes.
+func (w *window) bulkSnooze(t time.Time) {
+	if len(w.selected) == 0 {
+		return
+	}
+	ids := make([]string, 0, len(w.selected))
+	for id := range w.selected {
+		ids = append(ids, id)
+	}
+	acctID := w.activeID
+	logging.Trace("ui: bulk snooze", "n", len(ids), "until", t.Unix(), "account", acctID)
+	w.selectBtn.SetActive(false) // exits select mode (clears selection, refreshes)
+	go func() {
+		ctx := context.Background()
+		for _, id := range ids {
+			if err := w.deps.Store.SnoozeThread(ctx, acctID, id, t.Unix()); err != nil {
+				slog.Warn("ui: bulk snooze", "thread", id, "err", err)
+			}
+		}
+		dispatch.Main(func() {
+			toast := adw.NewToast(fmt.Sprintf("Snoozed %d conversations until %s", len(ids), t.Format("Mon 15:04")))
+			toast.SetButtonLabel("Undo")
+			toast.SetTimeout(6)
+			toast.ConnectButtonClicked(func() {
+				go func() {
+					for _, id := range ids {
+						if err := w.deps.Store.UnsnoozeThread(context.Background(), acctID, id); err != nil {
+							slog.Warn("ui: bulk unsnooze", "thread", id, "err", err)
+						}
+					}
+					dispatch.Main(func() {
+						w.refreshList(w.searchEntry.Text())
+						w.loadLabels()
+					})
+				}()
+			})
+			w.toastOverlay.AddToast(toast)
+			w.refreshList(w.searchEntry.Text())
+			w.loadLabels()
+		})
+	}()
+}
+
 // selected thread) runs off the main thread; the label change and the undo
 // toast dispatch back once resolved.
 func (w *window) bulkApply(verb string, add, remove []string) {
