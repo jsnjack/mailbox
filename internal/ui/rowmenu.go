@@ -102,6 +102,10 @@ func (w *window) showRowMenu(row gtk.Widgetter, threadID string, x, y float64) {
 				w.snoozeUntil(acct, threadID, p.t)
 			})
 		}
+		item(snBox, "Pick date…", func() {
+			snPop.Popdown()
+			w.openSnoozeDialog(acct, threadID)
+		})
 		snPop.SetChild(snBox)
 		lbl := gtk.NewLabel("Snooze")
 		lbl.SetXAlign(0)
