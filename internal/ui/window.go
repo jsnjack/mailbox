@@ -221,7 +221,8 @@ type window struct {
 	aiFailing       bool
 	aiFailedAt      time.Time
 	inboxCategories bool
-	sendUndoSecs    int // undo-send window in seconds (0 = default 5)
+	sendUndoSecs    int             // undo-send window in seconds (0 = default 5)
+	trustedImgs     map[string]bool // lowercased senders whose images always load
 
 	// AI thread summary: a button reveals a card that streams a summary in.
 	// summaryCache memoizes by the thread's message fingerprint, so reopening is
@@ -265,10 +266,14 @@ func newWindow(app *adw.Application, deps Deps) *window {
 		inlineRefetched:  map[string]bool{},
 	}
 	w.accountNames, _ = config.LoadAccountNames()
+	w.trustedImgs = map[string]bool{}
 	if p, err := config.LoadPrefs(); err == nil {
 		w.blockImages = p.BlockRemoteImages
 		w.inboxCategories = !p.DisableInboxCategories
 		w.sendUndoSecs = p.SendUndoSeconds
+		for _, a := range p.TrustedImageSenders {
+			w.trustedImgs[strings.ToLower(a)] = true
+		}
 	}
 	if len(deps.Accounts) > 0 {
 		w.activeID = deps.Accounts[0].ID
@@ -3196,6 +3201,12 @@ func (w *window) showThread(threadID string) {
 	w.openMsg = msgs[len(msgs)-1] // newest, for reply/forward/star/unread
 	w.resetTranslation()          // a freshly opened thread shows the original
 	w.hideSummary()               // collapse any summary from the previous thread
+	// Per-open image policy: the global default, overridden for trusted
+	// senders (Preferences knows them via "Always load images from …").
+	if want := !w.blockImages || w.trustedImgs[strings.ToLower(w.openMsg.FromAddr)]; want != w.imagesEnabled {
+		w.imagesEnabled = want
+		w.webview.Settings().SetAutoLoadImages(want)
+	}
 	w.setActionsSensitive(true)
 	w.readerStack.SetVisibleChildName("message")
 	w.innerSplit.SetShowContent(true)
@@ -4132,6 +4143,7 @@ func (w *window) registerReaderActions() {
 	add("reader-labels", w.showLabelsDialog)
 	add("reader-analyze", w.onAnalyze)
 	add("reader-unsubscribe", w.onUnsubscribe)
+	add("reader-trust-images", w.onTrustImages)
 	add("reader-find-from", func() { w.searchFrom(w.openMsg.FromAddr) })
 	add("reader-copy-sender", w.onCopySender)
 	add("reader-view-headers", w.onViewHeaders)
@@ -4215,6 +4227,9 @@ func (w *window) buildReaderMenuModel() *gio.Menu {
 
 	img := gio.NewMenu()
 	img.Append("Show remote images", "win.reader-images")
+	if w.blockImages && strings.TrimSpace(w.openMsg.FromAddr) != "" && !w.trustedImgs[strings.ToLower(w.openMsg.FromAddr)] {
+		img.Append("Always load images from this sender", "win.reader-trust-images")
+	}
 	menu.AppendSection("", img)
 	return menu
 }
@@ -4396,6 +4411,24 @@ func (w *window) setCaution(warnings []string) {
 	}
 	w.cautionLabel.SetText("⚠ " + strings.Join(warnings, " "))
 	w.cautionLabel.SetVisible(true)
+}
+
+// onTrustImages remembers the open message's sender as image-trusted (their
+// remote images load even while the global default blocks) and shows them now.
+func (w *window) onTrustImages() {
+	addr := strings.ToLower(strings.TrimSpace(w.openMsg.FromAddr))
+	if addr == "" || w.trustedImgs[addr] {
+		return
+	}
+	logging.Trace("ui: trust images", "sender", addr)
+	w.trustedImgs[addr] = true
+	p, _ := config.LoadPrefs()
+	p.TrustedImageSenders = append(p.TrustedImageSenders, addr)
+	if err := config.SavePrefs(p); err != nil {
+		slog.Warn("ui: save prefs", "err", err)
+	}
+	w.toast("Images from " + addr + " will always load")
+	w.setImagesEnabled(true)
 }
 
 // setImagesEnabled toggles remote-image loading and re-renders the open thread

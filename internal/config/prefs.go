@@ -28,6 +28,9 @@ type Prefs struct {
 	// SendUndoSeconds is how long a sent message is held behind the Undo toast
 	// before it goes out. 0 means the default (5s).
 	SendUndoSeconds int `json:"send_undo_seconds,omitempty"`
+	// TrustedImageSenders are addresses whose remote images always load, even
+	// when BlockRemoteImages is on (people trust senders, not messages).
+	TrustedImageSenders []string `json:"trusted_image_senders,omitempty"`
 }
 
 func prefsPath() (string, error) {
