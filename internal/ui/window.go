@@ -627,14 +627,25 @@ func (w *window) selectAdjacent(delta int) {
 	}
 	const invalidPos = 0xffffffff // GTK_INVALID_LIST_POSITION
 	next := 0
+	step := 1
+	if delta < 0 {
+		step = -1
+	}
 	if cur := w.threadSel.Selected(); cur != invalidPos {
 		next = int(cur) + delta
 	}
 	if next < 0 {
-		next = 0
+		next, step = 0, 1 // clamped at the top: only forward makes sense
 	}
 	if next >= n {
-		next = n - 1
+		next, step = n-1, -1
+	}
+	// Date group headers aren't conversations; keep moving past them.
+	for next >= 0 && next < n && isDateHeader(w.threadModel.String(uint(next))) {
+		next += step
+	}
+	if next < 0 || next >= n {
+		return // nothing but headers in that direction
 	}
 	w.threadSel.SetSelected(uint(next))
 }
@@ -790,8 +801,11 @@ func (w *window) present() {
 	if os.Getenv("MAILBOX_OPEN_FIRST") == "1" {
 		// List loads are async; select the newest thread once it has populated.
 		w.afterPopulate = func() {
-			if w.threadModel.NItems() > 0 {
-				w.threadSel.SetSelected(0)
+			for i := uint(0); i < w.threadModel.NItems(); i++ {
+				if !isDateHeader(w.threadModel.String(i)) {
+					w.threadSel.SetSelected(i)
+					return
+				}
 			}
 		}
 	}
@@ -1130,6 +1144,16 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 			return
 		}
 		id := so.String()
+		if isDateHeader(id) {
+			w.rowSig[id] = id
+			li.SetChild(dateHeaderRow(strings.TrimPrefix(id, dateHdrPrefix)))
+			li.SetSelectable(false)
+			li.SetActivatable(false)
+			return
+		}
+		// Recycled items may have been a header last bind; restore defaults.
+		li.SetSelectable(true)
+		li.SetActivatable(true)
 		outgoing := w.current == model.LabelSent || w.current == model.LabelDraft
 		// Keep the signature cache in step with what is actually on screen, so a
 		// scroll-recycled row never looks "unchanged" to the next diff.
@@ -1884,6 +1908,46 @@ func (w *window) reselectOpenThread() {
 // no work at all and an in-place change (mark-read, a new category tag) re-binds
 // only the affected rows — preserving scroll position instead of rebuilding the
 // whole list on every event.
+// dateHdrPrefix marks a synthetic thread-list row that renders as a date group
+// header ("Today", …) instead of a conversation. The unit separator survives
+// GTK's C strings (NUL would truncate) and never appears in provider ids.
+const dateHdrPrefix = "\x1fhdr:"
+
+func isDateHeader(id string) bool { return strings.HasPrefix(id, dateHdrPrefix) }
+
+// dateBucket names the date group a message time falls into, relative to now.
+func dateBucket(t, now time.Time) string {
+	if t.IsZero() {
+		return "Older"
+	}
+	y, m, d := now.Date()
+	today := time.Date(y, m, d, 0, 0, 0, 0, now.Location())
+	switch {
+	case !t.Before(today):
+		return "Today"
+	case !t.Before(today.AddDate(0, 0, -1)):
+		return "Yesterday"
+	case !t.Before(today.AddDate(0, 0, -6)):
+		return "This week"
+	case !t.Before(today.AddDate(0, 0, -29)):
+		return "This month"
+	default:
+		return "Older"
+	}
+}
+
+// dateHeaderRow renders a date group header row.
+func dateHeaderRow(label string) *gtk.Box {
+	box := gtk.NewBox(gtk.OrientationHorizontal, 0)
+	l := gtk.NewLabel(label)
+	l.SetXAlign(0)
+	l.AddCSSClass("dim-label")
+	l.AddCSSClass("caption-heading")
+	setMargins(l, 12, 12, 10, 2)
+	box.Append(l)
+	return box
+}
+
 func (w *window) showThreads(sums []model.ThreadSummary) {
 	// The "unread only" toggle filters whatever the current view produced.
 	if w.unreadOnly {
@@ -1896,10 +1960,23 @@ func (w *window) showThreads(sums []model.ThreadSummary) {
 		sums = filtered
 	}
 
+	// Date group headers ("Today", …) are woven in as synthetic rows — the
+	// label views are date-ordered so buckets appear once each. Search results
+	// are relevance-shaped and the Snoozed view is ordered by wake time, so
+	// both stay header-free.
+	withHeaders := strings.TrimSpace(w.searchEntry.Text()) == "" && w.current != snoozedID
+	now := time.Now()
 	newByID := make(map[string]model.ThreadSummary, len(sums))
-	ids := make([]string, len(sums))
-	for i, s := range sums {
-		ids[i] = s.ThreadID
+	ids := make([]string, 0, len(sums)+6)
+	lastBucket := ""
+	for _, s := range sums {
+		if withHeaders {
+			if b := dateBucket(s.Latest.InternalDate, now); b != lastBucket {
+				ids = append(ids, dateHdrPrefix+b)
+				lastBucket = b
+			}
+		}
+		ids = append(ids, s.ThreadID)
 		newByID[s.ThreadID] = s
 	}
 	// Publish the new data before touching the model so any (re)bind reads it.
@@ -1907,7 +1984,7 @@ func (w *window) showThreads(sums []model.ThreadSummary) {
 	w.threadByID = newByID
 	w.diffThreadModel(oldIDs, ids)
 	w.threadIDs = ids
-	w.updateEmptyFolderBanner(len(ids))
+	w.updateEmptyFolderBanner(len(sums))
 
 	if len(sums) == 0 {
 		w.emptyPage.SetChild(nil)
@@ -2016,6 +2093,9 @@ func (w *window) diffThreadModel(oldIDs, newIDs []string) {
 // category, and the select-mode checkbox state), so a change in any of them
 // triggers a re-bind of just that row and nothing else does.
 func (w *window) renderSig(id string) string {
+	if isDateHeader(id) {
+		return id // header rows never change appearance
+	}
 	t := w.threadByID[id]
 	m := t.Latest
 	who := m.FromName + "\x1f" + m.FromAddr
@@ -2333,6 +2413,9 @@ func (w *window) onThreadSelected() {
 		return
 	}
 	id := so.String()
+	if isDateHeader(id) {
+		return // a date group header is not a conversation
+	}
 	if id == w.openThreadID {
 		logging.Trace("ui: thread selected (already open)", "thread", id)
 		return // already shown; avoids a re-render when the list refreshes live
@@ -5103,9 +5186,25 @@ func (w *window) advanceSelection(pos uint) {
 	if pos == invalidPos || pos >= n {
 		pos = n - 1
 	}
+	// Never land on a date group header: prefer the next conversation below,
+	// else the nearest above.
+	p := int(pos)
+	for p < int(n) && isDateHeader(w.threadModel.String(uint(p))) {
+		p++
+	}
+	if p >= int(n) {
+		p = int(pos)
+		for p >= 0 && isDateHeader(w.threadModel.String(uint(p))) {
+			p--
+		}
+	}
+	if p < 0 {
+		w.clearReader()
+		return
+	}
 	// The list was just spliced, so the selection is currently invalid; setting it
 	// fires the selection-changed handler, which opens the conversation.
-	w.threadSel.SetSelected(pos)
+	w.threadSel.SetSelected(uint(p))
 }
 
 // toast shows a transient message over the window. Safe to call from the main
