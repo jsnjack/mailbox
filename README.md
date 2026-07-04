@@ -1,14 +1,13 @@
 # Mailbox
 
-A fast, native mail client for GNOME — local mail, useful AI, no bloat.
+A fast, native mail client for GNOME, with useful AI.
 
 ![Mailbox](screenshots/main.png)
 
 Mailbox is a small GTK4 app for people who live on Linux and want their mail
 quick, local, and private. Gmail connects through its own API; everything else
 speaks IMAP. An AI layer takes over the busywork — sorting, summarizing,
-drafting, translating — using whatever model you point it at, including one
-running on your own machine.
+drafting, translating — using whatever model you point it at.
 
 ## How it's different
 
@@ -16,10 +15,9 @@ running on your own machine.
   in a frame.
 - **Local first.** Your mail lives in a local database: search answers as you
   type, reading works offline, and the interface never waits for a server.
-- **AI on your terms.** Any OpenAI-compatible or Anthropic endpoint works —
-  including a local model. Every result is cached, so nothing is analyzed or
-  paid for twice. Without a configured provider the app is simply a complete
-  mail client; nothing nags.
+- **AI on your terms.** Any OpenAI-compatible or Anthropic endpoint works.
+  Every result is cached, so nothing is analyzed or paid for twice. Without a
+  configured provider the app is simply a complete mail client; nothing nags.
 - **Private by default.** Tracking pixels are stripped before rendering, email
   can never run scripts, forged senders are flagged, and every secret stays in
   the system keyring.

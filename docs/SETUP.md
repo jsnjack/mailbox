@@ -17,8 +17,7 @@ make build    # compiles to bin/mailbox
 The first build compiles the GTK4/WebKit bindings and takes a while (~10–15
 minutes); every build after that is cached and fast.
 
-On Fedora you can instead build and install an RPM, which pulls the runtime
-libraries automatically:
+On Fedora you can instead build and install an RPM:
 
 ```bash
 make rpm
@@ -122,9 +121,8 @@ them, set the provider, endpoint, and model in **Preferences → AI** (or the
 printf '%s' "$YOUR_API_KEY" | ./bin/mailbox set-ai-key
 ```
 
-Anything OpenAI-compatible works (OpenAI itself, a LiteLLM proxy, a local
-model behind one), as does Anthropic directly. The key lives only in the OS
-keyring — never in a config file.
+Anything OpenAI-compatible works, as does Anthropic directly. The key lives
+only in the OS keyring — never in a config file.
 
 ## Where things live
 
