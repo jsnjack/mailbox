@@ -2,6 +2,8 @@ package ui
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"mime"
@@ -173,12 +175,63 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 	aiCtx, cancelAI := context.WithCancel(context.Background())
 
 	var attachments []model.OutgoingAttachment
+	var attachIDs []int // parallel to attachments; ids stay stable across removals
+	attachSeq := 0
+	attachmentsChanged := false // any user add/remove (init carryover doesn't count)
 	attachRow := gtk.NewBox(gtk.OrientationHorizontal, 6)
 	attachRow.SetVisible(false)
-	addChip := func(name string) {
+	attachmentIndex := func(id int) int {
+		for i, v := range attachIDs {
+			if v == id {
+				return i
+			}
+		}
+		return -1 // already removed
+	}
+	// addAttachment appends the payload and its chip. The chip opens the file
+	// with the default app on double-click (the data may exist only in memory —
+	// a reopened draft or an undone send — so it goes through a cache file) and
+	// carries a close button that removes the attachment from the message.
+	addAttachment := func(att model.OutgoingAttachment) {
+		attachSeq++
+		id := attachSeq
+		attachments = append(attachments, att)
+		attachIDs = append(attachIDs, id)
+
 		chip := gtk.NewBox(gtk.OrientationHorizontal, 4)
 		chip.Append(gtk.NewImageFromIconName("mail-attachment-symbolic"))
-		chip.Append(gtk.NewLabel(name))
+		chip.Append(gtk.NewLabel(att.Filename))
+		chip.SetTooltipText("Double-click to open")
+		click := gtk.NewGestureClick()
+		click.ConnectPressed(func(nPress int, _, _ float64) {
+			if nPress != 2 {
+				return
+			}
+			if i := attachmentIndex(id); i >= 0 {
+				logging.Trace("ui: compose attachment open", "name", attachments[i].Filename)
+				openOutgoingAttachment(attachments[i])
+			}
+		})
+		chip.AddController(click)
+		rm := gtk.NewButtonFromIconName("window-close-symbolic")
+		rm.AddCSSClass("flat")
+		rm.SetTooltipText("Remove attachment")
+		a11yLabel(rm, "Remove attachment "+att.Filename)
+		rm.ConnectClicked(func() {
+			i := attachmentIndex(id)
+			if i < 0 {
+				return
+			}
+			logging.Trace("ui: compose attachment removed", "name", attachments[i].Filename, "left", len(attachments)-1)
+			attachments = append(attachments[:i], attachments[i+1:]...)
+			attachIDs = append(attachIDs[:i], attachIDs[i+1:]...)
+			attachmentsChanged = true
+			attachRow.Remove(chip)
+			if len(attachments) == 0 {
+				attachRow.SetVisible(false)
+			}
+		})
+		chip.Append(rm)
 		attachRow.Append(chip)
 		attachRow.SetVisible(true)
 	}
@@ -201,17 +254,17 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 				mtype = "application/octet-stream"
 			}
 			dispatch.Main(func() {
-				attachments = append(attachments, model.OutgoingAttachment{Filename: name, MimeType: mtype, Data: data})
-				logging.Trace("ui: compose attachment added", "name", name, "mime", mtype, "bytes", len(data), "total", len(attachments))
-				addChip(name)
+				logging.Trace("ui: compose attachment added", "name", name, "mime", mtype, "bytes", len(data), "total", len(attachments)+1)
+				addAttachment(model.OutgoingAttachment{Filename: name, MimeType: mtype, Data: data})
+				attachmentsChanged = true
 			})
 		}()
 	}
 
-	// Carry over any attachments from init (e.g. a reopened/undone message).
-	attachments = append(attachments, init.Attachments...)
+	// Carry over any attachments from init (e.g. a reopened/undone message);
+	// these are prefilled, not user changes, so attachmentsChanged stays false.
 	for _, a := range init.Attachments {
-		addChip(a.Filename)
+		addAttachment(a)
 	}
 
 	// Cc/Bcc are hidden until needed (revealed by the toggle, or automatically
@@ -386,10 +439,10 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 			strings.TrimSpace(c.Bcc) != strings.TrimSpace(init.Bcc) ||
 			c.Subject != init.Subject ||
 			c.Body != init.Body ||
-			// Compare against the prefilled set — a forward carries the original's
-			// attachments, which are not user changes. (Attachments can only be
-			// added, so a count comparison suffices.)
-			len(c.Attachments) != len(init.Attachments)
+			// Tracked explicitly — a forward carries the original's attachments
+			// (prefilled, not user changes), and add+remove could leave the
+			// count equal while the set differs.
+			attachmentsChanged
 	}
 
 	win.ConnectCloseRequest(func() bool {
@@ -1245,4 +1298,32 @@ func quoteOriginal(m model.Message, body string) string {
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+// openOutgoingAttachment writes a compose attachment to a cache file and opens
+// it with the default application. It goes through a file because the payload
+// may exist only in memory — a reopened draft, an undone send, or a forwarded
+// original. The name is content-prefixed so different files with the same
+// filename don't clobber each other.
+func openOutgoingAttachment(att model.OutgoingAttachment) {
+	go func() {
+		dir, err := config.CacheDir()
+		if err != nil {
+			slog.Warn("ui: open compose attachment", "err", err)
+			return
+		}
+		dir = filepath.Join(dir, "compose")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			slog.Warn("ui: open compose attachment", "err", err)
+			return
+		}
+		sum := sha256.Sum256(att.Data)
+		path := filepath.Join(dir, hex.EncodeToString(sum[:8])+"-"+filepath.Base(att.Filename))
+		if err := os.WriteFile(path, att.Data, 0o600); err != nil {
+			slog.Warn("ui: open compose attachment", "path", path, "err", err)
+			return
+		}
+		logging.Trace("ui: open compose attachment", "name", att.Filename, "path", path, "bytes", len(att.Data))
+		openExternal(path)
+	}()
 }
