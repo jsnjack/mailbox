@@ -287,7 +287,10 @@ aggregated by `deps.Stats`. The window collapses responsively via
 `adw.Breakpoint` (3 panes → list+reader below ~860sp → single pane below ~520sp),
 with `SetShowContent` driving navigation when collapsed. Single-key shortcuts
 (bubble-phase key controller, so text entries keep their input): j/k navigate
-threads, r reply, a archive, c compose, / focus search. Test hooks:
+threads, r reply, a/e archive, c compose, / focus search, and more ("?" shows
+the cheat sheet) — all user-rebindable (Preferences → Keyboard; the
+`shortcutDefs` table drives the handler, the cheat sheet, and the editor;
+overrides in `~/.config/mailbox/shortcuts.json`). Test hooks:
 `MAILBOX_OPEN_FIRST=1` opens the newest message on launch; `MAILBOX_OPEN_PREFS=1`
 opens the Preferences dialog on launch; `MAILBOX_WIN_SIZE=WxH`
 overrides the initial window size; `MAILBOX_APP_ID` overrides the GApplication id
@@ -341,6 +344,7 @@ afterward. The `sync` command and the headless packages build without GTK.
 - Persistent state (SQLite DB): `~/.local/share/mailbox/mailbox.db`. Preferences → Storage can clear the attachment cache (`config.ClearAttachmentsCache`) and compact the DB (`store.Vacuum` — `VACUUM` + WAL-truncate, reclaiming pages freed by deleted mail; WAL keeps that space otherwise).
 - Account display names: `~/.local/share/mailbox/accounts.json` (email → name).
 - Default signature: `~/.config/mailbox/signature.txt` (plain text, may be empty); per-account overrides in `~/.config/mailbox/signatures.json` (email → signature).
+- Keyboard shortcut overrides: `~/.config/mailbox/shortcuts.json` (action id → keys).
 - View state (last folder, unread filter, reader zoom): `~/.local/share/mailbox/view.json`.
 - General prefs (block remote images by default, body retention window): `~/.config/mailbox/prefs.json`. Body retention (Preferences → Storage, default off) prunes cached bodies older than N days (`store.PruneBodies` — metadata/header search kept, body re-fetched on open, body-derived AI caches + attachment rows pruned too); applied on change and by a daily background pass (`backgroundRetention`), with an auto-`Vacuum` after a large prune.
 - Attachment cache: `~/.cache/mailbox/attachments/` (content-addressed by sha256).
