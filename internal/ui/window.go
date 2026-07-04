@@ -223,6 +223,7 @@ type window struct {
 	inboxCategories bool
 	sendUndoSecs    int             // undo-send window in seconds (0 = default 5)
 	keymap          map[uint]func() // single-key shortcuts (configurable; see shortcuts.go)
+	readerCatTag    *gtk.Label      // thread category pill in the reader header
 	trustedImgs     map[string]bool // lowercased senders whose images always load
 
 	// AI thread summary: a button reveals a card that streams a summary in.
@@ -2352,6 +2353,14 @@ func (w *window) onDecidePolicy(decision webkit.PolicyDecisioner, dtype webkit.P
 	if uri == "" || strings.HasPrefix(uri, "about:") || strings.HasPrefix(uri, "data:") || strings.HasPrefix(uri, "blob:") {
 		return false // our own rendered content — show it in place
 	}
+	// Our own in-page affordances (the sender link in a message header).
+	if id, ok := strings.CutPrefix(uri, "mbaction:sender/"); ok {
+		if dec, err := url.QueryUnescape(id); err == nil {
+			w.showSenderActions(dec)
+		}
+		nav.Ignore()
+		return true
+	}
 	switch {
 	case strings.HasPrefix(uri, "http://"), strings.HasPrefix(uri, "https://"),
 		strings.HasPrefix(uri, "mailto:"), strings.HasPrefix(uri, "ftp://"), strings.HasPrefix(uri, "ftps://"):
@@ -2470,10 +2479,26 @@ func (w *window) buildReader() *adw.NavigationPage {
 	w.authIcon = gtk.NewImageFromIconName("security-high-symbolic")
 	w.authIcon.SetVAlign(gtk.AlignCenter)
 	w.authIcon.SetVisible(false)
+	// The thread's AI category carries over from the list (already-computed
+	// context; no extra AI cost).
+	w.readerCatTag = gtk.NewLabel("")
+	w.readerCatTag.AddCSSClass("cat-tag")
+	w.readerCatTag.SetVAlign(gtk.AlignCenter)
+	w.readerCatTag.SetVisible(false)
+	// Tracker count sits quietly at the end of the subject row instead of
+	// claiming a row of its own.
+	w.trackerLabel = gtk.NewLabel("")
+	w.trackerLabel.AddCSSClass("dim-label")
+	w.trackerLabel.AddCSSClass("caption")
+	w.trackerLabel.SetVAlign(gtk.AlignCenter)
+	w.trackerLabel.SetTooltipText("Tracking pixels stripped from this conversation before rendering")
+	w.trackerLabel.SetVisible(false)
 	headerRow := gtk.NewBox(gtk.OrientationHorizontal, 6)
 	setMargins(headerRow, 12, 12, 8, 8)
 	headerRow.Append(w.authIcon)
 	headerRow.Append(w.header)
+	headerRow.Append(w.readerCatTag)
+	headerRow.Append(w.trackerLabel)
 
 	// A FlowBox wraps chips to additional rows instead of a single horizontal row,
 	// whose summed width could otherwise force the reader pane — and the whole
@@ -2486,13 +2511,6 @@ func (w *window) buildReader() *adw.NavigationPage {
 	w.attachBox.SetHomogeneous(false)
 	setMargins(w.attachBox, 12, 12, 0, 8)
 	w.attachBox.SetVisible(false)
-
-	w.trackerLabel = gtk.NewLabel("")
-	w.trackerLabel.SetXAlign(0)
-	w.trackerLabel.AddCSSClass("dim-label")
-	w.trackerLabel.AddCSSClass("caption")
-	setMargins(w.trackerLabel, 12, 12, 0, 6)
-	w.trackerLabel.SetVisible(false)
 
 	w.cautionLabel = gtk.NewLabel("")
 	w.cautionLabel.SetXAlign(0)
@@ -2515,7 +2533,6 @@ func (w *window) buildReader() *adw.NavigationPage {
 	box.Append(w.buildInviteCard())
 	box.Append(w.attachBox)
 	box.Append(w.cautionLabel)
-	box.Append(w.trackerLabel)
 
 	box.Append(w.webview)
 
@@ -3169,6 +3186,7 @@ func (w *window) clearReader() {
 	w.resetTranslation()
 	w.hideSummary()
 	w.showInviteCard(0, nil)
+	w.setReaderCategory("")
 	w.setActionsSensitive(false)
 	w.readerStack.SetVisibleChildName("empty")
 }
@@ -3438,6 +3456,7 @@ func (w *window) renderConversation(msgs []model.Message) {
 		title += fmt.Sprintf("\n<span size=\"small\">%d messages</span>", len(msgs))
 	}
 	w.header.SetMarkup(title)
+	w.setReaderCategory(w.categories[w.openThreadID])
 	// Show a loading placeholder immediately when bodies need fetching (not all
 	// cached), so the user sees their click registered instead of staring at the
 	// previous message for up to the fetch timeout. When all bodies are cached
@@ -3548,7 +3567,7 @@ func (w *window) renderConversation(msgs []model.Message) {
 					blocked += cs.trackers
 					continue
 				}
-				sec, n := conversationSection(m, body, w.cleanHTML, fetchFailed[m.GmailID])
+				sec, n := w.conversationSection(m, body, w.cleanHTML, fetchFailed[m.GmailID])
 				// A failure section (snippet + "could not be loaded" notice) is
 				// transient — caching it would keep showing the failure after the
 				// body becomes fetchable again. Only real bodies are immutable.
@@ -3565,7 +3584,7 @@ func (w *window) renderConversation(msgs []model.Message) {
 				blocked += cs.trackers
 			} else {
 				body := w.bodyForRender(ctx, m, refetched)
-				s2, n := conversationSection(m, body, w.cleanHTML, fetchFailed[m.GmailID])
+				s2, n := w.conversationSection(m, body, w.cleanHTML, fetchFailed[m.GmailID])
 				// Transient failure sections are not cached — see the
 				// latest-message branch above.
 				if !fetchFailed[m.GmailID] {
@@ -3734,24 +3753,74 @@ func (w *window) invalidateSection(gmailID string) {
 	}
 }
 
+// formatMsgDate renders a message timestamp, spending the year only when it
+// isn't this year.
+func formatMsgDate(t, now time.Time) string {
+	if t.Year() == now.Year() {
+		return t.Format("Jan 2, 15:04")
+	}
+	return t.Format("Jan 2, 2006 15:04")
+}
+
+// formatRecipients renders a recipient list compactly: the user's own
+// addresses become "me" (the mail being addressed to you is the routine case),
+// others show their display name, and long lists truncate to "+N" — the full
+// raw list stays on hover. Senders keep their full address elsewhere (an
+// anti-phishing choice); recipients don't need it.
+func (w *window) formatRecipients(list string) string {
+	own := make(map[string]bool, len(w.deps.Accounts))
+	for _, a := range w.deps.Accounts {
+		own[strings.ToLower(a.Email)] = true
+	}
+	addrs, err := mail.ParseAddressList(list)
+	if err != nil || len(addrs) == 0 {
+		return html.EscapeString(list) // unparseable — show as-is
+	}
+	var parts []string
+	for _, a := range addrs {
+		switch {
+		case own[strings.ToLower(a.Address)]:
+			parts = append(parts, "me")
+		case a.Name != "":
+			parts = append(parts, a.Name)
+		default:
+			parts = append(parts, a.Address)
+		}
+	}
+	shown := parts
+	suffix := ""
+	if len(parts) > 3 {
+		shown = parts[:3]
+		suffix = fmt.Sprintf(" +%d", len(parts)-3)
+	}
+	return `<span title="` + html.EscapeString(list) + `">` +
+		html.EscapeString(strings.Join(shown, ", ")) + suffix + `</span>`
+}
+
 // conversationSection renders one message's header + body and returns the HTML
 // plus how many trackers were stripped from it. clean sanitizes+de-tracks HTML.
 // fetchFailed, when true, inserts a styled notice that the body couldn't be
 // loaded (network error/timeout) so the snippet fallback isn't silent.
-func conversationSection(m model.Message, body model.MessageBody, clean func(string) (string, int), fetchFailed bool) (string, int) {
+func (w *window) conversationSection(m model.Message, body model.MessageBody, clean func(string) (string, int), fetchFailed bool) (string, int) {
 	var hb strings.Builder
+	// Sender left, date right (flex); the sender is a link to the in-app
+	// sender actions (mbaction: is intercepted by onDecidePolicy — it never
+	// navigates or leaves the app).
 	hb.WriteString(`<div style="border-top:1px solid #ddd;margin-top:18px;padding-top:8px;color:#555;font-size:90%">`)
-	fmt.Fprintf(&hb, `<b>%s</b>`, html.EscapeString(displayFrom(m)))
-	// Always show the actual address, not just the display name.
+	hb.WriteString(`<div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap"><span>`)
+	fmt.Fprintf(&hb, `<a href="mbaction:sender/%s" style="color:inherit;text-decoration:none" title="Sender actions"><b>%s</b>`,
+		url.QueryEscape(m.GmailID), html.EscapeString(displayFrom(m)))
+	// Always show the actual sender address, not just the display name.
 	if addr := strings.TrimSpace(m.FromAddr); addr != "" && !strings.EqualFold(addr, displayFrom(m)) {
 		fmt.Fprintf(&hb, ` <span style="color:#888">&lt;%s&gt;</span>`, html.EscapeString(addr))
 	}
-	fmt.Fprintf(&hb, ` · %s`, m.InternalDate.Format("Jan 2, 2006 15:04"))
+	hb.WriteString(`</a></span>`)
+	fmt.Fprintf(&hb, `<span style="color:#888;white-space:nowrap">%s</span></div>`, formatMsgDate(m.InternalDate, time.Now()))
 	if to := strings.TrimSpace(m.ToAddrs); to != "" {
-		fmt.Fprintf(&hb, `<br><span style="color:#888">to %s</span>`, html.EscapeString(to))
+		fmt.Fprintf(&hb, `<div style="color:#888">to %s</div>`, w.formatRecipients(to))
 	}
 	if cc := strings.TrimSpace(m.CcAddrs); cc != "" {
-		fmt.Fprintf(&hb, `<br><span style="color:#888">cc %s</span>`, html.EscapeString(cc))
+		fmt.Fprintf(&hb, `<div style="color:#888">cc %s</div>`, w.formatRecipients(cc))
 	}
 	hb.WriteString(`</div>`)
 	header := hb.String()
@@ -4448,6 +4517,94 @@ func (w *window) cleanHTML(h string) (string, int) {
 	return `<div class="` + scope + `"><style>` + scoped + `</style>` + clean + `</div>`, n
 }
 
+// setReaderCategory shows the thread's category pill in the reader header
+// (hidden when uncategorized), mirroring the list row's tag styling.
+func (w *window) setReaderCategory(category string) {
+	for _, c := range []string{"cat-needsreply", "cat-replied", "cat-discount"} {
+		w.readerCatTag.RemoveCSSClass(c)
+	}
+	if category == "" {
+		w.readerCatTag.SetVisible(false)
+		return
+	}
+	switch category {
+	case "Needs reply":
+		w.readerCatTag.AddCSSClass("cat-needsreply")
+	case "Replied":
+		w.readerCatTag.AddCSSClass("cat-replied")
+	case "Discount":
+		w.readerCatTag.AddCSSClass("cat-discount")
+	}
+	w.readerCatTag.SetText(category)
+	w.readerCatTag.SetVisible(true)
+}
+
+// showSenderActions presents the sender utilities for the message with this
+// provider id in the open conversation — reached by clicking the sender in a
+// message header.
+func (w *window) showSenderActions(gmailID string) {
+	var m model.Message
+	for _, om := range w.openThreadMsgs {
+		if om.GmailID == gmailID {
+			m = om
+			break
+		}
+	}
+	if m.GmailID == "" {
+		return
+	}
+	addr := strings.TrimSpace(m.FromAddr)
+	logging.Trace("ui: sender actions", "id", gmailID, "addr", addr)
+
+	list := gtk.NewListBox()
+	list.AddCSSClass("boxed-list")
+	list.SetSelectionMode(gtk.SelectionNone)
+	dialog := adw.NewDialog()
+	item := func(label string, fn func()) {
+		lbl := gtk.NewLabel(label)
+		lbl.SetXAlign(0)
+		lbl.SetHExpand(true)
+		b := gtk.NewButton()
+		b.SetChild(lbl)
+		b.AddCSSClass("flat")
+		b.ConnectClicked(func() {
+			dialog.Close()
+			fn()
+		})
+		list.Append(b)
+	}
+	item("Copy address", func() {
+		if disp := gdk.DisplayGetDefault(); disp != nil {
+			disp.Clipboard().SetText(addr)
+			w.toast("Copied " + addr)
+		}
+	})
+	if w.deps.SearchServer != nil {
+		item("Find emails from "+displayFrom(m), func() { w.searchFrom(addr) })
+	}
+	if m.ListUnsubscribe != "" {
+		item("Unsubscribe", func() {
+			if t, ok := parseListUnsubscribe(m.ListUnsubscribe, m.ListUnsubOneClick); ok {
+				w.performUnsubscribe(m.AccountID, displayFrom(m), t, nil)
+			}
+		})
+	}
+	if w.blockImages && addr != "" && !w.trustedImgs[strings.ToLower(addr)] {
+		item("Always load images from this sender", func() { w.onTrustImages() })
+	}
+
+	box := gtk.NewBox(gtk.OrientationVertical, 0)
+	setMargins(box, 12, 12, 6, 12)
+	box.Append(list)
+	tv := adw.NewToolbarView()
+	tv.AddTopBar(adw.NewHeaderBar())
+	tv.SetContent(box)
+	dialog.SetTitle(addr)
+	dialog.SetContentWidth(420)
+	dialog.SetChild(tv)
+	dialog.Present(w.win)
+}
+
 // setTrackerCount shows "N trackers blocked" in the reader (hidden when none).
 func (w *window) setTrackerCount(n int) {
 	if n <= 0 {
@@ -4458,7 +4615,7 @@ func (w *window) setTrackerCount(n int) {
 	if n != 1 {
 		noun = "trackers"
 	}
-	w.trackerLabel.SetText(fmt.Sprintf("🛡 %d %s blocked", n, noun))
+	w.trackerLabel.SetText(fmt.Sprintf("%d %s blocked", n, noun))
 	w.trackerLabel.SetVisible(true)
 }
 
@@ -4470,10 +4627,9 @@ func (w *window) setAuthBadge(v authVerdict) {
 	w.authIcon.RemoveCSSClass("error")
 	switch v.level {
 	case authPass:
-		w.authIcon.SetFromIconName("security-high-symbolic")
-		w.authIcon.AddCSSClass("success")
-		w.authIcon.SetTooltipText("Verified sender · " + v.detail)
-		w.authIcon.SetVisible(true)
+		// Indicate exceptions, not norms: a verified sender is the routine
+		// case, so no badge — the shield appears only when something is off.
+		w.authIcon.SetVisible(false)
 	case authPartial:
 		w.authIcon.SetFromIconName("security-medium-symbolic")
 		w.authIcon.AddCSSClass("warning")
@@ -4690,7 +4846,7 @@ func (w *window) showTranslatedConversation(msgs []model.Message) {
 	for i := len(msgs) - 1; i >= 0; i-- {
 		m := msgs[i]
 		body := model.MessageBody{HTML: w.translationCache[m.GmailID]}
-		sec, n := conversationSection(m, body, w.cleanHTML, false)
+		sec, n := w.conversationSection(m, body, w.cleanHTML, false)
 		b.WriteString(sec)
 		blocked += n
 	}
@@ -5908,7 +6064,8 @@ func readerShellHTML() string {
 	// their min-content — so email fits the reader with neither a horizontal
 	// scrollbar nor cropping.
 	const style = `
-body{font-family:sans-serif;margin:16px;color:#222;line-height:1.4;overflow-wrap:anywhere}
+body{font-family:sans-serif;margin:8px 16px 16px;color:#222;line-height:1.4;overflow-wrap:anywhere}
+.mbwrap>div:first-child{border-top:none!important;margin-top:0!important}
 img,video{max-width:100%!important;height:auto!important}
 pre{font-family:monospace;white-space:pre-wrap}
 details.mbmsg>summary{cursor:pointer;list-style:none;color:#555;font-size:90%;border-top:1px solid #ddd;margin-top:18px;padding:8px 0 2px}
@@ -5935,7 +6092,7 @@ details.mbmsg[open]>summary .mbprev{display:none}
 	script := `<script nonce="` + nonce + `">(function(){var wrap;function fit(){var b=document.body;if(!b||!wrap)return;` +
 		`wrap.style.transform='none';wrap.style.width='auto';var avail=b.clientWidth,natural=wrap.scrollWidth;` +
 		`if(natural>avail+1&&natural>0){var s=avail/natural;wrap.style.width=natural+'px';wrap.style.transformOrigin='top left';wrap.style.transform='scale('+s+')';b.style.height=(wrap.offsetHeight*s)+'px';}else{b.style.height='';}}` +
-		`function setup(){var b=document.body;if(!b)return;wrap=document.createElement('div');b.appendChild(wrap);b.style.overflowX='hidden';window.addEventListener('resize',fit);` +
+		`function setup(){var b=document.body;if(!b)return;wrap=document.createElement('div');wrap.className='mbwrap';b.appendChild(wrap);b.style.overflowX='hidden';window.addEventListener('resize',fit);` +
 		`window.__mbSet=function(h){wrap.innerHTML=h;window.scrollTo(0,0);fit();` +
 		`wrap.querySelectorAll('img').forEach(function(i){if(!i.complete){i.addEventListener('load',fit,{once:true});}});};` +
 		`try{window.webkit.messageHandlers.` + shellReadyHandler + `.postMessage(true);}catch(e){}}` +
