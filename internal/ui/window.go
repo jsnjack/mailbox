@@ -2497,8 +2497,8 @@ func (w *window) buildReader() *adw.NavigationPage {
 	setMargins(headerRow, 12, 12, 8, 8)
 	headerRow.Append(w.authIcon)
 	headerRow.Append(w.header)
-	headerRow.Append(w.readerCatTag)
 	headerRow.Append(w.trackerLabel)
+	headerRow.Append(w.readerCatTag)
 
 	// A FlowBox wraps chips to additional rows instead of a single horizontal row,
 	// whose summed width could otherwise force the reader pane — and the whole
