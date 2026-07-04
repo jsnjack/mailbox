@@ -3817,6 +3817,12 @@ func attachmentChip(a model.Attachment) *gtk.Box {
 	name.SetEllipsize(pango.EllipsizeMiddle)
 	name.SetMaxWidthChars(28)
 	box.Append(name)
+	if a.SizeBytes > 0 {
+		size := gtk.NewLabel(humanBytes(a.SizeBytes))
+		size.AddCSSClass("dim-label")
+		size.AddCSSClass("caption")
+		box.Append(size)
+	}
 	return box
 }
 

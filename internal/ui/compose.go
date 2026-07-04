@@ -201,6 +201,12 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 		chip := gtk.NewBox(gtk.OrientationHorizontal, 4)
 		chip.Append(gtk.NewImageFromIconName("mail-attachment-symbolic"))
 		chip.Append(gtk.NewLabel(att.Filename))
+		if len(att.Data) > 0 {
+			size := gtk.NewLabel(humanBytes(int64(len(att.Data))))
+			size.AddCSSClass("dim-label")
+			size.AddCSSClass("caption")
+			chip.Append(size)
+		}
 		chip.SetTooltipText("Double-click to open")
 		click := gtk.NewGestureClick()
 		click.ConnectPressed(func(nPress int, _, _ float64) {
