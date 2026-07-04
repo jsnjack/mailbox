@@ -28,6 +28,9 @@ const (
 	AuthExpired
 	// SendStateChanged means an outbox item was sent or its state changed.
 	SendStateChanged
+	// SnoozeWoke means a snoozed conversation's wake time passed — it is back
+	// in the inbox (ThreadID identifies it).
+	SnoozeWoke
 )
 
 // kindName returns a human-readable name for a ChangeKind, used only in trace
@@ -48,6 +51,8 @@ func kindName(k ChangeKind) string {
 		return "AuthExpired"
 	case SendStateChanged:
 		return "SendStateChanged"
+	case SnoozeWoke:
+		return "SnoozeWoke"
 	default:
 		return "unknown"
 	}

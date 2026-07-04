@@ -227,6 +227,9 @@ func launchUI(mailto string) error {
 	// bodies older than the window shortly after launch and then daily.
 	go backgroundRetention(ctx, st)
 
+	// Snooze wake: return due snoozed conversations to the inbox.
+	go backgroundSnoozeWake(ctx, st, hub)
+
 	// Cumulative metrics for the status bar: cache sizes + per-account API stats.
 	deps.Stats = func() ui.StatusStats {
 		s := ui.StatusStats{}
@@ -753,6 +756,37 @@ func runRetentionPass(ctx context.Context, st *store.Store) {
 	if n >= retentionVacuumMin {
 		if err := st.Vacuum(ctx); err != nil {
 			slog.Warn("body retention: vacuum", "err", err)
+		}
+	}
+}
+
+// snoozeWakeInterval is how often due snoozes are checked while the GUI is
+// open. A snooze that comes due while the app is closed wakes on next launch.
+const snoozeWakeInterval = time.Minute
+
+// backgroundSnoozeWake returns conversations whose snooze elapsed to the inbox:
+// the snooze row is deleted (its absence is what un-hides the thread) and a
+// SnoozeWoke change tells the UI to refresh and raise a reminder notification.
+func backgroundSnoozeWake(ctx context.Context, st *store.Store, hub *syncer.Hub) {
+	ticker := time.NewTicker(snoozeWakeInterval)
+	defer ticker.Stop()
+	for {
+		due, err := st.DueSnoozes(ctx, time.Now().Unix())
+		if err != nil {
+			slog.Warn("snooze wake: list due", "err", err)
+		}
+		for _, sn := range due {
+			if err := st.UnsnoozeThread(ctx, sn.AccountID, sn.ThreadID); err != nil {
+				slog.Warn("snooze wake: unsnooze", "thread", sn.ThreadID, "err", err)
+				continue
+			}
+			slog.Debug("launch: snooze woke", "account", sn.AccountID, "thread", sn.ThreadID)
+			hub.Publish(syncer.Change{Kind: syncer.SnoozeWoke, AccountID: sn.AccountID, ThreadID: sn.ThreadID})
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
 		}
 	}
 }

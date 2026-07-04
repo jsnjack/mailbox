@@ -152,6 +152,16 @@ CREATE TABLE IF NOT EXISTS message_analyses (
   PRIMARY KEY (account_id, gmail_id)
 );
 
+-- Snoozed conversations: hidden from the inbox until `until`, then woken by a
+-- background sweeper (the thread keeps its labels — snooze only affects
+-- visibility, so nothing needs mirroring to the provider).
+CREATE TABLE IF NOT EXISTS snoozes (
+  account_id      INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  thread_id       TEXT NOT NULL,
+  until           INTEGER NOT NULL,  -- unix seconds
+  PRIMARY KEY (account_id, thread_id)
+);
+
 -- FTS5 index over message text, keyed by messages.rowid. Rows are written
 -- explicitly by the store (not via triggers) because the searchable text spans
 -- messages + message_bodies and bodies arrive later than metadata. Updates are

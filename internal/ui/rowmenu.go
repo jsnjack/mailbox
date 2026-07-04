@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"time"
 
 	"github.com/diamondburned/gotk4/pkg/gdk/v4"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
@@ -83,6 +84,38 @@ func (w *window) showRowMenu(row gtk.Widgetter, threadID string, x, y float64) {
 		})
 	})
 	item(box, "Label…", func() { w.showThreadLabelsDialog(acct, threadID) })
+	// Snooze: hide the conversation until a quick wake time (nested popover of
+	// presets, like "Categorize as"); in the Snoozed view offer the reverse.
+	if w.current == snoozedID {
+		item(box, "Unsnooze", func() { w.unsnooze(acct, threadID) })
+	} else {
+		snPop := gtk.NewPopover()
+		snPop.SetHasArrow(false)
+		snPop.SetPosition(gtk.PosRight)
+		snBox := gtk.NewBox(gtk.OrientationVertical, 0)
+		snBox.AddCSSClass("menu")
+		snBox.AddCSSClass("rowmenu")
+		for _, p := range snoozePresets(time.Now()) {
+			p := p
+			item(snBox, p.label+" ("+p.t.Format("Mon 15:04")+")", func() {
+				snPop.Popdown()
+				w.snoozeUntil(acct, threadID, p.t)
+			})
+		}
+		snPop.SetChild(snBox)
+		lbl := gtk.NewLabel("Snooze")
+		lbl.SetXAlign(0)
+		lbl.SetHExpand(true)
+		snBtn := gtk.NewButton()
+		snBtn.SetChild(lbl)
+		snBtn.AddCSSClass("flat")
+		snBtn.ConnectClicked(func() {
+			snPop.SetParent(snBtn)
+			snPop.Popup()
+		})
+		snPop.ConnectClosed(func() { snPop.Unparent() })
+		box.Append(snBtn)
+	}
 	sep()
 
 	if t.Latest.IsStarred {

@@ -17,6 +17,15 @@ import (
 func (s *Store) ListThreadsByLabel(ctx context.Context, accountID int64, labelID string, limit, offset int) ([]model.ThreadSummary, error) {
 	start := time.Now()
 	logging.TraceContext(ctx, "store: list threads by label", "account", accountID, "label", labelID, "limit", limit, "offset", offset)
+	// Snoozed conversations are hidden from the inbox only (their labels are
+	// untouched — snooze is pure visibility); an elapsed snooze shows even
+	// before the wake sweeper fires.
+	snoozeFilter := ""
+	if labelID == model.LabelInbox {
+		snoozeFilter = ` AND NOT EXISTS (
+			SELECT 1 FROM snoozes sn
+			WHERE sn.account_id = m.account_id AND sn.thread_id = m.thread_id AND sn.until > unixepoch())`
+	}
 	// Exactly one row per thread: the labeled message with the greatest
 	// (internal_date, rowid). The rowid tiebreak avoids duplicate rows when two
 	// messages share a whole-second internal_date, and ordering by rowid means a
@@ -35,7 +44,7 @@ func (s *Store) ListThreadsByLabel(ctx context.Context, accountID int64, labelID
 			WHERE m2.account_id = m.account_id AND m2.thread_id = m.thread_id
 			ORDER BY m2.internal_date DESC, m2.rowid DESC
 			LIMIT 1
-		)
+		)`+snoozeFilter+`
 		ORDER BY m.internal_date DESC, m.rowid DESC
 		LIMIT ? OFFSET ?`,
 		accountID, labelID, accountID, labelID, limit, offset)

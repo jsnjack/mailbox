@@ -779,6 +779,10 @@ func (w *window) present() {
 // cached thread regardless of label (it is not a real Gmail label).
 const allMailID = "__all_mail__"
 
+// snoozedID is the sentinel "folder" id for the Snoozed view: conversations
+// hidden from the inbox until their wake time (a local table, not a label).
+const snoozedID = "__snoozed__"
+
 // sidebarItem records what a row in the sidebar list maps to. Heading rows are
 // non-selectable and carry an empty id.
 type sidebarItem struct {
@@ -799,6 +803,7 @@ type folderDef struct {
 var systemFolders = []folderDef{
 	{model.LabelInbox, "Inbox", "mail-unread-symbolic"},
 	{model.LabelStarred, "Starred", "starred-symbolic"},
+	{snoozedID, "Snoozed", "alarm-symbolic"},
 	{model.LabelImportant, "Important", "mail-mark-important-symbolic"},
 	{model.LabelSent, "Sent", "mail-send-symbolic"},
 	{model.LabelDraft, "Drafts", "document-edit-symbolic"},
@@ -1347,7 +1352,7 @@ func (w *window) buildListMenuModel() *gio.Menu {
 	menu.Append("Show unread only", "win.list-unread-only")
 	// "Mark all read" is meaningful per folder, but not for the All Mail view
 	// (it spans every label and Gmail offers no such bulk op there).
-	if w.deps.MarkAllRead != nil && w.current != allMailID {
+	if w.deps.MarkAllRead != nil && w.current != allMailID && w.current != snoozedID {
 		sec := gio.NewMenu()
 		sec.Append("Mark all as read", "win.list-mark-all-read")
 		menu.AppendSection("", sec)
@@ -1390,7 +1395,7 @@ func (w *window) onRecategorize() {
 }
 
 func (w *window) onMarkAllRead() {
-	if w.deps.MarkAllRead == nil || w.current == allMailID {
+	if w.deps.MarkAllRead == nil || w.current == allMailID || w.current == snoozedID {
 		return
 	}
 	label := w.current
@@ -1657,6 +1662,9 @@ func (w *window) loadThreadsFor(query string) {
 		w.loadThreads(func(ctx context.Context) ([]model.ThreadSummary, error) {
 			if label == allMailID {
 				return w.deps.Store.ListAllThreads(ctx, acct, threadListCap, 0)
+			}
+			if label == snoozedID {
+				return w.snoozedSummaries(ctx, acct)
 			}
 			return w.deps.Store.ListThreadsByLabel(ctx, acct, label, threadListCap, 0)
 		})
@@ -2786,8 +2794,8 @@ func (w *window) applySidebar(labels []model.Label, counts map[int64]int) {
 		// Only the Inbox carries an unread-count badge — that's where new mail
 		// matters; badges on every folder/label read as noise.
 		for _, f := range systemFolders {
-			if f.id == allMailID {
-				w.appendFolder(f.id, f.icon, f.name, 0)
+			if f.id == allMailID || f.id == snoozedID {
+				w.appendFolder(f.id, f.icon, f.name, 0) // virtual views, no gmail label
 				continue
 			}
 			if !have[f.id] {
@@ -2825,7 +2833,7 @@ func (w *window) sidebarSignature(labels []model.Label, have map[string]bool, in
 	var b strings.Builder
 	fmt.Fprintf(&b, "a=%d;inbox=%d;", w.activeID, inboxUnread)
 	for _, f := range systemFolders {
-		if f.id == allMailID || have[f.id] {
+		if f.id == allMailID || f.id == snoozedID || have[f.id] {
 			b.WriteString("f:" + f.id + ";")
 		}
 	}
@@ -5053,6 +5061,15 @@ func (w *window) onChange(c syncer.Change) {
 		}
 	case syncer.SendStateChanged:
 		w.refreshOutbox() // the banner counts every account's outbox
+	case syncer.SnoozeWoke:
+		// A snoozed conversation returned to the inbox: refresh the list (its
+		// absence from snoozes un-hides it) and raise a reminder notification.
+		if c.AccountID == w.activeID {
+			w.scheduleRefresh(true)
+		} else {
+			w.refreshAccountUnread()
+		}
+		w.notifySnoozeWoke(c.AccountID, c.ThreadID)
 	case syncer.AuthExpired:
 		// The account's sign-in expired/was revoked; surface it (it won't recover
 		// without re-login) and name the account so multi-account users know which.
@@ -5208,6 +5225,96 @@ func (w *window) notifyNewMail(accountID int64, m model.Message) {
 	// Unique id per message so concurrent accounts' notifications don't replace
 	// one another.
 	w.app.SendNotification(fmt.Sprintf("mailbox-mail-%d-%s", accountID, m.GmailID), n)
+}
+
+// snoozedSummaries lists the account's snoozed conversations (soonest wake
+// first) as thread summaries — the Snoozed virtual folder's content.
+func (w *window) snoozedSummaries(ctx context.Context, acct int64) ([]model.ThreadSummary, error) {
+	sns, err := w.deps.Store.SnoozedThreads(ctx, acct)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, len(sns))
+	for i, sn := range sns {
+		ids[i] = sn.ThreadID
+	}
+	return w.deps.Store.GetThreadSummaries(ctx, acct, ids)
+}
+
+// snoozePreset is one quick snooze choice offered by the row menu.
+type snoozePreset struct {
+	label string
+	t     time.Time
+}
+
+// snoozePresets returns the quick wake times: later today, tomorrow morning,
+// and next week's Monday morning.
+func snoozePresets(now time.Time) []snoozePreset {
+	tomorrow := time.Date(now.Year(), now.Month(), now.Day(), 9, 0, 0, 0, now.Location()).AddDate(0, 0, 1)
+	daysToMonday := (int(time.Monday) - int(now.Weekday()) + 7) % 7
+	if daysToMonday == 0 {
+		daysToMonday = 7
+	}
+	monday := time.Date(now.Year(), now.Month(), now.Day(), 9, 0, 0, 0, now.Location()).AddDate(0, 0, daysToMonday)
+	return []snoozePreset{
+		{"Later today", now.Add(4 * time.Hour)},
+		{"Tomorrow morning", tomorrow},
+		{"Next week", monday},
+	}
+}
+
+// snoozeUntil hides a conversation until t (a local snooze — labels untouched,
+// so nothing syncs to the provider and other clients are unaffected).
+func (w *window) snoozeUntil(acctID int64, threadID string, t time.Time) {
+	logging.Trace("ui: snooze", "account", acctID, "thread", threadID, "until", t.Unix())
+	go func() {
+		if err := w.deps.Store.SnoozeThread(context.Background(), acctID, threadID, t.Unix()); err != nil {
+			slog.Warn("ui: snooze thread", "thread", threadID, "err", err)
+			return
+		}
+		dispatch.Main(func() {
+			w.toast("Snoozed until " + t.Format("Mon 15:04"))
+			w.refreshList(w.searchEntry.Text())
+		})
+	}()
+}
+
+// unsnooze wakes a conversation now.
+func (w *window) unsnooze(acctID int64, threadID string) {
+	logging.Trace("ui: unsnooze", "account", acctID, "thread", threadID)
+	go func() {
+		if err := w.deps.Store.UnsnoozeThread(context.Background(), acctID, threadID); err != nil {
+			slog.Warn("ui: unsnooze thread", "thread", threadID, "err", err)
+			return
+		}
+		dispatch.Main(func() {
+			w.toast("Snooze removed")
+			w.refreshList(w.searchEntry.Text())
+		})
+	}()
+}
+
+// notifySnoozeWoke raises the reminder notification for a woken conversation.
+func (w *window) notifySnoozeWoke(accountID int64, threadID string) {
+	go func() {
+		sum, err := w.deps.Store.GetThreadSummary(context.Background(), accountID, threadID)
+		if err != nil {
+			logging.Trace("ui: notify snooze woke skipped", "thread", threadID, "err", err)
+			return
+		}
+		dispatch.Main(func() {
+			logging.Trace("ui: notify snooze woke", "account", accountID, "thread", threadID, "subject", sum.Latest.Subject)
+			n := gio.NewNotification("Reminder")
+			body := displayFrom(sum.Latest)
+			if sum.Latest.Subject != "" {
+				body += " — " + sum.Latest.Subject
+			}
+			n.SetBody(body)
+			target := glib.NewVariantString(fmt.Sprintf("%d|%s", accountID, sum.Latest.GmailID))
+			n.SetDefaultAction(gio.ActionPrintDetailedName("app.open-message", target))
+			w.app.SendNotification("mailbox-snooze-"+threadID, n)
+		})
+	}()
 }
 
 // folderRow builds a sidebar row: a leading symbolic icon, the folder name, and
