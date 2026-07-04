@@ -63,7 +63,7 @@ type window struct {
 	activityTimer    glib.SourceHandle
 	markReadTimer    glib.SourceHandle // pending "mark thread read" (cancelled if the user navigates away first)
 	pendingMarkRead  func()            // the deferred mark-read body, so an explicit action can flush it early
-	lastSyncLabel    string            // idle text once a sync has completed
+	lastSyncAt       time.Time         // when the last sync finished (idle status text)
 	accountBox       *gtk.ListBox
 	// accountHeader wraps the switcher list-box and its separator; it is hidden
 	// when no account is connected (zero-account first run) and revealed once the

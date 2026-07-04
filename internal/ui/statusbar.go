@@ -27,6 +27,14 @@ const statusLogCap = 200
 func (w *window) buildStatusBar() gtk.Widgetter {
 	w.statusStarted = make(map[string]time.Time)
 	w.statusProgText = make(map[string]string)
+	// Keep the relative idle text ("Synced 2 min ago") honest while nothing is
+	// happening; a cheap label repaint twice a minute.
+	glib.TimeoutSecondsAdd(30, func() bool {
+		if len(w.statusActive) == 0 && !w.lastSyncAt.IsZero() {
+			w.refreshStatusLabel()
+		}
+		return true
+	})
 
 	bar := gtk.NewBox(gtk.OrientationHorizontal, 8)
 	bar.AddCSSClass("status-bar")
@@ -220,7 +228,7 @@ func (w *window) onActivity(e activity.Event) {
 		delete(w.statusStarted, e.Label)
 		delete(w.statusProgText, e.Label)
 		if e.Op == "sync" {
-			w.lastSyncLabel = "Synced " + time.Now().Format("15:04")
+			w.lastSyncAt = time.Now()
 		}
 	}
 	w.refreshStatusLabel()
@@ -242,10 +250,24 @@ func (w *window) refreshStatusLabel() {
 		w.activityTimer = 0
 	}
 	w.statusSpinner.SetVisible(false)
-	if w.lastSyncLabel != "" {
-		w.statusLabel.SetText(w.lastSyncLabel)
+	if !w.lastSyncAt.IsZero() {
+		w.statusLabel.SetText(syncedAgo(w.lastSyncAt, time.Now()))
 	} else {
 		w.statusLabel.SetText("Idle")
+	}
+}
+
+// syncedAgo renders the idle status as a relative time ("Synced 00:15" read as
+// a clock time; "2 min ago" doesn't). Older than an hour falls back to the
+// absolute clock, which is more useful than "247 min ago".
+func syncedAgo(t, now time.Time) string {
+	switch d := now.Sub(t); {
+	case d < time.Minute:
+		return "Synced just now"
+	case d < time.Hour:
+		return fmt.Sprintf("Synced %d min ago", int(d.Minutes()))
+	default:
+		return "Synced at " + t.Format("15:04")
 	}
 }
 
