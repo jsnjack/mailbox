@@ -128,7 +128,24 @@ cached by the thread's message-id fingerprint (`summaryKey`) so reopening is
 instant and a new reply auto-invalidates it; the summary is also **persisted**
 keyed by thread id + that fingerprint (`store.{SetThreadSummary,ThreadSummary}`,
 `thread_summaries` table), so an unchanged thread isn't re-summarized after a
-restart. Message headers show the sender's
+restart. **Snooze**: a conversation can be hidden until a wake time (local
+`snoozes` table — pure visibility, labels untouched, nothing mirrored): the
+row menu's Snooze flyout offers presets, AI-suggested moments read from the
+email itself (`Assistant.SuggestSnooze` — up to three "YYYY-MM-DD HH:MM|reason"
+lines: an hour before a meeting, the day before a deadline), and a "Pick date…"
+calendar dialog (`openSnoozeDialog`); a Snoozed virtual folder (`snoozedID`,
+neutral grey count pill) lists them, a per-minute sweeper
+(`backgroundSnoozeWake`) returns due threads to the inbox publishing
+`SnoozeWoke` (list refresh + "Reminder" notification), and the inbox query
+excludes unelapsed snoozes. **Calendar invites**: an `.ics` attachment
+(parsed by the dependency-free `internal/ics`) renders an event card above the
+conversation with Accept/Maybe/Decline that email the iTIP REPLY to the
+organizer via the normal outbox path; CANCEL shows a note. **Unsubscribe**:
+`List-Unsubscribe(-Post)` headers are captured at metadata fetch (both
+backends, `messages.list_unsubscribe` columns); the reader overflow offers
+Unsubscribe (RFC 8058 one-click POST > mailto via outbox > browser URL) and
+the thread-list menu's "Subscriptions…" dialog (`store.Subscriptions`) groups
+list senders by volume with per-sender unsubscribe. Message headers show the sender's
 full address ("Name <addr>"), not just the display name. Reader actions archive /
 mark-unread / star / move-to-inbox / report-spam (or not-spam in the Spam
 folder), plus "Delete forever" in Trash/Spam and an "Empty now" banner that empties
