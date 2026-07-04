@@ -160,6 +160,10 @@ const appCSS = `
 	border-color: alpha(@window_fg_color, 0.25);
 }
 
+/* Meeting-invite card: a neutral panel above the conversation. The padding
+   keeps text and buttons off the border (margins only push the card itself). */
+.invite-card { padding: 12px 14px; }
+
 /* AI thread-summary card: a soft accent-tinted panel pinned above the thread. */
 .summary-card {
 	background-color: alpha(@accent_color, 0.08);

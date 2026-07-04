@@ -16,8 +16,9 @@ import (
 // buildInviteCard creates the (hidden) meeting-invite card shown above the
 // conversation when a message carries a calendar invite.
 func (w *window) buildInviteCard() gtk.Widgetter {
-	w.inviteCard = gtk.NewBox(gtk.OrientationVertical, 6)
+	w.inviteCard = gtk.NewBox(gtk.OrientationVertical, 4)
 	w.inviteCard.AddCSSClass("card")
+	w.inviteCard.AddCSSClass("invite-card") // inner padding — see theme.go
 	setMargins(w.inviteCard, 12, 12, 6, 6)
 	w.inviteCard.SetVisible(false)
 	return w.inviteCard
@@ -104,6 +105,7 @@ func (w *window) showInviteCard(accountID int64, ev *ics.Event) {
 	}
 
 	btns := gtk.NewBox(gtk.OrientationHorizontal, 6)
+	btns.SetMarginTop(6)
 	answered := gtk.NewLabel("")
 	answered.SetXAlign(0)
 	answered.SetVisible(false)
