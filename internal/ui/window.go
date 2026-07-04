@@ -156,6 +156,7 @@ type window struct {
 
 	header       *gtk.Label
 	attachBox    *gtk.FlowBox // chips for the open message's attachments (wraps, never forces width)
+	inviteCard   *gtk.Box     // meeting-invite card (Accept/Maybe/Decline) above the conversation
 	trackerLabel *gtk.Label   // "N trackers blocked" indicator
 	authIcon     *gtk.Image   // compact sender-auth (SPF/DKIM/DMARC) status; details on hover
 	cautionLabel *gtk.Label   // anti-phishing heuristic warnings
@@ -2339,6 +2340,7 @@ func (w *window) buildReader() *adw.NavigationPage {
 	box.Append(w.translationBanner)
 	box.Append(headerRow)
 	box.Append(w.buildSummaryCard())
+	box.Append(w.buildInviteCard())
 	box.Append(w.attachBox)
 	box.Append(w.cautionLabel)
 	box.Append(w.trackerLabel)
@@ -2986,6 +2988,7 @@ func (w *window) clearReader() {
 	w.openHeaders = ""
 	w.resetTranslation()
 	w.hideSummary()
+	w.showInviteCard(0, nil)
 	w.setActionsSensitive(false)
 	w.readerStack.SetVisibleChildName("empty")
 }
@@ -3391,6 +3394,7 @@ func (w *window) renderConversation(msgs []model.Message) {
 		// thread); the main thread only builds widgets and loads the page.
 		atts := w.threadAttachments(ctx, msgs)
 		inlineImgs := w.prepareInlineImages(ctx, msgs)
+		invite, inviteAcct := w.detectInvite(ctx, atts)
 		slog.Debug("ui: renderConversation", "msgs", len(msgs), "fetched", fetched,
 			"trackers", blocked, "auth", verdict.level, "fetch", fetchDur, "sanitize", time.Since(sanitizeStart))
 		logging.Trace("ui: render conversation ready", "thread", threadID, "msgs", len(msgs), "fetched", fetched,
@@ -3417,6 +3421,7 @@ func (w *window) renderConversation(msgs []model.Message) {
 			w.setCaution(warnings)
 			w.setReaderHTML(out)
 			w.showThreadAttachments(atts)
+			w.showInviteCard(inviteAcct, invite)
 			if w.lastFetchFailed {
 				w.toast("Couldn't load some message bodies — offline?")
 			}
