@@ -315,6 +315,31 @@ func (w *window) openSettings() {
 		}
 	})
 
+	// Sending: how long the Undo toast holds a message before it goes out.
+	undoSecs := []int{5, 10, 20, 30}
+	undoRow := adw.NewComboRow()
+	undoRow.SetTitle("Undo send window")
+	undoRow.SetSubtitle("How long a sent message can still be taken back.")
+	undoRow.SetModel(gtk.NewStringList([]string{"5 seconds", "10 seconds", "20 seconds", "30 seconds"}))
+	for i, v := range undoSecs {
+		if v == w.sendUndoSecs {
+			undoRow.SetSelected(uint(i))
+		}
+	}
+	undoRow.Connect("notify::selected", func() {
+		sel := int(undoRow.Selected())
+		if sel < 0 || sel >= len(undoSecs) {
+			return
+		}
+		secs := undoSecs[sel]
+		logging.Trace("ui: setting changed", "pref", "send_undo_seconds", "new", secs)
+		w.sendUndoSecs = secs
+		savePref(func(p *config.Prefs) { p.SendUndoSeconds = secs })
+	})
+	sendGroup := adw.NewPreferencesGroup()
+	sendGroup.SetTitle("Sending")
+	sendGroup.Add(undoRow)
+
 	storageGroup := adw.NewPreferencesGroup()
 	storageGroup.SetTitle("Storage")
 	storageGroup.SetDescription("Bodies older than the retention window are removed from the cache and re-downloaded when opened. Headers and search by sender or subject always stay.")
@@ -329,6 +354,7 @@ func (w *window) openSettings() {
 	}
 	page.Add(sigGroup)
 	page.Add(privacyGroup)
+	page.Add(sendGroup)
 	page.Add(storageGroup)
 
 	dialog := adw.NewPreferencesDialog()

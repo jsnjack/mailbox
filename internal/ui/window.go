@@ -221,6 +221,7 @@ type window struct {
 	aiFailing       bool
 	aiFailedAt      time.Time
 	inboxCategories bool
+	sendUndoSecs    int // undo-send window in seconds (0 = default 5)
 
 	// AI thread summary: a button reveals a card that streams a summary in.
 	// summaryCache memoizes by the thread's message fingerprint, so reopening is
@@ -267,6 +268,7 @@ func newWindow(app *adw.Application, deps Deps) *window {
 	if p, err := config.LoadPrefs(); err == nil {
 		w.blockImages = p.BlockRemoteImages
 		w.inboxCategories = !p.DisableInboxCategories
+		w.sendUndoSecs = p.SendUndoSeconds
 	}
 	if len(deps.Accounts) > 0 {
 		w.activeID = deps.Accounts[0].ID
@@ -5058,9 +5060,18 @@ func (w *window) toast(msg string) {
 	w.toastOverlay.AddToast(adw.NewToast(msg))
 }
 
-// sendUndoDelay is how long a sent message is held (with an Undo toast) before
-// it actually goes out.
-const sendUndoDelay = 5 * time.Second
+// defaultSendUndoDelay is how long a sent message is held (with an Undo toast)
+// before it actually goes out, unless Preferences says otherwise.
+const defaultSendUndoDelay = 5 * time.Second
+
+// sendUndoDelay returns the configured undo-send window (Preferences →
+// Sending), falling back to the default.
+func (w *window) sendUndoDelay() time.Duration {
+	if w.sendUndoSecs > 0 {
+		return time.Duration(w.sendUndoSecs) * time.Second
+	}
+	return defaultSendUndoDelay
+}
 
 // deferSend makes a send crash-safe: it persists the message to the outbox
 // immediately with a not_before watermark one undo-window ahead (so a quit or
@@ -5072,7 +5083,7 @@ const sendUndoDelay = 5 * time.Second
 // already closed, so this runs at the main-window level.
 func (w *window) deferSend(accountID int64, msg model.OutgoingMessage) {
 	logging.Trace("ui: defer send", "account", accountID, "to", msg.To, "cc", msg.Cc, "subject", msg.Subject)
-	notBefore := time.Now().Add(sendUndoDelay).Unix()
+	notBefore := time.Now().Add(w.sendUndoDelay()).Unix()
 	go func() {
 		id, err := w.deps.EnqueueSend(context.Background(), accountID, msg, notBefore)
 		logging.Trace("ui: enqueue send done", "account", accountID, "id", id, "err", err)
@@ -5127,7 +5138,7 @@ func (w *window) showSendUndoToast(accountID, outboxID int64, msg model.Outgoing
 
 	go func() {
 		// A small margin past not_before guarantees the item is sweepable.
-		time.Sleep(sendUndoDelay + 250*time.Millisecond)
+		time.Sleep(w.sendUndoDelay() + 250*time.Millisecond)
 		dispatch.Main(func() {
 			if cancelled {
 				return

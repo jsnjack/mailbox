@@ -25,6 +25,9 @@ type Prefs struct {
 	// (metadata is kept forever; a pruned body is re-fetched on open). 0 — the
 	// default — keeps bodies forever.
 	BodyRetentionDays int `json:"body_retention_days,omitempty"`
+	// SendUndoSeconds is how long a sent message is held behind the Undo toast
+	// before it goes out. 0 means the default (5s).
+	SendUndoSeconds int `json:"send_undo_seconds,omitempty"`
 }
 
 func prefsPath() (string, error) {
