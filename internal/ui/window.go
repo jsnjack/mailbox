@@ -4495,7 +4495,7 @@ func (w *window) resetTranslation() {
 // at the top of the reader: a title row with a close button and the streamed
 // summary below. Returns the revealer wrapping it.
 func (w *window) buildSummaryCard() *gtk.Revealer {
-	w.cardIcon = gtk.NewImageFromIconName("view-list-bullet-symbolic")
+	w.cardIcon = gtk.NewImageFromIconName("summarize-symbolic")
 	w.cardIcon.AddCSSClass("summary-title")
 
 	w.cardTitle = gtk.NewLabel("Summary")

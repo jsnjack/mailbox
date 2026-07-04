@@ -158,6 +158,7 @@ const appCSS = `
 	background-color: alpha(@accent_color, 0.08);
 	border: 1px solid alpha(@accent_color, 0.28);
 	border-radius: 12px;
+	padding: 10px 12px;
 }
 .summary-title { color: @accent_color; }
 `
