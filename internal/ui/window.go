@@ -5237,10 +5237,44 @@ func (w *window) refreshOpenThread() {
 
 func (w *window) notifyNewMail(accountID int64, m model.Message) {
 	logging.Trace("ui: notify new mail", "account", accountID, "id", m.GmailID, "from", m.FromAddr, "subject", m.Subject)
+	// Unique id per message so concurrent accounts' notifications don't replace
+	// one another — and so the AI enrichment below can update this one in place.
+	id := fmt.Sprintf("mailbox-mail-%d-%s", accountID, m.GmailID)
+	w.app.SendNotification(id, w.mailNotification(accountID, m, ""))
+
+	// Best-effort AI gist: once ready, re-send the same notification id — GNOME
+	// swaps the bubble content in place. The notification above already fired,
+	// so a slow or failing AI can never delay or lose it. Gated on the same
+	// consent as inbox categorization (automatic AI over incoming mail).
+	if w.deps.Assistant == nil || !w.inboxCategories || strings.TrimSpace(m.Snippet) == "" {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		gist, err := w.deps.Assistant.BriefSummary(ctx,
+			fmt.Sprintf("From: %s\nSubject: %s\n\n%s", displayFrom(m), m.Subject, m.Snippet))
+		if err != nil || gist == "" {
+			logging.Trace("ui: notification gist skipped", "id", m.GmailID, "err", err)
+			return
+		}
+		dispatch.Main(func() {
+			logging.Trace("ui: notification gist", "id", m.GmailID, "gist", gist)
+			w.app.SendNotification(id, w.mailNotification(accountID, m, gist))
+		})
+	}()
+}
+
+// mailNotification builds the new-mail notification; a non-empty gist becomes
+// a second body line with the AI's one-sentence summary.
+func (w *window) mailNotification(accountID int64, m model.Message, gist string) *gio.Notification {
 	n := gio.NewNotification("New mail")
 	body := displayFrom(m)
 	if m.Subject != "" {
 		body += " — " + m.Subject
+	}
+	if gist != "" {
+		body += "\n" + gist
 	}
 	n.SetBody(body)
 	// Clicking the notification opens this message; the buttons act on it without
@@ -5253,9 +5287,7 @@ func (w *window) notifyNewMail(accountID int64, m model.Message) {
 	if w.deps.Send != nil {
 		n.AddButton("Reply", gio.ActionPrintDetailedName("app.notify-reply", target))
 	}
-	// Unique id per message so concurrent accounts' notifications don't replace
-	// one another.
-	w.app.SendNotification(fmt.Sprintf("mailbox-mail-%d-%s", accountID, m.GmailID), n)
+	return n
 }
 
 // snoozedSummaries lists the account's snoozed conversations (soonest wake

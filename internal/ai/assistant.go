@@ -491,3 +491,34 @@ func parseSnoozeSuggestions(s string, now time.Time) []SnoozeSuggestion {
 	}
 	return out
 }
+
+// BriefSummary condenses an email into one very short line for a desktop
+// notification. Hard-capped client-side so a rambling model can't blow up the
+// notification bubble.
+func (a *Assistant) BriefSummary(ctx context.Context, emailContext string) (string, error) {
+	start := time.Now()
+	logging.Trace("ai: brief summary", "op", "BriefSummary", "provider", a.p.Name(), "bytes", len(emailContext))
+	system := "Summarize this email in ONE very short sentence, at most 12 words, in the email's " +
+		"language. State the gist (what they want / what happened), not that it is an email. " +
+		"Reply with only that sentence — no preamble, no quotes."
+	ch, err := a.p.Stream(ctx, system, []Msg{{Role: RoleUser, Content: emailContext}})
+	if err != nil {
+		logging.Trace("ai: brief summary failed", "op", "BriefSummary", "err", err)
+		return "", err
+	}
+	var b strings.Builder
+	for c := range ch {
+		if c.Err != nil {
+			logging.Trace("ai: brief summary failed", "op", "BriefSummary", "err", c.Err)
+			return "", c.Err
+		}
+		b.WriteString(c.Text)
+	}
+	gist := strings.Join(strings.Fields(b.String()), " ") // collapse newlines/runs
+	gist = strings.Trim(gist, `"'`)
+	if r := []rune(gist); len(r) > 140 {
+		gist = string(r[:139]) + "…"
+	}
+	logging.Trace("ai: brief summary done", "op", "BriefSummary", "gist", gist, "dur", time.Since(start))
+	return gist, nil
+}
