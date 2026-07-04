@@ -1,9 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" fill="#2e3436">
-  <!-- One full-size conversation bubble with a "T" cut out (even-odd) — the
-       same bubble geometry as sparkle-symbolic, so the two AI tools read as a
-       family. The T uses 1.5px strokes: bold enough to survive 16px, thin
-       enough not to clog the bubble. -->
+  <!-- Conversation bubble with a "T" cut out — same bubble geometry as
+       sparkle-symbolic so the AI tools read as a family. Full-canvas ink;
+       1.5px T strokes. -->
   <path fill-rule="evenodd" d="
-    M3 2 h10 a2 2 0 0 1 2 2 v6 a2 2 0 0 1 -2 2 h-4.5 L5 15 V12 H3 a2 2 0 0 1 -2 -2 V4 a2 2 0 0 1 2 -2 Z
-    M5 4.5 h6 v1.5 h-2.25 v4.5 h-1.5 v-4.5 h-2.25 Z"/>
+    M3 1 h10 a2 2 0 0 1 2 2 v7 a2 2 0 0 1 -2 2 h-4.5 L5 15.5 V12 H3 a2 2 0 0 1 -2 -2 V3 a2 2 0 0 1 2 -2 Z
+    M5 3.5 h6 v1.5 h-2.25 v5 h-1.5 v-5 h-2.25 Z"/>
 </svg>

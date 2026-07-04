@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" fill="#2e3436">
-  <!-- Lid: slightly wider than the body, every edge on the pixel grid. -->
-  <path d="M2 2 h12 a1 1 0 0 1 1 1 v2 h-14 v-2 a1 1 0 0 1 1 -1 z"/>
-  <!-- Body with a pill handle slot cut out (even-odd), integer-aligned. -->
-  <path fill-rule="evenodd" d="M2 6 h12 v6.5 a1.5 1.5 0 0 1 -1.5 1.5 h-9 a1.5 1.5 0 0 1 -1.5 -1.5 z M6 8 h4 a1 1 0 0 1 0 2 h-4 a1 1 0 0 1 0 -2 z"/>
+  <!-- Adwaita-sized: ink spans 1..15 / 1..15 like stock symbolics (they use
+       the full canvas; margins read as a too-small icon). Grid-aligned. -->
+  <path d="M2 1 h12 a1 1 0 0 1 1 1 v2 h-14 v-2 a1 1 0 0 1 1 -1 z"/>
+  <path fill-rule="evenodd" d="M2 5 h12 v8.5 a1.5 1.5 0 0 1 -1.5 1.5 h-9 a1.5 1.5 0 0 1 -1.5 -1.5 z M6 7 h4 a1 1 0 0 1 0 2 h-4 a1 1 0 0 1 0 -2 z"/>
 </svg>

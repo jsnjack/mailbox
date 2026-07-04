@@ -1,8 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" fill="#2e3436">
   <!-- Speech bubble with a four-point sparkle cut out (even-odd) — "AI reply".
-       Body spans y=2..12 (tail to 15) so it optically centers with its
-       headerbar neighbors; outline on the pixel grid. -->
+       Full-canvas ink (1..15.5) to match stock symbolic sizing. -->
   <path fill-rule="evenodd" d="
-    M3 2 h10 a2 2 0 0 1 2 2 v6 a2 2 0 0 1 -2 2 h-4.5 L5 15 V12 H3 a2 2 0 0 1 -2 -2 V4 a2 2 0 0 1 2 -2 Z
-    M8 3.5 C8.4 6 9 6.6 11.5 7 C9 7.4 8.4 8 8 10.5 C7.6 8 7 7.4 4.5 7 C7 6.6 7.6 6 8 3.5 Z"/>
+    M3 1 h10 a2 2 0 0 1 2 2 v7 a2 2 0 0 1 -2 2 h-4.5 L5 15.5 V12 H3 a2 2 0 0 1 -2 -2 V3 a2 2 0 0 1 2 -2 Z
+    M8 3 C8.4 5.6 9 6.1 11.5 6.5 C9 6.9 8.4 7.4 8 10 C7.6 7.4 7 6.9 4.5 6.5 C7 6.1 7.6 5.6 8 3 Z"/>
 </svg>
