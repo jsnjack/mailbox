@@ -188,37 +188,39 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 		}
 		return -1 // already removed
 	}
-	// addAttachment appends the payload and its chip. The chip opens the file
-	// with the default app on double-click (the data may exist only in memory —
-	// a reopened draft or an undone send — so it goes through a cache file) and
-	// carries a close button that removes the attachment from the message.
+	// addAttachment appends the payload and its chip: a flat button that opens
+	// the file with the default app on click (like the reader's chips — the
+	// data may exist only in memory, so it goes through a cache file), plus a
+	// close button that removes the attachment from the message.
 	addAttachment := func(att model.OutgoingAttachment) {
 		attachSeq++
 		id := attachSeq
 		attachments = append(attachments, att)
 		attachIDs = append(attachIDs, id)
 
-		chip := gtk.NewBox(gtk.OrientationHorizontal, 4)
-		chip.Append(gtk.NewImageFromIconName("mail-attachment-symbolic"))
-		chip.Append(gtk.NewLabel(att.Filename))
+		inner := gtk.NewBox(gtk.OrientationHorizontal, 4)
+		inner.Append(gtk.NewImageFromIconName("mail-attachment-symbolic"))
+		inner.Append(gtk.NewLabel(att.Filename))
 		if len(att.Data) > 0 {
 			size := gtk.NewLabel(humanBytes(int64(len(att.Data))))
 			size.AddCSSClass("dim-label")
 			size.AddCSSClass("caption")
-			chip.Append(size)
+			inner.Append(size)
 		}
-		chip.SetTooltipText("Double-click to open")
-		click := gtk.NewGestureClick()
-		click.ConnectPressed(func(nPress int, _, _ float64) {
-			if nPress != 2 {
-				return
-			}
+		open := gtk.NewButton()
+		open.SetChild(inner)
+		open.AddCSSClass("flat")
+		open.SetTooltipText("Open attachment")
+		a11yLabel(open, "Open attachment "+att.Filename)
+		open.ConnectClicked(func() {
 			if i := attachmentIndex(id); i >= 0 {
 				logging.Trace("ui: compose attachment open", "name", attachments[i].Filename)
 				openOutgoingAttachment(attachments[i])
 			}
 		})
-		chip.AddController(click)
+
+		chip := gtk.NewBox(gtk.OrientationHorizontal, 0)
+		chip.Append(open)
 		rm := gtk.NewButtonFromIconName("window-close-symbolic")
 		rm.AddCSSClass("flat")
 		rm.SetTooltipText("Remove attachment")
