@@ -72,3 +72,14 @@ func scanSnoozes(rows *sql.Rows) ([]Snooze, error) {
 	}
 	return out, rows.Err()
 }
+
+// SnoozedCount returns how many conversations an account has snoozed (active
+// or elapsed-but-unswept) — the Snoozed folder's badge.
+func (s *Store) SnoozedCount(ctx context.Context, accountID int64) (int, error) {
+	var n int
+	if err := s.reader.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM snoozes WHERE account_id = ?`, accountID).Scan(&n); err != nil {
+		return 0, fmt.Errorf("snoozed count: %w", err)
+	}
+	return n, nil
+}

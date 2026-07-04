@@ -153,6 +153,13 @@ const appCSS = `
 }
 .rowmenu button label { font-weight: normal; }
 
+/* Neutral pill variant: a quiet count that isn't a call to action (the
+   Snoozed folder) — grey instead of the accent. */
+.badge-pill.neutral {
+	color: alpha(@window_fg_color, 0.55);
+	border-color: alpha(@window_fg_color, 0.25);
+}
+
 /* AI thread-summary card: a soft accent-tinted panel pinned above the thread. */
 .summary-card {
 	background-color: alpha(@accent_color, 0.08);

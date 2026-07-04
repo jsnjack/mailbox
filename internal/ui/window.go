@@ -2772,20 +2772,24 @@ func (w *window) loadLabels() {
 			slog.Warn("ui: account unread counts", "err", err)
 			counts = map[int64]int{}
 		}
+		snoozed, err := w.deps.Store.SnoozedCount(ctx, acct)
+		if err != nil {
+			slog.Warn("ui: snoozed count", "err", err)
+		}
 		dispatch.Main(func() {
 			slog.Debug("ui: loadLabels", "dur", time.Since(start))
 			if gen != w.labelsGen || acct != w.activeID {
 				logging.Trace("ui: load labels superseded", "gen", gen, "account", acct)
 				return // a newer reload (or an account switch) owns the sidebar
 			}
-			w.applySidebar(labels, counts)
+			w.applySidebar(labels, counts, snoozed)
 		})
 	}()
 }
 
 // applySidebar renders loadLabels' query results into the sidebar widgets.
 // Main thread only.
-func (w *window) applySidebar(labels []model.Label, counts map[int64]int) {
+func (w *window) applySidebar(labels []model.Label, counts map[int64]int, snoozed int) {
 	have := make(map[string]bool, len(labels))
 	for _, l := range labels {
 		have[l.GmailID] = true
@@ -2795,7 +2799,7 @@ func (w *window) applySidebar(labels []model.Label, counts map[int64]int) {
 	// Rebuild the sidebar widgets only when its structure or the inbox badge
 	// actually changed — an idle 60s sync (no new mail) leaves it untouched,
 	// avoiding widget churn and a selection flicker every cycle.
-	sig := w.sidebarSignature(labels, have, inboxCount)
+	sig := w.sidebarSignature(labels, have, inboxCount, snoozed)
 	if sig != w.sidebarSig {
 		w.sidebarSig = sig
 		w.labelBox.RemoveAll()
@@ -2805,7 +2809,11 @@ func (w *window) applySidebar(labels []model.Label, counts map[int64]int) {
 		// matters; badges on every folder/label read as noise.
 		for _, f := range systemFolders {
 			if f.id == allMailID || f.id == snoozedID {
-				w.appendFolder(f.id, f.icon, f.name, 0) // virtual views, no gmail label
+				count := 0
+				if f.id == snoozedID {
+					count = snoozed // neutral badge — see appendFolder
+				}
+				w.appendFolder(f.id, f.icon, f.name, count) // virtual views, no gmail label
 				continue
 			}
 			if !have[f.id] {
@@ -2839,9 +2847,9 @@ func (w *window) applySidebar(labels []model.Label, counts map[int64]int) {
 // sidebarSignature captures everything the label sidebar renders — the active
 // account, the visible folders/labels, and the inbox badge count — so loadLabels
 // can skip the widget rebuild when none of it changed.
-func (w *window) sidebarSignature(labels []model.Label, have map[string]bool, inboxUnread int) string {
+func (w *window) sidebarSignature(labels []model.Label, have map[string]bool, inboxUnread, snoozed int) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "a=%d;inbox=%d;", w.activeID, inboxUnread)
+	fmt.Fprintf(&b, "a=%d;inbox=%d;snoozed=%d;", w.activeID, inboxUnread, snoozed)
 	for _, f := range systemFolders {
 		if f.id == allMailID || f.id == snoozedID || have[f.id] {
 			b.WriteString("f:" + f.id + ";")
@@ -2914,7 +2922,7 @@ func (w *window) refreshAccountUnread() {
 
 // appendFolder adds a selectable folder/label row mapped to id.
 func (w *window) appendFolder(id, icon, name string, count int) {
-	w.labelBox.Append(folderRow(icon, name, count))
+	w.labelBox.Append(folderRow(icon, name, count, id == snoozedID))
 	w.sidebar = append(w.sidebar, sidebarItem{id: id, selectable: true})
 }
 
@@ -5298,6 +5306,7 @@ func (w *window) snoozeUntil(acctID int64, threadID string, t time.Time) {
 		dispatch.Main(func() {
 			w.toast("Snoozed until " + t.Format("Mon 15:04"))
 			w.refreshList(w.searchEntry.Text())
+			w.loadLabels() // the Snoozed badge counts one more
 		})
 	}()
 }
@@ -5313,6 +5322,7 @@ func (w *window) unsnooze(acctID int64, threadID string) {
 		dispatch.Main(func() {
 			w.toast("Snooze removed")
 			w.refreshList(w.searchEntry.Text())
+			w.loadLabels() // the Snoozed badge counts one fewer
 		})
 	}()
 }
@@ -5343,7 +5353,7 @@ func (w *window) notifySnoozeWoke(accountID int64, threadID string) {
 // folderRow builds a sidebar row: a leading symbolic icon, the folder name, and
 // an unread-count badge. When there are unread messages the name is emphasized,
 // like a standard mail client.
-func folderRow(icon, name string, unread int) *gtk.Box {
+func folderRow(icon, name string, unread int, neutral bool) *gtk.Box {
 	box := gtk.NewBox(gtk.OrientationHorizontal, 8)
 	setMargins(box, 12, 12, 6, 6)
 	if icon != "" {
@@ -5353,12 +5363,16 @@ func folderRow(icon, name string, unread int) *gtk.Box {
 	n.SetXAlign(0)
 	n.SetHExpand(true)
 	n.SetEllipsize(pango.EllipsizeEnd)
-	if unread > 0 {
-		n.AddCSSClass("heading")
+	if unread > 0 && !neutral {
+		n.AddCSSClass("heading") // unread demands attention; a neutral count doesn't
 	}
 	box.Append(n)
 	if unread > 0 {
-		box.Append(countBadge(unread))
+		badge := countBadge(unread)
+		if neutral {
+			badge.AddCSSClass("neutral")
+		}
+		box.Append(badge)
 	}
 	return box
 }
