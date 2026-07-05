@@ -31,11 +31,11 @@ sudo dnf install ./rpmbuild/RPMS/x86_64/mailbox-*.rpm
 ```
 
 The app opens to a welcome screen. Everything else happens from the main (☰)
-menu → **Add account…**: pick a provider, fill in the form, **Test & Add** —
-the account starts syncing immediately, no restart. Add as many accounts as
-you like the same way.
+menu → **Add account…**: pick a provider, fill in the form, and press
+**Test & Add**. The account starts syncing immediately, without a restart,
+and further accounts are added the same way.
 
-## 3. Connect an account — pick your path
+## 3. Connect an account
 
 | You have | Easiest path | You'll need |
 |---|---|---|
@@ -45,7 +45,7 @@ you like the same way.
 
 ### App password — Yahoo, iCloud, Fastmail, any IMAP server
 
-The simplest path: no client setup at all. Create an **app password** with
+This path needs no client setup. Create an **app password** with
 your provider (your normal password won't work, and some providers also want
 IMAP switched on in their settings):
 
@@ -59,8 +59,8 @@ the IMAP/SMTP host, port, and security under **Advanced**.
 
 ### Gmail — native API
 
-The best way to use Gmail: real labels, server-side search, and fast
-incremental sync. It needs a one-time setup of your own Google OAuth client:
+The native API gives Gmail its real labels, server-side search, and fast
+sync. It needs a one-time setup of your own Google OAuth client:
 
 1. In the [Google Cloud Console](https://console.cloud.google.com) (any
    project, new or existing):
@@ -79,8 +79,8 @@ incremental sync. It needs a one-time setup of your own Google OAuth client:
 > users*, and each person signs in with their own Google account. Tokens stay
 > in each person's own keyring.
 
-Prefer the terminal? The same flow works headlessly and does the first sync in
-one go:
+The same flow also works from the terminal, and does the first sync in one
+go:
 
 ```bash
 ./bin/mailbox sync --account your@gmail.com --credentials ~/.config/mailbox/credentials.json
@@ -113,16 +113,15 @@ export MAILBOX_MS_CLIENT_ID=<your-application-client-id>
 
 ## 4. Turn on the AI (optional)
 
-Without a provider the AI features stay dormant and out of the way. To enable
-them, set the provider, endpoint, and model in **Preferences → AI** (or the
+Set the provider, endpoint, and model in **Preferences → AI** (or the
 `MAILBOX_AI_*` environment variables), then store the key:
 
 ```bash
 printf '%s' "$YOUR_API_KEY" | ./bin/mailbox set-ai-key
 ```
 
-Anything OpenAI-compatible works, as does Anthropic directly. The key lives
-only in the OS keyring — never in a config file.
+Any OpenAI-compatible endpoint works, as does Anthropic directly. The key is
+stored in the OS keyring, not in the config file.
 
 ## Where things live
 
