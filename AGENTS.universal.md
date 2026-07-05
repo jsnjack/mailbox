@@ -115,6 +115,25 @@ errors through the UI itself.
 
 ---
 
+## Writing style
+
+Applies to all prose: docs, READMEs, commit messages, UI copy, and summaries.
+
+Plain, calm, factual writing in complete sentences. Specifically banned:
+
+- Sentence fragments for punch ("Not a web page in a frame." "Fast. Local.
+  Yours.")
+- Bold-lead marketing bullets ("**AI on your terms.** Any endpoint works…")
+- Stating the obvious or overexplaining (don't explain what an RPM is, don't
+  reassure twice that a feature is optional)
+- Negative or edgy framing, taglines, and competitor comparisons
+- Jargon where an ordinary word exists
+
+Good example of the register: "Mail is stored in a local database, so search
+is instant and reading works offline."
+
+---
+
 ## Commits
 
 Every commit message starts with a single-letter prefix that drives automatic
