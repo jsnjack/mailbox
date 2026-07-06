@@ -103,6 +103,9 @@ func TestCategorizeSingleSalvage(t *testing.T) {
 		{`["Notifications"]`, "Notification"},
 		{`Category: Needs reply`, "Needs reply"},
 		{`Newsletter or Notification`, ""}, // ambiguous → no tag
+		// Off-list labels models emit (seen live) map to their canonical bucket.
+		{`["Marketing"]`, "Newsletter"},
+		{`Invitation`, "Calendar"},
 	}
 	for _, tc := range cases {
 		fp := &fakeProvider{chunks: []Chunk{{Text: tc.reply}}}

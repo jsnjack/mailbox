@@ -409,7 +409,24 @@ func MatchCategory(s string) string {
 			found = c
 		}
 	}
-	return found
+	if found != "" {
+		return found
+	}
+	// Off-list labels small models actually emit (seen in traces), mapped onto
+	// the canonical bucket they mean. Exact-fold matches only — no containment,
+	// so a longer hallucination doesn't get creatively reinterpreted.
+	aliases := map[string]string{
+		"marketing":  "Newsletter",
+		"promotion":  "Newsletter",
+		"promotions": "Newsletter",
+		"promo":      "Newsletter",
+		"invitation": "Calendar",
+		"invite":     "Calendar",
+		"meeting":    "Calendar",
+		"alert":      "Notification",
+		"alerts":     "Notification",
+	}
+	return aliases[ls]
 }
 
 // Proofread streams a grammar- and spelling-corrected version of the user's

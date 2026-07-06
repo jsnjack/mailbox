@@ -1391,6 +1391,13 @@ func (w *window) recategorizeThread(threadID string) {
 			if w.activeID != acctID {
 				return
 			}
+			// An explicit user action must run now: re-categorizing the same
+			// conversation twice in a row would otherwise be debounced away as
+			// an "unchanged candidate set" (that guard is for automatic
+			// re-entry loops, not menu clicks), and the post-failure cooldown
+			// is lifted too ("try now" beats backoff).
+			w.categorizeFP = ""
+			w.aiFailedAt = time.Time{}
 			w.refreshList(w.searchEntry.Text()) // drop the stale tag, then re-classify
 			w.categorizeInbox()
 		})
@@ -1445,6 +1452,11 @@ func (w *window) onRecategorize() {
 			w.categories = map[string]string{}
 			w.categorizedMsg = map[string]string{}
 			w.manualCat = map[string]bool{}
+			// An explicit user action must run now: drop the anti-loop debounce
+			// state so an identical candidate set isn't silently skipped, and
+			// lift the post-failure cooldown ("try now" beats backoff).
+			w.categorizeFP = ""
+			w.aiFailedAt = time.Time{}
 			// Re-populating the list runs categorizeInbox afresh (no cache to skip).
 			w.refreshList(w.searchEntry.Text())
 		})
