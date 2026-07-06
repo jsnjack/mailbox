@@ -70,7 +70,7 @@ func uidSetOf(uids []imap.UID) imap.UIDSet {
 // next incremental (old id vanishes from the source, new id appears in dest).
 func (b *Backend) ApplyLabels(ctx context.Context, ids []string, add, remove []string) error {
 	logging.TraceContext(ctx, "imapbackend: apply labels", "account", b.cfg.Email, "ids", len(ids), "add", add, "remove", remove)
-	return b.withConn(func(c *conn) error {
+	return b.withConn(ctx, func(c *conn) error {
 		if err := b.ensureFolders(c); err != nil {
 			return err
 		}
@@ -149,7 +149,7 @@ func (b *Backend) moveDest(add, remove []string) string {
 // Delete permanently removes messages: \Deleted + EXPUNGE per folder.
 func (b *Backend) Delete(ctx context.Context, ids []string) error {
 	logging.TraceContext(ctx, "imapbackend: delete", "account", b.cfg.Email, "ids", len(ids))
-	return b.withConn(func(c *conn) error {
+	return b.withConn(ctx, func(c *conn) error {
 		for key, uids := range groupByFolder(ids) {
 			sel, err := c.reselect(key.mailbox, false) // fresh SELECT: EXPUNGE is irreversible
 			if err != nil {
@@ -312,7 +312,7 @@ func (b *Backend) smtpSend(ctx context.Context, from string, to []string, msg []
 
 // appendToSent files a sent message in the Sent folder (best-effort).
 func (b *Backend) appendToSent(msg []byte) {
-	_ = b.withConn(func(c *conn) error {
+	_ = b.withConn(context.Background(), func(c *conn) error {
 		if err := b.ensureFolders(c); err != nil {
 			return err
 		}
@@ -349,7 +349,7 @@ func appendMessage(cl *imapclient.Client, mailbox string, msg []byte, flags ...i
 func (b *Backend) SaveDraft(ctx context.Context, raw []byte, threadID string) (string, error) {
 	logging.TraceContext(ctx, "imapbackend: save draft", "account", b.cfg.Email, "bytes", len(raw), "threadID", threadID)
 	var draftID string
-	err := b.withConn(func(c *conn) error {
+	err := b.withConn(ctx, func(c *conn) error {
 		if err := b.ensureFolders(c); err != nil {
 			return err
 		}
@@ -410,7 +410,7 @@ func (b *Backend) FindDraftID(ctx context.Context, id string) (string, error) {
 // attachment at the 1-based ordinal recorded during parsing.
 func (b *Backend) FetchAttachment(ctx context.Context, msgIDArg, attID string) ([]byte, error) {
 	logging.TraceContext(ctx, "imapbackend: fetch attachment", "id", msgIDArg, "attID", attID)
-	raw, err := b.fetchRaw(msgIDArg)
+	raw, err := b.fetchRaw(ctx, msgIDArg)
 	if err != nil {
 		return nil, err
 	}

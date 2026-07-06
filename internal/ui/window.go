@@ -169,6 +169,10 @@ type window struct {
 	openThreadID   string
 	openThreadMsgs []model.Message
 	openMsg        model.Message
+	// openGen guards showThread's off-thread read: each open bumps it, and a
+	// completed read only applies if its generation is still current (last
+	// click wins). Main-thread only.
+	openGen uint64
 	// renderCancel cancels an in-flight render goroutine when the user opens
 	// another thread or backs out — so a hung body fetch can't pin a stale
 	// goroutine for the full fetch timeout. Main-thread only (set/cancelled
@@ -3266,15 +3270,45 @@ func (w *window) showThread(threadID string) {
 		w.openDraftForEdit(threadID)
 		return
 	}
-	msgs, err := w.deps.Store.ListThreadMessages(context.Background(), w.activeID, threadID)
-	if err != nil || len(msgs) == 0 {
-		if err != nil {
-			slog.Warn("ui: load thread", "thread", threadID, "err", err)
-			w.toast("Couldn't open this conversation")
-		}
-		logging.Trace("ui: show thread empty", "thread", threadID, "n", len(msgs), "err", err)
-		return
-	}
+	// The thread read runs off the main thread: it is normally instant, but a
+	// background VACUUM (compact, retention, empty-folder cleanup) holds an
+	// exclusive lock, and a synchronous read here would freeze the whole UI
+	// behind it for up to the store's busy timeout. openGen makes the last
+	// click win when reads complete out of order.
+	w.openGen++
+	gen := w.openGen
+	acctID := w.activeID
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), openThreadTimeout)
+		defer cancel()
+		msgs, err := w.deps.Store.ListThreadMessages(ctx, acctID, threadID)
+		dispatch.Main(func() {
+			if gen != w.openGen {
+				logging.Trace("ui: show thread superseded", "thread", threadID)
+				return
+			}
+			if err != nil || len(msgs) == 0 {
+				if err != nil {
+					slog.Warn("ui: load thread", "thread", threadID, "err", err)
+					w.toast("Couldn't open this conversation")
+				}
+				logging.Trace("ui: show thread empty", "thread", threadID, "n", len(msgs), "err", err)
+				return
+			}
+			w.showThreadMsgs(threadID, msgs)
+		})
+	}()
+}
+
+// openThreadTimeout bounds the store read behind opening a conversation. The
+// SQLite busy timeout (5s) caps a lock wait, but a reader-pool checkout has no
+// bound of its own — this keeps a click from waiting forever on a saturated
+// pool.
+const openThreadTimeout = 10 * time.Second
+
+// showThreadMsgs is showThread's main-thread continuation once the thread's
+// messages have been read.
+func (w *window) showThreadMsgs(threadID string, msgs []model.Message) {
 	logging.Trace("ui: show thread", "thread", threadID, "n", len(msgs), "account", w.activeID)
 	w.openThreadID = threadID
 	w.openThreadMsgs = msgs
@@ -3379,25 +3413,30 @@ func hasLabel(m model.Message, label string) bool {
 // the draft's recipients, subject, and body.
 func (w *window) openDraftForEdit(threadID string) {
 	logging.Trace("ui: open draft for edit", "thread", threadID, "account", w.activeID)
-	msgs, err := w.deps.Store.ListThreadMessages(context.Background(), w.activeID, threadID)
-	if err != nil || len(msgs) == 0 {
-		if err != nil {
-			slog.Warn("ui: load draft thread", "thread", threadID, "err", err)
-		}
-		return
-	}
-	// The draft is the message carrying the DRAFT label (fall back to newest).
-	dm := msgs[len(msgs)-1]
-	for _, m := range msgs {
-		if hasLabel(m, model.LabelDraft) {
-			dm = m
-			break
-		}
-	}
 	acctID := w.activeID
 	w.toast("Opening draft…")
 	go func() {
 		ctx := context.Background()
+		// Read off the main thread (a background VACUUM would block a
+		// synchronous read here — see showThread) and bounded like any other
+		// store read behind a click.
+		listCtx, cancelList := context.WithTimeout(ctx, openThreadTimeout)
+		msgs, err := w.deps.Store.ListThreadMessages(listCtx, acctID, threadID)
+		cancelList()
+		if err != nil || len(msgs) == 0 {
+			if err != nil {
+				slog.Warn("ui: load draft thread", "thread", threadID, "err", err)
+			}
+			return
+		}
+		// The draft is the message carrying the DRAFT label (fall back to newest).
+		dm := msgs[len(msgs)-1]
+		for _, m := range msgs {
+			if hasLabel(m, model.LabelDraft) {
+				dm = m
+				break
+			}
+		}
 		if !dm.BodyFetched && w.deps.FetchBody != nil {
 			fetchCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 			if err := w.deps.FetchBody(fetchCtx, dm.AccountID, dm.GmailID); err != nil {

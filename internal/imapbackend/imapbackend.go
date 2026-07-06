@@ -66,18 +66,19 @@ const (
 )
 
 // pooledOpTimeout bounds one pooled operation (a withConn fn — a SELECT+FETCH
-// group, a folder sweep, an APPEND). Without it a server that stalls mid-reply
-// after login would wedge a pool slot forever (dial clears its deadline after
-// login). Generous, because a single fn may sweep every folder of a large
-// account; it only needs to beat "forever". The dedicated IDLE connection is
-// NOT pooled and never gets this deadline — IDLE legitimately blocks for
-// minutes (see idle.go).
+// group, a folder sweep, an APPEND). Without it a connection that goes
+// half-open mid-operation would wedge a pool slot until TCP gives up (minutes).
+// Enforced by withConn's watchdog force-closing the connection — NOT by a
+// socket deadline, which go-imap silently re-arms around every response.
+// Generous, because a single fn may sweep every folder of a large account; it
+// only needs to beat "forever". The dedicated IDLE connection is NOT pooled and
+// never gets this bound — IDLE legitimately blocks for minutes (see idle.go).
 const pooledOpTimeout = 5 * time.Minute
 
 // conn is one pooled IMAP connection plus the mailbox it currently has SELECTed
 // (cached so a fan-out of fetches against the same folder skips re-SELECTing).
-// raw is the underlying net.Conn so withConn can bound each pooled operation
-// with a deadline.
+// raw is the underlying net.Conn (kept for the byte-counting wrapper and login
+// deadlines during dial).
 type conn struct {
 	cl       *imapclient.Client
 	raw      net.Conn
@@ -241,12 +242,18 @@ func isAuthFailure(err error) bool {
 }
 
 // acquire takes a connection from the pool (reusing an idle one or dialing a new
-// one), blocking until a slot is free.
-func (b *Backend) acquire() (*conn, error) {
+// one), blocking until a slot is free or ctx is cancelled — so a caller whose
+// sync tick was cancelled doesn't queue behind wedged slots it no longer wants.
+func (b *Backend) acquire(ctx context.Context) (*conn, error) {
 	if b.closed.Load() {
 		return nil, fmt.Errorf("imap: backend closed")
 	}
-	b.sem <- struct{}{}
+	select {
+	case b.sem <- struct{}{}:
+	case <-ctx.Done():
+		logging.TraceContext(ctx, "imapbackend: pool acquire cancelled", "account", b.cfg.Email, "err", ctx.Err())
+		return nil, ctx.Err()
+	}
 	// Re-check after taking the slot: Close may have run between the check above
 	// and here. Without this, a teardown (stopAccount → Close) wouldn't be a
 	// barrier — we'd dial a fresh connection on an already-closed backend.
@@ -301,26 +308,55 @@ func (b *Backend) release(c *conn, healthy bool) {
 // a bad state). release runs via defer so a panic in fn still returns the pool
 // token (otherwise repeated panics would starve the pool and deadlock all I/O).
 //
-// Each fn runs under a conn deadline (pooledOpTimeout) so a server that stalls
-// mid-command can't wedge a pool slot forever; the deadline is cleared on
-// success before the conn is repooled, so an idle pooled connection doesn't
-// expire while waiting for its next use. (The dedicated IDLE connection never
-// passes through here.)
-func (b *Backend) withConn(fn func(*conn) error) (err error) {
-	c, aerr := b.acquire()
+// Each fn is bounded by a watchdog, NOT a socket deadline: go-imap re-arms the
+// read deadline around every response and parks between responses with no
+// deadline at all (readResponse's defer resets it to idleReadTimeout=0), so a
+// SetDeadline here is clobbered after the first reply of a multi-command fn. A
+// half-open connection mid-operation (suspend/resume, network switch) would
+// then block the read loop until TCP gives up — minutes, uncancellable. The
+// watchdog force-closes the connection when fn outlives pooledOpTimeout or ctx
+// is cancelled; a close is the one signal the read loop always honors, and the
+// killed conn is never repooled. (The dedicated IDLE connection never passes
+// through here.)
+func (b *Backend) withConn(ctx context.Context, fn func(*conn) error) (err error) {
+	c, aerr := b.acquire(ctx)
 	if aerr != nil {
 		return aerr
 	}
-	if c.raw != nil {
-		_ = c.raw.SetDeadline(time.Now().Add(pooledOpTimeout))
-	}
 	healthy := false
 	defer func() { b.release(c, healthy) }()
+	var killed atomic.Bool
+	watchdogDone := make(chan struct{})
+	go func() {
+		timer := time.NewTimer(pooledOpTimeout)
+		defer timer.Stop()
+		select {
+		case <-watchdogDone:
+		case <-ctx.Done():
+			killed.Store(true)
+			logging.Trace("imapbackend: op cancelled; closing conn", "account", b.cfg.Email, "err", ctx.Err())
+			_ = c.cl.Close()
+		case <-timer.C:
+			killed.Store(true)
+			logging.Trace("imapbackend: op watchdog fired; closing conn", "account", b.cfg.Email, "timeout", pooledOpTimeout)
+			_ = c.cl.Close()
+		}
+	}()
 	err = fn(c)
-	healthy = err == nil
-	if healthy && c.raw != nil {
-		_ = c.raw.SetDeadline(time.Time{})
+	close(watchdogDone)
+	// A kill can race fn's success return; treat the conn as dead either way so
+	// a just-killed connection is never repooled.
+	if killed.Load() {
+		if err == nil {
+			err = fmt.Errorf("imap: operation aborted (cancelled or timed out)")
+		}
+		if cerr := ctx.Err(); cerr != nil {
+			err = fmt.Errorf("imap: operation aborted: %w", cerr)
+		}
+		healthy = false
+		return err
 	}
+	healthy = err == nil
 	return err
 }
 
@@ -400,7 +436,7 @@ func (b *Backend) labelFor(mailbox string) string {
 func (b *Backend) Profile(ctx context.Context) (backend.Profile, error) {
 	logging.TraceContext(ctx, "imapbackend: profile", "account", b.cfg.Email)
 	var cur string
-	err := b.withConn(func(c *conn) error {
+	err := b.withConn(ctx, func(c *conn) error {
 		var e error
 		cur, e = b.buildProfileCursor(c)
 		return e
@@ -419,7 +455,7 @@ func (b *Backend) Profile(ctx context.Context) (backend.Profile, error) {
 // mapping for FetchMetadata.
 func (b *Backend) Labels(ctx context.Context) ([]model.Label, error) {
 	logging.TraceContext(ctx, "imapbackend: labels", "account", b.cfg.Email)
-	if err := b.withConn(b.ensureFolders); err != nil {
+	if err := b.withConn(ctx, b.ensureFolders); err != nil {
 		logging.TraceContext(ctx, "imapbackend: labels failed", "account", b.cfg.Email, "err", err)
 		return nil, err
 	}
@@ -520,7 +556,7 @@ func (b *Backend) SearchIDs(ctx context.Context, query string, max int) ([]strin
 		return nil, err
 	}
 	var ids []string
-	err = b.withConn(func(c *conn) error {
+	err = b.withConn(ctx, func(c *conn) error {
 		folders, err := b.folders(c)
 		if err != nil {
 			return err
@@ -572,7 +608,7 @@ func (b *Backend) FetchMetadata(ctx context.Context, id string) (model.Message, 
 	}
 	logging.TraceContext(ctx, "imapbackend: fetch metadata", "id", id, "mailbox", mailbox, "uid", uint32(uid), "uidvalidity", uidv)
 	var out model.Message
-	err = b.withConn(func(c *conn) error {
+	err = b.withConn(ctx, func(c *conn) error {
 		sel, err := c.selectMailbox(mailbox, false)
 		if err != nil {
 			return err
@@ -654,7 +690,7 @@ func (b *Backend) FetchMetadataBatch(ctx context.Context, ids []string) ([]model
 	}
 
 	out := make([]model.Message, 0, len(ids))
-	err := b.withConn(func(c *conn) error {
+	err := b.withConn(ctx, func(c *conn) error {
 		for _, k := range order {
 			uids := groups[k]
 			sel, err := c.selectMailbox(k.mailbox, false)
@@ -724,7 +760,7 @@ func (b *Backend) fetchMetaChunk(c *conn, mailbox string, uidv uint32, uids []im
 // FetchBody fetches and parses a message's full body + attachment metadata.
 func (b *Backend) FetchBody(ctx context.Context, id string) (model.MessageBody, []model.Attachment, error) {
 	logging.TraceContext(ctx, "imapbackend: fetch body", "id", id)
-	raw, err := b.fetchRaw(id)
+	raw, err := b.fetchRaw(ctx, id)
 	if err != nil {
 		return model.MessageBody{}, nil, err
 	}
@@ -736,13 +772,13 @@ func (b *Backend) FetchBody(ctx context.Context, id string) (model.MessageBody, 
 
 // fetchRaw returns a message's full raw RFC 5322 bytes (BODY[], peeked so it
 // doesn't set \Seen). Shared by FetchBody and FetchAttachment.
-func (b *Backend) fetchRaw(id string) ([]byte, error) {
+func (b *Backend) fetchRaw(ctx context.Context, id string) ([]byte, error) {
 	mailbox, uidv, uid, err := parseMsgID(id)
 	if err != nil {
 		return nil, err
 	}
 	var raw []byte
-	err = b.withConn(func(c *conn) error {
+	err = b.withConn(ctx, func(c *conn) error {
 		sel, err := c.selectMailbox(mailbox, false)
 		if err != nil {
 			return err
@@ -778,7 +814,7 @@ func (b *Backend) fetchRaw(id string) ([]byte, error) {
 func (b *Backend) Changes(ctx context.Context, cur string) (upserts, deletes []string, next string, err error) {
 	logging.TraceContext(ctx, "imapbackend: changes", "account", b.cfg.Email, "cursor_bytes", len(cur))
 	var nextCur cursor
-	err = b.withConn(func(c *conn) error {
+	err = b.withConn(ctx, func(c *conn) error {
 		var e error
 		upserts, deletes, nextCur, e = b.computeChanges(c, decodeCursor(cur))
 		return e

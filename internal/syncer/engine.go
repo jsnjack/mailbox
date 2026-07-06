@@ -712,7 +712,9 @@ func (e *Engine) ModifyLabelsBatch(ctx context.Context, b backend.Backend, accou
 	// incremental sync reconciles any divergence.
 	if b != nil {
 		e.mirrorAsync(accountID, func() {
-			if err := b.ApplyLabels(context.Background(), gmailIDs, add, remove); err != nil {
+			ctx, cancel := mirrorCtx()
+			defer cancel()
+			if err := b.ApplyLabels(ctx, gmailIDs, add, remove); err != nil {
 				slog.Default().Warn("modify labels: mirror to provider", "n", len(gmailIDs), "err", err)
 			}
 		})
@@ -728,8 +730,11 @@ func (e *Engine) ModifyLabelsBatch(ctx context.Context, b backend.Backend, accou
 // backlog deep enough to fill it just applies backpressure.
 //
 // The send happens under mirrorMu so StopAccount (which closes the channel
-// under the same lock) can never close it mid-send. The drain goroutine never
-// takes the lock, so a full buffer still drains and the send can't deadlock.
+// under the same lock) can never close it mid-send. The send is non-blocking:
+// mirrorMu is engine-wide, so blocking on a full buffer (a drain wedged on a
+// dead provider with 128 ops queued) would freeze label operations and
+// StopAccount for every account. A full queue drops the op instead — the same
+// contract as a failed mirror: the next incremental sync reconciles.
 func (e *Engine) mirrorAsync(accountID int64, fn func()) {
 	e.mirrorMu.Lock()
 	defer e.mirrorMu.Unlock()
@@ -752,7 +757,25 @@ func (e *Engine) mirrorAsync(accountID int64, fn func()) {
 			logging.Trace("syncer: mirror queue drained and stopped", "account", accountID)
 		}()
 	}
-	ch <- fn
+	select {
+	case ch <- fn:
+	default:
+		slog.Default().Warn("mirror queue full; dropping mirror op (next sync reconciles)", "account", accountID, "queued", len(ch))
+	}
+}
+
+// mirrorOpTimeout bounds one queued mirror operation. The mirror queue is a
+// single drain goroutine per account, so an unbounded op (the provider clients
+// bound single requests, but retries can stack) would stall every mirror queued
+// behind it and eventually fill the buffer. Generous — a mirror is one batch
+// call plus retries; a failure is reconciled by the next incremental sync.
+const mirrorOpTimeout = 3 * time.Minute
+
+// mirrorCtx returns the bounded context a queued mirror operation runs under
+// (mirrors deliberately outlive the UI action that queued them, so they can't
+// use the caller's ctx).
+func mirrorCtx() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), mirrorOpTimeout)
 }
 
 // StopAccount releases the engine's per-account resources — today the mirror
@@ -806,7 +829,9 @@ func (e *Engine) MarkLabelRead(ctx context.Context, b backend.Backend, accountID
 	e.publish(Change{Kind: LabelsSynced, AccountID: accountID})
 	if b != nil {
 		e.mirrorAsync(accountID, func() {
-			if err := b.ApplyLabels(context.Background(), ids, nil, []string{model.LabelUnread}); err != nil {
+			ctx, cancel := mirrorCtx()
+			defer cancel()
+			if err := b.ApplyLabels(ctx, ids, nil, []string{model.LabelUnread}); err != nil {
 				slog.Default().Warn("mark label read: mirror to provider", "label", labelID, "n", len(ids), "err", err)
 			}
 		})

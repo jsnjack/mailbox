@@ -17,6 +17,12 @@ const idleRefresh = 25 * time.Minute
 // idleRetry is the backoff before reconnecting after an IDLE connection error.
 const idleRetry = 30 * time.Second
 
+// idleTeardownTimeout bounds the DONE→tagged-reply exchange when an IDLE cycle
+// is refreshed. On a half-open connection (suspend/resume) the reply never
+// arrives and idle.Wait() blocks with no deadline; closing the connection is
+// the only signal that unblocks it, after which Watch redials.
+const idleTeardownTimeout = 30 * time.Second
+
 // Watch holds a dedicated connection in IDLE on the INBOX and calls onChange when
 // the server reports new or expunged mail, so the app syncs promptly instead of
 // waiting for the poll. It reconnects on error and returns when ctx is cancelled
@@ -67,6 +73,21 @@ func (b *Backend) idleOnce(ctx context.Context, onChange func()) error {
 		return err
 	}
 	defer func() { _ = cl.Close() }()
+	// Tie the connection's lifetime to ctx: Backend.Close never touches this
+	// dedicated connection, and neither Select, Idle, nor Wait below takes a
+	// ctx — without this reaper a teardown (stopAccount) would leave the
+	// goroutine (and its authenticated server session) alive until TCP notices
+	// the peer is gone. Closing the connection unblocks every pending call.
+	reaperDone := make(chan struct{})
+	defer close(reaperDone)
+	go func() {
+		select {
+		case <-ctx.Done():
+			logging.Trace("imapbackend: idle reaper closing conn", "account", b.cfg.Email)
+			_ = cl.Close()
+		case <-reaperDone:
+		}
+	}()
 	if !cl.Caps().Has(imap.CapIdle) {
 		logging.Trace("imapbackend: idle unsupported", "account", b.cfg.Email)
 		return errNoIdle
@@ -90,11 +111,22 @@ func (b *Backend) idleOnce(ctx context.Context, onChange func()) error {
 		case <-time.After(idleRefresh):
 		}
 		logging.Trace("imapbackend: idle refresh", "account", b.cfg.Email)
-		if err := idle.Close(); err != nil {
-			return err
+		// Bound the refresh teardown: Close writes DONE (write-timeout bounded by
+		// go-imap), but Wait blocks on the tagged reply with no deadline — on a
+		// half-open socket it would hang until TCP gives up. The watchdog closes
+		// the connection instead; the error return then makes Watch redial.
+		watchdog := time.AfterFunc(idleTeardownTimeout, func() {
+			logging.Trace("imapbackend: idle refresh watchdog closing conn", "account", b.cfg.Email, "timeout", idleTeardownTimeout)
+			_ = cl.Close()
+		})
+		cerr := idle.Close()
+		werr := idle.Wait()
+		watchdog.Stop()
+		if cerr != nil {
+			return cerr
 		}
-		if err := idle.Wait(); err != nil {
-			return err
+		if werr != nil {
+			return werr
 		}
 	}
 }

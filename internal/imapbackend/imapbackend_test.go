@@ -715,3 +715,26 @@ func TestParseMetaHeaders(t *testing.T) {
 		t.Fatalf("refs-only = %+v", mh)
 	}
 }
+
+// TestAcquireCancelled verifies a pool wait is abandoned when ctx is cancelled:
+// with every slot held (e.g. by operations wedged on a dead server), an acquire
+// must return the context error promptly instead of queueing forever.
+func TestAcquireCancelled(t *testing.T) {
+	b := New(Config{Host: "127.0.0.1", Port: 1, Security: SecurityNone, Email: "x@example.com"}, 1, PasswordAuth("x", "y"))
+	for i := 0; i < poolSize; i++ {
+		b.sem <- struct{}{}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := b.acquire(ctx)
+	if err == nil {
+		t.Fatal("expected an error from acquire with an exhausted pool and a cancelled ctx")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected context.DeadlineExceeded, got %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("acquire blocked %v past ctx cancellation", elapsed)
+	}
+}

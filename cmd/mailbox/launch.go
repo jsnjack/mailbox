@@ -18,6 +18,7 @@ import (
 	"github.com/jsnjack/mailbox/internal/gmailapi"
 	"github.com/jsnjack/mailbox/internal/gmailbackend"
 	"github.com/jsnjack/mailbox/internal/imapbackend"
+	"github.com/jsnjack/mailbox/internal/logging"
 	"github.com/jsnjack/mailbox/internal/model"
 	"github.com/jsnjack/mailbox/internal/store"
 	"github.com/jsnjack/mailbox/internal/syncer"
@@ -41,6 +42,31 @@ const resyncBackfillLimit = 500
 // goroutines to exit before proceeding, so one wedged on a deadline-less network
 // read can't hang a remove/reconnect indefinitely.
 const stopGrace = 5 * time.Second
+
+// syncPassTimeout bounds one background sync pass end to end. Every layer below
+// carries its own bound (Gmail's stall watchdog, the IMAP op watchdog, the
+// bounded token refresh), so this backstop should never fire — it exists so no
+// single pass, present or future, can pin the sync loop indefinitely. Generous:
+// an initial 500-message backfill on a slow link takes minutes.
+const syncPassTimeout = 10 * time.Minute
+
+// syncBackoffCap is the longest wait between sync attempts for an account whose
+// passes keep failing. Failures back off exponentially from syncInterval up to
+// this cap, so a persistently broken account (bad cursor, provider outage)
+// doesn't re-run a heavy resync every tick — and every IDLE nudge — forever.
+const syncBackoffCap = 15 * time.Minute
+
+// syncBackoff returns how long to wait after n consecutive failed passes.
+func syncBackoff(n int) time.Duration {
+	d := syncInterval
+	for i := 1; i < n && d < syncBackoffCap; i++ {
+		d *= 2
+	}
+	if d > syncBackoffCap {
+		d = syncBackoffCap
+	}
+	return d
+}
 
 // acctRuntime tracks a live account's background goroutines (sync, outbox sweep,
 // IMAP IDLE watch) so stopAccount can cancel them and wait for them to exit
@@ -796,32 +822,36 @@ func backgroundSnoozeWake(ctx context.Context, st *store.Store, hub *syncer.Hub)
 func backgroundSync(ctx context.Context, engine *syncer.Engine, act *activity.Hub, b backend.Backend, accountID int64, email string, wake <-chan struct{}) {
 	ticker := time.NewTicker(syncInterval)
 	defer ticker.Stop()
+	consecFails := 0
 	for {
 		done := act.Begin("sync", "Syncing "+email)
 		var (
 			n   int
 			err error
 		)
-		if acc, aerr := engine.Store.GetAccountByID(ctx, accountID); aerr == nil && acc.SyncCursor == "" {
+		// Per-pass backstop deadline — see syncPassTimeout.
+		passCtx, cancelPass := context.WithTimeout(ctx, syncPassTimeout)
+		if acc, aerr := engine.Store.GetAccountByID(passCtx, accountID); aerr == nil && acc.SyncCursor == "" {
 			// Never backfilled (a freshly added IMAP account, or a Gmail account
 			// connected without the headless `sync`): do the initial labels +
 			// backfill, which seeds the cursor.
-			if _, lerr := engine.SyncLabels(ctx, b, accountID); lerr != nil {
+			if _, lerr := engine.SyncLabels(passCtx, b, accountID); lerr != nil {
 				fmt.Fprintf(os.Stderr, "initial label sync for %s: %v\n", email, lerr)
 			}
-			n, err = engine.Resync(ctx, b, accountID, resyncBackfillLimit)
+			n, err = engine.Resync(passCtx, b, accountID, resyncBackfillLimit)
 			if err == nil {
-				_ = engine.Store.SetBackfilledAt(ctx, accountID, time.Now())
+				_ = engine.Store.SetBackfilledAt(passCtx, accountID, time.Now())
 			}
 		} else {
-			n, err = engine.Incremental(ctx, b, accountID)
+			n, err = engine.Incremental(passCtx, b, accountID)
 			if errors.Is(err, syncer.ErrHistoryExpired) {
 				// Cursor too old (offline past the provider's change window). Recover
 				// by re-backfilling and resetting it, else incremental fails forever.
 				fmt.Fprintf(os.Stderr, "background sync: cursor expired for %s, resyncing\n", email)
-				n, err = engine.Resync(ctx, b, accountID, resyncBackfillLimit)
+				n, err = engine.Resync(passCtx, b, accountID, resyncBackfillLimit)
 			}
 		}
+		cancelPass()
 		if err != nil {
 			if auth.IsAuthError(err) || errors.Is(err, backend.ErrAuth) {
 				// Revoked/expired OAuth token, or a rejected IMAP password — can't
@@ -830,7 +860,21 @@ func backgroundSync(ctx context.Context, engine *syncer.Engine, act *activity.Hu
 			}
 			done("error: " + err.Error())
 			fmt.Fprintf(os.Stderr, "background sync: %v\n", err)
-		} else if n > 0 {
+			// Back off on repeated failures instead of re-running a possibly heavy
+			// pass every tick; IDLE nudges are ignored while backing off (the wake
+			// channel holds at most one, consumed by the next healthy select).
+			consecFails++
+			wait := syncBackoff(consecFails)
+			logging.Trace("launch: sync backing off", "account", accountID, "fails", consecFails, "wait", wait)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(wait):
+			}
+			continue
+		}
+		consecFails = 0
+		if n > 0 {
 			done(fmt.Sprintf("%d change(s)", n))
 		} else {
 			done("up to date")
