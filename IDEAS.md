@@ -22,7 +22,33 @@ Move an item into a commit (and delete it here) when it's done.
 
 ## Features (noticed while working, not requested yet)
 
-_(none currently — recently shipped: per-account signatures, Reply-To handling.)_
+- **Google Calendar API integration for own-copy RSVP** (requested 2026-07-06,
+  deferred "a bit later"). Accepting an invite emails an iTIP REPLY to the
+  organizer — that updates the *organizer's* calendar, but the user's own
+  Google Calendar copy stays "unanswered": Google only flips your attendee
+  status through its own UI/API, never from outgoing mail. Sketch:
+  - **Scope.** Add `https://www.googleapis.com/auth/calendar.events` to the
+    Gmail OAuth consent (re-consent needed once per account; scope is
+    "sensitive", not "restricted" — no CASA implication for our test-user-only
+    app, but each user re-runs the consent screen).
+  - **Flow.** After the reply email is queued in `rsvp()` (Gmail accounts
+    only): find the event on the user's primary calendar with
+    `events.list?iCalUID=<ev.UID>` (the .ics UID matches Google's iCalUID for
+    auto-added invites), locate the attendee entry whose `email` (or an
+    alias) is the account, `events.patch` its `responseStatus` to
+    `accepted|tentative|declined`. ~2 requests, no sync loop, no storage.
+  - **Placement.** A small `calendarapi` package (headless, like `gmailapi`)
+    driven from the launcher via a new optional dep hook
+    (`deps.UpdateOwnRSVP(accountID, uid, status)`); `invite.go` calls it
+    fire-and-forget after `deferSend`, and the card note drops the "your own
+    calendar may still show it as unanswered" caveat when the patch succeeds.
+  - **Failure = non-event.** Missing scope (old token), event not found
+    (IMAP account, invite not auto-added), or API error just keeps today's
+    behavior + trace line; the emailed REPLY is already correct.
+  - **Non-Google accounts.** Out of scope — IMAP/Exchange own-copy status has
+    no equivalent public API; the card note stays for them.
+
+_(recently shipped: per-account signatures, Reply-To handling.)_
 
 ## Feature ideas — modern email clients, 2026 scan
 
