@@ -42,11 +42,14 @@ type Engine struct {
 	Store *store.Store
 	Hub   *Hub
 
-	// sweepMu serializes SweepOutbox so overlapping sweeps (the background
-	// timer, the user's "Send now", and per-item "retry" all trigger one) can't
-	// both claim and send the same queued item — which would deliver the message
-	// to the recipient twice. Sends are infrequent, so serializing them is free.
-	sweepMu sync.Mutex
+	// sweepMus serializes SweepOutbox per account so overlapping sweeps (the
+	// background timer, the user's "Send now", and per-item "retry" all trigger
+	// one) can't both claim and send the same queued item — which would deliver
+	// the message to the recipient twice. Per account, not engine-wide: one
+	// account's slow send (bounded, but SMTP DATA allows minutes) must not
+	// delay every other account's outbox. sweepMuMu guards the map.
+	sweepMuMu sync.Mutex
+	sweepMus  map[int64]*sync.Mutex
 
 	// mirror holds a per-account FIFO queue (drained by one goroutine each) that
 	// serializes provider label-mirror operations in submission order, so an
@@ -61,6 +64,61 @@ type Engine struct {
 	// Now returns the current time; overridable in tests to drive the outbox
 	// not_before undo-window logic deterministically. nil means time.Now.
 	Now func() time.Time
+
+	// fetchFails counts, per account and message id, how many consecutive
+	// incremental passes failed to fetch that message's metadata. Incremental
+	// holds the sync cursor on a transient fetch failure so the next pass
+	// retries — but one permanently unfetchable message would then pin the
+	// cursor and re-walk the same history range every pass forever. After
+	// maxFetchFailPasses the id stops holding the cursor (fetches are still
+	// attempted; a later success clears the count, and a skipped message
+	// remains recoverable by Resync). In-memory: a restart just retries.
+	fetchFailMu sync.Mutex
+	fetchFails  map[int64]map[string]int
+}
+
+// maxFetchFailPasses is how many consecutive failed passes a message may hold
+// the sync cursor before it is skipped (see fetchFails).
+const maxFetchFailPasses = 3
+
+// noteFetchFailures bumps the failure count of each failed id and reports
+// whether the cursor should still be held: true while any id is under
+// maxFetchFailPasses. Ids crossing the threshold are logged loudly.
+func (e *Engine) noteFetchFailures(accountID int64, failedIDs []string) (holdCursor bool) {
+	e.fetchFailMu.Lock()
+	defer e.fetchFailMu.Unlock()
+	if e.fetchFails == nil {
+		e.fetchFails = map[int64]map[string]int{}
+	}
+	m := e.fetchFails[accountID]
+	if m == nil {
+		m = map[string]int{}
+		e.fetchFails[accountID] = m
+	}
+	for _, id := range failedIDs {
+		m[id]++
+		switch {
+		case m[id] == maxFetchFailPasses:
+			slog.Default().Warn("incremental: message failed too many passes; no longer holding cursor for it",
+				"account", accountID, "id", id, "passes", m[id])
+		case m[id] < maxFetchFailPasses:
+			holdCursor = true
+		}
+	}
+	return holdCursor
+}
+
+// clearFetchFailures resets the failure counts of ids that fetched successfully.
+func (e *Engine) clearFetchFailures(accountID int64, fetchedIDs []string) {
+	e.fetchFailMu.Lock()
+	defer e.fetchFailMu.Unlock()
+	m := e.fetchFails[accountID]
+	if m == nil {
+		return
+	}
+	for _, id := range fetchedIDs {
+		delete(m, id)
+	}
 }
 
 // now returns the engine's clock (time.Now unless overridden for tests).
@@ -575,11 +633,12 @@ func (e *Engine) SaveDraft(ctx context.Context, b backend.Backend, accountID int
 // SweepOutbox retries queued/failed messages for an account, returning how many
 // were sent. It is run periodically in the background.
 func (e *Engine) SweepOutbox(ctx context.Context, b backend.Backend, accountID int64) (int, error) {
-	// Serialize sweeps: the lock spans the list→send→mark loop so a second sweep
-	// blocks until the first finishes, then re-lists and sees the items already
-	// sent (no duplicate delivery). See sweepMu.
-	e.sweepMu.Lock()
-	defer e.sweepMu.Unlock()
+	// Serialize sweeps per account: the lock spans the list→send→mark loop so a
+	// second sweep blocks until the first finishes, then re-lists and sees the
+	// items already sent (no duplicate delivery). See sweepMus.
+	mu := e.sweepMuFor(accountID)
+	mu.Lock()
+	defer mu.Unlock()
 
 	// Any 'sending' row seen here is a leftover claim from a crashed run (live
 	// claims only exist inside a sweep, and sweeps are serialized) — turn it
@@ -658,6 +717,21 @@ func (e *Engine) SweepOutbox(ctx context.Context, b backend.Backend, accountID i
 		sent++
 	}
 	return sent, nil
+}
+
+// sweepMuFor returns accountID's sweep mutex, creating it on first use.
+func (e *Engine) sweepMuFor(accountID int64) *sync.Mutex {
+	e.sweepMuMu.Lock()
+	defer e.sweepMuMu.Unlock()
+	if e.sweepMus == nil {
+		e.sweepMus = map[int64]*sync.Mutex{}
+	}
+	mu, ok := e.sweepMus[accountID]
+	if !ok {
+		mu = &sync.Mutex{}
+		e.sweepMus[accountID] = mu
+	}
+	return mu
 }
 
 // isGmailAccount reports whether accountID is a Gmail account, so outbox dedup
@@ -888,7 +962,7 @@ func (e *Engine) Incremental(ctx context.Context, b backend.Backend, accountID i
 	// then publish a per-id event so new-mail notifications (which need the id)
 	// still fire. Concurrency makes catching up a burst of external changes
 	// (e.g. a bulk archive done on another device) N/workers round-trips, not N.
-	msgs, fetchedIDs, transientFail := e.fetchMetadataConcurrent(ctx, b, upserts)
+	msgs, fetchedIDs, failedIDs := e.fetchMetadataConcurrent(ctx, b, upserts)
 	if len(msgs) > 0 {
 		ustart := time.Now()
 		if err := e.Store.UpsertMessages(ctx, msgs); err != nil {
@@ -912,9 +986,12 @@ func (e *Engine) Incremental(ctx context.Context, b backend.Backend, accountID i
 	// cursor). Holding the cursor makes the next incremental re-walk the same
 	// range and retry; the deletes and successful upserts already applied are
 	// idempotent, so re-processing is harmless. A vanished message (ErrNotFound)
-	// is not a transient failure, so it doesn't stall the cursor.
-	if transientFail {
-		logging.TraceContext(ctx, "syncer: Incremental holding cursor (transient fetch failure)", "account", accountID, "cursor", acc.SyncCursor, "fetched", len(fetchedIDs), "wanted", len(upserts))
+	// is not a transient failure, so it doesn't stall the cursor — and a message
+	// that keeps failing pass after pass stops holding it too (see fetchFails),
+	// so one poisoned message can't pin the cursor forever.
+	e.clearFetchFailures(accountID, fetchedIDs)
+	if len(failedIDs) > 0 && e.noteFetchFailures(accountID, failedIDs) {
+		logging.TraceContext(ctx, "syncer: Incremental holding cursor (transient fetch failure)", "account", accountID, "cursor", acc.SyncCursor, "fetched", len(fetchedIDs), "failed", len(failedIDs), "wanted", len(upserts))
 		return changed, nil
 	}
 
@@ -985,13 +1062,13 @@ func (e *Engine) Resync(ctx context.Context, b backend.Backend, accountID int64,
 // fetchMetadataConcurrent fetches each id's metadata in parallel (bounded by
 // backfillWorkers) and returns the converted messages and their ids in input
 // order. An id that is genuinely gone (backend.ErrNotFound) is skipped silently.
-// Any other fetch error is transient (network blip, exhausted retries) and sets
-// the returned transientFail flag so the caller can decline to advance the sync
-// cursor past a message it hasn't actually stored yet. Each goroutine writes its
-// own slot, so there is no shared-state contention.
-func (e *Engine) fetchMetadataConcurrent(ctx context.Context, b backend.Backend, ids []string) (msgs []model.Message, fetchedIDs []string, transientFail bool) {
+// Any other fetch error is transient (network blip, exhausted retries); the
+// failing ids are returned so the caller can decline to advance the sync cursor
+// past a message it hasn't actually stored yet. Each goroutine writes its own
+// slot, so there is no shared-state contention.
+func (e *Engine) fetchMetadataConcurrent(ctx context.Context, b backend.Backend, ids []string) (msgs []model.Message, fetchedIDs, failedIDs []string) {
 	if len(ids) == 0 {
-		return nil, nil, false
+		return nil, nil, nil
 	}
 	// Prefer a batched fetch when the backend supports it (IMAP: one FETCH per
 	// ~200 ids per folder instead of one round-trip per message). Gmail has no
@@ -1033,10 +1110,10 @@ func (e *Engine) fetchMetadataConcurrent(ctx context.Context, b backend.Backend,
 			fetchedIDs = append(fetchedIDs, ids[i])
 		}
 		if s.transient {
-			transientFail = true
+			failedIDs = append(failedIDs, ids[i])
 		}
 	}
-	return msgs, fetchedIDs, transientFail
+	return msgs, fetchedIDs, failedIDs
 }
 
 // fetchChunk fetches metadata for a chunk of ids for backfill, using the
@@ -1073,11 +1150,11 @@ const metadataBatchSize = 200
 
 // fetchMetadataBatched fetches ids via the backend's batch fetcher, splitting them
 // into fixed-size chunks fetched concurrently. A chunk that fails at the transport
-// layer sets transientFail (so the caller holds the sync cursor and retries),
-// while ids simply absent from a successful chunk's result are treated as gone —
-// mirroring the per-id path's ErrNotFound handling. fetchedIDs is built from the
-// returned messages so it stays parallel to msgs.
-func (e *Engine) fetchMetadataBatched(ctx context.Context, bf backend.BatchMetadataFetcher, ids []string) (msgs []model.Message, fetchedIDs []string, transientFail bool) {
+// layer reports all its ids as failed (so the caller holds the sync cursor and
+// retries), while ids simply absent from a successful chunk's result are treated
+// as gone — mirroring the per-id path's ErrNotFound handling. fetchedIDs is built
+// from the returned messages so it stays parallel to msgs.
+func (e *Engine) fetchMetadataBatched(ctx context.Context, bf backend.BatchMetadataFetcher, ids []string) (msgs []model.Message, fetchedIDs, failedIDs []string) {
 	var chunks [][]string
 	for start := 0; start < len(ids); start += metadataBatchSize {
 		end := start + metadataBatchSize
@@ -1112,14 +1189,14 @@ func (e *Engine) fetchMetadataBatched(ctx context.Context, bf backend.BatchMetad
 
 	msgs = make([]model.Message, 0, len(ids))
 	fetchedIDs = make([]string, 0, len(ids))
-	for _, r := range results {
+	for i, r := range results {
 		if r.transient {
-			transientFail = true
+			failedIDs = append(failedIDs, chunks[i]...)
 		}
 		for _, m := range r.msgs {
 			msgs = append(msgs, m)
 			fetchedIDs = append(fetchedIDs, m.GmailID)
 		}
 	}
-	return msgs, fetchedIDs, transientFail
+	return msgs, fetchedIDs, failedIDs
 }

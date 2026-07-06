@@ -193,9 +193,18 @@ func (s *Store) DeleteMessage(ctx context.Context, accountID int64, gmailID stri
 	return err
 }
 
-// DeleteMessages removes many messages (and their FTS rows) in one transaction;
-// missing ids are skipped. Used by incremental sync so a batch of deletions is
-// one commit, not one per id.
+// deleteChunkSize bounds how many messages one delete transaction covers, so a
+// bulk delete yields the single writer connection to concurrent writes between
+// chunks.
+const deleteChunkSize = 500
+
+// DeleteMessages removes many messages (and their FTS rows), batched into
+// chunked transactions; missing ids are skipped. Chunked, not one transaction:
+// a bulk delete ("Empty Trash" can be tens of thousands) in a single
+// transaction would hold the sole writer connection — and with it every
+// concurrent sync/outbox write — for its whole duration. Deletes are
+// idempotent and re-derived from the server, so all-or-nothing atomicity buys
+// nothing here.
 func (s *Store) DeleteMessages(ctx context.Context, accountID int64, gmailIDs []string) error {
 	if len(gmailIDs) == 0 {
 		logging.TraceContext(ctx, "store: delete messages", "account", accountID, "n", 0)
@@ -203,17 +212,24 @@ func (s *Store) DeleteMessages(ctx context.Context, accountID int64, gmailIDs []
 	}
 	start := time.Now()
 	logging.TraceContext(ctx, "store: delete messages", "account", accountID, "n", len(gmailIDs))
-	err := s.withTx(ctx, func(tx *sql.Tx) error {
-		for _, id := range gmailIDs {
-			if err := deleteMessageTx(ctx, tx, accountID, id); err != nil {
-				return err
-			}
+	for cs := 0; cs < len(gmailIDs); cs += deleteChunkSize {
+		ce := cs + deleteChunkSize
+		if ce > len(gmailIDs) {
+			ce = len(gmailIDs)
 		}
-		return nil
-	})
-	if err != nil {
-		logging.TraceContext(ctx, "store: delete messages", "account", accountID, "n", len(gmailIDs), "err", err)
-		return err
+		chunk := gmailIDs[cs:ce]
+		err := s.withTx(ctx, func(tx *sql.Tx) error {
+			for _, id := range chunk {
+				if err := deleteMessageTx(ctx, tx, accountID, id); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			logging.TraceContext(ctx, "store: delete messages", "account", accountID, "n", len(gmailIDs), "deleted", cs, "err", err)
+			return err
+		}
 	}
 	logging.TraceContext(ctx, "store: delete messages done", "account", accountID, "n", len(gmailIDs), "dur", time.Since(start))
 	return nil

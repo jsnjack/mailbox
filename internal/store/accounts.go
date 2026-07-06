@@ -127,19 +127,48 @@ func (s *Store) SetSyncCursor(ctx context.Context, accountID int64, cursor strin
 	return nil
 }
 
-// DeleteAccount removes an account and all of its cached data. The account row's
-// ON DELETE CASCADE drops the messages, labels, threads, outbox, and per-message
-// AI tables; the FTS index is not a foreign-key child, so its rows are cleared
-// explicitly first (else they orphan and corrupt search).
+// DeleteAccount removes an account and all of its cached data. Messages (with
+// their FTS rows and per-message cascade children) are deleted first in chunked
+// transactions — a large account in one transaction would hold the sole writer
+// connection, and with it every concurrent write, for the whole delete. The
+// final transaction drops the account row, whose ON DELETE CASCADE clears the
+// remaining small tables (labels, threads, outbox). The FTS index is not a
+// foreign-key child, so its rows are cleared explicitly alongside each chunk
+// (else they orphan and corrupt search). A crash mid-way leaves a smaller,
+// still-consistent account that a retried delete finishes off.
 func (s *Store) DeleteAccount(ctx context.Context, accountID int64) error {
 	start := time.Now()
 	logging.TraceContext(ctx, "store: delete account", "account", accountID)
-	err := s.withTx(ctx, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx,
-			`DELETE FROM messages_fts WHERE rowid IN (SELECT rowid FROM messages WHERE account_id = ?)`,
-			accountID); err != nil {
-			return fmt.Errorf("delete fts rows: %w", err)
+	chunks := 0
+	for {
+		var n int64
+		err := s.withTx(ctx, func(tx *sql.Tx) error {
+			if _, err := tx.ExecContext(ctx, `
+				DELETE FROM messages_fts WHERE rowid IN
+					(SELECT rowid FROM messages WHERE account_id = ? ORDER BY rowid LIMIT ?)`,
+				accountID, deleteChunkSize); err != nil {
+				return fmt.Errorf("delete fts rows: %w", err)
+			}
+			res, err := tx.ExecContext(ctx, `
+				DELETE FROM messages WHERE rowid IN
+					(SELECT rowid FROM messages WHERE account_id = ? ORDER BY rowid LIMIT ?)`,
+				accountID, deleteChunkSize)
+			if err != nil {
+				return fmt.Errorf("delete message rows: %w", err)
+			}
+			n, _ = res.RowsAffected()
+			return nil
+		})
+		if err != nil {
+			logging.TraceContext(ctx, "store: delete account", "account", accountID, "chunks", chunks, "err", err)
+			return err
 		}
+		chunks++
+		if n < deleteChunkSize {
+			break
+		}
+	}
+	err := s.withTx(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM accounts WHERE id = ?`, accountID); err != nil {
 			return fmt.Errorf("delete account %d: %w", accountID, err)
 		}
@@ -149,7 +178,7 @@ func (s *Store) DeleteAccount(ctx context.Context, accountID int64) error {
 		logging.TraceContext(ctx, "store: delete account", "account", accountID, "err", err)
 		return err
 	}
-	logging.TraceContext(ctx, "store: delete account done", "account", accountID, "dur", time.Since(start))
+	logging.TraceContext(ctx, "store: delete account done", "account", accountID, "chunks", chunks, "dur", time.Since(start))
 	return nil
 }
 
