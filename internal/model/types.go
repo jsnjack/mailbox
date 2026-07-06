@@ -131,16 +131,22 @@ type OutgoingAttachment struct {
 // OutgoingMessage is a message to be sent. For replies and forwards the
 // threading fields (InReplyTo, References, ThreadID) tie it to the conversation.
 type OutgoingMessage struct {
-	From        string
-	To          string
-	Cc          string
-	Bcc         string
-	Subject     string
-	Body        string // plain text
-	InReplyTo   string // original Message-ID header
-	References  string // existing References plus the original Message-ID
-	ThreadID    string // Gmail threadId, so Gmail files it in the conversation
-	DraftID     string // when set, this edits/sends an existing Gmail draft
+	From       string
+	To         string
+	Cc         string
+	Bcc        string
+	Subject    string
+	Body       string // plain text
+	HTMLBody   string // HTML alternative; when set the message goes out multipart/alternative
+	InReplyTo  string // original Message-ID header
+	References string // existing References plus the original Message-ID
+	ThreadID   string // Gmail threadId, so Gmail files it in the conversation
+	DraftID    string // when set, this edits/sends an existing Gmail draft
+	// QuoteHTML is compose-side only: the replied-to/forwarded message's
+	// sanitized HTML, carried into the compose window so the send can embed the
+	// original's real formatting in the HTML alternative's quote. BuildMIME
+	// never writes it to the wire.
+	QuoteHTML   string
 	Attachments []OutgoingAttachment
 }
 

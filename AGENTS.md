@@ -176,8 +176,20 @@ root command has subcommands) — `SetArgs` with a non-nil empty slice, since
 `SetArgs(nil)` falls back to `os.Args`. The RPM's `%post` runs
 `update-desktop-database` so the registration takes effect on install; the dev
 self-install runs it too.
-Reply / reply-all / forward / new compose in a separate window (text/plain via
-`gmailapi.BuildMIME` + `messages.send`, threading headers + threadId on replies;
+Reply / reply-all / forward / new compose in a separate window. Compose is a
+plain-text editor, but outgoing mail is multipart/alternative (text +
+quoted-printable HTML via `backend.BuildMIME`; nested in multipart/mixed with
+attachments): `buildHTMLBody` renders the user's text escaped+linkified, and —
+while the prefilled quote region is unedited (`quoteBoundary` vs the snapshot)
+— embeds the original's sanitized HTML (`bodyHTMLFor` → `QuoteHTML`) as a
+left-rule blockquote for replies or unquoted under the header block for
+forwards, so recipients see the original's real formatting; an edited quote
+falls back to rendering the whole text so the alternatives never disagree.
+Replies quote with the conventional "On <date>, Name <addr> wrote:" attribution
++ "> " markers; forwards use the standard "---------- Forwarded message
+---------" From/Date/Subject/To block with the body unquoted. `htmlToText`
+(quote/AI text source) walks the HTML tree and preserves link targets as
+"text (url)". (Send: `messages.send`, threading headers + threadId on replies;
 replies target the sender's `Reply-To` header when present — captured into
 `model.Message.ReplyTo` / the `reply_to` column — else the From address, via
 `replyTarget`);

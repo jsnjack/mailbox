@@ -176,3 +176,72 @@ func TestEncodeAddressListPassthroughOnUnparseable(t *testing.T) {
 		t.Errorf("bare address mangled: %q", got)
 	}
 }
+
+func TestBuildMIMEAlternative(t *testing.T) {
+	raw, err := BuildMIME(model.OutgoingMessage{
+		From:     "me@example.com",
+		To:       "you@example.com",
+		Subject:  "hi",
+		Body:     "plain text reply",
+		HTMLBody: "<div>html reply</div><blockquote>quoted</blockquote>",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(raw)
+	if !strings.Contains(s, "Content-Type: multipart/alternative;") {
+		t.Fatalf("expected multipart/alternative, got:\n%s", s)
+	}
+	for _, want := range []string{"text/plain", "text/html", "plain text reply", "quoted-printable"} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("missing %q in:\n%s", want, s)
+		}
+	}
+	// The text part must come first so HTML-capable clients prefer the later part.
+	if strings.Index(s, "text/plain") > strings.Index(s, "text/html") {
+		t.Fatal("text/plain part must precede text/html")
+	}
+}
+
+func TestBuildMIMEAlternativeWithAttachment(t *testing.T) {
+	raw, err := BuildMIME(model.OutgoingMessage{
+		From:        "me@example.com",
+		To:          "you@example.com",
+		Subject:     "hi",
+		Body:        "plain",
+		HTMLBody:    "<div>html</div>",
+		Attachments: []model.OutgoingAttachment{{Filename: "a.txt", MimeType: "text/plain", Data: []byte("x")}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(raw)
+	if !strings.Contains(s, "Content-Type: multipart/mixed;") {
+		t.Fatalf("expected multipart/mixed, got:\n%s", s)
+	}
+	if !strings.Contains(s, "multipart/alternative") {
+		t.Fatalf("expected nested multipart/alternative, got:\n%s", s)
+	}
+	if !strings.Contains(s, `attachment; filename="a.txt"`) {
+		t.Fatalf("missing attachment part:\n%s", s)
+	}
+}
+
+// TestBuildMIMEAlternativeLongLines: quoted original HTML routinely has lines
+// far past SMTP's 998-byte limit; the quoted-printable HTML part must keep
+// every wire line within it.
+func TestBuildMIMEAlternativeLongLines(t *testing.T) {
+	raw, err := BuildMIME(model.OutgoingMessage{
+		From: "me@example.com", To: "you@example.com", Subject: "hi",
+		Body:     "plain",
+		HTMLBody: "<div>" + strings.Repeat("x", 5000) + "</div>",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, line := range strings.Split(string(raw), "\r\n") {
+		if len(line) > 998 {
+			t.Fatalf("wire line %d is %d bytes (limit 998)", i, len(line))
+		}
+	}
+}

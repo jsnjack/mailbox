@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+
 	"log/slog"
 	"net/mail"
 	"net/url"
@@ -19,6 +20,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	xhtml "golang.org/x/net/html"
 
 	"github.com/diamondburned/gotk4-adwaita/pkg/adw"
 	"github.com/diamondburned/gotk4-webkitgtk/pkg/javascriptcore/v6"
@@ -2669,6 +2672,7 @@ func (w *window) replyInit(m model.Message) model.OutgoingMessage {
 		To:         replyTarget(m),
 		Subject:    ensureRePrefix(m.Subject),
 		Body:       quoteOriginal(m, w.bodyTextFor(m)),
+		QuoteHTML:  w.bodyHTMLFor(m),
 		InReplyTo:  m.RFC822MsgID,
 		References: strings.TrimSpace(m.References + " " + m.RFC822MsgID),
 		ThreadID:   m.ThreadID,
@@ -2709,6 +2713,7 @@ func (w *window) replyAllInit() (init model.OutgoingMessage, aiContext string, o
 		Cc:         cc,
 		Subject:    ensureRePrefix(m.Subject),
 		Body:       quoteOriginal(m, w.bodyTextFor(m)),
+		QuoteHTML:  w.bodyHTMLFor(m),
 		InReplyTo:  m.RFC822MsgID,
 		References: strings.TrimSpace(m.References + " " + m.RFC822MsgID),
 		ThreadID:   m.ThreadID,
@@ -2868,8 +2873,9 @@ func (w *window) onForward() {
 	logging.Trace("ui: forward", "id", m.GmailID, "thread", w.openThreadID, "account", w.activeID)
 	w.flushMarkRead()
 	init := model.OutgoingMessage{
-		Subject: ensureFwdPrefix(m.Subject),
-		Body:    quoteOriginal(m, w.bodyTextFor(m)),
+		Subject:   ensureFwdPrefix(m.Subject),
+		Body:      forwardOriginal(m, w.bodyTextFor(m)),
+		QuoteHTML: w.bodyHTMLFor(m),
 	}
 	// A forward carries the original's attachments. Gather them off the main thread
 	// (a download may be needed), then open the compose; forwardAttachments returns
@@ -4929,8 +4935,9 @@ func (w *window) showTranslatedConversation(msgs []model.Message) {
 	w.setReaderHTML(b.String())
 }
 
-// bodyHTMLFor returns the open message's HTML body for translation (sanitized),
-// falling back to its text or snippet wrapped as HTML.
+// bodyHTMLFor returns the message's HTML body (sanitized), falling back to its
+// text or snippet wrapped as HTML. Used for translation and as the QuoteHTML a
+// reply/forward compose embeds in the outgoing HTML alternative.
 func (w *window) bodyHTMLFor(m model.Message) string {
 	if b, err := w.deps.Store.GetBody(context.Background(), m.RowID); err == nil {
 		if strings.TrimSpace(b.HTML) != "" {
@@ -5312,12 +5319,84 @@ func (w *window) bodyTextFor(m model.Message) string {
 	return htmlToText(raw)
 }
 
-// htmlToText strips any HTML tags and decodes entities, yielding readable plain
-// text. Safe on input that is already plain text.
+// htmlToText renders HTML as readable plain text: tags stripped with block
+// boundaries becoming newlines, entities decoded, and — unlike a bare tag
+// strip — link targets preserved as "text (url)", so a quoted link still leads
+// somewhere. Safe on input that is already plain text.
 func htmlToText(s string) string {
-	stripped := bluemonday.StrictPolicy().Sanitize(s)
-	text := html.UnescapeString(stripped)
-	// Collapse the runs of blank lines that tag removal tends to leave behind.
+	doc, err := xhtml.Parse(strings.NewReader(s))
+	if err != nil {
+		// Fallback: strip tags without structure (the historical behavior).
+		return collapseBlank(html.UnescapeString(bluemonday.StrictPolicy().Sanitize(s)))
+	}
+	var b strings.Builder
+	renderText(&b, doc)
+	return collapseBlank(b.String())
+}
+
+// blockTags are elements whose end implies a line break in a text rendering.
+var blockTags = map[string]bool{
+	"p": true, "div": true, "br": true, "tr": true, "li": true, "ul": true,
+	"ol": true, "table": true, "blockquote": true, "h1": true, "h2": true,
+	"h3": true, "h4": true, "h5": true, "h6": true, "pre": true, "hr": true,
+}
+
+// renderText walks a parsed HTML tree appending its visible text, newlines at
+// block boundaries, and "(url)" after links whose text isn't the URL itself.
+func renderText(b *strings.Builder, n *xhtml.Node) {
+	switch n.Type {
+	case xhtml.TextNode:
+		b.WriteString(n.Data)
+		return
+	case xhtml.ElementNode:
+		switch n.Data {
+		case "script", "style", "head", "title":
+			return
+		case "br", "hr":
+			b.WriteString("\n")
+			return
+		}
+	}
+	start := b.Len()
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		renderText(b, c)
+	}
+	if n.Type != xhtml.ElementNode {
+		return
+	}
+	if n.Data == "a" {
+		if href := attrVal(n, "href"); strings.HasPrefix(href, "http://") || strings.HasPrefix(href, "https://") {
+			if text := strings.TrimSpace(b.String()[start:]); text != "" && text != href {
+				fmt.Fprintf(b, " (%s)", href)
+			}
+		}
+	}
+	if blockTags[n.Data] {
+		b.WriteString("\n")
+	}
+}
+
+// attrVal returns the value of the node's named attribute, or "".
+func attrVal(n *xhtml.Node, key string) string {
+	for _, a := range n.Attr {
+		if a.Key == key {
+			return a.Val
+		}
+	}
+	return ""
+}
+
+// collapseBlank trims the text and collapses runs of blank lines (which tag
+// removal tends to leave behind) to one.
+func collapseBlank(text string) string {
+	// Whitespace-only lines count as blank for collapsing.
+	lines := strings.Split(text, "\n")
+	for i, l := range lines {
+		if strings.TrimSpace(l) == "" {
+			lines[i] = ""
+		}
+	}
+	text = strings.Join(lines, "\n")
 	for strings.Contains(text, "\n\n\n") {
 		text = strings.ReplaceAll(text, "\n\n\n", "\n\n")
 	}

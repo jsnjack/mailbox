@@ -1,7 +1,9 @@
 package ui
 
 import (
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/jsnjack/mailbox/internal/model"
 )
@@ -245,5 +247,129 @@ func TestWithOwnAccounts(t *testing.T) {
 	// The past correspondent survives; the dup of an own account does not.
 	if got[2].Address != "friend@x.com" {
 		t.Errorf("third = %q, want friend@x.com", got[2].Address)
+	}
+}
+
+func TestForwardOriginal(t *testing.T) {
+	m := model.Message{
+		FromName:     "Alice",
+		FromAddr:     "alice@example.com",
+		Subject:      "News",
+		ToAddrs:      "bob@example.com",
+		InternalDate: time.Date(2026, 7, 6, 9, 36, 0, 0, time.UTC),
+	}
+	got := forwardOriginal(m, "line one\nline two")
+	for _, want := range []string{
+		forwardMarker,
+		"From: Alice <alice@example.com>",
+		"Date: Mon, Jul 6, 2026 at 09:36",
+		"Subject: News",
+		"To: bob@example.com",
+		"\n\nline one\nline two\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "> line one") {
+		t.Fatal("forwarded body must not be quote-prefixed")
+	}
+}
+
+func TestQuoteOriginalAttribution(t *testing.T) {
+	m := model.Message{
+		FromName:     "Alice",
+		FromAddr:     "alice@example.com",
+		InternalDate: time.Date(2026, 7, 6, 9, 36, 0, 0, time.UTC),
+	}
+	got := quoteOriginal(m, "hello")
+	if !strings.Contains(got, "On Mon, Jul 6, 2026 at 09:36, Alice <alice@example.com> wrote:\n> hello\n") {
+		t.Fatalf("unexpected quote:\n%s", got)
+	}
+	// The compose splitter must still recognize the attribution.
+	if quoteBoundary("reply\n"+got) >= len("reply\n"+got) {
+		t.Fatal("quoteBoundary did not find the attribution")
+	}
+}
+
+func TestQuoteBoundaryForward(t *testing.T) {
+	body := "my note\n\n" + forwardMarker + "\nFrom: X <x@y>\n\nbody"
+	qb := quoteBoundary(body)
+	if !strings.HasPrefix(body[qb:], forwardMarker) {
+		t.Fatalf("boundary at %d, want start of forward marker; got %q", qb, body[qb:])
+	}
+	if eb := editableBoundary(body); eb > qb {
+		t.Fatalf("editableBoundary %d should not exceed the forward marker at %d", eb, qb)
+	}
+}
+
+func TestBuildHTMLBody(t *testing.T) {
+	m := model.Message{FromName: "Alice", FromAddr: "a@x.com", InternalDate: time.Date(2026, 7, 6, 9, 0, 0, 0, time.UTC)}
+	quote := quoteOriginal(m, "original text")
+	quoteHTML := "<div><b>original</b> text</div>"
+
+	t.Run("unedited quote embeds original HTML", func(t *testing.T) {
+		body := "my reply\n" + quote
+		got := buildHTMLBody(body, quote, quoteHTML)
+		if !strings.Contains(got, "<blockquote") || !strings.Contains(got, quoteHTML) {
+			t.Fatalf("expected blockquoted original HTML:\n%s", got)
+		}
+		if !strings.Contains(got, "my reply") || !strings.Contains(got, "wrote:") {
+			t.Fatalf("missing user text or attribution:\n%s", got)
+		}
+		if strings.Contains(got, "&gt; original text") {
+			t.Fatal("plain quote lines leaked into the rich-quote rendering")
+		}
+	})
+	t.Run("edited quote falls back to text rendering", func(t *testing.T) {
+		body := "my reply\n" + strings.Replace(quote, "original", "edited", 1)
+		got := buildHTMLBody(body, quote, quoteHTML)
+		if strings.Contains(got, "<blockquote") {
+			t.Fatalf("edited quote must not use the original HTML:\n%s", got)
+		}
+		if !strings.Contains(got, "&gt; edited text") {
+			t.Fatalf("expected escaped text quote:\n%s", got)
+		}
+	})
+	t.Run("no quote renders whole body", func(t *testing.T) {
+		got := buildHTMLBody("just text\nwith https://example.com link", "", "")
+		if !strings.Contains(got, `<a href="https://example.com">`) {
+			t.Fatalf("expected linkified body:\n%s", got)
+		}
+		if !strings.Contains(got, "<br>") {
+			t.Fatalf("expected <br> line breaks:\n%s", got)
+		}
+	})
+	t.Run("forward embeds original HTML unquoted", func(t *testing.T) {
+		fwd := forwardOriginal(m, "original text")
+		body := "FYI\n" + fwd
+		got := buildHTMLBody(body, fwd, quoteHTML)
+		if !strings.Contains(got, quoteHTML) {
+			t.Fatalf("expected original HTML:\n%s", got)
+		}
+		if strings.Contains(got, "<blockquote") {
+			t.Fatalf("forward must not blockquote:\n%s", got)
+		}
+		if !strings.Contains(got, "Forwarded message") {
+			t.Fatalf("missing forwarded header block:\n%s", got)
+		}
+	})
+}
+
+func TestHTMLToTextPreservesLinks(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{"link with text", `<p>see <a href="https://example.com/x">the docs</a> now</p>`, "see the docs (https://example.com/x) now"},
+		{"link text is url", `<a href="https://example.com">https://example.com</a>`, "https://example.com"},
+		{"non-http scheme dropped", `<a href="mailto:x@y">mail me</a>`, "mail me"},
+		{"blocks become newlines", "<div>one</div><div>two</div>", "one\ntwo"},
+		{"style stripped", "<style>.x{color:red}</style><p>body</p>", "body"},
+		{"plain text unharmed", "already plain\ntext", "already plain\ntext"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := htmlToText(tc.in); got != tc.want {
+				t.Fatalf("htmlToText(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
 	}
 }

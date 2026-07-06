@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"html"
 	"log/slog"
 	"mime"
 	"net/mail"
@@ -123,6 +124,11 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 		logging.Trace("ui: compose signature resolved", "sig_len", len(w.signature))
 		init.Body = composeBodyWithSignature(init.Body, w.signature)
 	}
+
+	// Snapshot the prefilled quote region: buildHTMLBody swaps in the original's
+	// real HTML only while the plain quote is exactly this text (an edited quote
+	// must not diverge from what the HTML alternative shows).
+	initQuote := init.Body[quoteBoundary(init.Body):]
 
 	// With more than one account connected, the user picks which to send from;
 	// otherwise the message goes from the active account.
@@ -418,13 +424,15 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 	sent := false
 
 	gather := func() model.OutgoingMessage {
+		body := bodyText(buf)
 		return model.OutgoingMessage{
 			From:        selectedAccount().Email,
 			To:          strings.TrimSpace(toEntry.Text()),
 			Cc:          strings.TrimSpace(ccEntry.Text()),
 			Bcc:         strings.TrimSpace(bccEntry.Text()),
 			Subject:     subjEntry.Text(),
-			Body:        bodyText(buf),
+			Body:        body,
+			HTMLBody:    buildHTMLBody(body, initQuote, init.QuoteHTML),
 			InReplyTo:   init.InReplyTo,
 			References:  init.References,
 			ThreadID:    init.ThreadID,
@@ -1265,6 +1273,8 @@ func editableBoundary(text string) int {
 			mark(off)
 		case strings.HasPrefix(trimmed, "On ") && strings.HasSuffix(strings.TrimRight(trimmed, " "), "wrote:"):
 			mark(off) // quote attribution
+		case strings.HasPrefix(trimmed, forwardMarker):
+			mark(off) // forwarded-message block (its body is unquoted)
 		}
 		off += len(line)
 	}
@@ -1296,16 +1306,120 @@ func ensureFwdPrefix(subject string) string {
 	return "Fwd: " + subject
 }
 
-// quoteOriginal renders a simple quoted block of the original message.
+// attributionDate is the timestamp format used in quote attributions and
+// forwarded-message headers, matching the shape other clients emit and detect.
+const attributionDate = "Mon, Jan 2, 2006 at 15:04"
+
+// quoteOriginal renders the quoted block of the original message for a reply:
+// the conventional "On <date>, <sender> wrote:" attribution (with the address —
+// it disambiguates same-named senders and feeds other clients' quote-collapse
+// heuristics) followed by the body with "> " markers.
 func quoteOriginal(m model.Message, body string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "\n\nOn %s, %s wrote:\n", m.InternalDate.Format("Jan 2, 2006 15:04"), displayFrom(m))
+	fmt.Fprintf(&b, "\n\nOn %s, %s wrote:\n", m.InternalDate.Format(attributionDate), fullFrom(m))
 	for _, line := range strings.Split(body, "\n") {
 		b.WriteString("> ")
 		b.WriteString(line)
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+// forwardMarker opens the conventional forwarded-message block. Other clients
+// (and recipients' filters) key on this exact shape.
+const forwardMarker = "---------- Forwarded message ---------"
+
+// forwardOriginal renders the forwarded block of the original message: the
+// standard marker, the original's From/Date/Subject/To headers, then the body
+// unquoted — a forward passes the message along; it doesn't cite it.
+func forwardOriginal(m model.Message, body string) string {
+	var b strings.Builder
+	b.WriteString("\n\n" + forwardMarker + "\n")
+	fmt.Fprintf(&b, "From: %s\n", fullFrom(m))
+	fmt.Fprintf(&b, "Date: %s\n", m.InternalDate.Format(attributionDate))
+	fmt.Fprintf(&b, "Subject: %s\n", m.Subject)
+	if to := strings.TrimSpace(m.ToAddrs); to != "" {
+		fmt.Fprintf(&b, "To: %s\n", to)
+	}
+	b.WriteString("\n")
+	b.WriteString(body)
+	b.WriteString("\n")
+	return b.String()
+}
+
+// fullFrom renders the sender as "Name <addr>" (or the bare address) for quote
+// attributions and forwarded-message headers.
+func fullFrom(m model.Message) string {
+	if m.FromName != "" {
+		return m.FromName + " <" + m.FromAddr + ">"
+	}
+	return m.FromAddr
+}
+
+// quoteBoundary returns the byte offset where the quoted/forwarded region of a
+// composed body begins: the earliest attribution ("On … wrote:"), ">"-quoted
+// line, or forwarded-message marker. Unlike editableBoundary it ignores the
+// "-- " signature delimiter — the signature is the user's own content and
+// belongs in the authored part of the HTML alternative.
+func quoteBoundary(text string) int {
+	boundary := len(text)
+	off := 0
+	for _, line := range strings.SplitAfter(text, "\n") {
+		trimmed := strings.TrimRight(line, "\n")
+		switch {
+		case strings.HasPrefix(trimmed, ">"),
+			strings.HasPrefix(trimmed, forwardMarker),
+			strings.HasPrefix(trimmed, "On ") && strings.HasSuffix(strings.TrimRight(trimmed, " "), "wrote:"):
+			if off < boundary {
+				boundary = off
+			}
+		}
+		off += len(line)
+	}
+	return boundary
+}
+
+// textToHTML renders plain text as an HTML fragment: escaped, bare http(s)
+// URLs linkified, newlines as <br>.
+func textToHTML(s string) string {
+	return strings.ReplaceAll(linkifyText(s), "\n", "<br>\n")
+}
+
+// quoteStyle is the inline style for the reply quote's blockquote — the
+// conventional left-rule look (inline, since mail carries no stylesheet).
+const quoteStyle = "margin:0 0 0 0.8ex;border-left:1px solid #ccc;padding-left:1ex"
+
+// buildHTMLBody renders the outgoing HTML alternative for a composed plain-text
+// body. The user's own writing is escaped/linkified; the quoted original is
+// embedded as its real sanitized HTML (quoteHTML) — inside a blockquote for a
+// reply, unquoted below the header block for a forward — so the recipient sees
+// the original's formatting, not a text flattening. That swap is only safe
+// while the plain quote region is exactly what compose prefilled (initQuote):
+// if the user edited inside it, the whole body is rendered as text instead, so
+// the text and HTML alternatives never disagree.
+func buildHTMLBody(body, initQuote, quoteHTML string) string {
+	qb := quoteBoundary(body)
+	user, quote := body[:qb], body[qb:]
+	if quoteHTML == "" || strings.TrimSpace(quote) == "" ||
+		strings.TrimSpace(quote) != strings.TrimSpace(initQuote) {
+		return textToHTML(body)
+	}
+	trimmed := strings.TrimLeft(quote, "\n")
+	if strings.HasPrefix(trimmed, forwardMarker) {
+		// Header block = marker + original headers, up to the first blank line.
+		head := trimmed
+		if i := strings.Index(trimmed, "\n\n"); i >= 0 {
+			head = trimmed[:i]
+		}
+		return textToHTML(user) + "<br><br><div>" + textToHTML(head) + "</div><br>" + quoteHTML
+	}
+	// Reply: the attribution line, then the original in a blockquote.
+	attribution := trimmed
+	if i := strings.Index(trimmed, "\n"); i >= 0 {
+		attribution = trimmed[:i]
+	}
+	return textToHTML(user) + "<br><br><div>" + html.EscapeString(attribution) + "</div>" +
+		"<blockquote style=\"" + quoteStyle + "\">" + quoteHTML + "</blockquote>"
 }
 
 // openOutgoingAttachment writes a compose attachment to a cache file and opens
