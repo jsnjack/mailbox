@@ -5847,16 +5847,24 @@ func (w *window) notifyNewMail(accountID int64, m model.Message) {
 	}()
 }
 
-// mailNotification builds the new-mail notification; a non-empty gist becomes
-// a second body line with the AI's one-sentence summary.
+// mailNotification builds the new-mail notification. Sender and subject form
+// the title; the body is the snippet until the AI's one-sentence gist replaces
+// it. The gist must be the FIRST body line: GNOME's collapsed banner shows only
+// the title plus one body line, so a summary on a second line is invisible
+// until the notification is expanded in the tray — which is exactly where a
+// glanceable gist is useless.
 func (w *window) mailNotification(accountID int64, m model.Message, gist string) *gio.Notification {
-	n := gio.NewNotification("New mail")
-	body := displayFrom(m)
+	title := displayFrom(m)
 	if m.Subject != "" {
-		body += " — " + m.Subject
+		title += " — " + m.Subject
 	}
+	n := gio.NewNotification(title)
+	body := strings.TrimSpace(m.Snippet)
 	if gist != "" {
-		body += "\n" + gist
+		body = gist
+	}
+	if body == "" {
+		body = "New mail"
 	}
 	n.SetBody(body)
 	// Clicking the notification opens this message; the buttons act on it without

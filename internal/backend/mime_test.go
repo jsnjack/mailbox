@@ -1,6 +1,9 @@
 package backend
 
 import (
+	"bytes"
+	"fmt"
+	"net/mail"
 	"strings"
 	"testing"
 
@@ -243,5 +246,48 @@ func TestBuildMIMEAlternativeLongLines(t *testing.T) {
 		if len(line) > 998 {
 			t.Fatalf("wire line %d is %d bytes (limit 998)", i, len(line))
 		}
+	}
+}
+
+// TestBuildMIMEFoldsLongHeaders: References grows without bound on long
+// threads and reply-all To lists grow with participants; every header line
+// must stay within RFC 5322's 998-byte limit (target 78), and the folded
+// headers must still parse back to their original values.
+func TestBuildMIMEFoldsLongHeaders(t *testing.T) {
+	refs := make([]string, 60)
+	for i := range refs {
+		refs[i] = fmt.Sprintf("<%040d@mail.gmail.com>", i)
+	}
+	tos := make([]string, 30)
+	for i := range tos {
+		tos[i] = fmt.Sprintf("recipient-number-%02d@example-company.com", i)
+	}
+	raw, err := BuildMIME(model.OutgoingMessage{
+		From:       "me@example.com",
+		To:         strings.Join(tos, ", "),
+		Subject:    strings.Repeat("Ünïcode subject needing many encoded words ", 6),
+		Body:       "hi",
+		References: strings.Join(refs, " "),
+		InReplyTo:  refs[len(refs)-1],
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	headerEnd := strings.Index(string(raw), "\r\n\r\n")
+	for i, line := range strings.Split(string(raw[:headerEnd]), "\r\n") {
+		if len(line) > 998 {
+			t.Fatalf("header line %d is %d bytes (hard limit 998): %.80s…", i, len(line), line)
+		}
+	}
+	// The folded message must parse, and unfolding must reproduce the values.
+	msg, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("folded message does not parse: %v", err)
+	}
+	if got := msg.Header.Get("References"); got != strings.Join(refs, " ") {
+		t.Fatalf("References mangled by folding:\n got %q\nwant %q", got, strings.Join(refs, " "))
+	}
+	if addrs, err := msg.Header.AddressList("To"); err != nil || len(addrs) != len(tos) {
+		t.Fatalf("To list mangled by folding: %d addrs, err=%v", len(addrs), err)
 	}
 }

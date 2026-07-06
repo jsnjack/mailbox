@@ -30,33 +30,42 @@ func BuildMIME(m model.OutgoingMessage) ([]byte, error) {
 		"subject", m.Subject, "attachments", len(m.Attachments),
 		"threaded", m.InReplyTo != "" || m.References != "", "threadID", m.ThreadID)
 	var b bytes.Buffer
-	// Header values must be single-line. Strip any CR/LF from the value so input
-	// sourced from an untrusted place — a crafted mailto: link the app is
-	// registered to handle, or a reply header echoed from a malicious sender —
-	// can't smuggle extra headers (e.g. a hidden Bcc) into the message the user
-	// sends. Nothing we build here legitimately needs a raw newline in a value.
+	// Header values must not carry their own line breaks. Strip any CR/LF from
+	// the value so input sourced from an untrusted place — a crafted mailto:
+	// link the app is registered to handle, or a reply header echoed from a
+	// malicious sender — can't smuggle extra headers (e.g. a hidden Bcc) into
+	// the message the user sends. Folding (below) re-introduces only our own
+	// controlled CRLF+WSP breaks.
 	stripCRLF := strings.NewReplacer("\r", "", "\n", "")
 	header := func(k, v string) { fmt.Fprintf(&b, "%s: %s\r\n", k, stripCRLF.Replace(v)) }
+	// foldedHeader folds a structured header at its space-separated boundaries
+	// (RFC 5322 §2.2.3: CRLF + WSP). References grows without bound on long
+	// threads and reply-all recipient lists grow with participants; unfolded,
+	// either can exceed the 998-byte line limit (RFC 5322 §2.1.1) that strict
+	// MTAs enforce.
+	foldedHeader := func(k, v string) { fmt.Fprintf(&b, "%s: %s\r\n", k, foldValue(stripCRLF.Replace(v), len(k)+2)) }
 
-	header("From", encodeAddressList(m.From))
+	foldedHeader("From", encodeAddressList(m.From))
 	if strings.TrimSpace(m.To) != "" {
-		header("To", encodeAddressList(m.To))
+		foldedHeader("To", encodeAddressList(m.To))
 	}
 	if strings.TrimSpace(m.Cc) != "" {
-		header("Cc", encodeAddressList(m.Cc))
+		foldedHeader("Cc", encodeAddressList(m.Cc))
 	}
 	// Gmail honors a Bcc header for delivery and strips it from recipients' copies.
 	if strings.TrimSpace(m.Bcc) != "" {
-		header("Bcc", encodeAddressList(m.Bcc))
+		foldedHeader("Bcc", encodeAddressList(m.Bcc))
 	}
-	header("Subject", mime.QEncoding.Encode("utf-8", m.Subject))
+	// Q-encoded words are ≤75 chars and space-separated, so folding between
+	// them is fold-safe (RFC 2047 §2).
+	foldedHeader("Subject", mime.QEncoding.Encode("utf-8", m.Subject))
 	header("Date", time.Now().Format(time.RFC1123Z))
 	header("Message-ID", generateMessageID(m.From))
 	if m.InReplyTo != "" {
 		header("In-Reply-To", m.InReplyTo)
 	}
 	if m.References != "" {
-		header("References", m.References)
+		foldedHeader("References", m.References)
 	}
 	header("MIME-Version", "1.0")
 
@@ -190,6 +199,39 @@ func buildMultipart(b *bytes.Buffer, header func(k, v string), m model.OutgoingM
 	b.WriteString("\r\n")
 	b.Write(body.Bytes())
 	return b.Bytes(), nil
+}
+
+// foldTarget is the preferred maximum length of a header line (RFC 5322 §2.1.1
+// recommends 78 excluding CRLF); a single token longer than this stays on one
+// line — message-ids and addresses aren't splittable — which is fine as long as
+// it stays under the hard 998 limit.
+const foldTarget = 78
+
+// foldValue folds a header value at space boundaries so each output line stays
+// within foldTarget where possible. startCol is the width already used by the
+// header name and ": ". Folds are CRLF + one space of WSP; the space that
+// separated the tokens is consumed by the fold (its WSP), so unfolding
+// reproduces the original value (RFC 5322 §2.2.3).
+func foldValue(v string, startCol int) string {
+	if startCol+len(v) <= foldTarget {
+		return v
+	}
+	var out strings.Builder
+	col := startCol
+	for i, tok := range strings.Split(v, " ") {
+		if i > 0 {
+			if col+1+len(tok) > foldTarget {
+				out.WriteString("\r\n ")
+				col = 1
+			} else {
+				out.WriteString(" ")
+				col++
+			}
+		}
+		out.WriteString(tok)
+		col += len(tok)
+	}
+	return out.String()
 }
 
 // writeWrappedBase64 writes data as base64 wrapped at 76 columns (RFC 2045).
