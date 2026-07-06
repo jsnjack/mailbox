@@ -49,6 +49,26 @@ MAILBOX_OPEN_FIRST=1 MAILBOX_WIN_SIZE=1400x900 \
   socket server that accepts and never replies). Token refresh + all Gmail
   API calls hang at CONNECT; watch the trace for the bounded-timeout recovery.
 
+## Driving the UI (no xdotool on this machine)
+
+python3-Xlib with XTEST works for clicks/keys/typing — see the drive.py pattern
+(fake_input KeyPress/ButtonPress against DISPLAY=:77). Hard-won gotchas:
+
+- Xvfb has NO window manager → X input focus is PointerRoot: **keys go to the
+  window under the pointer**, not the newest window. Move/click the pointer
+  onto a window before typing at it, or keystrokes land in the main window and
+  trigger single-key shortcuts (archive/reply/translate…) on real mail.
+- The WebKit reader consumes keys when focused — click a thread-list row first
+  if a shortcut doesn't fire.
+- Shortcuts are user-rebound via `~/.config/mailbox/shortcuts.json` (copied
+  into the sandbox with the config!) — check it before assuming defaults;
+  archive is currently `a` only, not `a`/`e`.
+- Always screenshot-checkpoint before clicking Send or any destructive button.
+- Notifications: the sandbox app id has no .desktop entry, so GNOME drops its
+  banners (nothing pops on the real desktop); verify via the trace
+  ("ui: notify new mail" / "ui: notification gist") or dbus-monitor with a
+  method_call match rule (gdbus monitor only shows signals — useless here).
+
 ## Gotchas
 
 - Kill by PID you saved at launch; `pgrep -x mailbox` can also match a real
