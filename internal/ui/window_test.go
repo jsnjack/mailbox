@@ -196,3 +196,15 @@ func TestLinkifyText(t *testing.T) {
 		})
 	}
 }
+
+// cleanAIContext removes the invisible preheader padding (U+034F + NBSP runs)
+// LinkedIn-style mail packs into snippets, and collapses whitespace.
+func TestCleanAIContext(t *testing.T) {
+	in := "Senior VP of Sales at Itransition Group \u034f\u00a0\u034f\u00a0\u034f\u00a0 \u200b\u200d\ufeff tail"
+	if got := cleanAIContext(in); got != "Senior VP of Sales at Itransition Group tail" {
+		t.Fatalf("cleanAIContext = %q", got)
+	}
+	if got := cleanAIContext("  plain   text \n unchanged  "); got != "plain text unchanged" {
+		t.Fatalf("whitespace collapse = %q", got)
+	}
+}

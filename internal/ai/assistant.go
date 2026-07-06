@@ -256,7 +256,12 @@ func (a *Assistant) Categorize(ctx context.Context, items []string) ([]string, e
 		"- \"Security\": sign-in alerts, password resets, 2FA/verification codes, account or security changes.\n" +
 		"- \"Discount\": marketing that contains a usable promo/coupon/discount code or a specific limited-time offer.\n" +
 		"- \"Newsletter\": general marketing, promotions, or digests WITHOUT a specific redeemable code.\n" +
-		"- \"Notification\": automated alerts or status updates from a service (social, app, or system).\n" +
+		// "suggestions" is spelled out: social networks send connection/job
+		// suggestions that are neither alerts nor status updates, and small
+		// models read the definition literally (a LinkedIn "add Yuri" email
+		// scored "" until suggestions were named).
+		"- \"Notification\": automated notices from a service or social network — alerts, status updates, " +
+		"activity digests, or suggestions (e.g. \"people you may know\", job picks, commits pushed, CI results).\n" +
 		"If none of these clearly applies, use an empty string \"\" for that email. " +
 		"The user message is a JSON array of emails, each a short 'From / Subject / Snippet' string. " +
 		"Reply with ONLY a JSON array of the same length and order; each element is exactly one of the category " +

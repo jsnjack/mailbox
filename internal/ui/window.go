@@ -2172,7 +2172,7 @@ func (w *window) categorizeInbox() {
 		cands = append(cands, categoryCand{
 			threadID: id,
 			msgID:    m.GmailID,
-			ctx:      fmt.Sprintf("From: %s / Subject: %s / %s", displayFrom(m), m.Subject, m.Snippet),
+			ctx:      fmt.Sprintf("From: %s / Subject: %s / %s", displayFrom(m), m.Subject, cleanAIContext(m.Snippet)),
 		})
 	}
 	if len(cands) == 0 {
@@ -2336,6 +2336,23 @@ func candidatesFP(cands []categoryCand) string {
 // (no tag) for anything that doesn't match — there is no catch-all category.
 func normalizeCategory(s string) string {
 	return ai.MatchCategory(s)
+}
+
+// cleanAIContext strips the invisible preheader padding marketing mail packs
+// into snippets (LinkedIn pads with dozens of U+034F+NBSP pairs to suppress
+// preview text) and collapses whitespace. The junk wastes prompt tokens and
+// measurably changes a small model's classification.
+func cleanAIContext(s string) string {
+	s = strings.Map(func(r rune) rune {
+		switch r {
+		case '\u034f', '\u200b', '\u200c', '\u200d', '\ufeff': // grapheme joiner, zero-widths, BOM
+			return -1
+		case '\u00a0': // NBSP
+			return ' '
+		}
+		return r
+	}, s)
+	return strings.Join(strings.Fields(s), " ")
 }
 
 func (w *window) onRefresh() {
