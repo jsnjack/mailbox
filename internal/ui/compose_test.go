@@ -373,3 +373,17 @@ func TestHTMLToTextPreservesLinks(t *testing.T) {
 		})
 	}
 }
+
+func TestUndoTitle(t *testing.T) {
+	one := []model.Message{{ThreadID: "t1", Subject: "Quarterly report and a very long subject line that should be truncated nicely"}}
+	if got := undoTitle("Archived", one); !strings.HasPrefix(got, "Archived “Quarterly report") || !strings.HasSuffix(got, "…”") {
+		t.Fatalf("single: %q", got)
+	}
+	burst := []model.Message{{ThreadID: "t1", Subject: "a"}, {ThreadID: "t2", Subject: "b"}, {ThreadID: "t2", Subject: "b2"}, {ThreadID: "t3", Subject: "c"}}
+	if got := undoTitle("Archived", burst); got != "Archived 3 conversations" {
+		t.Fatalf("burst: %q", got)
+	}
+	if got := undoTitle("Archived", []model.Message{{ThreadID: "t1"}}); got != "Archived" {
+		t.Fatalf("no subject: %q", got)
+	}
+}

@@ -280,7 +280,15 @@ turns rows into checkboxes with a bulk-action bar (Archive / Trash / Mark read),
 applying the change to every selected conversation in one batched `ModifyLabels`
 call (`bulkApply`). Label changes from the bulk bar and the right-click row menu
 (`threadModifyAll`) show the same reversing "Undo" toast (`showUndoToast`) as the
-reader's archive/trash, so every archive/trash is recoverable. The AI-draft dialog offers on-demand quick replies
+reader's archive/trash, so every archive/trash is recoverable. Undo toasts
+coalesce: a burst of same-kind changes (rapid j/a triage) replaces the pending
+toast with one cumulative "Archived N conversations" whose Undo reverses the
+whole burst — ToastOverlay queues toasts, so 80 individual archives would
+otherwise drain one 6s toast at a time for minutes; a single change names its
+conversation ("Archived “subject…”", `undoTitle`). Switching accounts blanks
+the thread list immediately (the reload is async last-request-wins; under
+heavy churn the old account's threads would otherwise linger for seconds) and
+traces the click→content latency ("switch account content visible"). The AI-draft dialog offers on-demand quick replies
 (`SmartReplies`, behind a "Suggest quick replies" button).
 Compose supports attachments (a file picker adds them; `BuildMIME` emits
 multipart/mixed with base64 parts). Sending uses Undo Send: the compose closes

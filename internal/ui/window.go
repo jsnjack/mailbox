@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -176,6 +177,18 @@ type window struct {
 	// completed read only applies if its generation is still current (last
 	// click wins). Main-thread only.
 	openGen uint64
+	// Pending undo toast and the burst of same-kind label changes it reverses
+	// (rapid triage coalesces into one toast — see showUndoToast). Main-thread
+	// only.
+	undoToast  *adw.Toast
+	undoVerb   string
+	undoMsgs   []model.Message
+	undoAdd    []string
+	undoRemove []string
+	// switchStart stamps an account switch so the first thread-list render for
+	// the new account logs the end-to-end click→content latency (diagnosing
+	// "switching feels slow" from a trace). Zero when no switch is pending.
+	switchStart time.Time
 	// renderCancel cancels an in-flight render goroutine when the user opens
 	// another thread or backs out — so a hung body fetch can't pin a stale
 	// goroutine for the full fetch timeout. Main-thread only (set/cancelled
@@ -1658,7 +1671,7 @@ func (w *window) bulkApply(verb string, add, remove []string) {
 		}
 		dispatch.Main(func() {
 			w.applyLabels(msgs, add, remove, nil)
-			w.showUndoToast(fmt.Sprintf("%s %d conversations", verb, n), msgs, add, remove)
+			w.showUndoToast(verb, msgs, add, remove)
 		})
 	}()
 }
@@ -1936,6 +1949,10 @@ func dateHeaderRow(label string) *gtk.Box {
 }
 
 func (w *window) showThreads(sums []model.ThreadSummary) {
+	if !w.switchStart.IsZero() {
+		logging.Trace("ui: switch account content visible", "account", w.activeID, "n", len(sums), "dur", time.Since(w.switchStart))
+		w.switchStart = time.Time{}
+	}
 	// The "unread only" toggle filters whatever the current view produced.
 	if w.unreadOnly {
 		var filtered []model.ThreadSummary
@@ -3171,11 +3188,19 @@ func (w *window) setActiveAccount(a AccountInfo) {
 		return
 	}
 	logging.Trace("ui: switch account", "from", w.activeID, "to", a.ID, "email", a.Email)
+	w.switchStart = time.Now()
 	w.activeID = a.ID
 	w.activeEmail = a.Email
 	w.signature = w.signatureForActive() // signature the next compose appends
 	w.current = model.LabelInbox
 	w.clearReader()
+	// Blank the list NOW: its reload is async (last-request-wins), so without
+	// this the old account's threads stay on screen until the new account's
+	// query lands — instant when the store is idle, but seconds during heavy
+	// churn (a triage session's mirror queue + syncs), which reads as a laggy
+	// switch. An empty list is honest immediate feedback; rows follow.
+	w.threadByID = map[string]model.ThreadSummary{}
+	w.threadModel.Splice(0, w.threadModel.NItems(), nil)
 	w.loadLabels()
 	w.selectLabel(model.LabelInbox)
 	w.refreshOutbox()
@@ -5451,14 +5476,14 @@ func (w *window) applyLabels(msgs []model.Message, add, remove []string, after f
 // removeFromList applies a destructive label change to the whole open thread
 // (archive or trash), advances the selection to the next conversation, and shows
 // an undo toast that reverses the change.
-func (w *window) removeFromList(toastTitle string, add, remove []string) {
+func (w *window) removeFromList(verb string, add, remove []string) {
 	msgs := w.openThreadMsgs
 	if w.deps.ModifyLabels == nil || len(msgs) == 0 {
 		return
 	}
 	pos := w.threadSel.Selected()
 	w.applyLabels(msgs, add, remove, func() { w.advanceSelection(pos) })
-	w.showUndoToast(toastTitle, msgs, add, remove)
+	w.showUndoToast(verb, msgs, add, remove)
 }
 
 // advanceSelection selects the conversation that now occupies pos (the one after
@@ -5618,18 +5643,64 @@ func (w *window) reopenUnsent(accountID int64, msg model.OutgoingMessage, cause 
 
 // showUndoToast presents an undo toast that reverses the add/remove applied to
 // msgs (re-adding what was removed and vice versa).
-func (w *window) showUndoToast(title string, msgs []model.Message, add, remove []string) {
+func (w *window) showUndoToast(verb string, msgs []model.Message, add, remove []string) {
 	if w.toastOverlay == nil {
 		return
 	}
-	t := adw.NewToast(title)
+	// Coalesce a burst of same-kind changes (rapid j/e triage) into ONE toast
+	// whose Undo reverses the whole burst. ToastOverlay queues toasts one at a
+	// time, so 80 individual archives would otherwise drain one 6-second
+	// "Archived" toast at a time for minutes — each reversing only its own,
+	// unidentified conversation. A different-kind change starts a fresh burst.
+	if w.undoToast != nil && w.undoVerb == verb &&
+		slices.Equal(w.undoAdd, add) && slices.Equal(w.undoRemove, remove) {
+		w.undoMsgs = append(w.undoMsgs, msgs...)
+		old := w.undoToast
+		w.undoToast = nil // detach before Dismiss so its dismissed-handler keeps the burst
+		old.Dismiss()
+	} else {
+		w.undoMsgs = append([]model.Message(nil), msgs...)
+		w.undoVerb, w.undoAdd, w.undoRemove = verb, add, remove
+	}
+	burst := w.undoMsgs
+	t := adw.NewToast(undoTitle(verb, burst))
 	t.SetButtonLabel("Undo")
 	t.SetTimeout(6)
 	t.ConnectButtonClicked(func() {
-		logging.Trace("ui: undo", "title", title, "n", len(msgs), "add", add, "remove", remove)
-		w.applyLabels(msgs, remove, add, nil) // swap to reverse the change
+		logging.Trace("ui: undo", "verb", verb, "n", len(burst), "add", add, "remove", remove)
+		w.applyLabels(burst, remove, add, nil) // swap to reverse the change
 	})
+	t.ConnectDismissed(func() {
+		// The burst ends when its toast leaves the screen (timeout, close, or
+		// undo) — not when a coalescing replacement dismisses the old toast
+		// (w.undoToast already points elsewhere then).
+		if w.undoToast == t {
+			w.undoToast, w.undoMsgs = nil, nil
+		}
+	})
+	w.undoToast = t
 	w.toastOverlay.AddToast(t)
+}
+
+// undoTitle names an undo toast: one conversation is identified by its subject
+// ("don't know which email the Undo applies to" is worse than a long toast), a
+// burst by its conversation count.
+func undoTitle(verb string, msgs []model.Message) string {
+	threads := map[string]bool{}
+	for _, m := range msgs {
+		threads[m.ThreadID] = true
+	}
+	if len(threads) > 1 {
+		return fmt.Sprintf("%s %d conversations", verb, len(threads))
+	}
+	subject := strings.TrimSpace(msgs[len(msgs)-1].Subject)
+	if subject == "" {
+		return verb
+	}
+	if r := []rune(subject); len(r) > 45 {
+		subject = string(r[:44]) + "…"
+	}
+	return verb + " “" + subject + "”"
 }
 
 // subscribe refreshes label counts when the sync engine reports changes. The
