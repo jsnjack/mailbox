@@ -313,12 +313,11 @@ func launchUI(mailto string) error {
 			}
 		}
 		accountsMu.Unlock()
-		// Include AI provider traffic so "data transferred" reflects all network
-		// activity, not just Gmail.
+		// AI traffic gets its own counters (and status-bar line) rather than
+		// being folded invisibly into the mail-API numbers.
 		if deps.Assistant != nil {
-			in, out := deps.Assistant.Transferred()
-			s.BytesIn += in
-			s.BytesOut += out
+			s.AIRequests = deps.Assistant.Requests()
+			s.AIBytesIn, s.AIBytesOut = deps.Assistant.Transferred()
 		}
 		return s
 	}

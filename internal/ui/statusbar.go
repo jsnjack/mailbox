@@ -322,12 +322,18 @@ func (w *window) refreshStatusStats() {
 				fmt.Sprintf("API: %d requests · %d quota units (of 6000/min)", s.Requests, s.QuotaUnits),
 				fmt.Sprintf("Transferred: ↓ %s · ↑ %s", humanBytes(s.BytesIn), humanBytes(s.BytesOut)))
 		}
+		if s.AIRequests > 0 {
+			lines = append(lines,
+				fmt.Sprintf("AI: %d requests · ↓ %s · ↑ %s", s.AIRequests, humanBytes(s.AIBytesIn), humanBytes(s.AIBytesOut)))
+		}
 		lines = append(lines, fmt.Sprintf("Cache: %s messages · DB %s", humanCount(s.Messages), humanBytes(s.DBBytes)))
 		if s.CacheBytes > 0 {
 			lines = append(lines, fmt.Sprintf("Attachments: %s", humanBytes(s.CacheBytes)))
 		}
 		logging.Trace("ui: refresh session stats", "requests", s.Requests, "quota", s.QuotaUnits,
-			"bytes_in", s.BytesIn, "bytes_out", s.BytesOut, "messages", s.Messages, "db_bytes", s.DBBytes, "cache_bytes", s.CacheBytes)
+			"bytes_in", s.BytesIn, "bytes_out", s.BytesOut,
+			"ai_requests", s.AIRequests, "ai_bytes_in", s.AIBytesIn, "ai_bytes_out", s.AIBytesOut,
+			"messages", s.Messages, "db_bytes", s.DBBytes, "cache_bytes", s.CacheBytes)
 		text := strings.Join(lines, "\n")
 		dispatch.Main(func() { w.statusStatsLabel.SetText(text) })
 	}()

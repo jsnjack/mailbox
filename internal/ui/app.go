@@ -105,11 +105,14 @@ type FolderEmptier func(ctx context.Context, accountID int64, labelID string) (i
 type StatusStats struct {
 	Requests   int64 // Gmail API requests issued this session
 	QuotaUnits int64 // Gmail API quota units spent this session
-	BytesIn    int64 // bytes received from the Gmail API
-	BytesOut   int64 // bytes sent to the Gmail API
+	BytesIn    int64 // bytes received from the mail APIs (Gmail/IMAP)
+	BytesOut   int64 // bytes sent to the mail APIs (Gmail/IMAP)
 	DBBytes    int64 // size of the SQLite cache on disk
 	CacheBytes int64 // size of the attachment cache on disk
 	Messages   int64 // cached message count
+	AIRequests int64 // AI requests issued this session (all ops)
+	AIBytesIn  int64 // bytes received from the AI provider(s)
+	AIBytesOut int64 // bytes sent to the AI provider(s)
 }
 
 // Deps are the dependencies the UI needs. FetchBody, ModifyLabels and Hub may be

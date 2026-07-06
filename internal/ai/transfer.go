@@ -55,11 +55,15 @@ func (b *countingBody) Read(p []byte) (int, error) {
 
 func (b *countingBody) Close() error { return b.rc.Close() }
 
-// Transferred returns the bytes received/sent by the assistant's provider so
-// far (0,0 when the provider doesn't track it).
+// Transferred returns the bytes received/sent by AI providers this session:
+// the current provider's counters plus the baseline rolled over from providers
+// swapped out by a live settings change.
 func (a *Assistant) Transferred() (in, out int64) {
+	in, out = a.baseIn.Load(), a.baseOut.Load()
 	if r, ok := a.provider().(interface{ transfer() (int64, int64) }); ok {
-		return r.transfer()
+		i, o := r.transfer()
+		in += i
+		out += o
 	}
-	return 0, 0
+	return in, out
 }

@@ -301,8 +301,10 @@ sweeper (`SweepOutbox`, ~45s); pending/failed sends are surfaced by an
 `adw.Banner` over the thread list and an Outbox dialog (per-item retry/discard
 plus "send now"). A bottom status bar shows what the app is doing — the current
 operation with a spinner/progress bar (left) and live cumulative metrics (right:
-bytes transferred, Gmail API requests + quota units, DB size, cached-message
-count) — plus an expandable timestamped activity log. Background layers report
+bytes transferred, Gmail API requests + quota units, AI requests + AI bytes
+(`Assistant.Requests`/`Transferred` — counted in the Assistant so they survive a
+live provider swap), DB size, cached-message count) — plus an expandable
+timestamped activity log. Every AI op is bracketed into it via `aiActivity`. Background layers report
 transient activity to a headless `activity.Hub` (`deps.Activity`) that the bar
 drains via `dispatch`; the AI ops the UI brackets directly; metrics come from
 per-account `gmailapi.Stats` (a byte-counting transport + request/quota counters)

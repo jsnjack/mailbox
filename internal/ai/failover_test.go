@@ -156,3 +156,39 @@ func TestAssistantSetProvider(t *testing.T) {
 		t.Fatal("old provider used after swap")
 	}
 }
+
+// transferStub is a Provider whose byte counters are fixed.
+type transferStub struct {
+	fakeProvider
+	in, out int64
+}
+
+func (t *transferStub) transfer() (int64, int64) { return t.in, t.out }
+
+// Session AI stats: every op counts a request, and byte counters survive a
+// live provider swap (the old provider's total rolls into the baseline).
+func TestAssistantSessionStats(t *testing.T) {
+	p1 := &transferStub{fakeProvider: fakeProvider{chunks: []Chunk{{Text: `["Receipt"]`}}}, in: 100, out: 40}
+	a := NewAssistant(p1)
+	if _, err := a.Categorize(context.Background(), []string{"a"}); err != nil {
+		t.Fatalf("Categorize: %v", err)
+	}
+	if got := a.Requests(); got != 1 {
+		t.Fatalf("Requests = %d, want 1", got)
+	}
+	if in, out := a.Transferred(); in != 100 || out != 40 {
+		t.Fatalf("Transferred = %d/%d", in, out)
+	}
+
+	p2 := &transferStub{fakeProvider: fakeProvider{chunks: []Chunk{{Text: "ok"}}}, in: 7, out: 3}
+	a.SetProvider(p2)
+	if in, out := a.Transferred(); in != 107 || out != 43 {
+		t.Fatalf("Transferred after swap = %d/%d, want 107/43 (baseline + new)", in, out)
+	}
+	if err := a.Ping(context.Background()); err != nil {
+		t.Fatalf("Ping: %v", err)
+	}
+	if got := a.Requests(); got != 2 {
+		t.Fatalf("Requests after ping = %d, want 2", got)
+	}
+}

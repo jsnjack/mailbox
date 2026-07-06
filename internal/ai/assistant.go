@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jsnjack/mailbox/internal/logging"
@@ -13,19 +14,30 @@ import (
 
 // Assistant builds task-specific prompts on top of a Provider. The provider is
 // swappable at runtime (SetProvider), so Preferences changes apply to a live
-// Assistant without a restart.
+// Assistant without a restart. The Assistant owns the session-cumulative AI
+// counters (requests, transferred-bytes baseline) so the status bar's numbers
+// survive a provider swap instead of resetting with the new provider object.
 type Assistant struct {
 	mu sync.RWMutex
 	p  Provider
+
+	reqs            atomic.Int64 // AI requests issued this session
+	baseIn, baseOut atomic.Int64 // bytes from providers swapped out earlier
 }
 
 // NewAssistant wraps a provider.
 func NewAssistant(p Provider) *Assistant { return &Assistant{p: p} }
 
 // SetProvider swaps the underlying provider. In-flight requests finish on the
-// provider they started with; new requests use p.
+// provider they started with; new requests use p. The outgoing provider's byte
+// counters roll into the session baseline so cumulative stats keep counting.
 func (a *Assistant) SetProvider(p Provider) {
 	a.mu.Lock()
+	if r, ok := a.p.(interface{ transfer() (int64, int64) }); ok {
+		in, out := r.transfer()
+		a.baseIn.Add(in)
+		a.baseOut.Add(out)
+	}
 	a.p = p
 	a.mu.Unlock()
 	logging.Trace("ai: provider swapped", "provider", p.Name())
@@ -36,6 +48,20 @@ func (a *Assistant) provider() Provider {
 	defer a.mu.RUnlock()
 	return a.p
 }
+
+// stream is the single gate every Assistant op calls through: it counts the
+// request (for the status bar's session stats) and dispatches with options.
+func (a *Assistant) stream(ctx context.Context, system string, msgs []Msg, opts ...Options) (<-chan Chunk, error) {
+	a.reqs.Add(1)
+	o := Options{}
+	if len(opts) > 0 {
+		o = opts[0]
+	}
+	return streamWith(a.provider(), ctx, system, msgs, o)
+}
+
+// Requests returns how many AI requests this session has issued.
+func (a *Assistant) Requests() int64 { return a.reqs.Load() }
 
 // ProviderName returns the underlying provider's name.
 func (a *Assistant) ProviderName() string { return a.provider().Name() }
@@ -58,7 +84,7 @@ func (a *Assistant) TranslateSegments(ctx context.Context, segments []string, ta
 		"same length and order, where each element is the translation of the corresponding input snippet. " +
 		"Leave snippets that are URLs, email addresses, numbers, or pure symbols unchanged. Do not merge or " +
 		"split snippets. No commentary and no code fences."
-	ch, err := a.provider().Stream(ctx, system, []Msg{{Role: RoleUser, Content: string(payload)}})
+	ch, err := a.stream(ctx, system, []Msg{{Role: RoleUser, Content: string(payload)}})
 	if err != nil {
 		logging.Trace("ai: translate segments failed", "op", "TranslateSegments", "err", err)
 		return nil, err
@@ -176,7 +202,7 @@ func (a *Assistant) SmartReplies(ctx context.Context, threadContext string) ([]s
 	system := "You are an email assistant. Suggest 3 short, distinct, ready-to-send replies to the latest " +
 		"message in this thread — each a single natural sentence (under about 12 words), in the thread's " +
 		"language. Reply with ONLY a JSON array of exactly 3 strings: no commentary, no code fences."
-	ch, err := a.provider().Stream(ctx, system, []Msg{{Role: RoleUser, Content: threadContext}})
+	ch, err := a.stream(ctx, system, []Msg{{Role: RoleUser, Content: threadContext}})
 	if err != nil {
 		logging.Trace("ai: smart replies failed", "op", "SmartReplies", "err", err)
 		return nil, err
@@ -270,7 +296,7 @@ func (a *Assistant) Categorize(ctx context.Context, items []string) ([]string, e
 	// local models sampled at the server default flip between the right
 	// category and "" for the same email run-to-run.
 	zero := 0.0
-	ch, err := streamWith(a.provider(), ctx, system, []Msg{{Role: RoleUser, Content: string(payload)}}, Options{Temperature: &zero})
+	ch, err := a.stream(ctx, system, []Msg{{Role: RoleUser, Content: string(payload)}}, Options{Temperature: &zero})
 	if err != nil {
 		logging.Trace("ai: categorize failed", "op", "Categorize", "err", err)
 		return nil, err
@@ -396,7 +422,7 @@ func (a *Assistant) Proofread(ctx context.Context, text string) (<-chan Chunk, e
 		"text. Preserve the meaning, tone, language, line breaks, any quoted lines (those starting with '>'), " +
 		"and any signature, exactly. Return only the corrected text — no commentary, no surrounding quotes, no " +
 		"code fences."
-	return a.provider().Stream(ctx, system, []Msg{{Role: RoleUser, Content: text}})
+	return a.stream(ctx, system, []Msg{{Role: RoleUser, Content: text}})
 }
 
 // AnalyzeEmail streams a phishing/scam risk assessment of an email. emailContext
@@ -412,7 +438,7 @@ func (a *Assistant) AnalyzeEmail(ctx context.Context, emailContext string) (<-ch
 		"result and warnings. Reply with a first line that is exactly one of: 'Verdict: Looks legitimate', " +
 		"'Verdict: Be cautious', or 'Verdict: Likely phishing'. Then give 2-4 short bullet points (each " +
 		"starting with '- ') explaining why. Be concise and factual; do not invent details."
-	return a.provider().Stream(ctx, system, []Msg{{Role: RoleUser, Content: emailContext}})
+	return a.stream(ctx, system, []Msg{{Role: RoleUser, Content: emailContext}})
 }
 
 // Ping issues a tiny request to verify the provider, endpoint, and key actually
@@ -420,7 +446,7 @@ func (a *Assistant) AnalyzeEmail(ctx context.Context, emailContext string) (<-ch
 func (a *Assistant) Ping(ctx context.Context) error {
 	start := time.Now()
 	logging.Trace("ai: ping", "op", "Ping", "provider", a.provider().Name())
-	ch, err := a.provider().Stream(ctx, "Reply with the single word OK.", []Msg{{Role: RoleUser, Content: "ping"}})
+	ch, err := a.stream(ctx, "Reply with the single word OK.", []Msg{{Role: RoleUser, Content: "ping"}})
 	if err != nil {
 		logging.Trace("ai: ping failed", "op", "Ping", "dur", time.Since(start), "err", err)
 		return err
@@ -447,7 +473,7 @@ func (a *Assistant) SummarizeThread(ctx context.Context, threadContext string) (
 		"factual. Always write the summary in English, even when the thread is in another language. Output " +
 		"only the bullet points — no heading, no preamble such as 'Here is', and no code fences."
 	user := "Email thread to summarize:\n\n" + threadContext
-	return a.provider().Stream(ctx, system, []Msg{{Role: RoleUser, Content: user}})
+	return a.stream(ctx, system, []Msg{{Role: RoleUser, Content: user}})
 }
 
 // DraftNew streams a brand-new email body from an instruction (what the user
@@ -469,7 +495,7 @@ func (a *Assistant) DraftNew(ctx context.Context, subject, instruction string, o
 	}
 	logging.Trace("ai: draft new", "op", "DraftNew", "provider", a.provider().Name(),
 		"omitSignature", omitSignature, "subject", subject, "prompt", logging.Body(user))
-	return a.provider().Stream(ctx, system, []Msg{{Role: RoleUser, Content: user}})
+	return a.stream(ctx, system, []Msg{{Role: RoleUser, Content: user}})
 }
 
 // GenerateSubject returns a concise subject line for the given email body. The
@@ -482,7 +508,7 @@ func (a *Assistant) GenerateSubject(ctx context.Context, body string) (string, e
 	system := "You write a concise, specific email subject line for the email body the user provides. " +
 		"Reply with ONLY the subject line: a short noun phrase (ideally under 8 words), in the body's " +
 		"language, with no surrounding quotes, no 'Subject:' prefix, and no commentary."
-	ch, err := a.provider().Stream(ctx, system, []Msg{{Role: RoleUser, Content: body}})
+	ch, err := a.stream(ctx, system, []Msg{{Role: RoleUser, Content: body}})
 	if err != nil {
 		logging.Trace("ai: generate subject failed", "op", "GenerateSubject", "err", err)
 		return "", err
@@ -528,7 +554,7 @@ func (a *Assistant) DraftReply(ctx context.Context, threadContext, instruction s
 	}
 	logging.Trace("ai: draft reply", "op", "DraftReply", "provider", a.provider().Name(),
 		"omitSignature", omitSignature, "instruction", instruction, "prompt", logging.Body(user))
-	return a.provider().Stream(ctx, system, []Msg{{Role: RoleUser, Content: user}})
+	return a.stream(ctx, system, []Msg{{Role: RoleUser, Content: user}})
 }
 
 // SnoozeSuggestion is one AI-proposed wake time with its rationale.
@@ -553,7 +579,7 @@ func (a *Assistant) SuggestSnooze(ctx context.Context, now time.Time, emailConte
 		"before at 09:00. For a deadline, the day before at 09:00. For a delivery or travel date, that " +
 		"morning. Every time must be in the future. If the email suggests no particular time, reply " +
 		"exactly: none"
-	ch, err := a.provider().Stream(ctx, system, []Msg{{Role: RoleUser, Content: emailContext}})
+	ch, err := a.stream(ctx, system, []Msg{{Role: RoleUser, Content: emailContext}})
 	if err != nil {
 		logging.Trace("ai: suggest snooze failed", "op", "SuggestSnooze", "err", err)
 		return nil, err
@@ -602,7 +628,7 @@ func (a *Assistant) BriefSummary(ctx context.Context, emailContext string) (stri
 	system := "Summarize this email in ONE very short sentence, at most 12 words, in the email's " +
 		"language. State the gist (what they want / what happened), not that it is an email. " +
 		"Reply with only that sentence — no preamble, no quotes."
-	ch, err := a.provider().Stream(ctx, system, []Msg{{Role: RoleUser, Content: emailContext}})
+	ch, err := a.stream(ctx, system, []Msg{{Role: RoleUser, Content: emailContext}})
 	if err != nil {
 		logging.Trace("ai: brief summary failed", "op", "BriefSummary", "err", err)
 		return "", err
