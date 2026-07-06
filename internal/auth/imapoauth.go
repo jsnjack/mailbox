@@ -75,7 +75,7 @@ func OAuthTokenSourceFor(ctx context.Context, conf *oauth2.Config, service, emai
 		return nil, fmt.Errorf("load oauth refresh token for %q: %w", email, err)
 	}
 	seed := &oauth2.Token{RefreshToken: rt, Expiry: expiry}
-	base := &persistingTokenSource{service: service, email: email, last: rt, src: conf.TokenSource(ctx, seed)}
+	base := &persistingTokenSource{service: service, email: email, last: rt, src: conf.TokenSource(refreshContext(ctx), seed)}
 	logging.TraceContext(ctx, "auth: imap oauth token source built", "service", service, "email", email, "seedExpiry", expiry, "tokenLen", len(rt))
 	return oauth2.ReuseTokenSource(seed, base), nil
 }

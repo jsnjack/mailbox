@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -37,6 +38,23 @@ func IsAuthError(err error) bool {
 // keyringService is the Secret Service collection key under which refresh tokens
 // are stored, one item per account email.
 const keyringService = "mailbox"
+
+// refreshTimeout bounds the whole token-refresh POST. Every API request passes
+// through oauth2.Transport.RoundTrip → Source.Token(), which takes no context —
+// neither the per-request context nor the transport stall watchdog can cancel
+// it, and oauth2.ReuseTokenSource serializes all callers behind one mutex. An
+// unbounded refresh on a half-open connection (suspend/resume, network switch)
+// therefore wedges every request for the account indefinitely. The refresh is a
+// tiny POST, so a whole-request timeout is safe here (unlike the API transport,
+// where it would kill large attachment transfers — see gmailapi.NewService).
+// A var, not a const, so tests can shrink it.
+var refreshTimeout = 30 * time.Second
+
+// refreshContext returns ctx with a dedicated bounded HTTP client for the
+// oauth2 token refresh (oauth2 uses http.DefaultClient — no timeout — otherwise).
+func refreshContext(ctx context.Context) context.Context {
+	return context.WithValue(ctx, oauth2.HTTPClient, &http.Client{Timeout: refreshTimeout})
+}
 
 // SaveRefreshToken stores the account's refresh token in the OS keyring.
 func SaveRefreshToken(email, refreshToken string) error {
@@ -80,7 +98,7 @@ func TokenSource(ctx context.Context, cc ClientConfig, email string, expiry time
 	}
 	conf := oauthConfig(cc, "") // redirect is unused for refresh
 	seed := &oauth2.Token{RefreshToken: rt, Expiry: expiry}
-	base := &persistingTokenSource{service: keyringService, email: email, last: rt, src: conf.TokenSource(ctx, seed)}
+	base := &persistingTokenSource{service: keyringService, email: email, last: rt, src: conf.TokenSource(refreshContext(ctx), seed)}
 	logging.Trace("auth: token source built", "service", keyringService, "email", email, "seedExpiry", expiry)
 	return oauth2.ReuseTokenSource(seed, base), nil
 }

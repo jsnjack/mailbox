@@ -8,3 +8,4 @@ mailbox.db
 credentials.json
 client_secret*.json
 dist/
+.claude/worktrees/

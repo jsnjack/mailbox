@@ -3514,9 +3514,16 @@ func (w *window) renderConversation(msgs []model.Message) {
 		fetchCtx, cancelFetch := context.WithTimeout(renderCtx, 60*time.Second)
 		defer cancelFetch()
 		fetched := 0
-		fetchFailed := map[string]bool{} // gmailID → true when its body fetch failed
-		var fetchFailedMu sync.Mutex     // guards fetchFailed across the fetch goroutines
+		// fetchFailed marks messages whose body fetch failed or never finished
+		// within the deadline; their sections render the snippet fallback and are
+		// not cached. It is built once after the bounded wait below, so the reads
+		// further down are race-free without a lock.
+		fetchFailed := map[string]bool{}
 		if w.deps.FetchBody != nil {
+			var (
+				okMu  sync.Mutex
+				okIDs = map[string]bool{} // gmailID → body fetch completed successfully
+			)
 			sem := make(chan struct{}, 6)
 			var wg sync.WaitGroup
 			for _, m := range msgs {
@@ -3525,20 +3532,47 @@ func (w *window) renderConversation(msgs []model.Message) {
 				}
 				fetched++
 				wg.Add(1)
-				sem <- struct{}{}
 				go func(m model.Message) {
 					defer wg.Done()
+					// The slot is acquired inside the goroutine (not the spawn loop)
+					// so six stuck fetches can't block spawning — and with it the
+					// bounded wait below — indefinitely.
+					select {
+					case sem <- struct{}{}:
+					case <-fetchCtx.Done():
+						return
+					}
 					defer func() { <-sem }()
 					logging.Trace("ui: fetch body", "id", m.GmailID, "account", m.AccountID)
 					if err := w.deps.FetchBody(fetchCtx, m.AccountID, m.GmailID); err != nil {
 						slog.Warn("ui: fetch body", "id", m.GmailID, "err", err)
-						fetchFailedMu.Lock()
-						fetchFailed[m.GmailID] = true
-						fetchFailedMu.Unlock()
+						return
 					}
+					okMu.Lock()
+					okIDs[m.GmailID] = true
+					okMu.Unlock()
 				}(m)
 			}
-			wg.Wait()
+			// Bounded wait: a fetch stuck in a layer that ignores cancellation (an
+			// OAuth token refresh runs before the request context exists) would
+			// otherwise block wg.Wait() forever and pin the reader on the loading
+			// placeholder. Past the deadline the fallback renders; stragglers finish
+			// (or die) in the background, and the message stays unfetched so the
+			// next open retries it.
+			fetchDone := make(chan struct{})
+			go func() { wg.Wait(); close(fetchDone) }()
+			select {
+			case <-fetchDone:
+			case <-fetchCtx.Done():
+				logging.Trace("ui: fetch bodies deadline, rendering fallback", "thread", threadID, "err", fetchCtx.Err())
+			}
+			okMu.Lock()
+			for _, m := range msgs {
+				if !m.BodyFetched && !okIDs[m.GmailID] {
+					fetchFailed[m.GmailID] = true
+				}
+			}
+			okMu.Unlock()
 		}
 		// If a newer thread was opened (renderCtx cancelled), bail before the
 		// sanitization + UI swap — the newer render owns the reader.

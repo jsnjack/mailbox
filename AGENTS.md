@@ -35,7 +35,7 @@ internal/
   config/            XDG paths + config.toml load/save
   dispatch/          THE main-thread bridge: Main(fn) → glib.IdleAdd
   store/             SQLite layer (schema, FTS5, queries) — modernc.org/sqlite
-  auth/              OAuth2 installed-app loopback + keyring-backed token source (auto-refresh, rotated-token write-back, IsAuthError detects a revoked/expired refresh token)
+  auth/              OAuth2 installed-app loopback + keyring-backed token source (auto-refresh, rotated-token write-back, IsAuthError detects a revoked/expired refresh token). The refresh POST runs on a dedicated 30s-timeout HTTP client (refreshContext): oauth2.Transport calls Token() before the request context exists and ReuseTokenSource serializes all callers behind one mutex, so an unbounded refresh on a half-open connection would wedge every request for the account.
   backend/           the provider-agnostic Backend interface the engine drives (domain-typed: model.Message/Label, opaque sync cursor) + BuildMIME (RFC 5322). No protocol specifics — Gmail today, IMAP planned.
   gmailapi/          wrapper over google.golang.org/api/gmail/v1 (semaphore, per-attempt quota budget, backoff honoring Retry-After; network errors retried for idempotent calls but not sends)
   gmailbackend/      implements backend.Backend over gmailapi.Client (owns the Gmail↔domain conversions + the history-walk → upsert/delete id set)

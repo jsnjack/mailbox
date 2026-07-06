@@ -1,10 +1,14 @@
 package auth
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/zalando/go-keyring"
 	"golang.org/x/oauth2"
@@ -51,6 +55,47 @@ func TestRefreshTokenRoundTrip(t *testing.T) {
 	}
 	if _, err := LoadRefreshToken(email); err == nil {
 		t.Fatal("expected error loading deleted token")
+	}
+}
+
+// TestRefreshTimeout verifies the token-refresh POST is bounded: a refresh
+// endpoint that never answers must surface an error instead of hanging Token()
+// (and, through ReuseTokenSource's mutex, every API request) forever.
+func TestRefreshTimeout(t *testing.T) {
+	keyring.MockInit()
+
+	hang := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-hang // never respond
+	}))
+	defer srv.Close()
+	defer close(hang)
+
+	old := refreshTimeout
+	refreshTimeout = 200 * time.Millisecond
+	defer func() { refreshTimeout = old }()
+
+	// Build the same chain TokenSource builds, with the token endpoint pointed
+	// at the hanging server (TokenSource hardcodes Google's endpoint).
+	const email = "user@example.com"
+	conf := oauthConfig(ClientConfig{ClientID: "id", ClientSecret: "secret"}, "")
+	conf.Endpoint = oauth2.Endpoint{TokenURL: srv.URL}
+	seed := &oauth2.Token{RefreshToken: "rt-123"} // no expiry → forces a refresh
+	base := &persistingTokenSource{service: keyringService, email: email, last: "rt-123", src: conf.TokenSource(refreshContext(context.Background()), seed)}
+	ts := oauth2.ReuseTokenSource(seed, base)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := ts.Token()
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected a timeout error from a hanging refresh endpoint")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Token() hung past the refresh timeout — refresh POST is unbounded")
 	}
 }
 
