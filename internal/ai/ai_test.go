@@ -128,6 +128,21 @@ func TestCategorizeTemperatureZero(t *testing.T) {
 	}
 }
 
+// A truncated batch reply (the model emitted EOS mid-array — seen from
+// Ministral-3B on 20-item batches) salvages the answered prefix instead of
+// failing the whole batch; the unanswered tail is left for the next pass.
+func TestCategorizeTruncatedBatch(t *testing.T) {
+	fp := &fakeProvider{chunks: []Chunk{{Text: "[\n\"Calendar\",\n\"\",\n\"Notifications\",\n\""}}}
+	got, err := NewAssistant(fp).Categorize(context.Background(), make([]string, 20))
+	if err != nil {
+		t.Fatalf("Categorize: %v", err)
+	}
+	// Three complete elements; the fourth was cut mid-string and is dropped.
+	if len(got) != 3 || got[0] != "Calendar" || got[1] != "" || got[2] != "Notification" {
+		t.Fatalf("salvaged prefix = %#v", got)
+	}
+}
+
 // A multi-item nested reply maps element-wise.
 func TestCategorizeNestedMulti(t *testing.T) {
 	fp := &fakeProvider{chunks: []Chunk{{Text: `[["Receipt"],[""],["Notifications"]]`}}}

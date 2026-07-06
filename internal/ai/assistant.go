@@ -306,6 +306,14 @@ func parseCategories(raw string, n int) ([]string, error) {
 			err = nil
 		}
 	}
+	if err != nil {
+		// Truncated reply: the model emitted EOS mid-array, so the closing "]"
+		// never arrived and no balanced array exists. Salvage the complete
+		// prefix — the caller stores those and leaves the rest for a later pass.
+		if prefix := truncatedStringArray(raw); len(prefix) > 0 {
+			out, err = prefix, nil
+		}
+	}
 	if err == nil {
 		for i := range out {
 			out[i] = MatchCategory(out[i])
@@ -317,6 +325,32 @@ func parseCategories(raw string, n int) ([]string, error) {
 	}
 	// Tolerate a JSON-quoted string ("Notification") or a bare word.
 	return []string{MatchCategory(stripScalar(raw))}, nil
+}
+
+// truncatedStringArray reads the longest complete prefix of string elements
+// from a JSON array whose closing bracket never arrived. Nil when raw doesn't
+// start an array of strings.
+func truncatedStringArray(raw string) []string {
+	start := strings.IndexByte(raw, '[')
+	if start < 0 {
+		return nil
+	}
+	dec := json.NewDecoder(strings.NewReader(raw[start:]))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('[') {
+		return nil
+	}
+	var out []string
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return out // truncation point (or clean "]" — but then parsing above succeeded)
+		}
+		s, ok := tok.(string)
+		if !ok {
+			return out
+		}
+		out = append(out, s)
+	}
 }
 
 // MatchCategory maps a model-produced category string onto the canonical

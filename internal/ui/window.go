@@ -2123,6 +2123,13 @@ func (w *window) renderSig(id string) string {
 // so a huge inbox can't trigger a flood of AI calls.
 const maxCategorize = 40
 
+// categorizeChunk is how many emails go into one classify request. Small local
+// models fall apart on long batches — at 20 items a 3B model emits EOS mid-array
+// (an unparseable, unterminated reply) and answers "" for everything past the
+// first few; at 5 the same emails all get real judgments. Cloud models pay a
+// few extra (cached) system-prompt tokens — correctness is worth it.
+const categorizeChunk = 5
+
 // aiRetryCooldown is how long auto-categorization waits after an AI failure
 // before trying the provider again, so a down LLM isn't hit on every refresh.
 const aiRetryCooldown = 60 * time.Second
@@ -2253,8 +2260,8 @@ func (w *window) categorizeInbox() {
 			// cooldown takes over instead of stalling every refresh.
 			aiCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 			defer cancel()
-			for start := 0; start < len(todo); start += 20 {
-				end := start + 20
+			for start := 0; start < len(todo); start += categorizeChunk {
+				end := start + categorizeChunk
 				if end > len(todo) {
 					end = len(todo)
 				}

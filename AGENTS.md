@@ -245,7 +245,10 @@ match = no tag) shown on rows — category definitions live in the prompt —
 batched and **persisted per email** keyed by the latest message's id
 (`store.{SetMessageCategory,MessageCategories}`, `message_categories` table), so
 `categorizeInbox` seeds tags from the cache for free on launch and only calls the
-AI for still-uncategorized threads (capped per pass) — each email is classified
+AI for still-uncategorized threads (capped per pass, in `categorizeChunk`=5-email
+requests — long batches make small local models truncate mid-array and answer ""
+for everything past the first few; a truncated reply's answered prefix is still
+salvaged, the rest retried next pass) — each email is classified
 once, not every launch. Gated by a Preferences toggle (`ai.Categorize` /
 `categorizeInbox`). Because results are cached, a category-prompt change won't
 re-classify existing mail on its own; the thread-list overflow menu's
