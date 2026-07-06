@@ -19,8 +19,9 @@ import (
 )
 
 // BuildMIME renders an OutgoingMessage as an RFC 5322 message (UTF-8). A
-// plain-text-only message goes out text/plain; one with an HTMLBody goes out
-// multipart/alternative (text first, HTML preferred by capable clients); one
+// plain-text-only message goes out text/plain; one with an HTMLBody or a
+// Calendar payload goes out multipart/alternative (text first, HTML preferred
+// by capable clients, inline text/calendar last for iTIP processing); one
 // with attachments wraps either shape in multipart/mixed. The body's newlines
 // are normalized to CRLF. Threading headers are included when present so
 // replies/forwards thread correctly.
@@ -70,7 +71,7 @@ func BuildMIME(m model.OutgoingMessage) ([]byte, error) {
 	header("MIME-Version", "1.0")
 
 	if len(m.Attachments) == 0 {
-		if m.HTMLBody != "" {
+		if m.HTMLBody != "" || len(m.Calendar) > 0 {
 			var body bytes.Buffer
 			mw := multipart.NewWriter(&body)
 			if err := writeAlternative(mw, m); err != nil {
@@ -104,9 +105,12 @@ func BuildMIME(m model.OutgoingMessage) ([]byte, error) {
 
 // writeAlternative writes the message body as multipart/alternative parts into
 // mw: text/plain first, then text/html (clients render the last part they
-// support, so HTML is preferred by capable ones). The HTML part is
-// quoted-printable — quoted original HTML routinely carries lines far beyond
-// SMTP's 998-byte limit, which 8bit would put on the wire verbatim.
+// support, so HTML is preferred by capable ones), then an inline text/calendar
+// iTIP part when present — servers auto-process attendee responses only from
+// an inline calendar part, and calendar-aware clients render it as the RSVP.
+// The HTML part is quoted-printable — quoted original HTML routinely carries
+// lines far beyond SMTP's 998-byte limit, which 8bit would put on the wire
+// verbatim.
 func writeAlternative(mw *multipart.Writer, m model.OutgoingMessage) error {
 	text, err := mw.CreatePart(textproto.MIMEHeader{
 		"Content-Type":              {"text/plain; charset=\"utf-8\""},
@@ -118,19 +122,37 @@ func writeAlternative(mw *multipart.Writer, m model.OutgoingMessage) error {
 	if _, err := text.Write([]byte(normalizeNewlines(m.Body))); err != nil {
 		return fmt.Errorf("write text part: %w", err)
 	}
-	htmlPart, err := mw.CreatePart(textproto.MIMEHeader{
-		"Content-Type":              {"text/html; charset=\"utf-8\""},
-		"Content-Transfer-Encoding": {"quoted-printable"},
-	})
-	if err != nil {
-		return fmt.Errorf("create html part: %w", err)
+	if m.HTMLBody != "" {
+		htmlPart, err := mw.CreatePart(textproto.MIMEHeader{
+			"Content-Type":              {"text/html; charset=\"utf-8\""},
+			"Content-Transfer-Encoding": {"quoted-printable"},
+		})
+		if err != nil {
+			return fmt.Errorf("create html part: %w", err)
+		}
+		qp := quotedprintable.NewWriter(htmlPart)
+		if _, err := qp.Write([]byte(normalizeNewlines(m.HTMLBody))); err != nil {
+			return fmt.Errorf("write html part: %w", err)
+		}
+		if err := qp.Close(); err != nil {
+			return fmt.Errorf("close html part: %w", err)
+		}
 	}
-	qp := quotedprintable.NewWriter(htmlPart)
-	if _, err := qp.Write([]byte(normalizeNewlines(m.HTMLBody))); err != nil {
-		return fmt.Errorf("write html part: %w", err)
-	}
-	if err := qp.Close(); err != nil {
-		return fmt.Errorf("close html part: %w", err)
+	if len(m.Calendar) > 0 {
+		ctype := "text/calendar; charset=\"utf-8\""
+		if m.CalendarMethod != "" {
+			ctype += "; method=" + m.CalendarMethod
+		}
+		cal, err := mw.CreatePart(textproto.MIMEHeader{
+			"Content-Type":              {ctype},
+			"Content-Transfer-Encoding": {"base64"},
+		})
+		if err != nil {
+			return fmt.Errorf("create calendar part: %w", err)
+		}
+		if err := writeWrappedBase64(cal, m.Calendar); err != nil {
+			return fmt.Errorf("encode calendar part: %w", err)
+		}
 	}
 	return nil
 }
@@ -141,9 +163,9 @@ func buildMultipart(b *bytes.Buffer, header func(k, v string), m model.OutgoingM
 	var body bytes.Buffer
 	mw := multipart.NewWriter(&body)
 
-	if m.HTMLBody != "" {
-		// Nest the text+HTML pair as one multipart/alternative part, so clients
-		// pick a body independently of the attachments.
+	if m.HTMLBody != "" || len(m.Calendar) > 0 {
+		// Nest the text+HTML(+calendar) set as one multipart/alternative part,
+		// so clients pick a body independently of the attachments.
 		var alt bytes.Buffer
 		aw := multipart.NewWriter(&alt)
 		if err := writeAlternative(aw, m); err != nil {

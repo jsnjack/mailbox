@@ -2,6 +2,7 @@ package backend
 
 import (
 	"bytes"
+	"encoding/base64"
 	"fmt"
 	"net/mail"
 	"strings"
@@ -86,6 +87,65 @@ func TestBuildMIMEWithAttachment(t *testing.T) {
 	// "hello world" base64 is "aGVsbG8gd29ybGQ=".
 	if !strings.Contains(s, "aGVsbG8gd29ybGQ=") {
 		t.Errorf("attachment bytes not present:\n%s", s)
+	}
+}
+
+// An iTIP RSVP goes out with the calendar payload as an inline
+// text/calendar; method=REPLY body part inside multipart/alternative — the
+// only shape Exchange/Google auto-process — alongside the .ics attachment.
+func TestBuildMIMEWithCalendarPart(t *testing.T) {
+	ics := []byte("BEGIN:VCALENDAR\r\nMETHOD:REPLY\r\nEND:VCALENDAR\r\n")
+	raw, err := BuildMIME(model.OutgoingMessage{
+		From:           "me@example.com",
+		To:             "organizer@example.com",
+		Subject:        "Accepted: Sync",
+		Body:           "Me has accepted the invitation: Sync",
+		Calendar:       ics,
+		CalendarMethod: "REPLY",
+		Attachments: []model.OutgoingAttachment{
+			{Filename: "response.ics", MimeType: `application/ics; name="response.ics"`, Data: ics},
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildMIME: %v", err)
+	}
+	s := string(raw)
+	if !strings.Contains(s, "Content-Type: multipart/mixed; boundary=") {
+		t.Errorf("missing mixed content type:\n%s", s)
+	}
+	if !strings.Contains(s, "Content-Type: multipart/alternative; boundary=") {
+		t.Errorf("calendar body must be nested as multipart/alternative:\n%s", s)
+	}
+	if !strings.Contains(s, `Content-Type: text/calendar; charset="utf-8"; method=REPLY`) {
+		t.Errorf("missing inline text/calendar part:\n%s", s)
+	}
+	// The inline calendar part carries the payload (base64 of the ics bytes).
+	enc := base64.StdEncoding.EncodeToString(ics)
+	if strings.Count(s, enc[:20]) < 2 { // once inline, once as the attachment
+		t.Errorf("calendar payload missing from inline part or attachment:\n%s", s)
+	}
+	// A calendar part without HTML must not emit an empty text/html part.
+	if strings.Contains(s, "text/html") {
+		t.Errorf("unexpected html part:\n%s", s)
+	}
+}
+
+// A calendar part on an attachment-less message still produces
+// multipart/alternative (not bare text/plain).
+func TestBuildMIMECalendarNoAttachments(t *testing.T) {
+	raw, err := BuildMIME(model.OutgoingMessage{
+		From: "me@example.com", To: "o@example.com", Subject: "Accepted",
+		Body: "ok", Calendar: []byte("BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n"), CalendarMethod: "REPLY",
+	})
+	if err != nil {
+		t.Fatalf("BuildMIME: %v", err)
+	}
+	s := string(raw)
+	if !strings.Contains(s, "Content-Type: multipart/alternative; boundary=") {
+		t.Errorf("missing alternative content type:\n%s", s)
+	}
+	if !strings.Contains(s, `Content-Type: text/calendar; charset="utf-8"; method=REPLY`) {
+		t.Errorf("missing text/calendar part:\n%s", s)
 	}
 }
 

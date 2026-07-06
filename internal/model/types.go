@@ -148,6 +148,13 @@ type OutgoingMessage struct {
 	// never writes it to the wire.
 	QuoteHTML   string
 	Attachments []OutgoingAttachment
+	// Calendar is an iTIP payload (an .ics REPLY) sent as an inline
+	// text/calendar body part inside the multipart/alternative — mail servers
+	// (Exchange, Google) auto-process attendee responses only from an inline
+	// calendar part, not from an attached .ics file. CalendarMethod is its
+	// iTIP method ("REPLY"), echoed in the part's Content-Type.
+	Calendar       []byte
+	CalendarMethod string
 }
 
 // Contact is a correspondent derived from cached mail, used for recipient

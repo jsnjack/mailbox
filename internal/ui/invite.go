@@ -109,6 +109,15 @@ func (w *window) showInviteCard(accountID int64, ev *ics.Event) {
 	answered := gtk.NewLabel("")
 	answered.SetXAlign(0)
 	answered.SetVisible(false)
+	// An emailed iTIP reply updates the organizer's calendar, not the copy the
+	// user's own calendar service keeps — only its own UI/API can mark that
+	// one. Say what actually happened so "accepted" isn't over-promised.
+	answeredNote := gtk.NewLabel("The reply was emailed to the organizer. Your own calendar may still show the event as unanswered.")
+	answeredNote.SetXAlign(0)
+	answeredNote.SetWrap(true)
+	answeredNote.AddCSSClass("caption")
+	answeredNote.AddCSSClass("dim-label")
+	answeredNote.SetVisible(false)
 	rsvpBtn := func(label, partstat, verb, confirmation string, suggested bool) {
 		b := gtk.NewButtonWithLabel(label)
 		if suggested {
@@ -122,6 +131,7 @@ func (w *window) showInviteCard(accountID int64, ev *ics.Event) {
 			btns.SetVisible(false)
 			answered.SetText(confirmation)
 			answered.SetVisible(true)
+			answeredNote.SetVisible(true)
 		})
 		btns.Append(b)
 	}
@@ -130,6 +140,7 @@ func (w *window) showInviteCard(accountID int64, ev *ics.Event) {
 	rsvpBtn("Decline", "DECLINED", "Declined", "You declined this invitation.", false)
 	w.inviteCard.Append(btns)
 	w.inviteCard.Append(answered)
+	w.inviteCard.Append(answeredNote)
 	w.inviteCard.SetVisible(true)
 }
 
@@ -160,15 +171,22 @@ func (w *window) rsvp(accountID int64, ev *ics.Event, partstat, verb string) boo
 		"TENTATIVE": "has tentatively accepted the invitation",
 		"DECLINED":  "has declined the invitation",
 	}[partstat]
+	reply := ics.Reply(ev, email, name, partstat, time.Now())
 	msg := model.OutgoingMessage{
 		From:    email,
 		To:      ev.Organizer,
 		Subject: verb + ": " + ev.Summary,
 		Body:    who + " " + action + ": " + ev.Summary,
+		// The response goes out the way Gmail/Outlook send RSVPs: an inline
+		// text/calendar; method=REPLY body part (the only shape Exchange and
+		// Google auto-process into the organizer's calendar) plus an .ics
+		// attachment copy for clients that only look at attachments.
+		Calendar:       reply,
+		CalendarMethod: "REPLY",
 		Attachments: []model.OutgoingAttachment{{
 			Filename: "response.ics",
-			MimeType: "text/calendar; method=REPLY; charset=UTF-8",
-			Data:     ics.Reply(ev, email, name, partstat, time.Now()),
+			MimeType: "application/ics; name=\"response.ics\"",
+			Data:     reply,
 		}},
 	}
 	w.deferSend(accountID, msg)
