@@ -41,11 +41,18 @@ func (p *anthropicProvider) transfer() (in, out int64) { return p.xfer.snapshot(
 func (p *anthropicProvider) Name() string { return "anthropic" }
 
 func (p *anthropicProvider) Stream(ctx context.Context, system string, msgs []Msg) (<-chan Chunk, error) {
+	return p.StreamOpts(ctx, system, msgs, Options{})
+}
+
+func (p *anthropicProvider) StreamOpts(ctx context.Context, system string, msgs []Msg, o Options) (<-chan Chunk, error) {
 	payload := map[string]any{
 		"model":      p.model,
 		"max_tokens": anthropicMaxTokens,
 		"stream":     true,
 		"messages":   anthropicMessages(msgs),
+	}
+	if o.Temperature != nil {
+		payload["temperature"] = *o.Temperature
 	}
 	if system != "" {
 		payload["system"] = system

@@ -15,7 +15,22 @@ import (
 type Config struct {
 	Provider string `toml:"provider"` // "openai" | "litellm" | "anthropic"
 	Endpoint string `toml:"endpoint"` // base URL including /v1
-	Model    string `toml:"model"`
+	// Model is the single-model form, kept for existing config files; Models
+	// (priority order — first is primary, the rest are fallbacks) wins when set.
+	Model  string   `toml:"model"`
+	Models []string `toml:"models,omitempty"`
+}
+
+// ModelList returns the models in priority order: Models when set, else the
+// single Model, else empty.
+func (c Config) ModelList() []string {
+	if len(c.Models) > 0 {
+		return c.Models
+	}
+	if c.Model != "" {
+		return []string{c.Model}
+	}
+	return nil
 }
 
 type fileConfig struct {
@@ -43,12 +58,13 @@ func LoadConfig(path string) (Config, error) {
 	}
 	if v := os.Getenv("MAILBOX_AI_MODEL"); v != "" {
 		cfg.Model = v
+		cfg.Models = nil // the env override pins a single model, no fallbacks
 		modelSrc = "env"
 	}
 	logging.Trace("ai: config resolved",
 		"provider", cfg.Provider, "providerSrc", providerSrc,
 		"endpoint", cfg.Endpoint, "endpointSrc", endpointSrc,
-		"model", cfg.Model, "modelSrc", modelSrc,
+		"models", cfg.ModelList(), "modelSrc", modelSrc,
 		"configured", cfg.Configured())
 	return cfg, nil
 }
@@ -56,6 +72,14 @@ func LoadConfig(path string) (Config, error) {
 // SaveConfig writes cfg as the [ai] table of the TOML file at path, creating the
 // directory if needed. The API key is never written here.
 func SaveConfig(path string, cfg Config) error {
+	// Keep the single-model field mirroring the primary, so a config written by
+	// this version still works if the binary is downgraded.
+	if list := cfg.ModelList(); len(list) > 0 {
+		cfg.Model = list[0]
+		if len(list) == 1 {
+			cfg.Models = nil
+		}
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}
@@ -76,22 +100,37 @@ func SaveConfig(path string, cfg Config) error {
 
 // Configured reports whether enough is set to build a provider.
 func (c Config) Configured() bool {
-	return c.Provider != "" && c.Endpoint != "" && c.Model != ""
+	return c.Provider != "" && c.Endpoint != "" && len(c.ModelList()) > 0
 }
 
 // NewProvider builds a Provider from cfg and the API key. "openai" and "litellm"
-// both use the OpenAI-compatible implementation.
+// both use the OpenAI-compatible implementation. With more than one model
+// configured the result is a failover chain: the primary is tried first and
+// backups take over when it is down or errors before producing content.
 func NewProvider(cfg Config, apiKey string) (Provider, error) {
+	models := cfg.ModelList()
 	logging.Trace("ai: new provider",
-		"provider", cfg.Provider, "endpoint", cfg.Endpoint, "model", cfg.Model,
+		"provider", cfg.Provider, "endpoint", cfg.Endpoint, "models", models,
 		"hasKey", apiKey != "", "keyLen", len(apiKey))
+	var build func(model string) Provider
 	switch cfg.Provider {
 	case "openai", "litellm":
-		return newOpenAIProvider(cfg.Endpoint, apiKey, cfg.Model), nil
+		build = func(model string) Provider { return newOpenAIProvider(cfg.Endpoint, apiKey, model) }
 	case "anthropic":
-		return newAnthropicProvider(cfg.Endpoint, apiKey, cfg.Model), nil
+		build = func(model string) Provider { return newAnthropicProvider(cfg.Endpoint, apiKey, model) }
 	default:
 		logging.Trace("ai: unknown provider", "provider", cfg.Provider, "err", "unsupported")
 		return nil, fmt.Errorf("unknown ai provider %q (want openai, litellm, or anthropic)", cfg.Provider)
 	}
+	if len(models) == 0 {
+		return nil, fmt.Errorf("no ai model configured")
+	}
+	if len(models) == 1 {
+		return build(models[0]), nil
+	}
+	ps := make([]Provider, len(models))
+	for i, m := range models {
+		ps[i] = build(m)
+	}
+	return newFailoverProvider(ps, models), nil
 }

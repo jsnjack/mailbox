@@ -2328,13 +2328,7 @@ func candidatesFP(cands []categoryCand) string {
 // normalizeCategory maps a model's reply to one of the known categories, or ""
 // (no tag) for anything that doesn't match — there is no catch-all category.
 func normalizeCategory(s string) string {
-	s = strings.TrimSpace(s)
-	for _, c := range ai.EmailCategories {
-		if strings.EqualFold(c, s) {
-			return c
-		}
-	}
-	return ""
+	return ai.MatchCategory(s)
 }
 
 func (w *window) onRefresh() {

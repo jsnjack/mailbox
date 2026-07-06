@@ -37,10 +37,17 @@ func (p *openAIProvider) Name() string { return "openai" }
 func (p *openAIProvider) transfer() (in, out int64) { return p.xfer.snapshot() }
 
 func (p *openAIProvider) Stream(ctx context.Context, system string, msgs []Msg) (<-chan Chunk, error) {
+	return p.StreamOpts(ctx, system, msgs, Options{})
+}
+
+func (p *openAIProvider) StreamOpts(ctx context.Context, system string, msgs []Msg, o Options) (<-chan Chunk, error) {
 	payload := map[string]any{
 		"model":    p.model,
 		"stream":   true,
 		"messages": openAIMessages(system, msgs),
+	}
+	if o.Temperature != nil {
+		payload["temperature"] = *o.Temperature
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {

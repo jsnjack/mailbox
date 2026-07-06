@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -112,24 +113,53 @@ func launchUI(mailto string) error {
 
 	// AI settings are editable regardless of account/client state.
 	if cfgPath, err := config.ConfigFilePath(); err == nil {
-		deps.AISettings = func() (string, string, string) {
+		deps.AISettings = func() (string, string, string, string) {
 			c, err := ai.LoadConfig(cfgPath)
 			if err != nil {
 				slog.Warn("load ai config", "err", err)
 			}
-			return c.Provider, c.Endpoint, c.Model
+			key, _ := keyring.Get(aiKeyringService, c.Provider)
+			return c.Provider, c.Endpoint, strings.Join(c.ModelList(), ", "), key
 		}
-		deps.SaveAISettings = func(provider, endpoint, model string) error {
-			return ai.SaveConfig(cfgPath, ai.Config{Provider: provider, Endpoint: endpoint, Model: model})
-		}
-		deps.TestAISettings = func(ctx context.Context, provider, endpoint, model string) error {
-			cfg := ai.Config{Provider: provider, Endpoint: endpoint, Model: model}
-			if !cfg.Configured() {
-				return fmt.Errorf("provider, endpoint, and model are required")
+		deps.SaveAISettings = func(provider, endpoint, models, key string) error {
+			cfg := ai.Config{Provider: provider, Endpoint: endpoint, Models: splitModels(models)}
+			if err := ai.SaveConfig(cfgPath, cfg); err != nil {
+				return err
 			}
-			key := os.Getenv("MAILBOX_AI_KEY")
+			// The key row mirrors the keyring: typed → stored (under the possibly
+			// new provider name), cleared → removed (keyless local proxies).
+			if key != "" {
+				if err := keyring.Set(aiKeyringService, provider, key); err != nil {
+					return fmt.Errorf("store AI key: %w", err)
+				}
+			} else if err := keyring.Delete(aiKeyringService, provider); err != nil && !errors.Is(err, keyring.ErrNotFound) {
+				logging.Trace("launch: delete ai key", "provider", provider, "err", err)
+			}
+			// Swap the new provider into the live assistant so the change applies
+			// now. Going from unconfigured to configured still needs a restart (the
+			// AI widgets aren't built); broken new settings keep the old provider.
+			if deps.Assistant == nil || !cfg.Configured() {
+				logging.Trace("launch: ai settings saved without live swap",
+					"assistant", deps.Assistant != nil, "configured", cfg.Configured())
+				return nil
+			}
+			if v := os.Getenv("MAILBOX_AI_KEY"); v != "" {
+				key = v // env key overrides the keyring at launch; keep the swap consistent
+			}
+			p, err := ai.NewProvider(cfg, key)
+			if err != nil {
+				return err
+			}
+			deps.Assistant.SetProvider(p)
+			return nil
+		}
+		deps.TestAISettings = func(ctx context.Context, provider, endpoint, models, key string) error {
+			cfg := ai.Config{Provider: provider, Endpoint: endpoint, Models: splitModels(models)}
+			if !cfg.Configured() {
+				return fmt.Errorf("provider, endpoint, and a model are required")
+			}
 			if key == "" {
-				key, _ = keyring.Get(aiKeyringService, provider)
+				key = os.Getenv("MAILBOX_AI_KEY")
 			}
 			p, err := ai.NewProvider(cfg, key)
 			if err != nil {
@@ -536,6 +566,18 @@ func launchUI(mailto string) error {
 	}
 
 	return ui.Run(deps, mailto)
+}
+
+// splitModels parses the Preferences dialog's comma-separated model list into
+// a clean priority-ordered slice.
+func splitModels(s string) []string {
+	var out []string
+	for _, m := range strings.Split(s, ",") {
+		if m = strings.TrimSpace(m); m != "" {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // buildAssistant constructs the AI assistant from the config file + key (keyring

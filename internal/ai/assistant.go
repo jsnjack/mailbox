@@ -5,21 +5,40 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jsnjack/mailbox/internal/logging"
 )
 
-// Assistant builds task-specific prompts on top of a Provider.
+// Assistant builds task-specific prompts on top of a Provider. The provider is
+// swappable at runtime (SetProvider), so Preferences changes apply to a live
+// Assistant without a restart.
 type Assistant struct {
-	p Provider
+	mu sync.RWMutex
+	p  Provider
 }
 
 // NewAssistant wraps a provider.
 func NewAssistant(p Provider) *Assistant { return &Assistant{p: p} }
 
+// SetProvider swaps the underlying provider. In-flight requests finish on the
+// provider they started with; new requests use p.
+func (a *Assistant) SetProvider(p Provider) {
+	a.mu.Lock()
+	a.p = p
+	a.mu.Unlock()
+	logging.Trace("ai: provider swapped", "provider", p.Name())
+}
+
+func (a *Assistant) provider() Provider {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.p
+}
+
 // ProviderName returns the underlying provider's name.
-func (a *Assistant) ProviderName() string { return a.p.Name() }
+func (a *Assistant) ProviderName() string { return a.provider().Name() }
 
 // TranslateSegments translates each text snippet into targetLang and returns the
 // translations in the same order. It sends only the text (as a compact JSON
@@ -28,7 +47,7 @@ func (a *Assistant) ProviderName() string { return a.p.Name() }
 // reinserts the results into the original markup, preserving styling.
 func (a *Assistant) TranslateSegments(ctx context.Context, segments []string, targetLang string) ([]string, error) {
 	start := time.Now()
-	logging.Trace("ai: translate segments", "op", "TranslateSegments", "provider", a.p.Name(),
+	logging.Trace("ai: translate segments", "op", "TranslateSegments", "provider", a.provider().Name(),
 		"lang", targetLang, "segments", len(segments))
 	payload, err := json.Marshal(segments)
 	if err != nil {
@@ -39,7 +58,7 @@ func (a *Assistant) TranslateSegments(ctx context.Context, segments []string, ta
 		"same length and order, where each element is the translation of the corresponding input snippet. " +
 		"Leave snippets that are URLs, email addresses, numbers, or pure symbols unchanged. Do not merge or " +
 		"split snippets. No commentary and no code fences."
-	ch, err := a.p.Stream(ctx, system, []Msg{{Role: RoleUser, Content: string(payload)}})
+	ch, err := a.provider().Stream(ctx, system, []Msg{{Role: RoleUser, Content: string(payload)}})
 	if err != nil {
 		logging.Trace("ai: translate segments failed", "op", "TranslateSegments", "err", err)
 		return nil, err
@@ -152,12 +171,12 @@ func stripListMarker(s string) string {
 // message in a thread. It returns plain strings (parsed from a JSON array).
 func (a *Assistant) SmartReplies(ctx context.Context, threadContext string) ([]string, error) {
 	start := time.Now()
-	logging.Trace("ai: smart replies", "op", "SmartReplies", "provider", a.p.Name(),
+	logging.Trace("ai: smart replies", "op", "SmartReplies", "provider", a.provider().Name(),
 		"context", logging.Body(threadContext))
 	system := "You are an email assistant. Suggest 3 short, distinct, ready-to-send replies to the latest " +
 		"message in this thread — each a single natural sentence (under about 12 words), in the thread's " +
 		"language. Reply with ONLY a JSON array of exactly 3 strings: no commentary, no code fences."
-	ch, err := a.p.Stream(ctx, system, []Msg{{Role: RoleUser, Content: threadContext}})
+	ch, err := a.provider().Stream(ctx, system, []Msg{{Role: RoleUser, Content: threadContext}})
 	if err != nil {
 		logging.Trace("ai: smart replies failed", "op", "SmartReplies", "err", err)
 		return nil, err
@@ -223,7 +242,7 @@ var EmailCategories = []string{
 // Inputs and outputs are JSON arrays so many messages classify in one call.
 func (a *Assistant) Categorize(ctx context.Context, items []string) ([]string, error) {
 	start := time.Now()
-	logging.Trace("ai: categorize", "op", "Categorize", "provider", a.p.Name(), "items", len(items))
+	logging.Trace("ai: categorize", "op", "Categorize", "provider", a.provider().Name(), "items", len(items))
 	payload, err := json.Marshal(items)
 	if err != nil {
 		return nil, fmt.Errorf("encode items: %w", err)
@@ -242,7 +261,11 @@ func (a *Assistant) Categorize(ctx context.Context, items []string) ([]string, e
 		"The user message is a JSON array of emails, each a short 'From / Subject / Snippet' string. " +
 		"Reply with ONLY a JSON array of the same length and order; each element is exactly one of the category " +
 		"strings above or \"\". No commentary, no code fences."
-	ch, err := a.p.Stream(ctx, system, []Msg{{Role: RoleUser, Content: string(payload)}})
+	// Temperature 0: classification wants the model's argmax answer. Small
+	// local models sampled at the server default flip between the right
+	// category and "" for the same email run-to-run.
+	zero := 0.0
+	ch, err := streamWith(a.provider(), ctx, system, []Msg{{Role: RoleUser, Content: string(payload)}}, Options{Temperature: &zero})
 	if err != nil {
 		logging.Trace("ai: categorize failed", "op", "Categorize", "err", err)
 		return nil, err
@@ -257,52 +280,91 @@ func (a *Assistant) Categorize(ctx context.Context, items []string) ([]string, e
 	}
 	out, err := parseCategories(b.String(), len(items))
 	logging.Trace("ai: categorize done", "op", "Categorize",
-		"bytes", b.Len(), "results", len(out), "dur", time.Since(start), "err", err)
+		"bytes", b.Len(), "reply", logging.Body(b.String()),
+		"results", len(out), "dur", time.Since(start), "err", err)
 	return out, err
 }
 
-// parseCategories reads the model's categorize reply into n category strings.
-// The normal reply is a JSON array (parseTranslatedSegments). Small models,
-// asked to classify a single email, tend to answer with a bare scalar instead
-// of a one-element array (e.g. `""` or `Notification`), which has no JSON array
-// to find. When n == 1 we salvage that: strip code fences/quotes and match the
-// remaining text against the known category set, defaulting to "" (no tag).
+// parseCategories reads the model's categorize reply into n canonical category
+// strings. The normal reply is a JSON array (parseTranslatedSegments); small
+// models also produce a nested array (`[["Notification"]]`) or, for a single
+// email, a bare scalar (`""` or `Notification`). Every element is mapped onto
+// the canonical category set via MatchCategory, so near-misses ("Notifications",
+// "category: Notification") still tag rather than silently dropping to "".
 func parseCategories(raw string, n int) ([]string, error) {
 	out, err := parseTranslatedSegments(raw)
+	if err != nil {
+		// Over-bracketed reply: a nested array of one-element arrays.
+		var nested [][]string
+		if arr := firstJSONArray(raw); arr != "" && json.Unmarshal([]byte(arr), &nested) == nil {
+			out = make([]string, len(nested))
+			for i, inner := range nested {
+				if len(inner) > 0 {
+					out[i] = inner[0]
+				}
+			}
+			err = nil
+		}
+	}
 	if err == nil {
+		for i := range out {
+			out[i] = MatchCategory(out[i])
+		}
 		return out, nil
 	}
 	if n != 1 {
 		return nil, err
 	}
 	// Tolerate a JSON-quoted string ("Notification") or a bare word.
-	s := stripScalar(raw)
+	return []string{MatchCategory(stripScalar(raw))}, nil
+}
+
+// MatchCategory maps a model-produced category string onto the canonical
+// EmailCategories entry, tolerating the near-misses small models emit: case
+// differences, surrounding quotes/punctuation, a plural ("Notifications"), or
+// the category embedded in a short phrase ("Category: Needs reply"). Returns
+// "" (no tag) when nothing matches unambiguously.
+func MatchCategory(s string) string {
+	s = strings.TrimSpace(strings.Trim(strings.TrimSpace(s), "\"'`.,:;!"))
+	if s == "" {
+		return ""
+	}
 	for _, c := range EmailCategories {
 		if strings.EqualFold(s, c) {
-			return []string{c}, nil
+			return c
 		}
 	}
-	return []string{""}, nil
+	found := ""
+	ls := strings.ToLower(s)
+	for _, c := range EmailCategories {
+		if strings.Contains(ls, strings.ToLower(c)) {
+			if found != "" {
+				return "" // two categories named — ambiguous, better no tag
+			}
+			found = c
+		}
+	}
+	return found
 }
 
 // Proofread streams a grammar- and spelling-corrected version of the user's
 // email text, preserving meaning, language, line breaks, quoted lines (starting
 // with '>'), and any signature.
 func (a *Assistant) Proofread(ctx context.Context, text string) (<-chan Chunk, error) {
-	logging.Trace("ai: proofread", "op", "Proofread", "provider", a.p.Name(),
+	logging.Trace("ai: proofread", "op", "Proofread", "provider", a.provider().Name(),
 		"bytes", len(text), "text", logging.Body(text))
 	system := "You are a proofreader for email. Correct only spelling, grammar, and punctuation in the user's " +
 		"text. Preserve the meaning, tone, language, line breaks, any quoted lines (those starting with '>'), " +
 		"and any signature, exactly. Return only the corrected text — no commentary, no surrounding quotes, no " +
 		"code fences."
-	return a.p.Stream(ctx, system, []Msg{{Role: RoleUser, Content: text}})
+	return a.provider().Stream(ctx, system, []Msg{{Role: RoleUser, Content: text}})
 }
 
 // AnalyzeEmail streams a phishing/scam risk assessment of an email. emailContext
 // is the sender, subject, body, and any automated signals (auth result,
 // heuristic warnings). The reply leads with a one-line verdict, then reasons.
 func (a *Assistant) AnalyzeEmail(ctx context.Context, emailContext string) (<-chan Chunk, error) {
-	logging.Trace("ai: analyze email", "op", "AnalyzeEmail", "provider", a.p.Name(),
+	logging.Trace("ai: analyze email", "op", "AnalyzeEmail", "provider", a.provider().Name(),
 		"bytes", len(emailContext), "context", logging.Body(emailContext))
 	system := "You are a security assistant helping a user judge whether an email is a phishing, scam, or " +
 		"social-engineering attempt. Weigh signals like a false sense of urgency or threats, requests for " +
@@ -311,15 +373,15 @@ func (a *Assistant) AnalyzeEmail(ctx context.Context, emailContext string) (<-ch
 		"result and warnings. Reply with a first line that is exactly one of: 'Verdict: Looks legitimate', " +
 		"'Verdict: Be cautious', or 'Verdict: Likely phishing'. Then give 2-4 short bullet points (each " +
 		"starting with '- ') explaining why. Be concise and factual; do not invent details."
-	return a.p.Stream(ctx, system, []Msg{{Role: RoleUser, Content: emailContext}})
+	return a.provider().Stream(ctx, system, []Msg{{Role: RoleUser, Content: emailContext}})
 }
 
 // Ping issues a tiny request to verify the provider, endpoint, and key actually
 // work. It returns the first error from the stream, or nil on success.
 func (a *Assistant) Ping(ctx context.Context) error {
 	start := time.Now()
-	logging.Trace("ai: ping", "op", "Ping", "provider", a.p.Name())
-	ch, err := a.p.Stream(ctx, "Reply with the single word OK.", []Msg{{Role: RoleUser, Content: "ping"}})
+	logging.Trace("ai: ping", "op", "Ping", "provider", a.provider().Name())
+	ch, err := a.provider().Stream(ctx, "Reply with the single word OK.", []Msg{{Role: RoleUser, Content: "ping"}})
 	if err != nil {
 		logging.Trace("ai: ping failed", "op", "Ping", "dur", time.Since(start), "err", err)
 		return err
@@ -338,7 +400,7 @@ func (a *Assistant) Ping(ctx context.Context) error {
 // someone catching up quickly. threadContext is the thread rendered as plain
 // text (oldest message first). The reply is plain text — a few "- " bullets.
 func (a *Assistant) SummarizeThread(ctx context.Context, threadContext string) (<-chan Chunk, error) {
-	logging.Trace("ai: summarize thread", "op", "SummarizeThread", "provider", a.p.Name(),
+	logging.Trace("ai: summarize thread", "op", "SummarizeThread", "provider", a.provider().Name(),
 		"bytes", len(threadContext), "context", logging.Body(threadContext))
 	system := "You are an email assistant. Summarize the following email thread for someone catching up " +
 		"quickly. Reply with 2-5 short bullet points, one per line, each starting with '- ', covering the key " +
@@ -346,7 +408,7 @@ func (a *Assistant) SummarizeThread(ctx context.Context, threadContext string) (
 		"factual. Always write the summary in English, even when the thread is in another language. Output " +
 		"only the bullet points — no heading, no preamble such as 'Here is', and no code fences."
 	user := "Email thread to summarize:\n\n" + threadContext
-	return a.p.Stream(ctx, system, []Msg{{Role: RoleUser, Content: user}})
+	return a.provider().Stream(ctx, system, []Msg{{Role: RoleUser, Content: user}})
 }
 
 // DraftNew streams a brand-new email body from an instruction (what the user
@@ -366,9 +428,9 @@ func (a *Assistant) DraftNew(ctx context.Context, subject, instruction string, o
 	if s := strings.TrimSpace(subject); s != "" {
 		user = "The email subject is: " + s + "\n\n" + user
 	}
-	logging.Trace("ai: draft new", "op", "DraftNew", "provider", a.p.Name(),
+	logging.Trace("ai: draft new", "op", "DraftNew", "provider", a.provider().Name(),
 		"omitSignature", omitSignature, "subject", subject, "prompt", logging.Body(user))
-	return a.p.Stream(ctx, system, []Msg{{Role: RoleUser, Content: user}})
+	return a.provider().Stream(ctx, system, []Msg{{Role: RoleUser, Content: user}})
 }
 
 // GenerateSubject returns a concise subject line for the given email body. The
@@ -376,12 +438,12 @@ func (a *Assistant) DraftNew(ctx context.Context, subject, instruction string, o
 // stray "Subject:" prefix, surrounding quotes, or extra lines.
 func (a *Assistant) GenerateSubject(ctx context.Context, body string) (string, error) {
 	start := time.Now()
-	logging.Trace("ai: generate subject", "op", "GenerateSubject", "provider", a.p.Name(),
+	logging.Trace("ai: generate subject", "op", "GenerateSubject", "provider", a.provider().Name(),
 		"bytes", len(body), "body", logging.Body(body))
 	system := "You write a concise, specific email subject line for the email body the user provides. " +
 		"Reply with ONLY the subject line: a short noun phrase (ideally under 8 words), in the body's " +
 		"language, with no surrounding quotes, no 'Subject:' prefix, and no commentary."
-	ch, err := a.p.Stream(ctx, system, []Msg{{Role: RoleUser, Content: body}})
+	ch, err := a.provider().Stream(ctx, system, []Msg{{Role: RoleUser, Content: body}})
 	if err != nil {
 		logging.Trace("ai: generate subject failed", "op", "GenerateSubject", "err", err)
 		return "", err
@@ -425,9 +487,9 @@ func (a *Assistant) DraftReply(ctx context.Context, threadContext, instruction s
 	if instruction != "" {
 		user += "\n\nAdditional instruction: " + instruction
 	}
-	logging.Trace("ai: draft reply", "op", "DraftReply", "provider", a.p.Name(),
+	logging.Trace("ai: draft reply", "op", "DraftReply", "provider", a.provider().Name(),
 		"omitSignature", omitSignature, "instruction", instruction, "prompt", logging.Body(user))
-	return a.p.Stream(ctx, system, []Msg{{Role: RoleUser, Content: user}})
+	return a.provider().Stream(ctx, system, []Msg{{Role: RoleUser, Content: user}})
 }
 
 // SnoozeSuggestion is one AI-proposed wake time with its rationale.
@@ -443,7 +505,7 @@ type SnoozeSuggestion struct {
 // with nil error means the email suggests nothing usable.
 func (a *Assistant) SuggestSnooze(ctx context.Context, now time.Time, emailContext string) ([]SnoozeSuggestion, error) {
 	start := time.Now()
-	logging.Trace("ai: suggest snooze", "op", "SuggestSnooze", "provider", a.p.Name(), "bytes", len(emailContext))
+	logging.Trace("ai: suggest snooze", "op", "SuggestSnooze", "provider", a.provider().Name(), "bytes", len(emailContext))
 	system := "The user snoozes an email to deal with it at the right moment. Today is " +
 		now.Format("Monday, 2 January 2006, 15:04") + " (local time). " +
 		"If the email implies good times to resurface it, reply with one to three lines, most useful " +
@@ -452,7 +514,7 @@ func (a *Assistant) SuggestSnooze(ctx context.Context, now time.Time, emailConte
 		"before at 09:00. For a deadline, the day before at 09:00. For a delivery or travel date, that " +
 		"morning. Every time must be in the future. If the email suggests no particular time, reply " +
 		"exactly: none"
-	ch, err := a.p.Stream(ctx, system, []Msg{{Role: RoleUser, Content: emailContext}})
+	ch, err := a.provider().Stream(ctx, system, []Msg{{Role: RoleUser, Content: emailContext}})
 	if err != nil {
 		logging.Trace("ai: suggest snooze failed", "op", "SuggestSnooze", "err", err)
 		return nil, err
@@ -497,11 +559,11 @@ func parseSnoozeSuggestions(s string, now time.Time) []SnoozeSuggestion {
 // notification bubble.
 func (a *Assistant) BriefSummary(ctx context.Context, emailContext string) (string, error) {
 	start := time.Now()
-	logging.Trace("ai: brief summary", "op", "BriefSummary", "provider", a.p.Name(), "bytes", len(emailContext))
+	logging.Trace("ai: brief summary", "op", "BriefSummary", "provider", a.provider().Name(), "bytes", len(emailContext))
 	system := "Summarize this email in ONE very short sentence, at most 12 words, in the email's " +
 		"language. State the gist (what they want / what happened), not that it is an email. " +
 		"Reply with only that sentence — no preamble, no quotes."
-	ch, err := a.p.Stream(ctx, system, []Msg{{Role: RoleUser, Content: emailContext}})
+	ch, err := a.provider().Stream(ctx, system, []Msg{{Role: RoleUser, Content: emailContext}})
 	if err != nil {
 		logging.Trace("ai: brief summary failed", "op", "BriefSummary", "err", err)
 		return "", err

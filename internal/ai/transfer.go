@@ -58,7 +58,7 @@ func (b *countingBody) Close() error { return b.rc.Close() }
 // Transferred returns the bytes received/sent by the assistant's provider so
 // far (0,0 when the provider doesn't track it).
 func (a *Assistant) Transferred() (in, out int64) {
-	if r, ok := a.p.(interface{ transfer() (int64, int64) }); ok {
+	if r, ok := a.provider().(interface{ transfer() (int64, int64) }); ok {
 		return r.transfer()
 	}
 	return 0, 0

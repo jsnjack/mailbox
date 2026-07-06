@@ -71,6 +71,12 @@ python3-Xlib with XTEST works for clicks/keys/typing — see the drive.py patter
 
 ## Gotchas
 
+- **The keyring is NOT sandboxed** (it rides the shared session DBus, not XDG).
+  Preferences → AI mirrors the real keyring: closing the dialog with the key
+  row cleared DELETES the real key, and typing a key stores it for real. Before
+  driving a prefs-close in a sandbox, check whether a real AI key exists
+  (`secret-tool lookup service mailbox-ai` semantics) and don't clear the row.
+
 - Kill by PID you saved at launch; `pgrep -x mailbox` can also match a real
   running instance — check `/proc/<pid>/environ` for `MAILBOX_APP_ID` first.
 - The sandbox truncates `/tmp/mailbox.log`; if you need the real session's

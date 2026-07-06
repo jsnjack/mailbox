@@ -30,15 +30,15 @@ func humanBytes(n int64) string {
 }
 
 // openSettings shows a preferences window for the AI provider config. Values are
-// saved to config.toml when the window is closed; they take effect on next launch.
+// saved when the window is closed and apply to the running app immediately.
 func (w *window) openSettings() {
 	if w.deps.AISettings == nil {
 		logging.Trace("ui: open settings skipped", "reason", "no AI settings")
 		return
 	}
-	provider, endpoint, model := w.deps.AISettings()
-	logging.Trace("ui: open settings", "provider", provider, "endpoint", endpoint, "model", model,
-		"accounts", len(w.deps.Accounts), "categorize", w.inboxCategories, "block_images", w.blockImages)
+	provider, endpoint, models, key := w.deps.AISettings()
+	logging.Trace("ui: open settings", "provider", provider, "endpoint", endpoint, "models", models,
+		"keyLen", len(key), "accounts", len(w.deps.Accounts), "categorize", w.inboxCategories, "block_images", w.blockImages)
 
 	providerRow := adw.NewEntryRow()
 	providerRow.SetTitle("Provider (openai / litellm / anthropic)")
@@ -49,15 +49,24 @@ func (w *window) openSettings() {
 	endpointRow.SetText(endpoint)
 
 	modelRow := adw.NewEntryRow()
-	modelRow.SetTitle("Model")
-	modelRow.SetText(model)
+	modelRow.SetTitle("Models (primary first, backups after — comma-separated)")
+	modelRow.SetText(models)
+
+	keyRow := adw.NewPasswordEntryRow()
+	keyRow.SetTitle("API key (stored in the system keyring)")
+	keyRow.SetText(key)
 
 	group := adw.NewPreferencesGroup()
 	group.SetTitle("AI")
-	group.SetDescription("Changes take effect after restarting Mailbox. The API key is stored separately (mailbox set-ai-key).")
+	desc := "Changes apply immediately. When the primary model fails, the next one takes over."
+	if w.deps.Assistant == nil {
+		desc += " Enabling AI for the first time takes effect after a restart."
+	}
+	group.SetDescription(desc)
 	group.Add(providerRow)
 	group.Add(endpointRow)
 	group.Add(modelRow)
+	group.Add(keyRow)
 
 	// A "Test connection" button validates the entered settings with a tiny live
 	// request; the result shows on the button itself (success/error styling, full
@@ -66,8 +75,8 @@ func (w *window) openSettings() {
 		testBtn := gtk.NewButtonWithLabel("Test connection")
 		testBtn.SetVAlign(gtk.AlignCenter)
 		testBtn.ConnectClicked(func() {
-			provider, endpoint, model := providerRow.Text(), endpointRow.Text(), modelRow.Text()
-			logging.Trace("ui: settings test AI connection", "provider", provider, "endpoint", endpoint, "model", model)
+			provider, endpoint, models, key := providerRow.Text(), endpointRow.Text(), modelRow.Text(), keyRow.Text()
+			logging.Trace("ui: settings test AI connection", "provider", provider, "endpoint", endpoint, "models", models, "keyLen", len(key))
 			testBtn.SetSensitive(false)
 			testBtn.SetLabel("Testing…")
 			testBtn.RemoveCSSClass("success")
@@ -76,7 +85,7 @@ func (w *window) openSettings() {
 			go func() {
 				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 				defer cancel()
-				err := w.deps.TestAISettings(ctx, provider, endpoint, model)
+				err := w.deps.TestAISettings(ctx, provider, endpoint, models, key)
 				dispatch.Main(func() {
 					testBtn.SetSensitive(true)
 					if err != nil {
@@ -364,9 +373,9 @@ func (w *window) openSettings() {
 	dialog.ConnectClosed(func() {
 		logging.Trace("ui: settings dialog closed, saving")
 		if w.deps.SaveAISettings != nil {
-			np, ne, nm := providerRow.Text(), endpointRow.Text(), modelRow.Text()
-			logging.Trace("ui: save AI settings", "provider", np, "endpoint", ne, "model", nm)
-			if err := w.deps.SaveAISettings(np, ne, nm); err != nil {
+			np, ne, nm, nk := providerRow.Text(), endpointRow.Text(), modelRow.Text(), keyRow.Text()
+			logging.Trace("ui: save AI settings", "provider", np, "endpoint", ne, "models", nm, "keyLen", len(nk))
+			if err := w.deps.SaveAISettings(np, ne, nm, nk); err != nil {
 				slog.Warn("ui: save settings", "err", err)
 			}
 		}

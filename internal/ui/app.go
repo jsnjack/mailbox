@@ -143,13 +143,16 @@ type Deps struct {
 	Activity *activity.Hub
 	Stats    func() StatusStats
 
-	// AISettings/SaveAISettings read and persist the [ai] config (provider,
-	// endpoint, model). Always wired, independent of whether an account exists.
-	AISettings     func() (provider, endpoint, model string)
-	SaveAISettings func(provider, endpoint, model string) error
-	// TestAISettings validates the given AI settings (plus the stored key) with a
-	// tiny live request; nil result means the connection works.
-	TestAISettings func(ctx context.Context, provider, endpoint, model string) error
+	// AISettings/SaveAISettings read and persist the [ai] config. models is the
+	// priority-ordered list as one comma-separated string (first = primary, the
+	// rest fallbacks); key is the API key (keyring-backed, "" = none). Always
+	// wired, independent of whether an account exists. Save also swaps the new
+	// provider into the live Assistant, so changes apply without a restart.
+	AISettings     func() (provider, endpoint, models, key string)
+	SaveAISettings func(provider, endpoint, models, key string) error
+	// TestAISettings validates the given AI settings (with the key as entered in
+	// the dialog) via a tiny live request; nil result means the connection works.
+	TestAISettings func(ctx context.Context, provider, endpoint, models, key string) error
 
 	// IMAP account management, for the add-account dialog. TestIMAPAccount
 	// validates a connection (login + folder list) with the given settings and

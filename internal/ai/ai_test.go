@@ -97,6 +97,12 @@ func TestCategorizeSingleSalvage(t *testing.T) {
 		{"`Needs reply`", "Needs reply"}, // code-fenced
 		{`"Receipt"`, "Receipt"},         // quoted scalar
 		{`something else`, ""},           // unknown → no tag
+		// Real replies from Ministral-3B at temperature 0: a nested array, and
+		// near-misses the canonical set must still absorb.
+		{"[[\"Notification\"]]", "Notification"},
+		{`["Notifications"]`, "Notification"},
+		{`Category: Needs reply`, "Needs reply"},
+		{`Newsletter or Notification`, ""}, // ambiguous → no tag
 	}
 	for _, tc := range cases {
 		fp := &fakeProvider{chunks: []Chunk{{Text: tc.reply}}}
@@ -107,6 +113,30 @@ func TestCategorizeSingleSalvage(t *testing.T) {
 		if len(got) != 1 || got[0] != tc.want {
 			t.Fatalf("Categorize(%q) = %#v, want [%q]", tc.reply, got, tc.want)
 		}
+	}
+}
+
+// Categorize pins temperature 0 — sampled classification flips between the
+// right category and "" run-to-run on small models.
+func TestCategorizeTemperatureZero(t *testing.T) {
+	sp := &scriptedProvider{chunks: []Chunk{{Text: `["Receipt"]`}}}
+	if _, err := NewAssistant(sp).Categorize(context.Background(), []string{"a"}); err != nil {
+		t.Fatalf("Categorize: %v", err)
+	}
+	if sp.gotOpts == nil || sp.gotOpts.Temperature == nil || *sp.gotOpts.Temperature != 0 {
+		t.Fatalf("temperature not pinned to 0: %+v", sp.gotOpts)
+	}
+}
+
+// A multi-item nested reply maps element-wise.
+func TestCategorizeNestedMulti(t *testing.T) {
+	fp := &fakeProvider{chunks: []Chunk{{Text: `[["Receipt"],[""],["Notifications"]]`}}}
+	got, err := NewAssistant(fp).Categorize(context.Background(), []string{"a", "b", "c"})
+	if err != nil {
+		t.Fatalf("Categorize: %v", err)
+	}
+	if len(got) != 3 || got[0] != "Receipt" || got[1] != "" || got[2] != "Notification" {
+		t.Fatalf("categories = %#v", got)
 	}
 }
 
@@ -322,8 +352,38 @@ func TestSaveConfigRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	if got != want {
+	if got.Provider != want.Provider || got.Endpoint != want.Endpoint || got.Model != want.Model || len(got.Models) != 0 {
 		t.Fatalf("round-trip mismatch: got %+v, want %+v", got, want)
+	}
+}
+
+// A multi-model config round-trips, mirrors the primary into the single-model
+// field (downgrade compatibility), and resolves the priority list.
+func TestSaveConfigModelsRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	in := Config{Provider: "litellm", Endpoint: "http://argus:4000/v1", Models: []string{"big-cloud", "small-local"}}
+	if err := SaveConfig(path, in); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	got, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if list := got.ModelList(); len(list) != 2 || list[0] != "big-cloud" || list[1] != "small-local" {
+		t.Fatalf("ModelList = %#v", got.ModelList())
+	}
+	if got.Model != "big-cloud" {
+		t.Fatalf("single-model mirror = %q, want primary", got.Model)
+	}
+	if !got.Configured() {
+		t.Fatal("multi-model config should be Configured")
+	}
+
+	// The env override pins a single model with no fallbacks.
+	t.Setenv("MAILBOX_AI_MODEL", "pinned")
+	got, _ = LoadConfig(path)
+	if list := got.ModelList(); len(list) != 1 || list[0] != "pinned" {
+		t.Fatalf("env override ModelList = %#v", list)
 	}
 }
 

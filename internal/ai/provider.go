@@ -35,3 +35,24 @@ type Provider interface {
 	Stream(ctx context.Context, system string, msgs []Msg) (<-chan Chunk, error)
 	Name() string
 }
+
+// Options tunes a single request. Zero values mean "provider default".
+type Options struct {
+	// Temperature pins the sampling temperature. Classification tasks set 0:
+	// small local models sampled at their server's default flip between the
+	// right answer and an empty one run-to-run.
+	Temperature *float64
+}
+
+// OptionsStreamer is an optional Provider capability for per-request Options.
+type OptionsStreamer interface {
+	StreamOpts(ctx context.Context, system string, msgs []Msg, o Options) (<-chan Chunk, error)
+}
+
+// streamWith streams via p, applying o when p supports options.
+func streamWith(p Provider, ctx context.Context, system string, msgs []Msg, o Options) (<-chan Chunk, error) {
+	if os, ok := p.(OptionsStreamer); ok {
+		return os.StreamOpts(ctx, system, msgs, o)
+	}
+	return p.Stream(ctx, system, msgs)
+}
