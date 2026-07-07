@@ -234,7 +234,17 @@ type window struct {
 	// gistRequested guards per-message gist generation (the one-line AI summary
 	// card): a message is scheduled at most once per session — a failure clears
 	// its mark so a later open retries, a success is persisted and never re-runs.
+	// Both the reader path and the new-mail notification path mark it BEFORE
+	// starting, so they never generate the same message twice concurrently
+	// (two runs yield two slightly different sentences — a visible text change).
 	gistRequested map[string]bool
+	// appliedGists holds gists already revealed in the live reader, re-asserted
+	// after every conversation swap: a re-render in flight when a gist persists
+	// (the mark-read refresh 1.5s after opening an unread thread) queried the
+	// store and snapshotted the section cache before the persist, so its swap
+	// would otherwise replace the revealed card with the hidden placeholder —
+	// the card would blink. Entries drop once a render's store query has them.
+	appliedGists map[string]string
 	// inlineByCID maps the open thread's inline-image Content-IDs to their cached
 	// files, served by the cid: URI-scheme handler (so a big inline image loads as
 	// a streamed resource, not a multi-MB base64 blob inflating the HTML).
@@ -291,6 +301,7 @@ func newWindow(app *adw.Application, deps Deps) *window {
 		manualCat:        map[string]bool{},
 		inlineRefetched:  map[string]bool{},
 		gistRequested:    map[string]bool{},
+		appliedGists:     map[string]string{},
 	}
 	w.accountNames, _ = config.LoadAccountNames()
 	w.rebuildKeymap()
@@ -3806,6 +3817,23 @@ func (w *window) renderConversation(msgs []model.Message) {
 			w.setAuthBadge(verdict)
 			w.setCaution(warnings)
 			w.setReaderHTML(out)
+			// Re-assert known gists over the fresh swap: a section may have come
+			// from the cache with its placeholder still hidden, or this render's
+			// store query may predate a gist persisted mid-render — either way
+			// the swap must not un-reveal a card. Filling an already-filled card
+			// with the same text is a no-op visually. Once the store query
+			// includes a gist, its re-apply copy is no longer needed.
+			for _, m := range msgs {
+				g, ok := gists[m.GmailID]
+				if ok {
+					delete(w.appliedGists, m.GmailID)
+				} else {
+					g = w.appliedGists[m.GmailID]
+				}
+				if g != "" {
+					w.fireGistJS(m.GmailID, g)
+				}
+			}
 			w.showThreadAttachments(atts)
 			w.showInviteCard(inviteAcct, invite)
 			if w.lastFetchFailed {
@@ -3925,9 +3953,16 @@ func (w *window) generateGists(threadID string, msgs []model.Message) {
 // scroll position. Main thread.
 func (w *window) applyGist(gmailID, threadID, gist string) {
 	w.invalidateSection(gmailID)
+	w.appliedGists[gmailID] = gist
 	if w.openThreadID != threadID {
 		return
 	}
+	w.fireGistJS(gmailID, gist)
+}
+
+// fireGistJS fills and reveals a message's gist card in the rendered reader
+// (no-op in the shell when the message isn't on screen). Main thread.
+func (w *window) fireGistJS(gmailID, gist string) {
 	idJSON, _ := json.Marshal(gmailID)
 	gistJSON, _ := json.Marshal(gist)
 	evalJS(w.webview, "window.__mbGist("+string(idJSON)+","+string(gistJSON)+");")
@@ -6069,12 +6104,22 @@ func (w *window) notifyNewMail(accountID int64, m model.Message) {
 	if w.deps.Assistant == nil || !w.inboxCategories || strings.TrimSpace(m.Snippet) == "" {
 		return
 	}
+	// Claim the message before generating (main thread): if the reader opened
+	// this mail and is already summarizing it, a second run here would produce
+	// a slightly different sentence and visibly rewrite the card.
+	if w.gistRequested[m.GmailID] {
+		logging.Trace("ui: notification gist already requested", "id", m.GmailID)
+		return
+	}
+	w.gistRequested[m.GmailID] = true
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 		gist, err := w.deps.Assistant.BriefSummary(ctx, gistContext(m))
 		if err != nil || gist == "" {
 			logging.Trace("ui: notification gist skipped", "id", m.GmailID, "err", err)
+			// Release the claim so a later thread open retries.
+			dispatch.Main(func() { delete(w.gistRequested, m.GmailID) })
 			return
 		}
 		// Persist the line so the reader's per-message summary card reuses it
@@ -6084,7 +6129,6 @@ func (w *window) notifyNewMail(accountID int64, m model.Message) {
 		}
 		dispatch.Main(func() {
 			logging.Trace("ui: notification gist", "id", m.GmailID, "gist", gist)
-			w.gistRequested[m.GmailID] = true
 			w.applyGist(m.GmailID, m.ThreadID, gist)
 			w.app.SendNotification(id, w.mailNotification(accountID, m, gist))
 		})
