@@ -473,7 +473,25 @@ func (w *window) openFromNotification(target string) {
 		slog.Warn("ui: open from notification", "id", gmailID, "err", err)
 		return
 	}
-	w.selectLabel(model.LabelInbox)
+	// Open the conversation where it actually lives: archived (or moved) between
+	// the notification and the click, it is no longer in the Inbox list — the
+	// reader would show a conversation the list doesn't contain, which reads as
+	// detached. All Mail holds everything except Trash/Spam, which are followed
+	// to their own folder.
+	label := model.LabelInbox
+	switch {
+	case hasLabel(m, model.LabelInbox):
+	case hasLabel(m, model.LabelTrash):
+		label = model.LabelTrash
+	case hasLabel(m, model.LabelSpam):
+		label = model.LabelSpam
+	default:
+		label = allMailID
+	}
+	if label != model.LabelInbox {
+		logging.Trace("ui: notification message left the inbox; following", "id", gmailID, "label", label)
+	}
+	w.selectLabel(label)
 	w.showThread(m.ThreadID)
 }
 
@@ -3311,6 +3329,10 @@ func (w *window) selectLabel(labelID string) {
 	w.searchEntry.SetText("")
 	w.suppressSearch = false
 	w.refreshList("")
+	// Keep the sidebar highlight on the chosen folder: a programmatic switch
+	// (opening an archived conversation from a notification) has no row click
+	// to move it. A no-op when the row is already selected.
+	w.restoreSidebarSelection()
 	// When collapsed, reveal the thread list for the chosen label.
 	w.outerSplit.SetShowContent(true)
 	w.saveViewState()
