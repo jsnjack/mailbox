@@ -270,6 +270,10 @@ func deleteMessageTx(ctx context.Context, tx *sql.Tx, accountID int64, gmailID s
 		return fmt.Errorf("delete message analysis: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM message_gists WHERE account_id = ? AND gmail_id = ?`, accountID, gmailID); err != nil {
+		return fmt.Errorf("delete message gist: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM thread_summaries WHERE account_id = ? AND thread_id = ?`, accountID, threadID); err != nil {
 		return fmt.Errorf("delete thread summary: %w", err)
 	}

@@ -154,6 +154,18 @@ CREATE TABLE IF NOT EXISTS message_analyses (
   PRIMARY KEY (account_id, gmail_id)
 );
 
+-- AI one-line gist per message — the same brief summary the desktop
+-- notification shows, reused as a summary card in the reader. Keyed by the
+-- message's Gmail id; a message's content is immutable, so a stored gist never
+-- goes stale. Derived from the snippet (not the body), so it survives body
+-- retention pruning.
+CREATE TABLE IF NOT EXISTS message_gists (
+  account_id      INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  gmail_id        TEXT NOT NULL,
+  gist            TEXT NOT NULL,
+  PRIMARY KEY (account_id, gmail_id)
+);
+
 -- Snoozed conversations: hidden from the inbox until `until`, then woken by a
 -- background sweeper (the thread keeps its labels — snooze only affects
 -- visibility, so nothing needs mirroring to the provider).
