@@ -2523,6 +2523,11 @@ func (w *window) buildReader() *adw.NavigationPage {
 	w.header.SetXAlign(0)
 	w.header.SetHExpand(true)
 	w.header.SetWrap(true)
+	// WordChar, not the default word-only wrap: a subject with one long
+	// unbreakable token (a CI test id, a URL) would otherwise set the label's
+	// minimum width and force the reader pane — and the window — wider,
+	// clipping the header's right edge.
+	w.header.SetWrapMode(pango.WrapWordChar)
 	// Let the user select & copy the subject and sender address from the header
 	// (the message body is in the WebView, which is already selectable).
 	w.header.SetSelectable(true)
@@ -2569,6 +2574,9 @@ func (w *window) buildReader() *adw.NavigationPage {
 	w.cautionLabel = gtk.NewLabel("")
 	w.cautionLabel.SetXAlign(0)
 	w.cautionLabel.SetWrap(true)
+	// Same as w.header: a caution line quoting a long URL must break mid-token
+	// rather than widen the pane.
+	w.cautionLabel.SetWrapMode(pango.WrapWordChar)
 	w.cautionLabel.AddCSSClass("caption")
 	w.cautionLabel.AddCSSClass("warning")
 	setMargins(w.cautionLabel, 12, 12, 0, 6)
