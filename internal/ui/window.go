@@ -6095,6 +6095,13 @@ func (w *window) checkNewMail(batch []notifyCandidate) {
 		if err != nil || !m.IsUnread || !m.InternalDate.After(w.startTime) {
 			continue
 		}
+		if w.isOwnAddress(m.FromAddr) {
+			// A message this app sent (a reply, or self-addressed mail) —
+			// Gmail can legitimately label its own sent copy INBOX+UNREAD, but
+			// it isn't new mail to look at, so don't notify.
+			logging.Trace("ui: new-mail check skip self-sent", "id", m.GmailID, "from", m.FromAddr)
+			continue
+		}
 		if hasLabel(m, model.LabelInbox) {
 			hits = append(hits, hit{accountID: c.accountID, msg: m})
 		}

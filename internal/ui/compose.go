@@ -1154,6 +1154,22 @@ func formatContact(c model.Contact) string {
 	return c.Address
 }
 
+// isOwnAddress reports whether addr belongs to one of the user's configured
+// accounts (case-insensitive), so callers can recognize mail the app itself
+// sent rather than treating it as genuinely new incoming mail.
+func (w *window) isOwnAddress(addr string) bool {
+	addr = strings.ToLower(strings.TrimSpace(addr))
+	if addr == "" {
+		return false
+	}
+	for _, a := range w.deps.Accounts {
+		if strings.ToLower(strings.TrimSpace(a.Email)) == addr {
+			return true
+		}
+	}
+	return false
+}
+
 // withOwnAccounts prepends the user's registered accounts to the contact list
 // (so you can address your other account), de-duplicated against the past
 // correspondents by address. Own accounts come first so they rank at the top.
