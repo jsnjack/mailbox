@@ -6661,6 +6661,8 @@ func readerShellHTML() string {
 	// scrollbar nor cropping.
 	const style = `
 body{font-family:sans-serif;margin:8px 16px 16px;color:#222;line-height:1.4;overflow-wrap:anywhere}
+table{table-layout:auto}
+td,th{overflow-wrap:break-word;word-break:normal}
 .mbwrap>div:first-child{border-top:none!important;margin-top:0!important}
 img,video{max-width:100%!important;height:auto!important}
 pre{font-family:monospace;white-space:pre-wrap}
