@@ -3639,7 +3639,16 @@ func (w *window) renderConversation(msgs []model.Message) {
 		title += fmt.Sprintf("\n<span size=\"small\">%d messages</span>", len(msgs))
 	}
 	w.header.SetMarkup(title)
-	w.setReaderCategory(w.categories[w.openThreadID])
+	// Mirror threadRow's list-row override (window.go:6388): once you've had the
+	// last word the AI category is stale, so show "Replied" instead — otherwise
+	// the reader header could keep showing e.g. "Needs reply" after the list row
+	// already switched to "Replied" for the same thread.
+	category := w.categories[w.openThreadID]
+	outgoing := w.current == model.LabelSent || w.current == model.LabelDraft
+	if t, ok := w.threadByID[w.openThreadID]; ok && t.RepliedByMe && !outgoing && !w.manualCat[w.openThreadID] {
+		category = "Replied"
+	}
+	w.setReaderCategory(category)
 	// Show a loading placeholder immediately when bodies need fetching (not all
 	// cached), so the user sees their click registered instead of staring at the
 	// previous message for up to the fetch timeout. When all bodies are cached
