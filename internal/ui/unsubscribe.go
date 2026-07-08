@@ -11,6 +11,7 @@ import (
 	"github.com/diamondburned/gotk4-adwaita/pkg/adw"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 	"github.com/jsnjack/mailbox/internal/dispatch"
+	"github.com/jsnjack/mailbox/internal/httpclient"
 	"github.com/jsnjack/mailbox/internal/logging"
 	"github.com/jsnjack/mailbox/internal/model"
 )
@@ -73,7 +74,7 @@ func (w *window) performUnsubscribe(acctID int64, sender string, t unsubTargets,
 	case t.OneClickURL != "":
 		logging.Trace("ui: unsubscribe one-click", "sender", sender, "url", t.OneClickURL)
 		go func() {
-			client := &http.Client{Timeout: 20 * time.Second}
+			client := &http.Client{Timeout: 20 * time.Second, Transport: &httpclient.Transport{}}
 			resp, err := client.Post(t.OneClickURL, "application/x-www-form-urlencoded",
 				strings.NewReader("List-Unsubscribe=One-Click"))
 			outcome := "Unsubscribed from " + sender

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 
 	"github.com/jsnjack/mailbox/internal/config"
+	"github.com/jsnjack/mailbox/internal/httpclient"
 	"github.com/jsnjack/mailbox/internal/logging"
 	"github.com/spf13/cobra"
 )
@@ -57,6 +58,7 @@ var rootCmd = &cobra.Command{
 			level = "debug"
 		}
 		logCleanup = logging.Init(tracePath, level)
+		httpclient.UserAgent = "mailbox/" + Version
 		return nil
 	},
 	RunE: func(cmd *cobra.Command, args []string) error {

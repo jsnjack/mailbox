@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"sync/atomic"
 	"time"
+
+	"github.com/jsnjack/mailbox/internal/httpclient"
 )
 
 // transferCounter tallies HTTP bytes in/out for an AI provider, so the status
@@ -16,11 +18,12 @@ type transferCounter struct {
 
 func (c *transferCounter) snapshot() (in, out int64) { return c.in.Load(), c.out.Load() }
 
-// countingClient returns an HTTP client whose transport tallies bytes into c.
+// countingClient returns an HTTP client whose transport tallies bytes into c
+// and identifies the app via User-Agent.
 func countingClient(timeout time.Duration, c *transferCounter) *http.Client {
 	return &http.Client{
 		Timeout:   timeout,
-		Transport: &countingTransport{base: http.DefaultTransport, c: c},
+		Transport: &countingTransport{base: &httpclient.Transport{}, c: c},
 	}
 }
 

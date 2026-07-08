@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jsnjack/mailbox/internal/httpclient"
 	"github.com/jsnjack/mailbox/internal/logging"
 	"golang.org/x/oauth2"
 	gmail "google.golang.org/api/gmail/v1"
@@ -54,7 +55,13 @@ func NewService(ctx context.Context, ts oauth2.TokenSource, stats *Stats) (*gmai
 	// body), which deterministically kills large attachment transfers on slow
 	// links. Dropped connections are instead bounded by the transport's
 	// no-progress watchdog (netStallTimeout) — see countingTransport.RoundTrip.
-	httpClient.Transport = &countingTransport{base: httpClient.Transport, stats: stats, stall: netStallTimeout}
+	// option.WithUserAgent is incompatible with option.WithHTTPClient (used
+	// below), so the header is added via RoundTripper middleware instead.
+	oauthTransport := httpClient.Transport
+	httpClient.Transport = &countingTransport{
+		base:  &httpclient.Transport{Base: oauthTransport},
+		stats: stats, stall: netStallTimeout,
+	}
 	srv, err := gmail.NewService(ctx, option.WithHTTPClient(httpClient))
 	if err != nil {
 		logging.TraceContext(ctx, "gmailapi: newService failed", "err", err)

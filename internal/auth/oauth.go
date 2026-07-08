@@ -138,7 +138,7 @@ func loginWithConfig(ctx context.Context, conf *oauth2.Config, authOpts ...oauth
 		if res.err != nil {
 			return nil, res.err
 		}
-		tok, err := conf.Exchange(ctx, res.code, oauth2.VerifierOption(verifier))
+		tok, err := conf.Exchange(refreshContext(ctx), res.code, oauth2.VerifierOption(verifier))
 		if err != nil {
 			logging.TraceContext(ctx, "auth: oauth code exchange failed", "err", err)
 			return nil, fmt.Errorf("exchange authorization code: %w", err)

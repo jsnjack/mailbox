@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jsnjack/mailbox/internal/httpclient"
 	"github.com/jsnjack/mailbox/internal/logging"
 	"github.com/zalando/go-keyring"
 	"golang.org/x/oauth2"
@@ -53,7 +54,10 @@ var refreshTimeout = 30 * time.Second
 // refreshContext returns ctx with a dedicated bounded HTTP client for the
 // oauth2 token refresh (oauth2 uses http.DefaultClient — no timeout — otherwise).
 func refreshContext(ctx context.Context) context.Context {
-	return context.WithValue(ctx, oauth2.HTTPClient, &http.Client{Timeout: refreshTimeout})
+	return context.WithValue(ctx, oauth2.HTTPClient, &http.Client{
+		Timeout:   refreshTimeout,
+		Transport: &httpclient.Transport{},
+	})
 }
 
 // SaveRefreshToken stores the account's refresh token in the OS keyring.
