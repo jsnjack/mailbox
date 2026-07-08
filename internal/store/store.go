@@ -107,6 +107,10 @@ func migrate(db *sql.DB) error {
 		// (or lost on quit) before the window elapses.
 		`ALTER TABLE outbox ADD COLUMN draft_id TEXT`,
 		`ALTER TABLE outbox ADD COLUMN not_before INTEGER NOT NULL DEFAULT 0`,
+		// Snoozed-tag support: a woken snooze row is kept (not deleted) so the
+		// list can show where a thread came from; notified distinguishes an
+		// announced wake from a still-pending one.
+		`ALTER TABLE snoozes ADD COLUMN notified INTEGER NOT NULL DEFAULT 0`,
 	}
 	for _, s := range stmts {
 		if _, err := db.Exec(s); err != nil {

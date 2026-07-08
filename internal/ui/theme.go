@@ -132,6 +132,14 @@ const appCSS = `
 	background-color: alpha(@warning_color, 0.15);
 	color: @warning_color;
 }
+/* "Snoozed": a thread that just returned from Snooze — the same neutral grey
+   as the Snoozed folder's own badge (below), not the accent/success/warning
+   used by content categories, since this says where the mail came from
+   rather than what it needs. */
+.cat-snoozed {
+	background-color: alpha(@window_fg_color, 0.12);
+	color: alpha(@window_fg_color, 0.70);
+}
 
 /* Bottom status bar: a quiet strip set off by a hairline top border. */
 .status-bar {

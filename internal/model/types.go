@@ -108,6 +108,10 @@ type ThreadSummary struct {
 	// RepliedByMe is true when the thread's most recent message (any label) was
 	// sent by this account — i.e. you had the last word, so it needs no reply.
 	RepliedByMe bool
+	// WokeFromSnooze is true when this thread's snooze already fired (it
+	// returned to the inbox on schedule), so the list can show where it came
+	// from instead of a stale or absent AI category.
+	WokeFromSnooze bool
 	// SnoozedUntil is the wake time (unix seconds) when this summary is shown in
 	// the Snoozed view; 0 everywhere else. Rows show it in place of the date.
 	SnoozedUntil int64

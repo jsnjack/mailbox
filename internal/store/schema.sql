@@ -168,11 +168,15 @@ CREATE TABLE IF NOT EXISTS message_gists (
 
 -- Snoozed conversations: hidden from the inbox until `until`, then woken by a
 -- background sweeper (the thread keeps its labels — snooze only affects
--- visibility, so nothing needs mirroring to the provider).
+-- visibility, so nothing needs mirroring to the provider). The row is not
+-- deleted on wake (only on an explicit Unsnooze or a fresh re-snooze) so the
+-- list can show a "Snoozed" tag on a thread that recently returned; notified
+-- distinguishes an announced wake from a still-pending one.
 CREATE TABLE IF NOT EXISTS snoozes (
   account_id      INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
   thread_id       TEXT NOT NULL,
   until           INTEGER NOT NULL,  -- unix seconds
+  notified        INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (account_id, thread_id)
 );
 

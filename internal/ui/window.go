@@ -3639,14 +3639,19 @@ func (w *window) renderConversation(msgs []model.Message) {
 		title += fmt.Sprintf("\n<span size=\"small\">%d messages</span>", len(msgs))
 	}
 	w.header.SetMarkup(title)
-	// Mirror threadRow's list-row override (window.go:6388): once you've had the
-	// last word the AI category is stale, so show "Replied" instead — otherwise
-	// the reader header could keep showing e.g. "Needs reply" after the list row
-	// already switched to "Replied" for the same thread.
+	// Mirror threadRow's list-row override: once you've had the last word, or a
+	// snooze just returned the thread to the inbox, the cached AI category is
+	// stale or beside the point — otherwise the reader header could keep
+	// showing e.g. "Needs reply" after the list row already moved on.
 	category := w.categories[w.openThreadID]
 	outgoing := w.current == model.LabelSent || w.current == model.LabelDraft
-	if t, ok := w.threadByID[w.openThreadID]; ok && t.RepliedByMe && !outgoing && !w.manualCat[w.openThreadID] {
-		category = "Replied"
+	if t, ok := w.threadByID[w.openThreadID]; ok && !outgoing && !w.manualCat[w.openThreadID] {
+		switch {
+		case t.RepliedByMe:
+			category = "Replied"
+		case t.WokeFromSnooze:
+			category = "Snoozed"
+		}
 	}
 	w.setReaderCategory(category)
 	// Show a loading placeholder immediately when bodies need fetching (not all
@@ -4892,7 +4897,7 @@ func (w *window) cleanHTML(h string) (string, int) {
 // setReaderCategory shows the thread's category pill in the reader header
 // (hidden when uncategorized), mirroring the list row's tag styling.
 func (w *window) setReaderCategory(category string) {
-	for _, c := range []string{"cat-needsreply", "cat-replied", "cat-discount"} {
+	for _, c := range []string{"cat-needsreply", "cat-replied", "cat-discount", "cat-snoozed"} {
 		w.readerCatTag.RemoveCSSClass(c)
 	}
 	if category == "" {
@@ -4906,6 +4911,8 @@ func (w *window) setReaderCategory(category string) {
 		w.readerCatTag.AddCSSClass("cat-replied")
 	case "Discount":
 		w.readerCatTag.AddCSSClass("cat-discount")
+	case "Snoozed":
+		w.readerCatTag.AddCSSClass("cat-snoozed")
 	}
 	w.readerCatTag.SetText(category)
 	w.readerCatTag.SetVisible(true)
@@ -6428,8 +6435,14 @@ func threadRow(t model.ThreadSummary, outgoing bool, category string, manualCat 
 	// "Replied" tag in place of the content category (Needs reply / Discount / …).
 	// Skipped in Sent/Drafts, where the last message is always yours, and when the
 	// user picked the category by hand (a deliberate choice outranks "Replied").
-	if t.RepliedByMe && !outgoing && !manualCat {
+	switch {
+	case t.RepliedByMe && !outgoing && !manualCat:
 		category = "Replied"
+	case t.WokeFromSnooze && !outgoing && !manualCat:
+		// A thread that returned to the inbox from Snooze — "Replied" still wins
+		// if both apply (it's the more current, actionable fact). The tag stays
+		// until the user re-snoozes it or picks a category by hand.
+		category = "Snoozed"
 	}
 
 	box := gtk.NewBox(gtk.OrientationVertical, 2)
@@ -6506,6 +6519,8 @@ func threadRow(t model.ThreadSummary, outgoing bool, category string, manualCat 
 			tag.AddCSSClass("cat-replied")
 		case "Discount":
 			tag.AddCSSClass("cat-discount")
+		case "Snoozed":
+			tag.AddCSSClass("cat-snoozed")
 		}
 		tag.SetVAlign(gtk.AlignCenter)
 		subjRow := gtk.NewBox(gtk.OrientationHorizontal, 6)

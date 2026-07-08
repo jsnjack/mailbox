@@ -831,8 +831,9 @@ func runRetentionPass(ctx context.Context, st *store.Store) {
 // open. A snooze that comes due while the app is closed wakes on next launch.
 const snoozeWakeInterval = time.Minute
 
-// backgroundSnoozeWake returns conversations whose snooze elapsed to the inbox:
-// the snooze row is deleted (its absence is what un-hides the thread) and a
+// backgroundSnoozeWake returns conversations whose snooze elapsed to the
+// inbox: the row is marked notified (until > now is what un-hides the thread;
+// the row itself lingers so the list can show a "Snoozed" tag) and a
 // SnoozeWoke change tells the UI to refresh and raise a reminder notification.
 func backgroundSnoozeWake(ctx context.Context, st *store.Store, hub *syncer.Hub) {
 	ticker := time.NewTicker(snoozeWakeInterval)
@@ -843,8 +844,8 @@ func backgroundSnoozeWake(ctx context.Context, st *store.Store, hub *syncer.Hub)
 			slog.Warn("snooze wake: list due", "err", err)
 		}
 		for _, sn := range due {
-			if err := st.UnsnoozeThread(ctx, sn.AccountID, sn.ThreadID); err != nil {
-				slog.Warn("snooze wake: unsnooze", "thread", sn.ThreadID, "err", err)
+			if err := st.MarkSnoozeNotified(ctx, sn.AccountID, sn.ThreadID); err != nil {
+				slog.Warn("snooze wake: mark notified", "thread", sn.ThreadID, "err", err)
 				continue
 			}
 			slog.Debug("launch: snooze woke", "account", sn.AccountID, "thread", sn.ThreadID)

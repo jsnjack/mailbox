@@ -80,6 +80,9 @@ func (s *Store) ListThreadsByLabel(ctx context.Context, accountID int64, labelID
 	if err := s.markRepliedByMe(ctx, accountID, out); err != nil {
 		return nil, err
 	}
+	if err := s.markWokeFromSnooze(ctx, accountID, out); err != nil {
+		return nil, err
+	}
 	logging.TraceContext(ctx, "store: list threads by label done", "account", accountID, "label", labelID, "count", len(out), "dur", time.Since(start))
 	return out, nil
 }
@@ -135,6 +138,9 @@ func (s *Store) ListAllThreads(ctx context.Context, accountID int64, limit, offs
 		})
 	}
 	if err := s.markRepliedByMe(ctx, accountID, out); err != nil {
+		return nil, err
+	}
+	if err := s.markWokeFromSnooze(ctx, accountID, out); err != nil {
 		return nil, err
 	}
 	logging.TraceContext(ctx, "store: list all threads done", "account", accountID, "count", len(out), "dur", time.Since(start))
@@ -281,6 +287,9 @@ func (s *Store) GetThreadSummaries(ctx context.Context, accountID int64, threadI
 	if err := s.markRepliedByMe(ctx, accountID, out); err != nil {
 		return nil, err
 	}
+	if err := s.markWokeFromSnooze(ctx, accountID, out); err != nil {
+		return nil, err
+	}
 	logging.TraceContext(ctx, "store: get thread summaries done", "account", accountID, "n", len(threadIDs), "count", len(out), "dur", time.Since(start))
 	return out, nil
 }
@@ -390,6 +399,67 @@ func (s *Store) threadsRepliedByMe(ctx context.Context, accountID int64, ids []s
 			  )`, args...)
 		if err != nil {
 			return nil, fmt.Errorf("threads replied-by-me: %w", err)
+		}
+		err = func() error {
+			defer func() { _ = rows.Close() }()
+			for rows.Next() {
+				var tid string
+				if err := rows.Scan(&tid); err != nil {
+					return err
+				}
+				out[tid] = true
+			}
+			return rows.Err()
+		}()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// markWokeFromSnooze sets WokeFromSnooze on each summary whose snooze already
+// fired (it returned to the inbox on schedule), so the list can flag where it
+// came from.
+func (s *Store) markWokeFromSnooze(ctx context.Context, accountID int64, sums []model.ThreadSummary) error {
+	if len(sums) == 0 {
+		return nil
+	}
+	ids := make([]string, len(sums))
+	for i := range sums {
+		ids[i] = sums[i].ThreadID
+	}
+	woke, err := s.threadsWokeFromSnooze(ctx, accountID, ids)
+	if err != nil {
+		return err
+	}
+	for i := range sums {
+		sums[i].WokeFromSnooze = woke[sums[i].ThreadID]
+	}
+	return nil
+}
+
+// threadsWokeFromSnooze returns the subset of threadIDs whose snooze already
+// fired (notified = 1) — i.e. the thread reappeared in the inbox from Snooze.
+func (s *Store) threadsWokeFromSnooze(ctx context.Context, accountID int64, ids []string) (map[string]bool, error) {
+	out := make(map[string]bool, len(ids))
+	const chunk = 500
+	for start := 0; start < len(ids); start += chunk {
+		end := start + chunk
+		if end > len(ids) {
+			end = len(ids)
+		}
+		batch := ids[start:end]
+		args := make([]any, 0, len(batch)+1)
+		args = append(args, accountID)
+		for _, id := range batch {
+			args = append(args, id)
+		}
+		rows, err := s.reader.QueryContext(ctx, `
+			SELECT thread_id FROM snoozes
+			WHERE account_id = ? AND notified = 1 AND thread_id IN (`+placeholders(len(batch))+`)`, args...)
+		if err != nil {
+			return nil, fmt.Errorf("threads woke from snooze: %w", err)
 		}
 		err = func() error {
 			defer func() { _ = rows.Close() }()
