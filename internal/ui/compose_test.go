@@ -356,6 +356,20 @@ func TestReplyQuoteSkipsGitHubNotifications(t *testing.T) {
 	}
 }
 
+// A personal sign-off is out of place in a GitHub notification reply, so
+// replyInit/replyAllInit mark it to suppress the configured signature too.
+func TestReplyInitSkipsSignatureForGitHub(t *testing.T) {
+	w := &window{}
+	m := model.Message{
+		FromAddr:     "notifications@github.com",
+		Subject:      "Re: [org/repo] Some PR (#1)",
+		InternalDate: time.Date(2026, 7, 6, 9, 0, 0, 0, time.UTC),
+	}
+	if out := w.replyInit(m); !out.SkipSignature {
+		t.Fatal("replyInit for GitHub notification should set SkipSignature")
+	}
+}
+
 func TestBuildHTMLBody(t *testing.T) {
 	m := model.Message{FromName: "Alice", FromAddr: "a@x.com", InternalDate: time.Date(2026, 7, 6, 9, 0, 0, 0, time.UTC)}
 	quote := quoteOriginal(m, "original text")

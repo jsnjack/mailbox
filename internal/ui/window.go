@@ -2824,13 +2824,14 @@ func (w *window) replyQuote(m model.Message) (body, quoteHTML string) {
 func (w *window) replyInit(m model.Message) model.OutgoingMessage {
 	body, quoteHTML := w.replyQuote(m)
 	return model.OutgoingMessage{
-		To:         replyTarget(m),
-		Subject:    ensureRePrefix(m.Subject),
-		Body:       body,
-		QuoteHTML:  quoteHTML,
-		InReplyTo:  m.RFC822MsgID,
-		References: strings.TrimSpace(m.References + " " + m.RFC822MsgID),
-		ThreadID:   m.ThreadID,
+		To:            replyTarget(m),
+		Subject:       ensureRePrefix(m.Subject),
+		Body:          body,
+		QuoteHTML:     quoteHTML,
+		SkipSignature: isGitHubNotification(m),
+		InReplyTo:     m.RFC822MsgID,
+		References:    strings.TrimSpace(m.References + " " + m.RFC822MsgID),
+		ThreadID:      m.ThreadID,
 	}
 }
 
@@ -2865,14 +2866,15 @@ func (w *window) replyAllInit() (init model.OutgoingMessage, aiContext string, o
 	to, cc := replyAllRecipients(m, w.activeEmail)
 	body, quoteHTML := w.replyQuote(m)
 	return model.OutgoingMessage{
-		To:         to,
-		Cc:         cc,
-		Subject:    ensureRePrefix(m.Subject),
-		Body:       body,
-		QuoteHTML:  quoteHTML,
-		InReplyTo:  m.RFC822MsgID,
-		References: strings.TrimSpace(m.References + " " + m.RFC822MsgID),
-		ThreadID:   m.ThreadID,
+		To:            to,
+		Cc:            cc,
+		Subject:       ensureRePrefix(m.Subject),
+		Body:          body,
+		QuoteHTML:     quoteHTML,
+		SkipSignature: isGitHubNotification(m),
+		InReplyTo:     m.RFC822MsgID,
+		References:    strings.TrimSpace(m.References + " " + m.RFC822MsgID),
+		ThreadID:      m.ThreadID,
 	}, w.threadContextFor(m), true
 }
 

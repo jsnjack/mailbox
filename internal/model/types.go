@@ -150,8 +150,12 @@ type OutgoingMessage struct {
 	// sanitized HTML, carried into the compose window so the send can embed the
 	// original's real formatting in the HTML alternative's quote. BuildMIME
 	// never writes it to the wire.
-	QuoteHTML   string
-	Attachments []OutgoingAttachment
+	QuoteHTML string
+	// SkipSignature is compose-side only: true suppresses the configured
+	// signature for this compose (e.g. a reply to a GitHub notification, where
+	// a personal sign-off is out of place). BuildMIME never reads it.
+	SkipSignature bool
+	Attachments   []OutgoingAttachment
 	// Calendar is an iTIP payload (an .ics REPLY) sent as an inline
 	// text/calendar body part inside the multipart/alternative — mail servers
 	// (Exchange, Google) auto-process attendee responses only from an inline

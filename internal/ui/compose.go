@@ -112,7 +112,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 		logging.Trace("ui: open compose skipped", "has_sender", w.deps.Send != nil, "accounts", len(w.deps.Accounts))
 		return
 	}
-	addSignature := opts.addSignature
+	addSignature := opts.addSignature && !init.SkipSignature
 	logging.Trace("ui: open compose", "title", title, "to", init.To, "subject", init.Subject,
 		"draft_id", init.DraftID, "in_reply_to", init.InReplyTo, "thread_id", init.ThreadID,
 		"is_reply", aiContext != "", "attachments", len(init.Attachments), "add_signature", addSignature,
