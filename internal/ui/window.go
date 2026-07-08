@@ -2785,14 +2785,49 @@ func replyTarget(m model.Message) string {
 	return m.FromAddr
 }
 
+// isGitHubNotification reports whether m is a GitHub notification email
+// (From notifications@github.com, or a Reply-To on reply.github.com — the
+// address GitHub's reply-by-email uses). GitHub's own reply parsing only
+// looks at the new text above its own marker, so quoting the original for it
+// — diff hunks, the prior comment thread, GitHub's UI chrome, the "Reply to
+// this email directly, or view it on GitHub" footer — is pure noise with no
+// upside, unlike a normal human correspondent.
+func isGitHubNotification(m model.Message) bool {
+	return addrDomain(m.FromAddr) == "github.com" || addrDomain(m.ReplyTo) == "reply.github.com"
+}
+
+// addrDomain returns the lowercased domain of an email address, accepting
+// either a bare address or a "Name <addr>" form ("" if it doesn't parse).
+func addrDomain(addr string) string {
+	a, err := mail.ParseAddress(addr)
+	if err != nil {
+		return ""
+	}
+	at := strings.LastIndex(a.Address, "@")
+	if at < 0 {
+		return ""
+	}
+	return strings.ToLower(a.Address[at+1:])
+}
+
+// replyQuote returns the reply body/HTML quote for m — empty for a GitHub
+// notification (see isGitHubNotification), the full original otherwise.
+func (w *window) replyQuote(m model.Message) (body, quoteHTML string) {
+	if isGitHubNotification(m) {
+		return "", ""
+	}
+	return quoteOriginal(m, w.bodyTextFor(m)), w.bodyHTMLFor(m)
+}
+
 // replyInit builds the prefilled compose for a reply to m (To, Re: subject,
 // quoted body, threading headers).
 func (w *window) replyInit(m model.Message) model.OutgoingMessage {
+	body, quoteHTML := w.replyQuote(m)
 	return model.OutgoingMessage{
 		To:         replyTarget(m),
 		Subject:    ensureRePrefix(m.Subject),
-		Body:       quoteOriginal(m, w.bodyTextFor(m)),
-		QuoteHTML:  w.bodyHTMLFor(m),
+		Body:       body,
+		QuoteHTML:  quoteHTML,
 		InReplyTo:  m.RFC822MsgID,
 		References: strings.TrimSpace(m.References + " " + m.RFC822MsgID),
 		ThreadID:   m.ThreadID,
@@ -2828,12 +2863,13 @@ func (w *window) replyAllInit() (init model.OutgoingMessage, aiContext string, o
 		return model.OutgoingMessage{}, "", false
 	}
 	to, cc := replyAllRecipients(m, w.activeEmail)
+	body, quoteHTML := w.replyQuote(m)
 	return model.OutgoingMessage{
 		To:         to,
 		Cc:         cc,
 		Subject:    ensureRePrefix(m.Subject),
-		Body:       quoteOriginal(m, w.bodyTextFor(m)),
-		QuoteHTML:  w.bodyHTMLFor(m),
+		Body:       body,
+		QuoteHTML:  quoteHTML,
 		InReplyTo:  m.RFC822MsgID,
 		References: strings.TrimSpace(m.References + " " + m.RFC822MsgID),
 		ThreadID:   m.ThreadID,

@@ -303,6 +303,59 @@ func TestQuoteBoundaryForward(t *testing.T) {
 	}
 }
 
+func TestAddrDomain(t *testing.T) {
+	cases := []struct{ name, addr, want string }{
+		{"bare address", "notifications@github.com", "github.com"},
+		{"name and address", "GitHub <notifications@github.com>", "github.com"},
+		{"mixed case", "Notifications@GitHub.COM", "github.com"},
+		{"empty", "", ""},
+		{"unparsable", "not-an-address", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := addrDomain(c.addr); got != c.want {
+				t.Errorf("addrDomain(%q) = %q, want %q", c.addr, got, c.want)
+			}
+		})
+	}
+}
+
+func TestIsGitHubNotification(t *testing.T) {
+	cases := []struct {
+		name string
+		m    model.Message
+		want bool
+	}{
+		{"notifications@github.com", model.Message{FromAddr: "notifications@github.com"}, true},
+		{"reply-to reply.github.com", model.Message{FromAddr: "someone@example.com", ReplyTo: "reply+ABCDEF@reply.github.com"}, true},
+		{"ordinary sender", model.Message{FromAddr: "friend@example.com"}, false},
+		{"lookalike domain is not github.com", model.Message{FromAddr: "notifications@github.com.evil.com"}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isGitHubNotification(c.m); got != c.want {
+				t.Errorf("isGitHubNotification(%+v) = %v, want %v", c.m, got, c.want)
+			}
+		})
+	}
+}
+
+// A GitHub notification's diff hunks, prior comment thread, and "Reply to
+// this email directly, or view it on GitHub" footer are noise GitHub's own
+// reply-by-email parsing ignores anyway, so replyQuote skips quoting it.
+func TestReplyQuoteSkipsGitHubNotifications(t *testing.T) {
+	w := &window{}
+	m := model.Message{
+		FromAddr:     "notifications@github.com",
+		Subject:      "Re: [org/repo] Some PR (#1)",
+		InternalDate: time.Date(2026, 7, 6, 9, 0, 0, 0, time.UTC),
+	}
+	body, quoteHTML := w.replyQuote(m)
+	if body != "" || quoteHTML != "" {
+		t.Fatalf("replyQuote for GitHub notification = (%q, %q), want both empty", body, quoteHTML)
+	}
+}
+
 func TestBuildHTMLBody(t *testing.T) {
 	m := model.Message{FromName: "Alice", FromAddr: "a@x.com", InternalDate: time.Date(2026, 7, 6, 9, 0, 0, 0, time.UTC)}
 	quote := quoteOriginal(m, "original text")
