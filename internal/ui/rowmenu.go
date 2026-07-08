@@ -125,7 +125,7 @@ func (w *window) showRowMenu(row gtk.Widgetter, threadID string, x, y float64) {
 		var aiBox *gtk.Box
 		var aiPlaceholder *gtk.Button
 		var aiFetched bool
-		if w.deps.Assistant != nil {
+		if w.deps.Assistant != nil && w.aiSnoozeSuggestions {
 			aiBox = gtk.NewBox(gtk.OrientationVertical, 0)
 			aiLbl := gtk.NewLabel("✨ Suggesting…")
 			aiLbl.SetXAlign(0)

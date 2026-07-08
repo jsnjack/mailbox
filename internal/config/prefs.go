@@ -21,6 +21,17 @@ type Prefs struct {
 	// of inbox mail. Default false (categorization on), stored inverted so the
 	// out-of-the-box behaviour is the zero value's opposite.
 	DisableInboxCategories bool `json:"disable_inbox_categories"`
+	// The following DisableXxx fields gate the remaining individual AI features,
+	// each following the same inverted convention (false = feature on).
+	DisableGist              bool `json:"disable_gist"`
+	DisableAIDraft           bool `json:"disable_ai_draft"`
+	DisableSmartReplies      bool `json:"disable_smart_replies"`
+	DisableProofread         bool `json:"disable_proofread"`
+	DisableGenerateSubject   bool `json:"disable_generate_subject"`
+	DisableSummarize         bool `json:"disable_summarize"`
+	DisableTranslate         bool `json:"disable_translate"`
+	DisablePhishingAnalysis  bool `json:"disable_phishing_analysis"`
+	DisableSnoozeSuggestions bool `json:"disable_snooze_suggestions"`
 	// BodyRetentionDays prunes cached message bodies older than this many days
 	// (metadata is kept forever; a pruned body is re-fetched on open). 0 — the
 	// default — keeps bodies forever.
@@ -62,7 +73,12 @@ func LoadPrefs() (Prefs, error) {
 		logging.Trace("config: load prefs corrupt (ignored)", "path", path, "err", err)
 		return Prefs{}, nil // ignore a corrupt file
 	}
-	logging.Trace("config: load prefs", "path", path, "blockRemoteImages", p.BlockRemoteImages, "disableInboxCategories", p.DisableInboxCategories)
+	logging.Trace("config: load prefs", "path", path, "blockRemoteImages", p.BlockRemoteImages,
+		"disableInboxCategories", p.DisableInboxCategories, "disableGist", p.DisableGist,
+		"disableAIDraft", p.DisableAIDraft, "disableSmartReplies", p.DisableSmartReplies,
+		"disableProofread", p.DisableProofread, "disableGenerateSubject", p.DisableGenerateSubject,
+		"disableSummarize", p.DisableSummarize, "disableTranslate", p.DisableTranslate,
+		"disablePhishingAnalysis", p.DisablePhishingAnalysis, "disableSnoozeSuggestions", p.DisableSnoozeSuggestions)
 	return p, nil
 }
 
@@ -83,6 +99,11 @@ func SavePrefs(p Prefs) error {
 		logging.Trace("config: save prefs failed", "err", err)
 		return fmt.Errorf("write prefs: %w", err)
 	}
-	logging.Trace("config: save prefs", "blockRemoteImages", p.BlockRemoteImages, "disableInboxCategories", p.DisableInboxCategories)
+	logging.Trace("config: save prefs", "blockRemoteImages", p.BlockRemoteImages,
+		"disableInboxCategories", p.DisableInboxCategories, "disableGist", p.DisableGist,
+		"disableAIDraft", p.DisableAIDraft, "disableSmartReplies", p.DisableSmartReplies,
+		"disableProofread", p.DisableProofread, "disableGenerateSubject", p.DisableGenerateSubject,
+		"disableSummarize", p.DisableSummarize, "disableTranslate", p.DisableTranslate,
+		"disablePhishingAnalysis", p.DisablePhishingAnalysis, "disableSnoozeSuggestions", p.DisableSnoozeSuggestions)
 	return nil
 }

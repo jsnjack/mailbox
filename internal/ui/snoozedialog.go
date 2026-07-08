@@ -43,7 +43,7 @@ func (w *window) openSnoozeDialog(acctID int64, threadID string) {
 	// AI suggestions: read the conversation and propose the useful moments (an
 	// hour before a meeting, the day before a deadline). Load in the
 	// background; the rows only appear when the email actually implies times.
-	if w.deps.Assistant != nil {
+	if w.deps.Assistant != nil && w.aiSnoozeSuggestions {
 		aiBox := gtk.NewBox(gtk.OrientationVertical, 10)
 		placeholder := gtk.NewButtonWithLabel("Reading the email…")
 		placeholder.SetSensitive(false)

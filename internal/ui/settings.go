@@ -210,22 +210,87 @@ func (w *window) openSettings() {
 	privacyGroup.SetTitle("Privacy")
 	privacyGroup.Add(imgRow)
 
-	// AI categorization of the inbox (sends mail to the AI provider).
+	// AI Features: every AI-powered feature gets its own on/off switch, each
+	// hiding the button/menu item it drives immediately (see the
+	// w.refreshAIVisibility calls below and each feature's own gate at its
+	// UI call site). All of them send message content to the configured AI
+	// provider, so the subtitles say so.
+	var aiFeaturesGroup *adw.PreferencesGroup
 	if w.deps.Assistant != nil {
-		catRow := adw.NewSwitchRow()
-		catRow.SetTitle("Categorize inbox with AI")
-		catRow.SetSubtitle("Tags inbox mail (Needs reply, Receipt, …). Sends message details to the AI provider.")
-		catRow.SetActive(w.inboxCategories)
-		catRow.Connect("notify::active", func() {
-			on := catRow.Active()
-			logging.Trace("ui: setting changed", "pref", "categorize_inbox", "old", w.inboxCategories, "new", on)
-			w.inboxCategories = on
-			savePref(func(p *config.Prefs) { p.DisableInboxCategories = !on })
-			if on {
-				w.categorizeInbox()
-			}
-		})
-		privacyGroup.Add(catRow)
+		aiFeaturesGroup = adw.NewPreferencesGroup()
+		aiFeaturesGroup.SetTitle("AI Features")
+		aiFeaturesGroup.SetDescription("Each feature sends related message content to the AI provider. Turning one off also hides its button or menu item.")
+
+		aiToggle := func(title, subtitle string, active bool, onChange func(on bool)) {
+			row := adw.NewSwitchRow()
+			row.SetTitle(title)
+			row.SetSubtitle(subtitle)
+			row.SetActive(active)
+			row.Connect("notify::active", func() {
+				on := row.Active()
+				logging.Trace("ui: setting changed", "pref", title, "new", on)
+				onChange(on)
+			})
+			aiFeaturesGroup.Add(row)
+		}
+
+		aiToggle("Categorize inbox with AI", "Tags inbox mail (Needs reply, Receipt, …).",
+			w.inboxCategories, func(on bool) {
+				w.inboxCategories = on
+				savePref(func(p *config.Prefs) { p.DisableInboxCategories = !on })
+				if on {
+					w.categorizeInbox()
+				}
+			})
+		aiToggle("Message summaries", "A one-line AI gist shown on messages and in new-mail notifications.",
+			w.aiGist, func(on bool) {
+				w.aiGist = on
+				savePref(func(p *config.Prefs) { p.DisableGist = !on })
+			})
+		aiToggle("AI draft replies", "The \"AI draft\" button in compose and the reader's AI-reply popover.",
+			w.aiDraft, func(on bool) {
+				w.aiDraft = on
+				savePref(func(p *config.Prefs) { p.DisableAIDraft = !on })
+				w.refreshAIVisibility()
+			})
+		aiToggle("Smart quick replies", "One-tap suggested replies in the reader and compose.",
+			w.aiSmartReplies, func(on bool) {
+				w.aiSmartReplies = on
+				savePref(func(p *config.Prefs) { p.DisableSmartReplies = !on })
+				w.refreshAIVisibility()
+			})
+		aiToggle("Grammar and spelling check", "The grammar-check button in compose.",
+			w.aiProofread, func(on bool) {
+				w.aiProofread = on
+				savePref(func(p *config.Prefs) { p.DisableProofread = !on })
+			})
+		aiToggle("Subject suggestions", "The sparkle button next to Subject in compose.",
+			w.aiGenerateSubject, func(on bool) {
+				w.aiGenerateSubject = on
+				savePref(func(p *config.Prefs) { p.DisableGenerateSubject = !on })
+			})
+		aiToggle("Thread summaries", "The \"Summarize thread\" button in the reader.",
+			w.aiSummarize, func(on bool) {
+				w.aiSummarize = on
+				savePref(func(p *config.Prefs) { p.DisableSummarize = !on })
+				w.refreshAIVisibility()
+			})
+		aiToggle("Translate", "The \"Translate to English\" button in the reader.",
+			w.aiTranslate, func(on bool) {
+				w.aiTranslate = on
+				savePref(func(p *config.Prefs) { p.DisableTranslate = !on })
+				w.refreshAIVisibility()
+			})
+		aiToggle("Phishing analysis", "The reader overflow's \"Check for phishing\".",
+			w.aiPhishing, func(on bool) {
+				w.aiPhishing = on
+				savePref(func(p *config.Prefs) { p.DisablePhishingAnalysis = !on })
+			})
+		aiToggle("Snooze suggestions", "AI-suggested wake times in the Snooze flyout and dialog.",
+			w.aiSnoozeSuggestions, func(on bool) {
+				w.aiSnoozeSuggestions = on
+				savePref(func(p *config.Prefs) { p.DisableSnoozeSuggestions = !on })
+			})
 	}
 
 	// Storage: clear the (re-downloadable) attachment cache.
@@ -363,6 +428,9 @@ func (w *window) openSettings() {
 	}
 	page.Add(sigGroup)
 	page.Add(privacyGroup)
+	if aiFeaturesGroup != nil {
+		page.Add(aiFeaturesGroup)
+	}
 	page.Add(sendGroup)
 	page.Add(storageGroup)
 

@@ -309,7 +309,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 	box.Append(bccEntry)
 	// Subject row: the entry, plus an AI button that fills the subject in from the
 	// body (the user's own text, not the signature/quote).
-	if w.deps.Assistant != nil {
+	if w.deps.Assistant != nil && w.aiGenerateSubject {
 		subjEntry.SetHExpand(true)
 		subjBtn := gtk.NewButtonFromIconName("sparkle-symbolic")
 		subjBtn.SetTooltipText("Generate a subject from the email (AI)")
@@ -648,7 +648,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 
 	var startAIDraft func()
 	var runDraft func(string)
-	if w.deps.Assistant != nil {
+	if w.deps.Assistant != nil && w.aiDraft {
 		// A reply/forward has thread context; a new message is drafted from the
 		// user's instruction (and the subject) alone.
 		isReply := aiContext != ""
@@ -716,7 +716,9 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 		}
 		aiBtn.ConnectClicked(func() { startAIDraft() })
 		hb.PackEnd(aiBtn)
+	}
 
+	if w.deps.Assistant != nil && w.aiProofread {
 		// AI grammar/spell check: rewrite the body with spelling and grammar fixed
 		// (preserving quotes and signature).
 		grammarBtn := gtk.NewButtonFromIconName("tools-check-spelling-symbolic")
@@ -879,7 +881,7 @@ func (w *window) askAIIntent(parent gtk.Widgetter, isReply bool, threadContext s
 
 	// Ready-to-send quick replies (for a reply) — gated behind a button so they
 	// are only generated (and tokens spent) when the user asks.
-	if isReply && strings.TrimSpace(threadContext) != "" && onQuickReply != nil && w.deps.Assistant != nil {
+	if isReply && strings.TrimSpace(threadContext) != "" && onQuickReply != nil && w.deps.Assistant != nil && w.aiSmartReplies {
 		quick := gtk.NewBox(gtk.OrientationVertical, 4)
 		box.Append(quick)
 		clearQuick := func() {

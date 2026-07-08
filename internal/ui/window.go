@@ -255,10 +255,22 @@ type window struct {
 	aiFailing       bool
 	aiFailedAt      time.Time
 	inboxCategories bool
-	sendUndoSecs    int             // undo-send window in seconds (0 = default 5)
-	keymap          map[uint]func() // single-key shortcuts (configurable; see shortcuts.go)
-	readerCatTag    *gtk.Label      // thread category pill in the reader header
-	trustedImgs     map[string]bool // lowercased senders whose images always load
+	// Per-feature AI toggles (Preferences → AI Features), each mirroring a
+	// config.Prefs.DisableXxx field (inverted: true = feature on). Gate both
+	// whether a feature's UI is shown and whether it runs.
+	aiGist              bool
+	aiDraft             bool
+	aiSmartReplies      bool
+	aiProofread         bool
+	aiGenerateSubject   bool
+	aiSummarize         bool
+	aiTranslate         bool
+	aiPhishing          bool
+	aiSnoozeSuggestions bool
+	sendUndoSecs        int             // undo-send window in seconds (0 = default 5)
+	keymap              map[uint]func() // single-key shortcuts (configurable; see shortcuts.go)
+	readerCatTag        *gtk.Label      // thread category pill in the reader header
+	trustedImgs         map[string]bool // lowercased senders whose images always load
 
 	// AI thread summary: a button reveals a card that streams a summary in.
 	// summaryCache memoizes by the thread's message fingerprint, so reopening is
@@ -309,6 +321,15 @@ func newWindow(app *adw.Application, deps Deps) *window {
 	if p, err := config.LoadPrefs(); err == nil {
 		w.blockImages = p.BlockRemoteImages
 		w.inboxCategories = !p.DisableInboxCategories
+		w.aiGist = !p.DisableGist
+		w.aiDraft = !p.DisableAIDraft
+		w.aiSmartReplies = !p.DisableSmartReplies
+		w.aiProofread = !p.DisableProofread
+		w.aiGenerateSubject = !p.DisableGenerateSubject
+		w.aiSummarize = !p.DisableSummarize
+		w.aiTranslate = !p.DisableTranslate
+		w.aiPhishing = !p.DisablePhishingAnalysis
+		w.aiSnoozeSuggestions = !p.DisableSnoozeSuggestions
 		w.sendUndoSecs = p.SendUndoSeconds
 		for _, a := range p.TrustedImageSenders {
 			w.trustedImgs[strings.ToLower(a)] = true
@@ -2710,21 +2731,31 @@ func (w *window) buildReader() *adw.NavigationPage {
 	})
 
 	hb.PackStart(w.replyBtn)
-	if w.deps.Assistant != nil {
-		hb.PackStart(w.aiReplyBtn)
-	}
+	hb.PackStart(w.aiReplyBtn)
 	hb.PackStart(w.archiveBtn)
 	hb.PackEnd(w.overflowBtn)
-	if w.deps.Assistant != nil {
-		hb.PackEnd(w.translateBtn)
-		hb.PackEnd(w.summaryBtn)
-	}
+	hb.PackEnd(w.translateBtn)
+	hb.PackEnd(w.summaryBtn)
+	w.refreshAIVisibility()
 	w.setActionsSensitive(false)
 
 	tv := adw.NewToolbarView()
 	tv.AddTopBar(hb)
 	tv.SetContent(w.readerStack)
 	return adw.NewNavigationPage(tv, "Reader")
+}
+
+// refreshAIVisibility shows/hides the reader header's AI buttons per the
+// current per-feature toggles (Preferences → AI Features). Unlike the rest of
+// the AI UI — compose windows, menus, dialogs — which are rebuilt fresh on
+// every open and so pick up the current flags automatically, these three
+// buttons are built once in w.build() and persist for the window's lifetime,
+// so a toggle flipped in Preferences must call this to apply live.
+func (w *window) refreshAIVisibility() {
+	show := w.deps.Assistant != nil
+	w.translateBtn.SetVisible(show && w.aiTranslate)
+	w.summaryBtn.SetVisible(show && w.aiSummarize)
+	w.aiReplyBtn.SetVisible(show && (w.aiSmartReplies || w.aiDraft))
 }
 
 func (w *window) setActionsSensitive(on bool) {
@@ -2832,71 +2863,77 @@ func (w *window) buildAIReplyPopover() *gtk.Popover {
 	setMargins(box, 8, 8, 8, 8)
 
 	_, threadContext, ok := w.replyAllInit()
-	if !ok || w.deps.Assistant == nil {
+	if !ok || w.deps.Assistant == nil || (!w.aiSmartReplies && !w.aiDraft) {
 		box.Append(aiPopLabel("Open a message to reply."))
 		pop.SetChild(box)
 		return pop
 	}
 
-	// AI-suggested quick replies (one call per open; results stream in).
-	box.Append(aiPopLabel("Suggested replies"))
-	sug := gtk.NewBox(gtk.OrientationVertical, 4)
-	box.Append(sug)
-	spinner := adw.NewSpinner()
-	spinner.SetHAlign(gtk.AlignStart)
-	spinner.SetSizeRequest(20, 20)
-	sug.Append(spinner)
-	done := w.aiActivity("Suggesting replies")
-	logging.Trace("ui: suggest quick replies", "thread", w.openThreadID, "account", w.activeID)
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		replies, err := w.deps.Assistant.SmartReplies(ctx, threadContext)
-		logging.Trace("ui: suggest quick replies result", "n", len(replies), "err", err)
-		dispatch.Main(func() {
-			done(doneErr(err))
-			for c := sug.FirstChild(); c != nil; c = sug.FirstChild() {
-				sug.Remove(c)
-			}
-			if err != nil {
-				slog.Warn("ui: ai-reply suggestions", "err", err)
-			}
-			if err != nil || len(replies) == 0 {
-				sug.Append(aiPopLabel("No suggestions"))
-				return
-			}
-			for _, r := range replies {
-				text := strings.TrimSpace(r)
-				if text == "" {
-					continue
+	if w.aiSmartReplies {
+		// AI-suggested quick replies (one call per open; results stream in).
+		box.Append(aiPopLabel("Suggested replies"))
+		sug := gtk.NewBox(gtk.OrientationVertical, 4)
+		box.Append(sug)
+		spinner := adw.NewSpinner()
+		spinner.SetHAlign(gtk.AlignStart)
+		spinner.SetSizeRequest(20, 20)
+		sug.Append(spinner)
+		done := w.aiActivity("Suggesting replies")
+		logging.Trace("ui: suggest quick replies", "thread", w.openThreadID, "account", w.activeID)
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			replies, err := w.deps.Assistant.SmartReplies(ctx, threadContext)
+			logging.Trace("ui: suggest quick replies result", "n", len(replies), "err", err)
+			dispatch.Main(func() {
+				done(doneErr(err))
+				for c := sug.FirstChild(); c != nil; c = sug.FirstChild() {
+					sug.Remove(c)
 				}
-				row := aiPopRow(text, true)
-				row.ConnectClicked(func() {
-					pop.Popdown()
-					w.aiReply(composeAutoAI{quickReply: text})
-				})
-				sug.Append(row)
-			}
-		})
-	}()
-
-	box.Append(gtk.NewSeparator(gtk.OrientationHorizontal))
-	box.Append(aiPopLabel("Write a reply that…"))
-	for _, p := range replyPresets() {
-		instr := p.instruction
-		row := aiPopRow("↳ "+p.label, false)
-		row.ConnectClicked(func() {
-			pop.Popdown()
-			w.aiReply(composeAutoAI{instruction: instr})
-		})
-		box.Append(row)
+				if err != nil {
+					slog.Warn("ui: ai-reply suggestions", "err", err)
+				}
+				if err != nil || len(replies) == 0 {
+					sug.Append(aiPopLabel("No suggestions"))
+					return
+				}
+				for _, r := range replies {
+					text := strings.TrimSpace(r)
+					if text == "" {
+						continue
+					}
+					row := aiPopRow(text, true)
+					row.ConnectClicked(func() {
+						pop.Popdown()
+						w.aiReply(composeAutoAI{quickReply: text})
+					})
+					sug.Append(row)
+				}
+			})
+		}()
 	}
-	custom := aiPopRow("✎ Custom instruction…", false)
-	custom.ConnectClicked(func() {
-		pop.Popdown()
-		w.aiReply(composeAutoAI{openDialog: true})
-	})
-	box.Append(custom)
+
+	if w.aiDraft {
+		if w.aiSmartReplies {
+			box.Append(gtk.NewSeparator(gtk.OrientationHorizontal))
+		}
+		box.Append(aiPopLabel("Write a reply that…"))
+		for _, p := range replyPresets() {
+			instr := p.instruction
+			row := aiPopRow("↳ "+p.label, false)
+			row.ConnectClicked(func() {
+				pop.Popdown()
+				w.aiReply(composeAutoAI{instruction: instr})
+			})
+			box.Append(row)
+		}
+		custom := aiPopRow("✎ Custom instruction…", false)
+		custom.ConnectClicked(func() {
+			pop.Popdown()
+			w.aiReply(composeAutoAI{openDialog: true})
+		})
+		box.Append(custom)
+	}
 
 	pop.SetChild(box)
 	return pop
@@ -3921,10 +3958,10 @@ func gistContext(m model.Message) string {
 // generateGists produces (and persists) the one-line AI gist for the given
 // messages of the open conversation, sequentially in the background; each
 // finished gist is slotted into the rendered thread via applyGist. Gated on
-// the same consent as inbox categorization (automatic AI over mail) and
-// deduplicated per session via gistRequested. Main thread.
+// its own AI-features toggle and deduplicated per session via gistRequested.
+// Main thread.
 func (w *window) generateGists(threadID string, msgs []model.Message) {
-	if w.deps.Assistant == nil || !w.inboxCategories || len(msgs) == 0 {
+	if w.deps.Assistant == nil || !w.aiGist || len(msgs) == 0 {
 		return
 	}
 	var todo []model.Message
@@ -4675,7 +4712,7 @@ func (w *window) buildReaderMenuModel() *gio.Menu {
 	}
 	// On-demand AI phishing/scam analysis (rare, so it lives here rather than the
 	// header). Streams its verdict into the shared AI card.
-	if w.deps.Assistant != nil {
+	if w.deps.Assistant != nil && w.aiPhishing {
 		sec := gio.NewMenu()
 		sec.Append("Check for phishing", "win.reader-analyze")
 		menu.AppendSection("", sec)
@@ -5043,7 +5080,7 @@ func (w *window) onRetryLoading() {
 // cached per message id, so re-opening, reverting, or re-translating reuses the
 // cached result (and an already-translated message in the thread isn't redone).
 func (w *window) onTranslate() {
-	if w.deps.Assistant == nil || len(w.openThreadMsgs) == 0 {
+	if w.deps.Assistant == nil || !w.aiTranslate || len(w.openThreadMsgs) == 0 {
 		return
 	}
 	if w.translateCancel != nil {
@@ -5281,7 +5318,7 @@ func (w *window) buildSummaryCard() *gtk.Revealer {
 // instantly; once the thread gains a reply its fingerprint changes, so the
 // cache misses and a fresh summary is generated.
 func (w *window) onSummarize() {
-	if len(w.openThreadMsgs) == 0 || w.deps.Assistant == nil {
+	if len(w.openThreadMsgs) == 0 || w.deps.Assistant == nil || !w.aiSummarize {
 		return
 	}
 	if w.summaryCancel != nil { // cancel a summary still streaming
@@ -5382,7 +5419,7 @@ func (w *window) hideSummary() {
 // and caches by message id so re-running is instant.
 func (w *window) onAnalyze() {
 	m := w.openMsg
-	if m.GmailID == "" || w.deps.Assistant == nil {
+	if m.GmailID == "" || w.deps.Assistant == nil || !w.aiPhishing {
 		return
 	}
 	if w.summaryCancel != nil {
@@ -6121,9 +6158,9 @@ func (w *window) notifyNewMail(accountID int64, m model.Message) {
 
 	// Best-effort AI gist: once ready, re-send the same notification id — GNOME
 	// swaps the bubble content in place. The notification above already fired,
-	// so a slow or failing AI can never delay or lose it. Gated on the same
-	// consent as inbox categorization (automatic AI over incoming mail).
-	if w.deps.Assistant == nil || !w.inboxCategories || strings.TrimSpace(m.Snippet) == "" {
+	// so a slow or failing AI can never delay or lose it. Gated on its own
+	// AI-features toggle.
+	if w.deps.Assistant == nil || !w.aiGist || strings.TrimSpace(m.Snippet) == "" {
 		return
 	}
 	// Claim the message before generating (main thread): if the reader opened
