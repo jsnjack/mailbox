@@ -6110,9 +6110,26 @@ func (w *window) checkNewMail(batch []notifyCandidate) {
 	if len(hits) == 0 {
 		return
 	}
+	// A gist may already be persisted (e.g. inbox categorization ran first) —
+	// look it up now, off the main thread, so the very first notification can
+	// show the same AI summary the reader would, instead of the raw snippet.
+	gists := map[string]string{}
+	if w.aiGist {
+		byAccount := map[int64][]string{}
+		for _, h := range hits {
+			byAccount[h.accountID] = append(byAccount[h.accountID], h.msg.GmailID)
+		}
+		for accountID, ids := range byAccount {
+			if g, err := w.deps.Store.MessageGists(ctx, accountID, ids); err == nil {
+				for id, gist := range g {
+					gists[id] = gist
+				}
+			}
+		}
+	}
 	dispatch.Main(func() {
 		for _, h := range hits {
-			w.notifyNewMail(h.accountID, h.msg)
+			w.notifyNewMail(h.accountID, h.msg, gists[h.msg.GmailID])
 		}
 	})
 }
@@ -6165,12 +6182,15 @@ func (w *window) refreshOpenThread() {
 	w.rerenderOpenThread()        // keeps a shown translation shown
 }
 
-func (w *window) notifyNewMail(accountID int64, m model.Message) {
-	logging.Trace("ui: notify new mail", "account", accountID, "id", m.GmailID, "from", m.FromAddr, "subject", m.Subject)
+func (w *window) notifyNewMail(accountID int64, m model.Message, gist string) {
+	logging.Trace("ui: notify new mail", "account", accountID, "id", m.GmailID, "from", m.FromAddr, "subject", m.Subject, "has_gist", gist != "")
 	// Unique id per message so concurrent accounts' notifications don't replace
 	// one another — and so the AI enrichment below can update this one in place.
 	id := fmt.Sprintf("mailbox-mail-%d-%s", accountID, m.GmailID)
-	w.app.SendNotification(id, w.mailNotification(accountID, m, ""))
+	w.app.SendNotification(id, w.mailNotification(accountID, m, gist))
+	if gist != "" {
+		return // already showing the same summary the reader would — nothing more to do
+	}
 
 	// Best-effort AI gist: once ready, re-send the same notification id — GNOME
 	// swaps the bubble content in place. The notification above already fired,
