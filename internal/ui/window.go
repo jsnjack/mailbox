@@ -6289,36 +6289,44 @@ func (w *window) refreshOpenThread() {
 func (w *window) notifyNewMail(accountID int64, m model.Message, gist string) {
 	logging.Trace("ui: notify new mail", "account", accountID, "id", m.GmailID, "from", m.FromAddr, "subject", m.Subject, "has_gist", gist != "")
 	// Unique id per message so concurrent accounts' notifications don't replace
-	// one another — and so the AI enrichment below can update this one in place.
+	// one another.
 	id := fmt.Sprintf("mailbox-mail-%d-%s", accountID, m.GmailID)
-	w.app.SendNotification(id, w.mailNotification(accountID, m, gist))
-	if gist != "" {
-		return // already showing the same summary the reader would — nothing more to do
-	}
 
-	// Best-effort AI gist: once ready, re-send the same notification id — GNOME
-	// swaps the bubble content in place. The notification above already fired,
-	// so a slow or failing AI can never delay or lose it. Gated on its own
-	// AI-features toggle.
-	if w.deps.Assistant == nil || !w.aiGist || strings.TrimSpace(m.Snippet) == "" {
+	// A gist is already in hand (persisted from an earlier pass), or no AI
+	// attempt will be made at all — nothing to wait for, show it now.
+	if gist != "" || w.deps.Assistant == nil || !w.aiGist || strings.TrimSpace(m.Snippet) == "" {
+		w.app.SendNotification(id, w.mailNotification(accountID, m, gist))
 		return
 	}
 	// Claim the message before generating (main thread): if the reader opened
 	// this mail and is already summarizing it, a second run here would produce
-	// a slightly different sentence and visibly rewrite the card.
+	// a slightly different sentence and visibly rewrite the card. That run
+	// doesn't report back to us, so don't wait on it — show the snippet now
+	// rather than dropping the notification entirely.
 	if w.gistRequested[m.GmailID] {
 		logging.Trace("ui: notification gist already requested", "id", m.GmailID)
+		w.app.SendNotification(id, w.mailNotification(accountID, m, ""))
 		return
 	}
 	w.gistRequested[m.GmailID] = true
+	// Best-effort AI gist: hold the notification until it's ready (or fails/
+	// times out) so exactly one popup is ever shown for this message — sending
+	// once with the snippet and again with the gist double-pops the desktop
+	// banner (GNOME only dedupes the tray entry on a repeated id, not the
+	// transient popup). Bounded by BriefSummary's own timeout, so a slow or
+	// down AI delays the notification by at most that long, never loses it.
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 		gist, err := w.deps.Assistant.BriefSummary(ctx, gistContext(m))
 		if err != nil || gist == "" {
 			logging.Trace("ui: notification gist skipped", "id", m.GmailID, "err", err)
-			// Release the claim so a later thread open retries.
-			dispatch.Main(func() { delete(w.gistRequested, m.GmailID) })
+			// Release the claim so a later thread open retries, and fall back
+			// to the snippet — the notification was held, not lost.
+			dispatch.Main(func() {
+				delete(w.gistRequested, m.GmailID)
+				w.app.SendNotification(id, w.mailNotification(accountID, m, ""))
+			})
 			return
 		}
 		// Persist the line so the reader's per-message summary card reuses it
