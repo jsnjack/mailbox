@@ -79,6 +79,71 @@ func TestMessageCategories(t *testing.T) {
 	}
 }
 
+// TestSetMessageCategoryFailed verifies the failed/ok status distinction:
+// a failed attempt is excluded from MessageCategories (stays a retry
+// candidate) but shows up in FailedCategoryIDs, and a later success heals it.
+func TestSetMessageCategoryFailed(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	acc := seedAccount(t, s)
+
+	if err := s.SetMessageCategoryFailed(ctx, acc, "m1"); err != nil {
+		t.Fatalf("SetMessageCategoryFailed m1: %v", err)
+	}
+
+	// A failed row must not look like "already classified".
+	got, err := s.MessageCategories(ctx, acc, []string{"m1"})
+	if err != nil {
+		t.Fatalf("MessageCategories: %v", err)
+	}
+	if _, ok := got["m1"]; ok {
+		t.Fatalf("m1 should be absent from MessageCategories while failed, got %q", got["m1"])
+	}
+
+	failed, err := s.FailedCategoryIDs(ctx, acc, []string{"m1", "m2"})
+	if err != nil {
+		t.Fatalf("FailedCategoryIDs: %v", err)
+	}
+	if !failed["m1"] {
+		t.Fatalf("m1 should be reported as failed")
+	}
+	if failed["m2"] {
+		t.Fatalf("m2 was never attempted, should not be reported as failed")
+	}
+
+	// A later successful classification heals the failed status.
+	if err := s.SetMessageCategory(ctx, acc, "m1", "Receipt"); err != nil {
+		t.Fatalf("SetMessageCategory m1: %v", err)
+	}
+	got, err = s.MessageCategories(ctx, acc, []string{"m1"})
+	if err != nil {
+		t.Fatalf("MessageCategories after heal: %v", err)
+	}
+	if got["m1"] != "Receipt" {
+		t.Fatalf("m1 = %q, want %q", got["m1"], "Receipt")
+	}
+	failed, err = s.FailedCategoryIDs(ctx, acc, []string{"m1"})
+	if err != nil {
+		t.Fatalf("FailedCategoryIDs after heal: %v", err)
+	}
+	if failed["m1"] {
+		t.Fatalf("m1 should no longer be reported as failed after a successful classification")
+	}
+
+	// A failed retry of an already-'ok' message (e.g. from ClearMessageCategory
+	// racing a stale in-flight retry) must not downgrade it back to failed.
+	if err := s.SetMessageCategoryFailed(ctx, acc, "m1"); err != nil {
+		t.Fatalf("SetMessageCategoryFailed m1 (should be no-op): %v", err)
+	}
+	got, err = s.MessageCategories(ctx, acc, []string{"m1"})
+	if err != nil {
+		t.Fatalf("MessageCategories after no-op failed write: %v", err)
+	}
+	if got["m1"] != "Receipt" {
+		t.Fatalf("m1 = %q, want %q (a failed write must not downgrade an ok row)", got["m1"], "Receipt")
+	}
+}
+
 // TestDeleteMessageClearsCategory verifies that deleting a message also removes
 // its persisted category, so no orphan category row is left behind (the row is
 // keyed by gmail_id with its FK on accounts, so it doesn't cascade on its own).

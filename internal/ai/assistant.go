@@ -274,20 +274,28 @@ func (a *Assistant) Categorize(ctx context.Context, items []string) ([]string, e
 		return nil, fmt.Errorf("encode items: %w", err)
 	}
 	system := "You classify emails into exactly one category each, using these definitions:\n" +
-		"- \"Needs reply\": a real person is asking you something or clearly expects a response.\n" +
-		"- \"Calendar\": meetings or events — invitations, announcements or notices (incl. minutes/agendas), reminders, scheduling, or RSVP requests.\n" +
+		"- \"Needs reply\": a real person is asking you something or clearly expects a response — " +
+		"EXCEPT a meeting/event RSVP, which is always \"Calendar\" instead (see below), even though it also expects a response.\n" +
+		"- \"Calendar\": meetings or events — invitations, announcements or notices (incl. minutes/agendas), reminders, scheduling, or RSVP requests. " +
+		"Takes priority over \"Needs reply\" whenever the email is about a meeting/event.\n" +
 		"- \"Travel\": flights, hotels, car/train bookings, itineraries, boarding passes.\n" +
 		"- \"Receipt\": confirmation of an order/payment ALREADY made — invoices paid, order/shipping/delivery updates.\n" +
 		"- \"Finance\": money you still owe or account info — bills or payments DUE, bank/card statements, taxes.\n" +
-		"- \"Security\": sign-in alerts, password resets, 2FA/verification codes, account or security changes.\n" +
+		"- \"Security\": sign-in alerts, password resets, 2FA/verification codes, account or security changes. " +
+		"Takes priority over \"Notification\" whenever the email is about account access or security, even if it " +
+		"also reads like a generic automated notice.\n" +
 		"- \"Discount\": marketing that contains a usable promo/coupon/discount code or a specific limited-time offer.\n" +
-		"- \"Newsletter\": general marketing, promotions, or digests WITHOUT a specific redeemable code.\n" +
+		"- \"Newsletter\": marketing — promotions or digests of marketing content — WITHOUT a specific redeemable code. " +
+		"Requires actual marketing/promotional intent; an automated digest that is NOT marketing (e.g. a social network's " +
+		"activity summary) is \"Notification\" instead, even though both can be called a \"digest\".\n" +
 		// "suggestions" is spelled out: social networks send connection/job
 		// suggestions that are neither alerts nor status updates, and small
 		// models read the definition literally (a LinkedIn "add Yuri" email
 		// scored "" until suggestions were named).
-		"- \"Notification\": automated notices from a service or social network — alerts, status updates, " +
-		"activity digests, or suggestions (e.g. \"people you may know\", job picks, commits pushed, CI results).\n" +
+		"- \"Notification\": automated, non-marketing notices from a service or social network — alerts, status " +
+		"updates, activity digests, or suggestions (e.g. \"people you may know\", job picks, commits pushed, CI results). " +
+		"Loses to \"Security\" for account/sign-in content and to \"Newsletter\" for marketing content — this is the " +
+		"catch-all for automated mail that is neither of those.\n" +
 		"If none of these clearly applies, use an empty string \"\" for that email. " +
 		"The user message is a JSON array of emails, each a short 'From / Subject / Snippet' string. " +
 		"Reply with ONLY a JSON array of the same length and order; each element is exactly one of the category " +

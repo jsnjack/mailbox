@@ -216,8 +216,14 @@ type window struct {
 	categorizedMsg map[string]string
 	// manualCat marks threads whose category the user picked by hand (thread id →
 	// true). A manual pick outranks the automatic "Replied" tag in the list.
-	manualCat    map[string]bool
-	categorizing bool
+	manualCat map[string]bool
+	// categoryFailed marks threads whose last AI classification attempt errored
+	// (persisted via store.SetMessageCategoryFailed), distinct from a settled
+	// "no category": these threads stay AI retry candidates (never get a
+	// categorizedMsg entry) and render a subtle "failed" tag instead of
+	// silently looking uncategorized.
+	categoryFailed map[string]bool
+	categorizing   bool
 	// categorizeFP / categorizeAt debounce categorizeInbox against the same
 	// candidate set: every list refresh re-enters it (showThreads calls it), and
 	// the cache-seed refresh it issues re-enters it again. When the candidate set
@@ -311,6 +317,7 @@ func newWindow(app *adw.Application, deps Deps) *window {
 		categories:       map[string]string{},
 		categorizedMsg:   map[string]string{},
 		manualCat:        map[string]bool{},
+		categoryFailed:   map[string]bool{},
 		inlineRefetched:  map[string]bool{},
 		gistRequested:    map[string]bool{},
 		appliedGists:     map[string]string{},
@@ -1213,7 +1220,7 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 		// Keep the signature cache in step with what is actually on screen, so a
 		// scroll-recycled row never looks "unchanged" to the next diff.
 		w.rowSig[id] = w.renderSig(id)
-		row := threadRow(w.threadByID[id], outgoing, w.categories[id], w.manualCat[id])
+		row := threadRow(w.threadByID[id], outgoing, w.categories[id], w.manualCat[id], w.categoryFailed[id])
 		// Right-click a row for quick actions (archive/star/read/trash) without
 		// opening it. A fresh row+gesture is created each bind, so the captured id
 		// always matches what's shown.
@@ -1399,6 +1406,7 @@ func (w *window) setThreadCategory(threadID, cat string) {
 	msgID := t.Latest.GmailID
 	acctID := w.activeID
 	logging.Trace("ui: set thread category", "thread", threadID, "id", msgID, "category", cat, "account", acctID)
+	delete(w.categoryFailed, threadID) // a manual decision resolves any pending "failed" state
 	if cat == "" {
 		// "None" clears the manual override entirely, reverting to the default
 		// (which, for a thread you replied to last, is the "Replied" tag).
@@ -1437,6 +1445,7 @@ func (w *window) recategorizeThread(threadID string) {
 	delete(w.categories, threadID)
 	delete(w.categorizedMsg, threadID)
 	delete(w.manualCat, threadID) // re-running AI drops any manual override
+	delete(w.categoryFailed, threadID)
 	acctID := w.activeID
 	go func() {
 		if err := w.deps.Store.ClearMessageCategory(context.Background(), acctID, msgID); err != nil {
@@ -1507,6 +1516,7 @@ func (w *window) onRecategorize() {
 			w.categories = map[string]string{}
 			w.categorizedMsg = map[string]string{}
 			w.manualCat = map[string]bool{}
+			w.categoryFailed = map[string]bool{}
 			// An explicit user action must run now: drop the anti-loop debounce
 			// state so an identical candidate set isn't silently skipped, and
 			// lift the post-failure cooldown ("try now" beats backoff).
@@ -2181,8 +2191,8 @@ func (w *window) renderSig(id string) string {
 			sel = "s"
 		}
 	}
-	return fmt.Sprintf("%s\x1f%d\x1f%d\x1f%s\x1f%t\x1f%s\x1f%s\x1f%d\x1f%t\x1f%t\x1f%t\x1f%d\x1f%s",
-		sel, t.UnreadCount, t.Count, w.categories[id], w.manualCat[id], who, m.Subject,
+	return fmt.Sprintf("%s\x1f%d\x1f%d\x1f%s\x1f%t\x1f%t\x1f%s\x1f%s\x1f%d\x1f%t\x1f%t\x1f%t\x1f%d\x1f%s",
+		sel, t.UnreadCount, t.Count, w.categories[id], w.manualCat[id], w.categoryFailed[id], who, m.Subject,
 		m.InternalDate.Unix(), m.HasAttachments, m.IsStarred, t.RepliedByMe, t.SnoozedUntil, m.Snippet)
 }
 
@@ -2190,12 +2200,13 @@ func (w *window) renderSig(id string) string {
 // so a huge inbox can't trigger a flood of AI calls.
 const maxCategorize = 40
 
-// categorizeChunk is how many emails go into one classify request. Small local
-// models fall apart on long batches — at 20 items a 3B model emits EOS mid-array
-// (an unparseable, unterminated reply) and answers "" for everything past the
-// first few; at 5 the same emails all get real judgments. Cloud models pay a
-// few extra (cached) system-prompt tokens — correctness is worth it.
-const categorizeChunk = 5
+// categorizeWorkers bounds how many classify requests run concurrently. Each
+// request classifies exactly one email — small local models fall apart on
+// multi-email batches (a long JSON array reply truncates mid-array, or
+// positions drift), so one-at-a-time is both more reliable and simpler to
+// reason about per-item success/failure. A small pool keeps latency down
+// without flooding a rate-limited cloud provider or a modest local model server.
+const categorizeWorkers = 3
 
 // aiRetryCooldown is how long auto-categorization waits after an AI failure
 // before trying the provider again, so a down LLM isn't hit on every refresh.
@@ -2210,9 +2221,10 @@ type categoryCand struct {
 
 // categorizeInbox shows inbox category tags with minimal AI cost. It first seeds
 // from the persisted per-email cache (store.MessageCategories — no AI call), then
-// classifies only the still-uncategorized threads with the AI (batched, capped),
-// persisting each result so it survives restarts. Gated by the inboxCategories
-// preference + an assistant.
+// classifies only the still-uncategorized threads with the AI (one request per
+// email, run through a small worker pool, capped per pass), persisting each
+// result so it survives restarts. Gated by the inboxCategories preference + an
+// assistant.
 func (w *window) categorizeInbox() {
 	if !w.inboxCategories || w.deps.Assistant == nil || w.categorizing || w.current != model.LabelInbox {
 		return
@@ -2284,13 +2296,21 @@ func (w *window) categorizeInbox() {
 			slog.Warn("ui: load manual categories", "err", err)
 			manual = map[string]bool{}
 		}
+		// Ids whose last attempt errored — not "done" (still in todo below), but
+		// worth showing a distinct "failed" tag for across a restart rather than
+		// looking uncategorized while a retry is pending.
+		failedIDs, err := w.deps.Store.FailedCategoryIDs(ctx, acctID, msgIDs)
+		if err != nil {
+			slog.Warn("ui: load failed categories", "err", err)
+			failedIDs = map[string]bool{}
+		}
 		var todo []categoryCand
 		for _, c := range cands {
 			if _, ok := cached[c.msgID]; !ok {
 				todo = append(todo, c)
 			}
 		}
-		logging.Trace("ui: categorize seeded from cache", "cached", len(cached), "manual", len(manual), "todo", len(todo), "skipAI", skipAI, "account", acctID)
+		logging.Trace("ui: categorize seeded from cache", "cached", len(cached), "manual", len(manual), "failed", len(failedIDs), "todo", len(todo), "skipAI", skipAI, "account", acctID)
 		dispatch.Main(func() {
 			if w.activeID != acctID {
 				return // switched accounts; these tags belong to the other account
@@ -2299,9 +2319,12 @@ func (w *window) categorizeInbox() {
 				if cat, ok := cached[c.msgID]; ok {
 					w.categories[c.threadID] = cat
 					w.categorizedMsg[c.threadID] = c.msgID
+					delete(w.categoryFailed, c.threadID)
 					if manual[c.msgID] {
 						w.manualCat[c.threadID] = true
 					}
+				} else if failedIDs[c.msgID] {
+					w.categoryFailed[c.threadID] = true
 				}
 			}
 			w.refreshList(w.searchEntry.Text()) // show seeded tags immediately
@@ -2319,67 +2342,95 @@ func (w *window) categorizeInbox() {
 		}
 		var firstErr error
 		assigned := 0 // categories the AI actually stored this pass
+		failed := 0   // items whose request errored this pass
 		if len(todo) > 0 {
 			done := w.aiActivity(fmt.Sprintf("Categorizing %d threads", len(todo)))
 			// Bound the whole pass so a hung/unreachable provider can't hold the
 			// spinner (and the categorizing flag) for the client's full 120s; on
-			// timeout Categorize errors out, the provider is flagged failing, and the
-			// cooldown takes over instead of stalling every refresh.
+			// timeout Categorize errors out for every in-flight item, the provider
+			// is flagged failing, and the cooldown takes over instead of stalling
+			// every refresh. Shared across all workers, so total wall-clock stays
+			// bounded regardless of how many items are queued.
 			aiCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 			defer cancel()
-			for start := 0; start < len(todo); start += categorizeChunk {
-				end := start + categorizeChunk
-				if end > len(todo) {
-					end = len(todo)
-				}
-				chunk := todo[start:end]
-				ctxs := make([]string, len(chunk))
-				for i, c := range chunk {
-					ctxs[i] = c.ctx
-				}
-				cats, err := w.deps.Assistant.Categorize(aiCtx, ctxs)
-				if err != nil {
-					firstErr = err
-					slog.Warn("ui: categorize inbox", "err", err)
-					break
-				}
-				results := make(map[string]string, len(chunk)) // threadID → category
-				forMsg := make(map[string]string, len(chunk))  // threadID → categorized msg id
-				for i, c := range chunk {
-					if i >= len(cats) {
-						break
+
+			type classifyResult struct {
+				cand categoryCand
+				cat  string
+				err  error
+			}
+			resultsCh := make(chan classifyResult, len(todo))
+			sem := make(chan struct{}, categorizeWorkers)
+			var wg sync.WaitGroup
+			for _, c := range todo {
+				wg.Add(1)
+				sem <- struct{}{}
+				go func(c categoryCand) {
+					defer wg.Done()
+					defer func() { <-sem }()
+					cats, err := w.deps.Assistant.Categorize(aiCtx, []string{c.ctx})
+					cat := ""
+					if err == nil {
+						if len(cats) > 0 {
+							cat = normalizeCategory(cats[0])
+						} else {
+							err = fmt.Errorf("categorize %q: empty reply", c.msgID)
+						}
 					}
-					cat := normalizeCategory(cats[i])
-					if err := w.deps.Store.SetMessageCategory(ctx, acctID, c.msgID, cat); err != nil {
-						slog.Warn("ui: persist category", "err", err)
+					resultsCh <- classifyResult{cand: c, cat: cat, err: err}
+				}(c)
+			}
+			go func() {
+				wg.Wait()
+				close(resultsCh)
+			}()
+
+			for r := range resultsCh {
+				c := r.cand
+				if r.err != nil {
+					failed++
+					if firstErr == nil {
+						firstErr = r.err
 					}
-					results[c.threadID] = cat
-					forMsg[c.threadID] = c.msgID
-					assigned++
+					slog.Warn("ui: categorize inbox", "id", c.msgID, "err", r.err)
+					if err := w.deps.Store.SetMessageCategoryFailed(ctx, acctID, c.msgID); err != nil {
+						slog.Warn("ui: persist failed category", "err", err)
+					}
+					dispatch.Main(func() {
+						if w.activeID != acctID {
+							return // switched accounts; don't write its tag into the other's map
+						}
+						w.categoryFailed[c.threadID] = true
+					})
+					continue
 				}
+				if err := w.deps.Store.SetMessageCategory(ctx, acctID, c.msgID, r.cat); err != nil {
+					slog.Warn("ui: persist category", "err", err)
+				}
+				assigned++
+				cat := r.cat
 				dispatch.Main(func() {
 					if w.activeID != acctID {
-						return // switched accounts; don't write its tags into the other's map
+						return // switched accounts; don't write its tag into the other's map
 					}
-					for id, cat := range results {
-						w.categories[id] = cat
-						w.categorizedMsg[id] = forMsg[id]
-					}
+					w.categories[c.threadID] = cat
+					w.categorizedMsg[c.threadID] = c.msgID
+					delete(w.categoryFailed, c.threadID)
 				})
 			}
-			logging.Trace("ui: categorize inbox classified", "assigned", assigned, "todo", len(todo), "err", firstErr, "account", acctID)
+			logging.Trace("ui: categorize inbox classified", "assigned", assigned, "failed", failed, "todo", len(todo), "err", firstErr, "account", acctID)
 			dispatch.Main(func() { done(doneErr(firstErr)) })
 		}
 		dispatch.Main(func() {
 			w.categorizing = false
 			// Only re-bind (which re-enters categorizeInbox via showThreads, kicking
-			// off the next capped pass) when the AI actually classified something. If
-			// the provider is down — skipAI, or every chunk errored — no categories
-			// were assigned, so the candidates remain candidates; re-firing would spin
-			// a tight zero-delay loop (no AI call to pace it) and peg the CPU. The
-			// free cache seed above already refreshed the list, so nothing is lost.
-			// The next external trigger (a sync refresh) retries once the cooldown lapses.
-			if assigned > 0 {
+			// off the next capped pass) when something actually changed. If the
+			// provider is down and every item errored, no categories were assigned —
+			// the free cache seed above already refreshed the list, so nothing is
+			// lost. Re-bind on failures too, so the "failed" tag becomes visible
+			// without waiting for an unrelated refresh. The next external trigger (a
+			// sync refresh) retries once the cooldown lapses.
+			if assigned > 0 || failed > 0 {
 				w.refreshList(w.searchEntry.Text()) // re-bind rows to show the tags
 			}
 		})
@@ -3368,7 +3419,7 @@ func (w *window) clearReader() {
 	w.resetTranslation()
 	w.hideSummary()
 	w.showInviteCard(0, nil)
-	w.setReaderCategory("")
+	w.setReaderCategory("", false)
 	w.setActionsSensitive(false)
 	w.readerStack.SetVisibleChildName("empty")
 }
@@ -3691,7 +3742,7 @@ func (w *window) renderConversation(msgs []model.Message) {
 			category = "Snoozed"
 		}
 	}
-	w.setReaderCategory(category)
+	w.setReaderCategory(category, w.categoryFailed[w.openThreadID])
 	// Show a loading placeholder immediately when bodies need fetching (not all
 	// cached), so the user sees their click registered instead of staring at the
 	// previous message for up to the fetch timeout. When all bodies are cached
@@ -4933,10 +4984,16 @@ func (w *window) cleanHTML(h string) (string, int) {
 }
 
 // setReaderCategory shows the thread's category pill in the reader header
-// (hidden when uncategorized), mirroring the list row's tag styling.
-func (w *window) setReaderCategory(category string) {
-	for _, c := range []string{"cat-needsreply", "cat-replied", "cat-discount", "cat-snoozed"} {
+// (hidden when uncategorized), mirroring the list row's tag styling. When
+// category is "" and categorizeFailed is true, shows a distinct "Categorize
+// failed" pill instead of hiding it — so a stuck AI attempt isn't
+// indistinguishable from a settled "no category".
+func (w *window) setReaderCategory(category string, categorizeFailed bool) {
+	for _, c := range []string{"cat-needsreply", "cat-replied", "cat-discount", "cat-snoozed", "cat-failed"} {
 		w.readerCatTag.RemoveCSSClass(c)
+	}
+	if category == "" && categorizeFailed {
+		category = "Categorize failed"
 	}
 	if category == "" {
 		w.readerCatTag.SetVisible(false)
@@ -4951,6 +5008,8 @@ func (w *window) setReaderCategory(category string) {
 		w.readerCatTag.AddCSSClass("cat-discount")
 	case "Snoozed":
 		w.readerCatTag.AddCSSClass("cat-snoozed")
+	case "Categorize failed":
+		w.readerCatTag.AddCSSClass("cat-failed")
 	}
 	w.readerCatTag.SetText(category)
 	w.readerCatTag.SetVisible(true)
@@ -6466,7 +6525,7 @@ func countBadge(n int) *gtk.Label {
 	return c
 }
 
-func threadRow(t model.ThreadSummary, outgoing bool, category string, manualCat bool) *gtk.Box {
+func threadRow(t model.ThreadSummary, outgoing bool, category string, manualCat bool, categorizeFailed bool) *gtk.Box {
 	m := t.Latest
 	unread := t.UnreadCount > 0
 	// Once you've had the last word the conversation is handled, so show a
@@ -6481,6 +6540,11 @@ func threadRow(t model.ThreadSummary, outgoing bool, category string, manualCat 
 		// if both apply (it's the more current, actionable fact). The tag stays
 		// until the user re-snoozes it or picks a category by hand.
 		category = "Snoozed"
+	case category == "" && categorizeFailed:
+		// The AI attempt errored rather than legitimately finding no category —
+		// show that distinctly instead of silently looking uncategorized. A
+		// retry happens automatically on a later pass.
+		category = "Categorize failed"
 	}
 
 	box := gtk.NewBox(gtk.OrientationVertical, 2)
@@ -6559,6 +6623,8 @@ func threadRow(t model.ThreadSummary, outgoing bool, category string, manualCat 
 			tag.AddCSSClass("cat-discount")
 		case "Snoozed":
 			tag.AddCSSClass("cat-snoozed")
+		case "Categorize failed":
+			tag.AddCSSClass("cat-failed")
 		}
 		tag.SetVAlign(gtk.AlignCenter)
 		subjRow := gtk.NewBox(gtk.OrientationHorizontal, 6)

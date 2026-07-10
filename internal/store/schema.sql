@@ -111,11 +111,17 @@ CREATE TABLE IF NOT EXISTS outbox (
 -- email instead of every launch. category is one of the known buckets, or '' to
 -- record "classified, no tag" (so it isn't re-classified). Keyed by gmail_id, so
 -- a new message in a thread naturally has no row yet and gets classified once.
+-- status distinguishes a settled classification ('ok', category may still be
+-- '' for "no tag") from an AI attempt that errored ('failed', category always
+-- ''): a failed row is excluded from "already done" (MessageCategories), so the
+-- thread stays a retry candidate instead of looking identical to a genuine
+-- no-match.
 CREATE TABLE IF NOT EXISTS message_categories (
   account_id      INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
   gmail_id        TEXT NOT NULL,
   category        TEXT NOT NULL,     -- a known category, or '' for "no tag"
   manual          INTEGER NOT NULL DEFAULT 0, -- 1 = user picked it (overrides "Replied")
+  status          TEXT NOT NULL DEFAULT 'ok', -- 'ok' or 'failed' (AI attempt errored)
   PRIMARY KEY (account_id, gmail_id)
 );
 

@@ -140,6 +140,13 @@ const appCSS = `
 	background-color: alpha(@window_fg_color, 0.12);
 	color: alpha(@window_fg_color, 0.70);
 }
+/* "Categorize failed": the AI attempt errored rather than settling on "no
+   category" — a muted error tint so it reads as "still pending, will retry",
+   not as urgent as the Discount/warning hue. */
+.cat-failed {
+	background-color: alpha(@error_color, 0.12);
+	color: alpha(@error_color, 0.85);
+}
 
 /* Bottom status bar: a quiet strip set off by a hairline top border. */
 .status-bar {

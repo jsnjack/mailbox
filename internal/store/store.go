@@ -111,6 +111,11 @@ func migrate(db *sql.DB) error {
 		// list can show where a thread came from; notified distinguishes an
 		// announced wake from a still-pending one.
 		`ALTER TABLE snoozes ADD COLUMN notified INTEGER NOT NULL DEFAULT 0`,
+		// Distinguish "AI attempt failed" from "AI legitimately found no
+		// category": a status='failed' row is excluded from MessageCategories'
+		// "already done" set, so it stays a retry candidate instead of being
+		// indistinguishable from a settled category=''.
+		`ALTER TABLE message_categories ADD COLUMN status TEXT NOT NULL DEFAULT 'ok'`,
 	}
 	for _, s := range stmts {
 		if _, err := db.Exec(s); err != nil {
