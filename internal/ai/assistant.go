@@ -291,9 +291,14 @@ func (a *Assistant) Categorize(ctx context.Context, items []string) ([]string, e
 		// "suggestions" is spelled out: social networks send connection/job
 		// suggestions that are neither alerts nor status updates, and small
 		// models read the definition literally (a LinkedIn "add Yuri" email
-		// scored "" until suggestions were named).
+		// scored "" until suggestions were named). Code-hosting activity is
+		// spelled out too: it's the single largest slice of automated mail for
+		// a developer inbox, and without an explicit example a model
+		// inconsistently drops it to "" instead of Notification.
 		"- \"Notification\": automated, non-marketing notices from a service or social network — alerts, status " +
 		"updates, activity digests, or suggestions (e.g. \"people you may know\", job picks, commits pushed, CI results). " +
+		"Always includes code-hosting/dev-tool activity: a pull request or issue opened/commented/merged/closed, a " +
+		"code review requested or submitted, a CI/build/deploy run result or status change (e.g. GitHub, GitLab, CI bots). " +
 		"Loses to \"Security\" for account/sign-in content and to \"Newsletter\" for marketing content — this is the " +
 		"catch-all for automated mail that is neither of those.\n" +
 		"If none of these clearly applies, use an empty string \"\" for that email. " +
