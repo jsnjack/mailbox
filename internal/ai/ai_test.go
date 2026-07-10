@@ -93,6 +93,7 @@ func TestCategorizeSingleSalvage(t *testing.T) {
 		want  string
 	}{
 		{`""`, ""},                       // JSON empty string → no tag
+		{`[]`, ""},                       // clean empty array (some models' "no match" for one item) → no tag
 		{`Notification`, "Notification"}, // bare word
 		{"`Needs reply`", "Needs reply"}, // code-fenced
 		{`"Receipt"`, "Receipt"},         // quoted scalar

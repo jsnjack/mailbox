@@ -354,6 +354,15 @@ func parseCategories(raw string, n int) ([]string, error) {
 		}
 	}
 	if err == nil {
+		if len(out) == 0 && n == 1 {
+			// A clean, complete "[]" reply to a single-item request is some
+			// models' way of saying "none of the categories apply" rather than
+			// the expected `[""]` — a real parse success, not a short/malformed
+			// reply. Treat it as a legitimate "no category" result instead of
+			// surfacing it to the caller as an error (which would wrongly flag
+			// a perfectly healthy provider as failing).
+			return []string{""}, nil
+		}
 		for i := range out {
 			out[i] = MatchCategory(out[i])
 		}
