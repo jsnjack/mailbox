@@ -276,8 +276,13 @@ func (a *Assistant) Categorize(ctx context.Context, items []string) ([]string, e
 	system := "You classify emails into exactly one category each, using these definitions:\n" +
 		"- \"Needs reply\": a real person is asking you something or clearly expects a response — " +
 		"EXCEPT a meeting/event RSVP, which is always \"Calendar\" instead (see below), even though it also expects a response.\n" +
-		"- \"Calendar\": meetings or events — invitations, announcements or notices (incl. minutes/agendas), reminders, scheduling, or RSVP requests. " +
-		"Takes priority over \"Needs reply\" whenever the email is about a meeting/event.\n" +
+		"- \"Calendar\": a meeting or event ON THE RECIPIENT'S OWN CALENDAR — invitations, announcements or notices " +
+		"(incl. minutes/agendas), reminders, scheduling, or RSVP requests for something the recipient is personally " +
+		"invited to or organizing. NOT a marketing email that merely promotes a public webinar/product-launch/conference " +
+		"to a broad mailing list, even if it names a date/time — that's \"Newsletter\" or \"Discount\" instead. The test: " +
+		"would accepting/attending add a specific personal commitment to the recipient's calendar, or is this just an " +
+		"ad for an event anyone on the list could attend? Takes priority over \"Needs reply\" whenever the email is a " +
+		"genuine personal meeting/event.\n" +
 		"- \"Travel\": flights, hotels, car/train bookings, itineraries, boarding passes.\n" +
 		"- \"Receipt\": confirmation of an order/payment ALREADY made — invoices paid, order/shipping/delivery updates.\n" +
 		"- \"Finance\": money you still owe or account info — bills or payments DUE, bank/card statements, taxes.\n" +
@@ -285,9 +290,12 @@ func (a *Assistant) Categorize(ctx context.Context, items []string) ([]string, e
 		"Takes priority over \"Notification\" whenever the email is about account access or security, even if it " +
 		"also reads like a generic automated notice.\n" +
 		"- \"Discount\": marketing that contains a usable promo/coupon/discount code or a specific limited-time offer.\n" +
-		"- \"Newsletter\": marketing — promotions or digests of marketing content — WITHOUT a specific redeemable code. " +
-		"Requires actual marketing/promotional intent; an automated digest that is NOT marketing (e.g. a social network's " +
-		"activity summary) is \"Notification\" instead, even though both can be called a \"digest\".\n" +
+		"- \"Newsletter\": a subscribed publication or content digest for general readers — WITHOUT a specific redeemable " +
+		"code. Covers both promotional marketing AND purely editorial content (e.g. a developer/tech/news digest of " +
+		"articles and links) even when nothing is being sold — a newsletter doesn't have to be an ad to count. The test " +
+		"is WHO the content is about: general-audience publisher content (curated by an editor/company for anyone " +
+		"subscribed) is \"Newsletter\"; automated activity about the recipient's OWN account, profile, or connections " +
+		"is \"Notification\" instead (see below), even though both can be called a \"digest\".\n" +
 		// "suggestions" is spelled out: social networks send connection/job
 		// suggestions that are neither alerts nor status updates, and small
 		// models read the definition literally (a LinkedIn "add Yuri" email
@@ -295,12 +303,13 @@ func (a *Assistant) Categorize(ctx context.Context, items []string) ([]string, e
 		// spelled out too: it's the single largest slice of automated mail for
 		// a developer inbox, and without an explicit example a model
 		// inconsistently drops it to "" instead of Notification.
-		"- \"Notification\": automated, non-marketing notices from a service or social network — alerts, status " +
-		"updates, activity digests, or suggestions (e.g. \"people you may know\", job picks, commits pushed, CI results). " +
-		"Always includes code-hosting/dev-tool activity: a pull request or issue opened/commented/merged/closed, a " +
-		"code review requested or submitted, a CI/build/deploy run result or status change (e.g. GitHub, GitLab, CI bots). " +
-		"Loses to \"Security\" for account/sign-in content and to \"Newsletter\" for marketing content — this is the " +
-		"catch-all for automated mail that is neither of those.\n" +
+		"- \"Notification\": automated notices from a service or social network about the recipient's OWN account, " +
+		"profile, or connections — alerts, status updates, activity digests, or suggestions (e.g. \"people you may " +
+		"know\", job picks, commits pushed, CI results). Always includes code-hosting/dev-tool activity: a pull " +
+		"request or issue opened/commented/merged/closed, a code review requested or submitted, a CI/build/deploy run " +
+		"result or status change (e.g. GitHub, GitLab, CI bots). Loses to \"Security\" for account/sign-in content and " +
+		"to \"Newsletter\" for general publisher content (e.g. a tech newsletter's roundup of articles is \"Newsletter\" " +
+		"even though it's also a kind of digest) — this is the catch-all for automated mail that is neither of those.\n" +
 		"If none of these clearly applies, use an empty string \"\" for that email. " +
 		"The user message is a JSON array of emails, each a short 'From / Subject / Snippet' string. " +
 		"Reply with ONLY a JSON array of the same length and order; each element is exactly one of the category " +
