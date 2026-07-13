@@ -69,6 +69,14 @@ func (h *Hub) Begin(op, label string) func(note string) {
 	}
 }
 
+// Report publishes an already-completed operation (a Done with no matching
+// Start, so no duration): work that is effectively instant or only worth
+// logging when it did something — a label mirror, an outbox sweep that
+// delivered, a retention prune, a woken snooze.
+func (h *Hub) Report(op, label, note string) {
+	h.Publish(Event{Op: op, Phase: Done, Label: label, Note: note})
+}
+
 // Subscribe returns a channel of events and an unsubscribe function. The channel
 // is buffered; events are dropped (not blocked) when it is full.
 func (h *Hub) Subscribe() (<-chan Event, func()) {

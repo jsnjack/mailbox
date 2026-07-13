@@ -62,6 +62,7 @@ type window struct {
 	statusActive     []string             // labels of in-flight operations, most recent last
 	statusStarted    map[string]time.Time // op label → start time (elapsed + duration)
 	statusProgText   map[string]string    // op label → bounded "N/M" progress text
+	statusLogRows    map[string][]*logRow // op+label → in-flight log rows (FIFO), finished in place
 	statusLogLines   int                  // current number of log rows (capped)
 	activityTimer    glib.SourceHandle
 	markReadTimer    glib.SourceHandle // pending "mark thread read" (cancelled if the user navigates away first)
@@ -6138,7 +6139,9 @@ func (w *window) notifyNewMail(accountID int64, m model.Message, gist string) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
+		done := w.aiActivity("Summarizing new mail")
 		gist, err := w.deps.Assistant.BriefSummary(ctx, gistContext(m))
+		done(doneErr(err))
 		if err != nil || gist == "" {
 			logging.Trace("ui: notification gist skipped", "id", m.GmailID, "err", err)
 			// Release the claim so a later thread open retries, and fall back

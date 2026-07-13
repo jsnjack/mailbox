@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -318,7 +319,7 @@ func launchUI(mailto string) error {
 		}
 		rt.wg.Add(2)
 		go func() { defer rt.wg.Done(); backgroundSync(actx, engine, act, b, a.ID, a.Email, wake) }()
-		go func() { defer rt.wg.Done(); backgroundSweep(actx, engine, b, a.ID) }()
+		go func() { defer rt.wg.Done(); backgroundSweep(actx, engine, act, b, a.ID) }()
 		// One-time recovery: re-fetch Gmail messages cached text-only by an older
 		// build that dropped externalized (attachment-id-served) HTML bodies. IMAP
 		// fetches whole bodies, so its text-only mail is genuinely text-only — skip it.
@@ -336,10 +337,10 @@ func launchUI(mailto string) error {
 
 	// Body retention: when configured (Preferences → Storage), prune cached
 	// bodies older than the window shortly after launch and then daily.
-	go backgroundRetention(ctx, st)
+	go backgroundRetention(ctx, st, act)
 
 	// Snooze wake: return due snoozed conversations to the inbox.
-	go backgroundSnoozeWake(ctx, st, hub)
+	go backgroundSnoozeWake(ctx, st, hub, act)
 
 	// Cumulative metrics for the status bar: cache sizes + per-account API stats.
 	deps.Stats = func() ui.StatusStats {
@@ -505,7 +506,10 @@ func launchUI(mailto string) error {
 		if err != nil {
 			return err
 		}
-		return engine.ModifyLabelsBatch(ctx, c, accountID, gmailIDs, add, remove)
+		err = engine.ModifyLabelsBatch(ctx, c, accountID, gmailIDs, add, remove)
+		// Instant local change + async mirror — log it as a completed op.
+		act.Report("mail", labelChangeSummary(add, remove, len(gmailIDs)), doneNote(err))
+		return err
 	}
 	deps.Send = func(ctx context.Context, accountID int64, msg model.OutgoingMessage) error {
 		c, err := clientFor(accountID)
@@ -530,7 +534,10 @@ func launchUI(mailto string) error {
 		if err != nil {
 			return err
 		}
-		return engine.SaveDraft(ctx, c, accountID, msg)
+		done := act.Begin("send", "Saving draft")
+		err = engine.SaveDraft(ctx, c, accountID, msg)
+		done(doneNote(err))
+		return err
 	}
 	deps.FindDraftID = func(ctx context.Context, accountID int64, gmailID string) (string, error) {
 		c, err := clientFor(accountID)
@@ -544,16 +551,25 @@ func launchUI(mailto string) error {
 		if err != nil {
 			return "", err
 		}
-		return engine.OpenAttachment(ctx, c, gmailID, attID)
+		done := act.Begin("attach", "Downloading attachment")
+		path, err := engine.OpenAttachment(ctx, c, gmailID, attID)
+		done(doneNote(err))
+		return path, err
 	}
 	deps.Sync = func(ctx context.Context, accountID int64) error {
 		c, err := clientFor(accountID)
 		if err != nil {
 			return err
 		}
-		_, err = engine.Incremental(ctx, c, accountID)
+		done := act.Begin("sync", "Syncing now")
+		n, err := engine.Incremental(ctx, c, accountID)
 		if errors.Is(err, syncer.ErrHistoryExpired) {
-			_, err = engine.Resync(ctx, c, accountID, resyncBackfillLimit)
+			n, err = engine.Resync(ctx, c, accountID, resyncBackfillLimit)
+		}
+		if err != nil {
+			done(doneNote(err))
+		} else {
+			done(fmt.Sprintf("%d change(s)", n))
 		}
 		return err
 	}
@@ -576,14 +592,23 @@ func launchUI(mailto string) error {
 		if err != nil {
 			return err
 		}
-		return engine.MarkLabelRead(ctx, c, accountID, labelID)
+		done := act.Begin("mail", "Marking "+labelID+" read")
+		err = engine.MarkLabelRead(ctx, c, accountID, labelID)
+		done(doneNote(err))
+		return err
 	}
 	deps.SweepOutbox = func(ctx context.Context, accountID int64) error {
 		c, err := clientFor(accountID)
 		if err != nil {
 			return err
 		}
-		_, err = engine.SweepOutbox(ctx, c, accountID)
+		done := act.Begin("send", "Sending outbox")
+		n, err := engine.SweepOutbox(ctx, c, accountID)
+		if err != nil {
+			done(doneNote(err))
+		} else {
+			done(fmt.Sprintf("%d sent", n))
+		}
 		return err
 	}
 	deps.RetryOutbox = func(ctx context.Context, accountID, id int64) error {
@@ -603,14 +628,24 @@ func launchUI(mailto string) error {
 		if err != nil {
 			return err
 		}
-		return engine.DeletePermanently(ctx, c, accountID, gmailIDs)
+		done := act.Begin("mail", fmt.Sprintf("Deleting %d message(s) forever", len(gmailIDs)))
+		err = engine.DeletePermanently(ctx, c, accountID, gmailIDs)
+		done(doneNote(err))
+		return err
 	}
 	deps.EmptyFolder = func(ctx context.Context, accountID int64, labelID string) (int, error) {
 		c, err := clientFor(accountID)
 		if err != nil {
 			return 0, err
 		}
-		return engine.EmptyLabel(ctx, c, accountID, labelID)
+		done := act.Begin("mail", "Emptying "+labelID)
+		n, err := engine.EmptyLabel(ctx, c, accountID, labelID)
+		if err != nil {
+			done(doneNote(err))
+		} else {
+			done(fmt.Sprintf("%d deleted", n))
+		}
+		return n, err
 	}
 
 	if asst, err := buildAssistant(); err != nil {
@@ -629,6 +664,22 @@ func launchUI(mailto string) error {
 	}
 
 	return ui.Run(deps, mailto)
+}
+
+// labelChangeSummary renders a label mutation for the activity log, e.g.
+// "+TRASH −INBOX · 3 msgs".
+func labelChangeSummary(add, remove []string, n int) string {
+	var parts []string
+	for _, l := range add {
+		parts = append(parts, "+"+l)
+	}
+	for _, l := range remove {
+		parts = append(parts, "−"+l)
+	}
+	if len(parts) == 0 {
+		parts = append(parts, "labels")
+	}
+	return fmt.Sprintf("%s · %d msg(s)", strings.Join(parts, " "), n)
 }
 
 // buildAssistant constructs the AI assistant from the config file + key (keyring
@@ -801,13 +852,18 @@ func buildClientForAccount(ctx context.Context, email string) (*gmailapi.Client,
 // sweepInterval is how often the outbox is retried while the GUI is open.
 const sweepInterval = 45 * time.Second
 
-// backgroundSweep retries queued outbox messages on a timer.
-func backgroundSweep(ctx context.Context, engine *syncer.Engine, b backend.Backend, accountID int64) {
+// backgroundSweep retries queued outbox messages on a timer. A quiet tick (an
+// empty outbox) is not logged — only sweeps that delivered something or failed.
+func backgroundSweep(ctx context.Context, engine *syncer.Engine, act *activity.Hub, b backend.Backend, accountID int64) {
 	ticker := time.NewTicker(sweepInterval)
 	defer ticker.Stop()
 	for {
-		if _, err := engine.SweepOutbox(ctx, b, accountID); err != nil {
+		n, err := engine.SweepOutbox(ctx, b, accountID)
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "outbox sweep: %v\n", err)
+			act.Report("send", "Outbox sweep", doneNote(err))
+		} else if n > 0 {
+			act.Report("send", "Outbox sweep", fmt.Sprintf("%d sent", n))
 		}
 		select {
 		case <-ctx.Done():
@@ -833,7 +889,7 @@ const (
 
 // backgroundRetention applies the body-retention preference (see
 // store.PruneBodies): old message bodies are cleared, metadata kept.
-func backgroundRetention(ctx context.Context, st *store.Store) {
+func backgroundRetention(ctx context.Context, st *store.Store, act *activity.Hub) {
 	select {
 	case <-ctx.Done():
 		return
@@ -842,7 +898,7 @@ func backgroundRetention(ctx context.Context, st *store.Store) {
 	ticker := time.NewTicker(retentionInterval)
 	defer ticker.Stop()
 	for {
-		runRetentionPass(ctx, st)
+		runRetentionPass(ctx, st, act)
 		select {
 		case <-ctx.Done():
 			return
@@ -853,7 +909,9 @@ func backgroundRetention(ctx context.Context, st *store.Store) {
 
 // runRetentionPass prunes bodies older than the configured window (no-op when
 // retention is off) and compacts the DB when the pass freed enough to matter.
-func runRetentionPass(ctx context.Context, st *store.Store) {
+// A pass that pruned something (or failed) is reported to the activity log; a
+// quiet no-op pass is not.
+func runRetentionPass(ctx context.Context, st *store.Store, act *activity.Hub) {
 	prefs, err := config.LoadPrefs()
 	if err != nil || prefs.BodyRetentionDays <= 0 {
 		return
@@ -862,12 +920,14 @@ func runRetentionPass(ctx context.Context, st *store.Store) {
 	n, err := st.PruneBodies(ctx, cutoff)
 	if err != nil {
 		slog.Warn("body retention: prune", "err", err)
+		act.Report("mail", "Body retention", doneNote(err))
 		return
 	}
 	if n == 0 {
 		return
 	}
 	slog.Info("body retention: pruned old message bodies", "count", n, "days", prefs.BodyRetentionDays)
+	act.Report("mail", "Body retention", fmt.Sprintf("%d bodies pruned (>%dd)", n, prefs.BodyRetentionDays))
 	if n >= retentionVacuumMin {
 		if err := st.Vacuum(ctx); err != nil {
 			slog.Warn("body retention: vacuum", "err", err)
@@ -883,7 +943,7 @@ const snoozeWakeInterval = time.Minute
 // inbox: the row is marked notified (until > now is what un-hides the thread;
 // the row itself lingers so the list can show a "Snoozed" tag) and a
 // SnoozeWoke change tells the UI to refresh and raise a reminder notification.
-func backgroundSnoozeWake(ctx context.Context, st *store.Store, hub *syncer.Hub) {
+func backgroundSnoozeWake(ctx context.Context, st *store.Store, hub *syncer.Hub, act *activity.Hub) {
 	ticker := time.NewTicker(snoozeWakeInterval)
 	defer ticker.Stop()
 	for {
@@ -891,6 +951,7 @@ func backgroundSnoozeWake(ctx context.Context, st *store.Store, hub *syncer.Hub)
 		if err != nil {
 			slog.Warn("snooze wake: list due", "err", err)
 		}
+		woke := 0
 		for _, sn := range due {
 			if err := st.MarkSnoozeNotified(ctx, sn.AccountID, sn.ThreadID); err != nil {
 				slog.Warn("snooze wake: mark notified", "thread", sn.ThreadID, "err", err)
@@ -898,6 +959,10 @@ func backgroundSnoozeWake(ctx context.Context, st *store.Store, hub *syncer.Hub)
 			}
 			slog.Debug("launch: snooze woke", "account", sn.AccountID, "thread", sn.ThreadID)
 			hub.Publish(syncer.Change{Kind: syncer.SnoozeWoke, AccountID: sn.AccountID, ThreadID: sn.ThreadID})
+			woke++
+		}
+		if woke > 0 {
+			act.Report("mail", "Snooze woke", fmt.Sprintf("%d conversation(s)", woke))
 		}
 		select {
 		case <-ctx.Done():

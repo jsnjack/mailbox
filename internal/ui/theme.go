@@ -155,6 +155,29 @@ const appCSS = `
 	min-height: 22px;
 }
 
+/* Activity log rows (the status-bar popover): developer density. A monospace
+   clock and duration, a tiny neutral kind chip (same quiet pill as .cat-tag —
+   no per-kind hues), and a dim result-note line that only picks up the error
+   color when the operation failed. */
+.log-time {
+	font-family: monospace;
+	color: alpha(@window_fg_color, 0.55);
+}
+.log-chip {
+	font-family: monospace;
+	font-size: 0.78em;
+	padding: 0 5px;
+	border-radius: 4px;
+	background-color: alpha(@card_fg_color, 0.10);
+	color: alpha(@window_fg_color, 0.75);
+}
+.log-note {
+	color: alpha(@window_fg_color, 0.60);
+}
+.log-error {
+	color: alpha(@error_color, 0.90);
+}
+
 /* Right-click row context menu. It is hand-built from flat buttons (a
    GtkPopoverMenu manually parented to a recycled list row won't activate its
    GActions), so these rules make the buttons read as native menu items: normal

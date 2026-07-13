@@ -309,7 +309,14 @@ operation with a spinner/progress bar (left) and live cumulative metrics (right:
 bytes transferred, Gmail API requests + quota units, AI requests + AI bytes
 (`Assistant.Requests`/`Transferred` — counted in the Assistant so they survive a
 live provider swap), DB size, cached-message count) — plus an expandable
-timestamped activity log. Every AI op is bracketed into it via `aiActivity`. Background layers report
+structured activity log: one row per operation (monospace clock, a neutral kind
+chip — SYNC/AI/FETCH/SEND/SEARCH/ATTACH/MAIL — the label, right-aligned
+duration), inserted at Start and finished in place (✓/✗/– with the result note
+on a dim second line, error-tinted on failure; capped at 200 rows). Every AI op
+is bracketed into it via `aiActivity` (including the background categorizer and
+the notification gist); label mutations, outbox sweeps that delivered,
+retention prunes, and woken snoozes log as instant completed rows via
+`activity.Hub.Report`. Background layers report
 transient activity to a headless `activity.Hub` (`deps.Activity`) that the bar
 drains via `dispatch`; the AI ops the UI brackets directly; metrics come from
 per-account `gmailapi.Stats` (a byte-counting transport + request/quota counters)

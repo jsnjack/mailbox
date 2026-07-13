@@ -16,8 +16,20 @@ import (
 	"github.com/jsnjack/mailbox/internal/logging"
 )
 
-// statusLogCap bounds how many recent activity lines the log popover keeps.
+// statusLogCap bounds how many recent operations the log popover keeps.
 const statusLogCap = 200
+
+// logRow is one operation's row in the activity log. An operation gets a
+// single row for its whole lifecycle — inserted at Start (with a running
+// glyph), updated with bounded progress, and finished in place with its
+// duration and result — instead of separate start/done lines that interleave
+// under concurrency.
+type logRow struct {
+	status  *gtk.Label // ▸ running · ✓ ok · ✗ error · – cancelled
+	dur     *gtk.Label // live progress ("3/10") while running, duration when done
+	note    *gtk.Label // result note (counts, errors); hidden while empty
+	started time.Time
+}
 
 // buildStatusBar constructs the bottom status bar. It is activity-first: the
 // left shows what the app is doing right now (spinner + label + elapsed time,
@@ -27,6 +39,7 @@ const statusLogCap = 200
 func (w *window) buildStatusBar() gtk.Widgetter {
 	w.statusStarted = make(map[string]time.Time)
 	w.statusProgText = make(map[string]string)
+	w.statusLogRows = make(map[string][]*logRow)
 	// Keep the relative idle text ("Synced 2 min ago") honest while nothing is
 	// happening; a cheap label repaint twice a minute.
 	glib.TimeoutSecondsAdd(30, func() bool {
@@ -69,11 +82,11 @@ func (w *window) buildStatusBar() gtk.Widgetter {
 // buildActivityLogButton returns the "activity log" button and its popover,
 // which holds the recent-operation log and a session-stats section.
 func (w *window) buildActivityLogButton() gtk.Widgetter {
-	w.statusLogBox = gtk.NewBox(gtk.OrientationVertical, 1)
+	w.statusLogBox = gtk.NewBox(gtk.OrientationVertical, 2)
 	scroller := gtk.NewScrolledWindow()
 	scroller.SetPolicy(gtk.PolicyNever, gtk.PolicyAutomatic)
 	scroller.SetChild(w.statusLogBox)
-	scroller.SetSizeRequest(400, 240)
+	scroller.SetSizeRequest(480, 280)
 
 	w.statusStatsLabel = gtk.NewLabel("")
 	w.statusStatsLabel.SetXAlign(0)
@@ -198,31 +211,60 @@ func (w *window) subscribeActivity() {
 
 // onActivity updates the bar (and log) for one event. Main thread only.
 func (w *window) onActivity(e activity.Event) {
+	key := e.Op + "\x00" + e.Label
 	switch e.Phase {
 	case activity.Start:
 		w.statusActive = append(w.statusActive, e.Label)
 		w.statusStarted[e.Label] = time.Now()
-		w.appendLogLine("▸ " + e.Label)
+		// Concurrent identical ops queue up; Done finishes the oldest (FIFO), so
+		// no row is ever orphaned in the running state.
+		w.statusLogRows[key] = append(w.statusLogRows[key], w.newLogRow(e.Op, e.Label))
 		logging.Trace("ui: activity start", "op", e.Op, "label", e.Label, "active", len(w.statusActive))
 	case activity.Progress:
 		if e.Total > 0 {
-			w.statusProgText[e.Label] = fmt.Sprintf("%d/%d", e.Done, e.Total)
+			p := fmt.Sprintf("%d/%d", e.Done, e.Total)
+			w.statusProgText[e.Label] = p
+			if rows := w.statusLogRows[key]; len(rows) > 0 {
+				rows[0].dur.SetText(p)
+			}
 		}
 	case activity.Done:
 		w.statusActive = removeFirst(w.statusActive, e.Label)
-		// "✓ Label — 1.2s · note" (duration only when we saw the matching Start;
-		// a Start published before the UI subscribed would otherwise read bogus).
-		line := e.Label
-		if t, ok := w.statusStarted[e.Label]; ok {
-			line += " — " + humanDuration(time.Since(t))
+		var row *logRow
+		if rows := w.statusLogRows[key]; len(rows) > 0 {
+			row = rows[0]
+			if len(rows) == 1 {
+				delete(w.statusLogRows, key)
+			} else {
+				w.statusLogRows[key] = rows[1:]
+			}
+		} else {
+			// A Report (instant, completed operation) — or a Start published
+			// before the UI subscribed. One row, no duration.
+			row = w.newLogRow(e.Op, e.Label)
+			row.started = time.Time{}
+		}
+		var dur time.Duration
+		if !row.started.IsZero() {
+			dur = time.Since(row.started)
+			row.dur.SetText(humanDuration(dur))
+		} else {
+			row.dur.SetText("")
+		}
+		switch {
+		case e.Note == noteCancelled:
+			row.status.SetText("–")
+		case strings.HasPrefix(e.Note, "error:"):
+			row.status.SetText("✗")
+			row.status.AddCSSClass("log-error")
+			row.note.AddCSSClass("log-error")
+		default:
+			row.status.SetText("✓")
 		}
 		if e.Note != "" {
-			line += " · " + e.Note
-		}
-		w.appendLogLine("✓ " + line)
-		var dur time.Duration
-		if t, ok := w.statusStarted[e.Label]; ok {
-			dur = time.Since(t)
+			row.note.SetText(e.Note)
+			row.note.SetTooltipText(e.Note) // errors are long; the row ellipsizes
+			row.note.SetVisible(true)
 		}
 		logging.Trace("ui: activity done", "op", e.Op, "label", e.Label, "dur", dur, "note", e.Note)
 		delete(w.statusStarted, e.Label)
@@ -339,13 +381,54 @@ func (w *window) refreshStatusStats() {
 	}()
 }
 
-// appendLogLine prepends a timestamped line to the activity log, capping the count.
-func (w *window) appendLogLine(text string) {
-	row := gtk.NewLabel(time.Now().Format("15:04:05") + "  " + text)
-	row.SetXAlign(0)
-	row.SetEllipsize(pango.EllipsizeEnd)
-	row.AddCSSClass("caption")
-	w.statusLogBox.Prepend(row)
+// newLogRow prepends one operation's row to the activity log (newest on top,
+// capped at statusLogCap) and returns it for in-place updates. Layout:
+//
+//	15:04:05  SYNC  ▸ Syncing work@…              1.2s
+//	          error: oauth2: token expired          (dim note line, red on error)
+func (w *window) newLogRow(op, label string) *logRow {
+	r := &logRow{started: time.Now()}
+
+	tim := gtk.NewLabel(time.Now().Format("15:04:05"))
+	tim.AddCSSClass("log-time")
+
+	chip := gtk.NewLabel(strings.ToUpper(op))
+	chip.AddCSSClass("log-chip")
+
+	r.status = gtk.NewLabel("▸")
+	r.status.AddCSSClass("log-time")
+	r.status.SetWidthChars(1)
+
+	lbl := gtk.NewLabel(label)
+	lbl.SetXAlign(0)
+	lbl.SetHExpand(true)
+	lbl.SetEllipsize(pango.EllipsizeEnd)
+	lbl.SetTooltipText(label)
+
+	r.dur = gtk.NewLabel("")
+	r.dur.AddCSSClass("log-time")
+	r.dur.SetXAlign(1)
+
+	head := gtk.NewBox(gtk.OrientationHorizontal, 6)
+	head.Append(tim)
+	head.Append(chip)
+	head.Append(r.status)
+	head.Append(lbl)
+	head.Append(r.dur)
+
+	r.note = gtk.NewLabel("")
+	r.note.SetXAlign(0)
+	r.note.SetEllipsize(pango.EllipsizeEnd)
+	r.note.AddCSSClass("log-note")
+	r.note.SetMarginStart(70) // roughly under the label column, past the clock
+	r.note.SetVisible(false)
+
+	box := gtk.NewBox(gtk.OrientationVertical, 0)
+	box.AddCSSClass("caption")
+	box.Append(head)
+	box.Append(r.note)
+
+	w.statusLogBox.Prepend(box)
 	w.statusLogLines++
 	for w.statusLogLines > statusLogCap {
 		if last := w.statusLogBox.LastChild(); last != nil {
@@ -355,6 +438,7 @@ func (w *window) appendLogLine(text string) {
 			break
 		}
 	}
+	return r
 }
 
 // removeFirst removes the first occurrence of s from xs (order preserved).
