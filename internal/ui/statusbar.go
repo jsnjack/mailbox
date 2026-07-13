@@ -285,7 +285,6 @@ func (w *window) onActivity(e activity.Event) {
 		}
 		if e.Note != "" {
 			row.note.SetText("· " + e.Note)
-			row.note.SetTooltipText(e.Note) // errors are long; the row ellipsizes
 			row.note.SetVisible(true)
 		}
 		logging.Trace("ui: activity done", "op", e.Op, "label", e.Label, "dur", dur, "note", e.Note)
@@ -427,7 +426,7 @@ func (w *window) newLogRow(op, label string) *logRow {
 	lbl := gtk.NewLabel(label)
 	lbl.SetXAlign(0)
 	lbl.SetEllipsize(pango.EllipsizeEnd)
-	lbl.SetTooltipText(label)
+	tooltipWhenTruncated(lbl)
 
 	r.note = gtk.NewLabel("")
 	r.note.SetXAlign(0)
@@ -435,6 +434,7 @@ func (w *window) newLogRow(op, label string) *logRow {
 	r.note.SetEllipsize(pango.EllipsizeEnd)
 	r.note.AddCSSClass("log-note")
 	r.note.SetVisible(false)
+	tooltipWhenTruncated(r.note)
 
 	r.dur = gtk.NewLabel("")
 	r.dur.AddCSSClass("log-time")
@@ -460,6 +460,21 @@ func (w *window) newLogRow(op, label string) *logRow {
 		}
 	}
 	return r
+}
+
+// tooltipWhenTruncated gives a label a tooltip only while its text is actually
+// ellipsized (a long error note, a long subject) — then it shows the hidden
+// full text. A tooltip that just repeats visible text is noise, so a label
+// that fits shows none.
+func tooltipWhenTruncated(l *gtk.Label) {
+	l.SetHasTooltip(true)
+	l.ConnectQueryTooltip(func(_, _ int, _ bool, tip *gtk.Tooltip) bool {
+		if !l.Layout().IsEllipsized() {
+			return false
+		}
+		tip.SetText(strings.TrimPrefix(l.Text(), "· "))
+		return true
+	})
 }
 
 // barText renders an in-flight operation for the bottom bar's label, where
