@@ -502,6 +502,20 @@ func (a *Assistant) Proofread(ctx context.Context, text string) (<-chan Chunk, e
 	return a.stream(ctx, system, []Msg{{Role: RoleUser, Content: text}})
 }
 
+// Refine streams the user's email text rewritten per their instruction ("make
+// it shorter", "more formal", …), preserving the language and any quoted lines
+// or signature unless the instruction says otherwise.
+func (a *Assistant) Refine(ctx context.Context, text, instruction string) (<-chan Chunk, error) {
+	logging.Trace("ai: refine", "op", "Refine", "provider", a.provider().Name(),
+		"bytes", len(text), "instruction", instruction, "text", logging.Body(text))
+	system := "You revise email text the user is writing. Rewrite the user's text following their instruction. " +
+		"Keep the original language and meaning except where the instruction asks otherwise; preserve line " +
+		"breaks, any quoted lines (those starting with '>'), and any signature unless told to change them. " +
+		"Return only the revised text — no commentary, no surrounding quotes, no code fences."
+	prompt := "Instruction: " + instruction + "\n\nText:\n" + text
+	return a.stream(ctx, system, []Msg{{Role: RoleUser, Content: prompt}})
+}
+
 // AnalyzeEmail streams a phishing/scam risk assessment of an email. emailContext
 // is the sender, subject, body, and any automated signals (auth result,
 // heuristic warnings). The reply leads with a one-line verdict, then reasons.

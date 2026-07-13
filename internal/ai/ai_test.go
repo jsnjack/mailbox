@@ -218,6 +218,27 @@ func TestProofread(t *testing.T) {
 	}
 }
 
+func TestRefine(t *testing.T) {
+	fp := &fakeProvider{chunks: []Chunk{{Text: "Dear team,\n"}, {Text: "Please review the report."}}}
+	ch, err := NewAssistant(fp).Refine(context.Background(), "hey all, look at the report", "more formal")
+	if err != nil {
+		t.Fatalf("Refine: %v", err)
+	}
+	var b strings.Builder
+	for c := range ch {
+		b.WriteString(c.Text)
+	}
+	if b.String() != "Dear team,\nPlease review the report." {
+		t.Fatalf("got %q", b.String())
+	}
+	if !strings.Contains(fp.gotMsgs[0].Content, "more formal") || !strings.Contains(fp.gotMsgs[0].Content, "look at the report") {
+		t.Fatalf("instruction/text not passed: %+v", fp.gotMsgs)
+	}
+	if !strings.Contains(fp.gotSystem, "instruction") {
+		t.Fatalf("system prompt wrong: %q", fp.gotSystem)
+	}
+}
+
 func TestAnalyzeEmail(t *testing.T) {
 	fp := &fakeProvider{chunks: []Chunk{{Text: "Verdict: Be cautious\n"}, {Text: "- urgent tone"}}}
 	a := NewAssistant(fp)

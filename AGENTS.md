@@ -202,7 +202,11 @@ token. A sparkle button next to Subject generates it from the body
 (`Assistant.GenerateSubject`). The compose window has an AI-draft button (streams a drafted reply via
 `DraftReply` for a reply/forward, or a from-scratch body via `DraftNew` for a
 new message — both prompted by `askAIIntent`, which also offers an on-demand "Suggest quick replies" button for a reply via `SmartReplies`), an AI grammar-check button
-(`Proofread`), and a Save-draft button
+(`Proofread`), a Refine-with-AI button (a popover takes a free-text
+instruction — "shorter", "more formal" — and `Assistant.Refine` rewrites the
+selection, or with none the same own-writing region grammar-check uses:
+everything above the quote, so a reply refines only the new text; the span is
+mark-anchored and replaced in place), and a Save-draft button
 (`users.drafts.create`). Send runs pre-send guards (`preSendWarning`: empty
 subject, "attachment" mentioned but none attached → confirm), and closing an
 unsent message offers Save-as-draft alongside Discard. A configurable signature

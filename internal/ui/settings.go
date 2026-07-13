@@ -375,6 +375,11 @@ func (w *window) openSettings() {
 				w.aiProofread = on
 				savePref(func(p *config.Prefs) { p.DisableProofread = !on })
 			})
+		aiToggle("Refine with AI", "The compose button that rewrites your text (or a selection) to an instruction.",
+			w.aiRefine, func(on bool) {
+				w.aiRefine = on
+				savePref(func(p *config.Prefs) { p.DisableRefine = !on })
+			})
 		aiToggle("Subject suggestions", "The sparkle button next to Subject in compose.",
 			w.aiGenerateSubject, func(on bool) {
 				w.aiGenerateSubject = on

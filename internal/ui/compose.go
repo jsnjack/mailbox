@@ -775,6 +775,87 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 		hb.PackEnd(grammarBtn)
 	}
 
+	if w.deps.Assistant != nil && w.aiRefine {
+		// Refine with AI: rewrite the selection — or, with nothing selected, the
+		// user's own writing (grammarRange: everything above the signature/quote,
+		// i.e. the whole body of a new message, just the reply text of a reply) —
+		// to a free-text instruction entered in a popover.
+		refineEntry := gtk.NewEntry()
+		refineEntry.SetPlaceholderText("e.g. shorter, more formal…")
+		refineEntry.SetWidthChars(28)
+		refineGo := gtk.NewButtonWithLabel("Refine")
+		refineGo.AddCSSClass("suggested-action")
+
+		row := gtk.NewBox(gtk.OrientationHorizontal, 6)
+		setMargins(row, 6, 6, 6, 6)
+		row.Append(refineEntry)
+		row.Append(refineGo)
+		pop := gtk.NewPopover()
+		pop.SetChild(row)
+
+		refineBtn := gtk.NewMenuButton()
+		refineBtn.SetIconName("document-edit-symbolic")
+		refineBtn.SetTooltipText("Refine with AI — rewrites the selection (or your whole text) to your instruction")
+		a11yLabel(refineBtn, "Refine with AI")
+		refineBtn.SetPopover(pop)
+		pop.ConnectShow(func() { refineEntry.GrabFocus() })
+
+		runRefine := func() {
+			instruction := strings.TrimSpace(refineEntry.Text())
+			if instruction == "" {
+				return
+			}
+			// The selection survives the popover taking focus (buffer marks move
+			// only when the user changes them), so the range is read at submit.
+			startIter, endIter := grammarRange(buf)
+			original := buf.Text(startIter, endIter, false)
+			pop.Popdown()
+			if strings.TrimSpace(original) == "" {
+				logging.Trace("ui: ai refine skipped", "reason", "empty")
+				return
+			}
+			logging.Trace("ui: ai refine begin", "len", len(original), "instruction", instruction)
+			// Anchor the range with marks so the exact span is replaced even if it
+			// streams back after an edit (gravity keeps them bracketing the text).
+			startMark := buf.CreateMark("", startIter, true)
+			endMark := buf.CreateMark("", endIter, false)
+			refineBtn.SetSensitive(false)
+			status.SetVisible(true)
+			status.SetText("Refining…")
+			done := w.aiActivity("refine")
+			go func() {
+				ch, err := w.deps.Assistant.Refine(aiCtx, original, instruction)
+				var acc strings.Builder
+				if err == nil {
+					for c := range ch {
+						if c.Err == nil {
+							acc.WriteString(c.Text)
+						}
+					}
+				}
+				refined := strings.TrimRight(acc.String(), " \t\r\n")
+				dispatch.Main(func() {
+					done(doneErr(err))
+					refineBtn.SetSensitive(true)
+					logging.Trace("ui: ai refine done", "refined_len", len(refined), "err", err)
+					defer func() { buf.DeleteMark(startMark); buf.DeleteMark(endMark) }()
+					if err != nil || strings.TrimSpace(refined) == "" {
+						status.SetText("Refine failed")
+						return
+					}
+					si := buf.IterAtMark(startMark)
+					ei := buf.IterAtMark(endMark)
+					buf.Delete(si, ei)
+					buf.Insert(buf.IterAtMark(startMark), refined)
+					status.SetVisible(false)
+				})
+			}()
+		}
+		refineEntry.ConnectActivate(runRefine)
+		refineGo.ConnectClicked(runRefine)
+		hb.PackEnd(refineBtn)
+	}
+
 	// Ctrl+Enter sends, from anywhere in the window. Capture phase so it fires
 	// before the body TextView would treat Return as a newline; plain Return
 	// (no Ctrl) falls through untouched.

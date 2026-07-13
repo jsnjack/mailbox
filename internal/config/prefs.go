@@ -27,6 +27,7 @@ type Prefs struct {
 	DisableAIDraft           bool `json:"disable_ai_draft"`
 	DisableSmartReplies      bool `json:"disable_smart_replies"`
 	DisableProofread         bool `json:"disable_proofread"`
+	DisableRefine            bool `json:"disable_refine"`
 	DisableGenerateSubject   bool `json:"disable_generate_subject"`
 	DisableSummarize         bool `json:"disable_summarize"`
 	DisableTranslate         bool `json:"disable_translate"`

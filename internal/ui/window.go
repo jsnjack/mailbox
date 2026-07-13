@@ -257,6 +257,7 @@ type window struct {
 	aiDraft             bool
 	aiSmartReplies      bool
 	aiProofread         bool
+	aiRefine            bool
 	aiGenerateSubject   bool
 	aiSummarize         bool
 	aiTranslate         bool
@@ -321,6 +322,7 @@ func newWindow(app *adw.Application, deps Deps) *window {
 		w.aiDraft = !p.DisableAIDraft
 		w.aiSmartReplies = !p.DisableSmartReplies
 		w.aiProofread = !p.DisableProofread
+		w.aiRefine = !p.DisableRefine
 		w.aiGenerateSubject = !p.DisableGenerateSubject
 		w.aiSummarize = !p.DisableSummarize
 		w.aiTranslate = !p.DisableTranslate
