@@ -141,6 +141,96 @@ func TestFailoverForwardsOptions(t *testing.T) {
 	}
 }
 
+// The circuit breaker: a failed entry is skipped for the cooldown, so the next
+// request goes straight to the healthy backup instead of re-paying the primary's
+// connect timeout.
+func TestFailoverCircuitBreakerSkipsCoolingEntry(t *testing.T) {
+	primary := &scriptedProvider{requestErr: errors.New("connect timeout")}
+	backup := &scriptedProvider{chunks: []Chunk{{Text: "ok"}}}
+	f := newFailoverProvider([]Provider{primary, backup}, []string{"p", "b"})
+
+	for i := 1; i <= 2; i++ {
+		ch, err := f.Stream(context.Background(), "", nil)
+		if err != nil {
+			t.Fatalf("Stream %d: %v", i, err)
+		}
+		if got, err := collect(t, ch); err != nil || got != "ok" {
+			t.Fatalf("Stream %d: got %q, %v", i, got, err)
+		}
+	}
+	if primary.calls != 1 {
+		t.Fatalf("primary.calls = %d, want 1 (second request must skip the cooling entry)", primary.calls)
+	}
+	if backup.calls != 2 {
+		t.Fatalf("backup.calls = %d, want 2", backup.calls)
+	}
+
+	// A success resets the breaker: mark the primary healthy again and it is
+	// tried first once more.
+	f.markHealthy(0)
+	primary.requestErr = nil
+	primary.chunks = []Chunk{{Text: "recovered"}}
+	ch, err := f.Stream(context.Background(), "", nil)
+	if err != nil {
+		t.Fatalf("Stream after recovery: %v", err)
+	}
+	if got, _ := collect(t, ch); got != "recovered" {
+		t.Fatalf("got %q, want the recovered primary", got)
+	}
+}
+
+// When every entry is cooling down, the breaker steps aside — all entries are
+// tried in order rather than failing without an attempt.
+func TestFailoverCircuitBreakerAllCoolingStillTries(t *testing.T) {
+	p1 := &scriptedProvider{requestErr: errors.New("down 1")}
+	p2 := &scriptedProvider{requestErr: errors.New("down 2")}
+	f := newFailoverProvider([]Provider{p1, p2}, []string{"a", "b"})
+
+	if _, err := f.Stream(context.Background(), "", nil); err == nil {
+		t.Fatal("expected failure")
+	}
+	// Both entries are now cooling; the next request must still try both.
+	if _, err := f.Stream(context.Background(), "", nil); err == nil {
+		t.Fatal("expected failure")
+	}
+	if p1.calls != 2 || p2.calls != 2 {
+		t.Fatalf("calls = %d/%d, want 2/2 (all-cooling ignores the breaker)", p1.calls, p2.calls)
+	}
+}
+
+// cancellingProvider cancels the request's context and then fails, the shape
+// of an attempt torn down by a user cancel.
+type cancellingProvider struct {
+	cancel context.CancelFunc
+}
+
+func (c *cancellingProvider) Name() string { return "cancelling" }
+func (c *cancellingProvider) Stream(ctx context.Context, s string, m []Msg) (<-chan Chunk, error) {
+	return c.StreamOpts(ctx, s, m, Options{})
+}
+func (c *cancellingProvider) StreamOpts(context.Context, string, []Msg, Options) (<-chan Chunk, error) {
+	c.cancel()
+	return nil, context.Canceled
+}
+
+// A user-cancelled request must not trip the breaker — the endpoint did
+// nothing wrong.
+func TestFailoverCancelDoesNotTripBreaker(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	primary := &cancellingProvider{cancel: cancel}
+	backup := &scriptedProvider{chunks: []Chunk{{Text: "ok"}}}
+	f := newFailoverProvider([]Provider{primary, backup}, []string{"p", "b"})
+
+	if _, err := f.Stream(ctx, "", nil); err == nil {
+		t.Fatal("expected the cancelled request to fail")
+	}
+	skip, _ := f.cooling()
+	if skip[0] {
+		t.Fatal("a cancelled request must not cool the entry")
+	}
+}
+
 // SetProvider swaps the provider a live Assistant uses for new requests.
 func TestAssistantSetProvider(t *testing.T) {
 	old := &fakeProvider{chunks: []Chunk{{Text: "old"}}}

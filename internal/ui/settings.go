@@ -36,47 +36,154 @@ func (w *window) openSettings() {
 		logging.Trace("ui: open settings skipped", "reason", "no AI settings")
 		return
 	}
-	provider, endpoint, models, key := w.deps.AISettings()
-	logging.Trace("ui: open settings", "provider", provider, "endpoint", endpoint, "models", models,
-		"keyLen", len(key), "accounts", len(w.deps.Accounts), "categorize", w.inboxCategories, "block_images", w.blockImages)
-
-	providerRow := adw.NewEntryRow()
-	providerRow.SetTitle("Provider (openai / litellm / anthropic)")
-	providerRow.SetText(provider)
-
-	endpointRow := adw.NewEntryRow()
-	endpointRow.SetTitle("Endpoint (base URL incl. /v1)")
-	endpointRow.SetText(endpoint)
-
-	modelRow := adw.NewEntryRow()
-	modelRow.SetTitle("Models (primary first, backups after — comma-separated)")
-	modelRow.SetText(models)
-
-	keyRow := adw.NewPasswordEntryRow()
-	keyRow.SetTitle("API key (stored in the system keyring)")
-	keyRow.SetText(key)
+	seeded := w.deps.AISettings()
+	logging.Trace("ui: open settings", "aiModels", len(seeded),
+		"accounts", len(w.deps.Accounts), "categorize", w.inboxCategories, "block_images", w.blockImages)
 
 	group := adw.NewPreferencesGroup()
 	group.SetTitle("AI")
-	desc := "Changes apply immediately. When the primary model fails, the next one takes over."
+	desc := "Models are tried in order: the first is the primary, the next takes over while it is unreachable (a VPN-only endpoint can fall back to a local model). Changes apply immediately."
 	if w.deps.Assistant == nil {
 		desc += " Enabling AI for the first time takes effect after a restart."
 	}
 	group.SetDescription(desc)
-	group.Add(providerRow)
-	group.Add(endpointRow)
-	group.Add(modelRow)
-	group.Add(keyRow)
 
-	// A "Test connection" button validates the entered settings with a tiny live
-	// request; the result shows on the button itself (success/error styling, full
-	// error in the tooltip).
+	// The chain editor: one expander per model, in priority order. Reordering
+	// re-adds the rows (PreferencesGroup has no move API), so each expander is
+	// kept in entryRows alongside its field widgets.
+	type aiEntryUI struct {
+		row      *adw.ExpanderRow
+		model    *adw.EntryRow
+		provider *adw.EntryRow
+		endpoint *adw.EntryRow
+		key      *adw.PasswordEntryRow
+		up       *gtk.Button
+	}
+	var entryRows []*aiEntryUI
+	var inGroup []*adw.ExpanderRow // rows currently added to the group
+	relayout := func() {
+		for _, r := range inGroup {
+			group.Remove(r)
+		}
+		inGroup = inGroup[:0]
+		for i, u := range entryRows {
+			group.Add(u.row)
+			inGroup = append(inGroup, u.row)
+			u.up.SetVisible(i > 0)
+		}
+	}
+	entryTitle := func(u *aiEntryUI) {
+		title := strings.TrimSpace(u.model.Text())
+		if title == "" {
+			title = "New model"
+		}
+		u.row.SetTitle(title)
+		u.row.SetSubtitle(strings.TrimSpace(u.endpoint.Text()))
+	}
+	addEntry := func(e AIModelEntry, expand bool) {
+		u := &aiEntryUI{row: adw.NewExpanderRow()}
+		u.model = adw.NewEntryRow()
+		u.model.SetTitle("Model")
+		u.model.SetText(e.Model)
+		u.provider = adw.NewEntryRow()
+		u.provider.SetTitle("Provider (openai / litellm / anthropic)")
+		u.provider.SetText(e.Provider)
+		u.endpoint = adw.NewEntryRow()
+		u.endpoint.SetTitle("Endpoint (base URL incl. /v1)")
+		u.endpoint.SetText(e.Endpoint)
+		u.key = adw.NewPasswordEntryRow()
+		u.key.SetTitle("API key (stored in the system keyring)")
+		u.key.SetText(e.Key)
+		u.row.AddRow(u.model)
+		u.row.AddRow(u.provider)
+		u.row.AddRow(u.endpoint)
+		u.row.AddRow(u.key)
+		u.model.Connect("changed", func() { entryTitle(u) })
+		u.endpoint.Connect("changed", func() { entryTitle(u) })
+		entryTitle(u)
+
+		u.up = gtk.NewButtonFromIconName("go-up-symbolic")
+		u.up.SetTooltipText("Try earlier (higher priority)")
+		u.up.AddCSSClass("flat")
+		u.up.SetVAlign(gtk.AlignCenter)
+		u.up.ConnectClicked(func() {
+			for i, cand := range entryRows {
+				if cand == u && i > 0 {
+					entryRows[i-1], entryRows[i] = entryRows[i], entryRows[i-1]
+					break
+				}
+			}
+			relayout()
+		})
+		rm := gtk.NewButtonFromIconName("user-trash-symbolic")
+		rm.SetTooltipText("Remove model")
+		rm.AddCSSClass("flat")
+		rm.SetVAlign(gtk.AlignCenter)
+		rm.ConnectClicked(func() {
+			for i, cand := range entryRows {
+				if cand == u {
+					entryRows = append(entryRows[:i], entryRows[i+1:]...)
+					break
+				}
+			}
+			relayout()
+		})
+		u.row.AddSuffix(u.up)
+		u.row.AddSuffix(rm)
+
+		entryRows = append(entryRows, u)
+		relayout()
+		if expand {
+			u.row.SetExpanded(true)
+		}
+	}
+	for _, e := range seeded {
+		addEntry(e, false)
+	}
+
+	// collectAIEntries reads the editor state in priority order, skipping rows
+	// left entirely blank (an added-then-abandoned entry).
+	collectAIEntries := func() []AIModelEntry {
+		var out []AIModelEntry
+		for _, u := range entryRows {
+			e := AIModelEntry{
+				Provider: strings.TrimSpace(u.provider.Text()),
+				Endpoint: strings.TrimSpace(u.endpoint.Text()),
+				Model:    strings.TrimSpace(u.model.Text()),
+				Key:      u.key.Text(),
+			}
+			if e.Provider == "" && e.Endpoint == "" && e.Model == "" {
+				continue
+			}
+			out = append(out, e)
+		}
+		return out
+	}
+
+	// Header buttons: add a model (pre-filled from the last entry, so a fallback
+	// on the same proxy only needs its model name) and test the entered chain
+	// with a tiny live request; the result shows on the button itself.
+	headerBox := gtk.NewBox(gtk.OrientationHorizontal, 6)
+	addBtn := gtk.NewButtonWithLabel("Add model")
+	addBtn.SetVAlign(gtk.AlignCenter)
+	addBtn.ConnectClicked(func() {
+		e := AIModelEntry{}
+		if n := len(entryRows); n > 0 {
+			last := entryRows[n-1]
+			e.Provider = strings.TrimSpace(last.provider.Text())
+			e.Endpoint = strings.TrimSpace(last.endpoint.Text())
+			e.Key = last.key.Text()
+		}
+		logging.Trace("ui: settings add AI model", "entries", len(entryRows)+1)
+		addEntry(e, true)
+	})
+	headerBox.Append(addBtn)
 	if w.deps.TestAISettings != nil {
 		testBtn := gtk.NewButtonWithLabel("Test connection")
 		testBtn.SetVAlign(gtk.AlignCenter)
 		testBtn.ConnectClicked(func() {
-			provider, endpoint, models, key := providerRow.Text(), endpointRow.Text(), modelRow.Text(), keyRow.Text()
-			logging.Trace("ui: settings test AI connection", "provider", provider, "endpoint", endpoint, "models", models, "keyLen", len(key))
+			entries := collectAIEntries()
+			logging.Trace("ui: settings test AI connection", "entries", len(entries))
 			testBtn.SetSensitive(false)
 			testBtn.SetLabel("Testing…")
 			testBtn.RemoveCSSClass("success")
@@ -85,7 +192,7 @@ func (w *window) openSettings() {
 			go func() {
 				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 				defer cancel()
-				err := w.deps.TestAISettings(ctx, provider, endpoint, models, key)
+				err := w.deps.TestAISettings(ctx, entries)
 				dispatch.Main(func() {
 					testBtn.SetSensitive(true)
 					if err != nil {
@@ -101,8 +208,9 @@ func (w *window) openSettings() {
 				})
 			}()
 		})
-		group.SetHeaderSuffix(testBtn)
+		headerBox.Append(testBtn)
 	}
+	group.SetHeaderSuffix(headerBox)
 
 	// One naming field per connected account ("Home", "Work", …), each with a
 	// Remove button (when account management is wired).
@@ -441,9 +549,9 @@ func (w *window) openSettings() {
 	dialog.ConnectClosed(func() {
 		logging.Trace("ui: settings dialog closed, saving")
 		if w.deps.SaveAISettings != nil {
-			np, ne, nm, nk := providerRow.Text(), endpointRow.Text(), modelRow.Text(), keyRow.Text()
-			logging.Trace("ui: save AI settings", "provider", np, "endpoint", ne, "models", nm, "keyLen", len(nk))
-			if err := w.deps.SaveAISettings(np, ne, nm, nk); err != nil {
+			entries := collectAIEntries()
+			logging.Trace("ui: save AI settings", "entries", len(entries))
+			if err := w.deps.SaveAISettings(entries); err != nil {
 				slog.Warn("ui: save settings", "err", err)
 			}
 		}

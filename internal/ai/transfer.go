@@ -2,12 +2,19 @@ package ai
 
 import (
 	"io"
+	"net"
 	"net/http"
 	"sync/atomic"
 	"time"
 
 	"github.com/jsnjack/mailbox/internal/httpclient"
 )
+
+// aiDialTimeout bounds the TCP connect to an AI endpoint. A VPN-only endpoint
+// reached while off VPN can blackhole the SYN instead of refusing it; without a
+// short dial bound every request would hang for the OS connect timeout (tens of
+// seconds) before the failover chain could move to the next model.
+const aiDialTimeout = 5 * time.Second
 
 // transferCounter tallies HTTP bytes in/out for an AI provider, so the status
 // bar can report data transferred for AI calls alongside Gmail traffic.
@@ -19,11 +26,14 @@ type transferCounter struct {
 func (c *transferCounter) snapshot() (in, out int64) { return c.in.Load(), c.out.Load() }
 
 // countingClient returns an HTTP client whose transport tallies bytes into c
-// and identifies the app via User-Agent.
+// and identifies the app via User-Agent, with a short dial bound (see
+// aiDialTimeout).
 func countingClient(timeout time.Duration, c *transferCounter) *http.Client {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.DialContext = (&net.Dialer{Timeout: aiDialTimeout, KeepAlive: 30 * time.Second}).DialContext
 	return &http.Client{
 		Timeout:   timeout,
-		Transport: &countingTransport{base: &httpclient.Transport{}, c: c},
+		Transport: &countingTransport{base: &httpclient.Transport{Base: tr}, c: c},
 	}
 }
 

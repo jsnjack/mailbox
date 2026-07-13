@@ -352,12 +352,84 @@ func TestLoadConfigAndOverrides(t *testing.T) {
 
 func TestNewProvider(t *testing.T) {
 	for _, p := range []string{"openai", "litellm", "anthropic"} {
-		if _, err := NewProvider(Config{Provider: p, Endpoint: "http://x/v1", Model: "m"}, "k"); err != nil {
+		if _, err := NewProvider(Config{Provider: p, Endpoint: "http://x/v1", Model: "m"}, StaticKey("k")); err != nil {
 			t.Fatalf("provider %q: %v", p, err)
 		}
 	}
-	if _, err := NewProvider(Config{Provider: "bogus"}, "k"); err == nil {
+	if _, err := NewProvider(Config{Provider: "bogus", Endpoint: "http://x/v1", Model: "m"}, StaticKey("k")); err == nil {
 		t.Fatal("expected error for unknown provider")
+	}
+	if _, err := NewProvider(Config{Provider: "openai", Endpoint: "http://x/v1"}, nil); err == nil {
+		t.Fatal("expected error for no model")
+	}
+}
+
+// A chain entry inherits blank provider/endpoint from the top level; each
+// entry's key is looked up for its own provider+endpoint.
+func TestNewProviderChain(t *testing.T) {
+	cfg := Config{
+		Provider: "litellm",
+		Endpoint: "http://argus:4000/v1",
+		Chain: []ModelConfig{
+			{Model: "big"},
+			{Model: "granite", Provider: "openai", Endpoint: "http://localhost:11434/v1"},
+		},
+	}
+	var asked [][2]string
+	p, err := NewProvider(cfg, func(provider, endpoint string) string {
+		asked = append(asked, [2]string{provider, endpoint})
+		return ""
+	})
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+	if _, ok := p.(*failoverProvider); !ok {
+		t.Fatalf("want a failover chain, got %T", p)
+	}
+	want := [][2]string{
+		{"litellm", "http://argus:4000/v1"},
+		{"openai", "http://localhost:11434/v1"},
+	}
+	if len(asked) != 2 || asked[0] != want[0] || asked[1] != want[1] {
+		t.Fatalf("keyFor calls = %v, want %v", asked, want)
+	}
+
+	// A chain entry with an unknown provider fails the whole build.
+	cfg.Chain[1].Provider = "bogus"
+	if _, err := NewProvider(cfg, nil); err == nil {
+		t.Fatal("expected error for unknown chain provider")
+	}
+}
+
+// ResolvedChain: [[ai.chain]] wins over models, inherits blanks, drops
+// model-less entries; the legacy list resolves onto the top-level values.
+func TestResolvedChain(t *testing.T) {
+	legacy := Config{Provider: "openai", Endpoint: "http://x/v1", Models: []string{"a", "b"}}
+	got := legacy.ResolvedChain()
+	if len(got) != 2 || got[0] != (ModelConfig{Model: "a", Provider: "openai", Endpoint: "http://x/v1"}) {
+		t.Fatalf("legacy chain = %+v", got)
+	}
+
+	chained := Config{
+		Provider: "litellm", Endpoint: "http://argus:4000/v1", Models: []string{"ignored"},
+		Chain: []ModelConfig{{Model: "big"}, {Provider: "openai"}, {Model: "local", Endpoint: "http://l:1/v1"}},
+	}
+	got = chained.ResolvedChain()
+	if len(got) != 2 {
+		t.Fatalf("chain = %+v, want the model-less entry dropped", got)
+	}
+	if got[0] != (ModelConfig{Model: "big", Provider: "litellm", Endpoint: "http://argus:4000/v1"}) {
+		t.Fatalf("inherited entry = %+v", got[0])
+	}
+	if got[1] != (ModelConfig{Model: "local", Provider: "litellm", Endpoint: "http://l:1/v1"}) {
+		t.Fatalf("override entry = %+v", got[1])
+	}
+
+	if !chained.Configured() {
+		t.Fatal("resolved chain should be Configured")
+	}
+	if (Config{Chain: []ModelConfig{{Model: "m"}}}).Configured() {
+		t.Fatal("chain without provider/endpoint anywhere must not be Configured")
 	}
 }
 
@@ -403,6 +475,66 @@ func TestSaveConfigModelsRoundTrip(t *testing.T) {
 	got, _ = LoadConfig(path)
 	if list := got.ModelList(); len(list) != 1 || list[0] != "pinned" {
 		t.Fatalf("env override ModelList = %#v", list)
+	}
+}
+
+// A chain with per-entry endpoints round-trips through the file, mirrors the
+// primary into the legacy top-level fields (downgrade compatibility), and is
+// pinned flat by the MAILBOX_AI_MODEL override.
+func TestSaveConfigChainRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	in := Config{
+		Provider: "litellm",
+		Chain: []ModelConfig{
+			{Model: "big", Endpoint: "http://argus:4000/v1"},
+			{Model: "granite", Provider: "openai", Endpoint: "http://localhost:11434/v1"},
+		},
+	}
+	if err := SaveConfig(path, in); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	got, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	chain := got.ResolvedChain()
+	if len(chain) != 2 || chain[0].Endpoint != "http://argus:4000/v1" || chain[1].Endpoint != "http://localhost:11434/v1" {
+		t.Fatalf("chain round-trip = %+v", chain)
+	}
+	if got.Model != "big" || got.Endpoint != "http://argus:4000/v1" {
+		t.Fatalf("legacy mirror = model %q endpoint %q, want the primary's", got.Model, got.Endpoint)
+	}
+	if !got.Configured() {
+		t.Fatal("chain config should be Configured")
+	}
+
+	t.Setenv("MAILBOX_AI_MODEL", "pinned")
+	got, _ = LoadConfig(path)
+	if chain := got.ResolvedChain(); len(chain) != 1 || chain[0].Model != "pinned" {
+		t.Fatalf("env pin over chain = %+v", chain)
+	}
+}
+
+// A chain whose entries all sit on the top-level provider/endpoint is saved as
+// the plain models list, not [[ai.chain]] blocks.
+func TestSaveConfigChainCollapsesWhenUniform(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	in := Config{
+		Provider: "litellm", Endpoint: "http://argus:4000/v1",
+		Chain: []ModelConfig{{Model: "big"}, {Model: "small"}},
+	}
+	if err := SaveConfig(path, in); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	got, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if len(got.Chain) != 0 {
+		t.Fatalf("uniform chain should collapse to models, got %+v", got.Chain)
+	}
+	if list := got.ModelList(); len(list) != 2 || list[0] != "big" || list[1] != "small" {
+		t.Fatalf("ModelList = %#v", list)
 	}
 }
 

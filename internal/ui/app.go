@@ -115,6 +115,15 @@ type StatusStats struct {
 	AIBytesOut int64 // bytes sent to the AI provider(s)
 }
 
+// AIModelEntry is one entry of the AI failover chain as shown in Preferences: a
+// model on its provider+endpoint, with the endpoint's API key ("" = keyless).
+type AIModelEntry struct {
+	Provider string
+	Endpoint string
+	Model    string
+	Key      string
+}
+
 // Deps are the dependencies the UI needs. FetchBody, ModifyLabels and Hub may be
 // nil (the UI then renders the cache read-only without live updates, on-demand
 // bodies, or message actions).
@@ -146,16 +155,17 @@ type Deps struct {
 	Activity *activity.Hub
 	Stats    func() StatusStats
 
-	// AISettings/SaveAISettings read and persist the [ai] config. models is the
-	// priority-ordered list as one comma-separated string (first = primary, the
-	// rest fallbacks); key is the API key (keyring-backed, "" = none). Always
-	// wired, independent of whether an account exists. Save also swaps the new
-	// provider into the live Assistant, so changes apply without a restart.
-	AISettings     func() (provider, endpoint, models, key string)
-	SaveAISettings func(provider, endpoint, models, key string) error
-	// TestAISettings validates the given AI settings (with the key as entered in
+	// AISettings/SaveAISettings read and persist the [ai] config as the
+	// priority-ordered failover chain (first entry = primary, the rest take over
+	// when it fails; each entry carries its own provider/endpoint/key, so a
+	// VPN-only proxy can chain to a local model). Always wired, independent of
+	// whether an account exists. Save also swaps the new provider into the live
+	// Assistant, so changes apply without a restart.
+	AISettings     func() []AIModelEntry
+	SaveAISettings func(entries []AIModelEntry) error
+	// TestAISettings validates the given AI settings (with the keys as entered in
 	// the dialog) via a tiny live request; nil result means the connection works.
-	TestAISettings func(ctx context.Context, provider, endpoint, models, key string) error
+	TestAISettings func(ctx context.Context, entries []AIModelEntry) error
 
 	// IMAP account management, for the add-account dialog. TestIMAPAccount
 	// validates a connection (login + folder list) with the given settings and
