@@ -2781,7 +2781,7 @@ func (w *window) buildAIReplyPopover() *gtk.Popover {
 		spinner.SetHAlign(gtk.AlignStart)
 		spinner.SetSizeRequest(20, 20)
 		sug.Append(spinner)
-		done := w.aiActivity("Suggesting replies")
+		done := w.aiActivity("quick replies")
 		logging.Trace("ui: suggest quick replies", "thread", w.openThreadID, "account", w.activeID)
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -3893,9 +3893,9 @@ func (w *window) generateGists(threadID string, msgs []model.Message) {
 		return
 	}
 	logging.Trace("ui: generate gists", "thread", threadID, "n", len(todo))
-	label := "Summarizing message"
+	label := "gist"
 	if len(todo) > 1 {
-		label = fmt.Sprintf("Summarizing %d messages", len(todo))
+		label = fmt.Sprintf("gists (%d)", len(todo))
 	}
 	done := w.aiActivity(label)
 	go func() {
@@ -5039,7 +5039,7 @@ func (w *window) onTranslate() {
 	w.translationBanner.SetRevealed(true)
 	// Keep the original showing while translating (the banner says "Translating…");
 	// setReaderHTML swaps to the translation in place when it's ready.
-	done := w.aiActivity("Translating")
+	done := w.aiActivity("translate")
 
 	go func() {
 		// 1) Seed from the persisted per-message cache (no AI cost). A message body
@@ -5280,7 +5280,7 @@ func (w *window) onSummarize() {
 	threadID := w.openThreadID
 	acctID := w.activeID
 	contextText := w.threadContextAll()
-	done := w.aiActivity("Summarizing thread")
+	done := w.aiActivity("summarize thread")
 
 	go func() {
 		ch, err := w.deps.Assistant.SummarizeThread(ctx, contextText)
@@ -5382,7 +5382,7 @@ func (w *window) onAnalyze() {
 	acctID := w.activeID
 	gmailID := m.GmailID
 	emailCtx := w.analysisContextFor(m)
-	done := w.aiActivity("Analyzing email")
+	done := w.aiActivity("phishing check")
 
 	go func() {
 		ch, err := w.deps.Assistant.AnalyzeEmail(ctx, emailCtx)
@@ -6139,7 +6139,7 @@ func (w *window) notifyNewMail(accountID int64, m model.Message, gist string) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
-		done := w.aiActivity("Summarizing new mail")
+		done := w.aiActivity("gist new mail")
 		gist, err := w.deps.Assistant.BriefSummary(ctx, gistContext(m))
 		done(doneErr(err))
 		if err != nil || gist == "" {

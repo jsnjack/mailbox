@@ -196,7 +196,7 @@ func (w *Worker) pass(ctx context.Context, accountID int64) (remaining int, err 
 
 	var done func(string)
 	if w.act != nil {
-		done = w.act.Begin("ai", fmt.Sprintf("Categorizing %d threads", len(todo)))
+		done = w.act.Begin("ai", fmt.Sprintf("categorize %d", len(todo)))
 	}
 	aiCtx, cancel := context.WithTimeout(ctx, passTimeout)
 	defer cancel()

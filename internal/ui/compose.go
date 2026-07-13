@@ -328,7 +328,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 			status.SetVisible(true)
 			status.SetText("Generating subject…")
 			logging.Trace("ui: ai generate subject", "body_len", len(body))
-			done := w.aiActivity("Generating subject")
+			done := w.aiActivity("subject")
 			go func() {
 				subject, err := w.deps.Assistant.GenerateSubject(aiCtx, body)
 				dispatch.Main(func() {
@@ -669,7 +669,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 			// The body already carries the configured signature; tell the AI not to
 			// add its own sign-off so the reply isn't double-signed.
 			omitSig := addSignature && strings.TrimSpace(w.signature) != ""
-			done := w.aiActivity("Drafting reply")
+			done := w.aiActivity("draft")
 			go func() {
 				var ch <-chan ai.Chunk
 				var err error
@@ -743,7 +743,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 			grammarBtn.SetSensitive(false)
 			status.SetVisible(true)
 			status.SetText("Checking grammar…")
-			done := w.aiActivity("Checking grammar")
+			done := w.aiActivity("proofread")
 			go func() {
 				ch, err := w.deps.Assistant.Proofread(aiCtx, original)
 				var acc strings.Builder
@@ -906,7 +906,7 @@ func (w *window) askAIIntent(parent gtk.Widgetter, isReply bool, threadContext s
 				busy.AddCSSClass("caption")
 				quick.Append(busy)
 				logging.Trace("ui: ai smart replies begin")
-				done := w.aiActivity("Suggesting quick replies")
+				done := w.aiActivity("quick replies")
 				go func() {
 					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 					defer cancel()

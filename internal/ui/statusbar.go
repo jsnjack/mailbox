@@ -231,10 +231,11 @@ func (w *window) subscribeActivity() {
 // onActivity updates the bar (and log) for one event. Main thread only.
 func (w *window) onActivity(e activity.Event) {
 	key := e.Op + "\x00" + e.Label
+	disp := barText(e.Op, e.Label)
 	switch e.Phase {
 	case activity.Start:
-		w.statusActive = append(w.statusActive, e.Label)
-		w.statusStarted[e.Label] = time.Now()
+		w.statusActive = append(w.statusActive, disp)
+		w.statusStarted[disp] = time.Now()
 		// Concurrent identical ops queue up; Done finishes the oldest (FIFO), so
 		// no row is ever orphaned in the running state.
 		w.statusLogRows[key] = append(w.statusLogRows[key], w.newLogRow(e.Op, e.Label))
@@ -242,13 +243,13 @@ func (w *window) onActivity(e activity.Event) {
 	case activity.Progress:
 		if e.Total > 0 {
 			p := fmt.Sprintf("%d/%d", e.Done, e.Total)
-			w.statusProgText[e.Label] = p
+			w.statusProgText[disp] = p
 			if rows := w.statusLogRows[key]; len(rows) > 0 {
 				rows[0].dur.SetText(p)
 			}
 		}
 	case activity.Done:
-		w.statusActive = removeFirst(w.statusActive, e.Label)
+		w.statusActive = removeFirst(w.statusActive, disp)
 		var row *logRow
 		if rows := w.statusLogRows[key]; len(rows) > 0 {
 			row = rows[0]
@@ -286,8 +287,8 @@ func (w *window) onActivity(e activity.Event) {
 			row.note.SetVisible(true)
 		}
 		logging.Trace("ui: activity done", "op", e.Op, "label", e.Label, "dur", dur, "note", e.Note)
-		delete(w.statusStarted, e.Label)
-		delete(w.statusProgText, e.Label)
+		delete(w.statusStarted, disp)
+		delete(w.statusProgText, disp)
 		if e.Op == "sync" {
 			w.lastSyncAt = time.Now()
 		}
@@ -457,6 +458,21 @@ func (w *window) newLogRow(op, label string) *logRow {
 		}
 	}
 	return r
+}
+
+// barText renders an in-flight operation for the bottom bar's label, where
+// there is no kind chip: the op word prefixes the terse label ("Sync
+// yauhen@…", "AI translate", "Fetch body"). "mail" labels already read
+// standalone ("Mark INBOX read"), so they get no prefix.
+func barText(op, label string) string {
+	prefix := map[string]string{
+		"sync": "Sync", "ai": "AI", "fetch": "Fetch", "send": "Send",
+		"search": "Search", "attach": "Attachment", "draft": "Draft",
+	}[op]
+	if prefix == "" {
+		return label
+	}
+	return strings.TrimSpace(prefix + " " + label)
 }
 
 // removeFirst removes the first occurrence of s from xs (order preserved).
