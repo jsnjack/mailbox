@@ -40,6 +40,8 @@ func (p *anthropicProvider) transfer() (in, out int64) { return p.xfer.snapshot(
 
 func (p *anthropicProvider) Name() string { return "anthropic" }
 
+func (p *anthropicProvider) activeModel() string { return p.model }
+
 func (p *anthropicProvider) Stream(ctx context.Context, system string, msgs []Msg) (<-chan Chunk, error) {
 	return p.StreamOpts(ctx, system, msgs, Options{})
 }

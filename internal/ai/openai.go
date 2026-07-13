@@ -34,6 +34,8 @@ func newOpenAIProvider(endpoint, apiKey, model string) *openAIProvider {
 
 func (p *openAIProvider) Name() string { return "openai" }
 
+func (p *openAIProvider) activeModel() string { return p.model }
+
 func (p *openAIProvider) transfer() (in, out int64) { return p.xfer.snapshot() }
 
 func (p *openAIProvider) Stream(ctx context.Context, system string, msgs []Msg) (<-chan Chunk, error) {

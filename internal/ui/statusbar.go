@@ -82,11 +82,11 @@ func (w *window) buildStatusBar() gtk.Widgetter {
 // buildActivityLogButton returns the "activity log" button and its popover,
 // which holds the recent-operation log and a session-stats section.
 func (w *window) buildActivityLogButton() gtk.Widgetter {
-	w.statusLogBox = gtk.NewBox(gtk.OrientationVertical, 2)
+	w.statusLogBox = gtk.NewBox(gtk.OrientationVertical, 1)
 	scroller := gtk.NewScrolledWindow()
 	scroller.SetPolicy(gtk.PolicyNever, gtk.PolicyAutomatic)
 	scroller.SetChild(w.statusLogBox)
-	scroller.SetSizeRequest(480, 280)
+	scroller.SetSizeRequest(440, 220)
 
 	w.statusStatsLabel = gtk.NewLabel("")
 	w.statusStatsLabel.SetXAlign(0)
@@ -144,8 +144,10 @@ func doneErr(err error) string {
 }
 
 // aiActivity reports an AI operation to the status bar; the returned function
-// ends it (pass a note, e.g. a token count or "" ). It also records AI health so
-// the status bar can flag a failing provider. Safe when no hub is wired.
+// ends it (pass a note, e.g. a token count or "" ). The log note is suffixed
+// with the model that served the request (failover-aware), so the log shows
+// which chain entry answered. It also records AI health so the status bar can
+// flag a failing provider. Safe when no hub is wired.
 func (w *window) aiActivity(label string) func(note string) {
 	var end func(string)
 	if w.deps.Activity != nil {
@@ -153,9 +155,26 @@ func (w *window) aiActivity(label string) func(note string) {
 	}
 	return func(note string) {
 		if end != nil {
-			end(note)
+			end(w.withAIModel(note))
 		}
 		w.noteAIResult(note)
+	}
+}
+
+// withAIModel appends the serving model to a successful AI note ("2.1 KB ·
+// granite-4.1…"). Errors and cancels pass through — no model served those.
+func (w *window) withAIModel(note string) string {
+	if w.deps.Assistant == nil || note == noteCancelled || strings.HasPrefix(note, "error:") {
+		return note
+	}
+	m := w.deps.Assistant.ActiveModel()
+	switch {
+	case m == "":
+		return note
+	case note == "":
+		return m
+	default:
+		return note + " · " + m
 	}
 }
 
@@ -262,7 +281,7 @@ func (w *window) onActivity(e activity.Event) {
 			row.status.SetText("✓")
 		}
 		if e.Note != "" {
-			row.note.SetText(e.Note)
+			row.note.SetText("· " + e.Note)
 			row.note.SetTooltipText(e.Note) // errors are long; the row ellipsizes
 			row.note.SetVisible(true)
 		}
@@ -382,10 +401,13 @@ func (w *window) refreshStatusStats() {
 }
 
 // newLogRow prepends one operation's row to the activity log (newest on top,
-// capped at statusLogCap) and returns it for in-place updates. Layout:
+// capped at statusLogCap) and returns it for in-place updates. A single dense
+// line per operation:
 //
-//	15:04:05  SYNC  ▸ Syncing work@…              1.2s
-//	          error: oauth2: token expired          (dim note line, red on error)
+//	15:04:05 SYNC ▸ Syncing work@… · 1 change(s)              1.2s
+//
+// The note rides inline after the label, dim (error-tinted on failure), with
+// the full text in the tooltip.
 func (w *window) newLogRow(op, label string) *logRow {
 	r := &logRow{started: time.Now()}
 
@@ -401,32 +423,28 @@ func (w *window) newLogRow(op, label string) *logRow {
 
 	lbl := gtk.NewLabel(label)
 	lbl.SetXAlign(0)
-	lbl.SetHExpand(true)
 	lbl.SetEllipsize(pango.EllipsizeEnd)
 	lbl.SetTooltipText(label)
+
+	r.note = gtk.NewLabel("")
+	r.note.SetXAlign(0)
+	r.note.SetHExpand(true)
+	r.note.SetEllipsize(pango.EllipsizeEnd)
+	r.note.AddCSSClass("log-note")
+	r.note.SetVisible(false)
 
 	r.dur = gtk.NewLabel("")
 	r.dur.AddCSSClass("log-time")
 	r.dur.SetXAlign(1)
 
-	head := gtk.NewBox(gtk.OrientationHorizontal, 6)
-	head.Append(tim)
-	head.Append(chip)
-	head.Append(r.status)
-	head.Append(lbl)
-	head.Append(r.dur)
-
-	r.note = gtk.NewLabel("")
-	r.note.SetXAlign(0)
-	r.note.SetEllipsize(pango.EllipsizeEnd)
-	r.note.AddCSSClass("log-note")
-	r.note.SetMarginStart(70) // roughly under the label column, past the clock
-	r.note.SetVisible(false)
-
-	box := gtk.NewBox(gtk.OrientationVertical, 0)
+	box := gtk.NewBox(gtk.OrientationHorizontal, 6)
 	box.AddCSSClass("caption")
-	box.Append(head)
+	box.Append(tim)
+	box.Append(chip)
+	box.Append(r.status)
+	box.Append(lbl)
 	box.Append(r.note)
+	box.Append(r.dur)
 
 	w.statusLogBox.Prepend(box)
 	w.statusLogLines++

@@ -3,6 +3,7 @@ package ai
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jsnjack/mailbox/internal/logging"
@@ -25,14 +26,22 @@ const failoverCooldown = time.Minute
 // anyway, since guessing beats certain failure).
 type failoverProvider struct {
 	ps     []Provider
-	models []string // parallel to ps, for tracing
+	models []string // parallel to ps, for tracing and activeModel
 
 	mu       sync.Mutex
-	failedAt []time.Time // parallel to ps; zero = healthy
+	failedAt []time.Time  // parallel to ps; zero = healthy
+	served   atomic.Int32 // index of the entry the last request committed to
 }
 
 func newFailoverProvider(ps []Provider, models []string) *failoverProvider {
 	return &failoverProvider{ps: ps, models: models, failedAt: make([]time.Time, len(ps))}
+}
+
+// activeModel names the chain entry the most recent request committed to (the
+// primary before any request), so callers can log which model actually served —
+// the interesting fact when the chain silently falls back.
+func (f *failoverProvider) activeModel() string {
+	return f.models[f.served.Load()]
 }
 
 func (f *failoverProvider) Name() string { return f.ps[0].Name() }
@@ -97,6 +106,7 @@ func (f *failoverProvider) StreamOpts(ctx context.Context, system string, msgs [
 			out := make(chan Chunk)
 			close(out)
 			f.markHealthy(i)
+			f.served.Store(int32(i))
 			if i > 0 {
 				logging.Trace("ai: failover succeeded on backup", "model", f.models[i], "index", i)
 			}
@@ -117,6 +127,7 @@ func (f *failoverProvider) StreamOpts(ctx context.Context, system string, msgs [
 		} else {
 			f.markHealthy(i)
 		}
+		f.served.Store(int32(i))
 		if i > 0 {
 			logging.Trace("ai: failover succeeded on backup", "model", f.models[i], "index", i)
 		}

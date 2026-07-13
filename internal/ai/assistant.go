@@ -66,6 +66,18 @@ func (a *Assistant) Requests() int64 { return a.reqs.Load() }
 // ProviderName returns the underlying provider's name.
 func (a *Assistant) ProviderName() string { return a.provider().Name() }
 
+// ActiveModel names the model that served the most recent request: the
+// configured model, or — with a failover chain — whichever entry the last
+// request committed to ("model @ host"), so activity logging can show when the
+// chain fell back. Best-effort under concurrency: overlapping requests read the
+// latest commit, which only differs mid-failover.
+func (a *Assistant) ActiveModel() string {
+	if p, ok := a.provider().(interface{ activeModel() string }); ok {
+		return p.activeModel()
+	}
+	return ""
+}
+
 // TranslateSegments translates each text snippet into targetLang and returns the
 // translations in the same order. It sends only the text (as a compact JSON
 // array), never the surrounding markup, so the model generates a small fraction

@@ -179,6 +179,29 @@ func TestFailoverCircuitBreakerSkipsCoolingEntry(t *testing.T) {
 	}
 }
 
+// ActiveModel follows the entry the last request committed to, so the log can
+// name the model that actually answered after a fallback.
+func TestFailoverActiveModel(t *testing.T) {
+	primary := &scriptedProvider{requestErr: errors.New("down")}
+	backup := &scriptedProvider{chunks: []Chunk{{Text: "ok"}}}
+	f := newFailoverProvider([]Provider{primary, backup}, []string{"big @ argus:4000", "granite @ localhost"})
+	a := NewAssistant(f)
+
+	if got := a.ActiveModel(); got != "big @ argus:4000" {
+		t.Fatalf("ActiveModel before any request = %q, want the primary", got)
+	}
+	ch, err := f.Stream(context.Background(), "", nil)
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	if _, err := collect(t, ch); err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	if got := a.ActiveModel(); got != "granite @ localhost" {
+		t.Fatalf("ActiveModel after fallback = %q, want the backup", got)
+	}
+}
+
 // When every entry is cooling down, the breaker steps aside — all entries are
 // tried in order rather than failing without an attempt.
 func TestFailoverCircuitBreakerAllCoolingStillTries(t *testing.T) {

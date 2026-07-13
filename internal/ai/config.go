@@ -2,6 +2,7 @@ package ai
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 
@@ -234,7 +235,17 @@ func NewProvider(cfg Config, keyFor KeyFunc) (Provider, error) {
 			return nil, err
 		}
 		ps[i] = p
-		labels[i] = e.Model + " @ " + e.Endpoint
+		// "model @ host" — the host disambiguates same-named models on
+		// different endpoints without the URL noise (log rows show this label).
+		labels[i] = e.Model + " @ " + endpointHost(e.Endpoint)
 	}
 	return newFailoverProvider(ps, labels), nil
+}
+
+// endpointHost reduces an endpoint URL to its host for display.
+func endpointHost(endpoint string) string {
+	if u, err := url.Parse(endpoint); err == nil && u.Host != "" {
+		return u.Host
+	}
+	return endpoint
 }
