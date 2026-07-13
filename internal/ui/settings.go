@@ -347,7 +347,10 @@ func (w *window) openSettings() {
 				w.inboxCategories = on
 				savePref(func(p *config.Prefs) { p.DisableInboxCategories = !on })
 				if on {
-					w.categorizeInbox()
+					w.categorizeInbox() // seed what's already cached
+					if w.deps.RecategorizeInbox != nil {
+						w.deps.RecategorizeInbox(0) // classify the rest, all accounts
+					}
 				}
 			})
 		aiToggle("Message summaries", "A one-line AI gist shown on messages and in new-mail notifications.",

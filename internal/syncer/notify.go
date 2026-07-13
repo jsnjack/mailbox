@@ -31,6 +31,9 @@ const (
 	// SnoozeWoke means a snoozed conversation's wake time passed — it is back
 	// in the inbox (ThreadID identifies it).
 	SnoozeWoke
+	// AIUpdated means the background AI worker persisted new results (inbox
+	// categories) for the account — the UI re-seeds its tags from the cache.
+	AIUpdated
 )
 
 // kindName returns a human-readable name for a ChangeKind, used only in trace
@@ -53,6 +56,8 @@ func kindName(k ChangeKind) string {
 		return "SendStateChanged"
 	case SnoozeWoke:
 		return "SnoozeWoke"
+	case AIUpdated:
+		return "AIUpdated"
 	default:
 		return "unknown"
 	}

@@ -12,6 +12,7 @@ import (
 
 	"github.com/jsnjack/mailbox/internal/activity"
 	"github.com/jsnjack/mailbox/internal/ai"
+	"github.com/jsnjack/mailbox/internal/aiwork"
 	"github.com/jsnjack/mailbox/internal/auth"
 	"github.com/jsnjack/mailbox/internal/backend"
 	"github.com/jsnjack/mailbox/internal/config"
@@ -616,6 +617,15 @@ func launchUI(mailto string) error {
 		fmt.Fprintf(os.Stderr, "AI features disabled (%v)\n", err)
 	} else if asst != nil {
 		deps.Assistant = asst
+		// Background categorization for every connected account — new mail is
+		// tagged as it arrives (plus a catch-up sweep at launch), so switching
+		// accounts shows ready tags instead of kicking off classification.
+		worker := aiwork.New(st, asst, hub, act, func() bool {
+			p, _ := config.LoadPrefs()
+			return !p.DisableInboxCategories
+		})
+		go worker.Run(ctx)
+		deps.RecategorizeInbox = worker.Trigger
 	}
 
 	return ui.Run(deps, mailto)
