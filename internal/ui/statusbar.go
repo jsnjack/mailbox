@@ -452,6 +452,7 @@ func (w *window) newLogRow(op, account, label string) *logRow {
 	if account != "" {
 		acct = gtk.NewLabel(account)
 		acct.AddCSSClass("log-chip")
+		acct.AddCSSClass("log-account") // dimmer: context, not the op kind
 	}
 
 	r.status = gtk.NewLabel("▸")

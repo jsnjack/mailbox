@@ -171,6 +171,12 @@ const appCSS = `
 	background-color: alpha(@card_fg_color, 0.10);
 	color: alpha(@window_fg_color, 0.75);
 }
+/* The account chip is context, not the operation — dimmer than the kind chip
+   so SYNC/AI stays the anchor of the row. */
+.log-chip.log-account {
+	background-color: alpha(@card_fg_color, 0.05);
+	color: alpha(@window_fg_color, 0.50);
+}
 .log-note {
 	color: alpha(@window_fg_color, 0.60);
 }
