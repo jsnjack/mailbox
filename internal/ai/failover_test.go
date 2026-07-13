@@ -202,6 +202,23 @@ func TestFailoverActiveModel(t *testing.T) {
 	}
 }
 
+// ShortModel: host suffix dropped, long names keep first 10 + last 5 runes,
+// short names pass through whole.
+func TestShortModel(t *testing.T) {
+	cases := map[string]string{
+		"local-qwen @ proteus.webfuse.it": "local-qwen",
+		"granite-4.1-8b-GGUF-Q5_K_M":      "granite-4.…5_K_M",
+		"claude-sonnet-5":                 "claude-sonnet-5", // 15 runes: truncating wouldn't shorten
+		"gpt-4o":                          "gpt-4o",
+		"":                                "",
+	}
+	for in, want := range cases {
+		if got := ShortModel(in); got != want {
+			t.Fatalf("ShortModel(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 // When every entry is cooling down, the breaker steps aside — all entries are
 // tried in order rather than failing without an attempt.
 func TestFailoverCircuitBreakerAllCoolingStillTries(t *testing.T) {

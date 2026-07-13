@@ -12,6 +12,7 @@ import (
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 	"github.com/diamondburned/gotk4/pkg/pango"
 	"github.com/jsnjack/mailbox/internal/activity"
+	"github.com/jsnjack/mailbox/internal/ai"
 	"github.com/jsnjack/mailbox/internal/dispatch"
 	"github.com/jsnjack/mailbox/internal/logging"
 )
@@ -162,12 +163,13 @@ func (w *window) aiActivity(label string) func(note string) {
 }
 
 // withAIModel appends the serving model to a successful AI note ("2.1 KB ·
-// granite-4.1…"). Errors and cancels pass through — no model served those.
+// granite-4.…"), shortened to stay glanceable (ai.ShortModel). Errors and
+// cancels pass through — no model served those.
 func (w *window) withAIModel(note string) string {
 	if w.deps.Assistant == nil || note == noteCancelled || strings.HasPrefix(note, "error:") {
 		return note
 	}
-	m := w.deps.Assistant.ActiveModel()
+	m := ai.ShortModel(w.deps.Assistant.ActiveModel())
 	switch {
 	case m == "":
 		return note

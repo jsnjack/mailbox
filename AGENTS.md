@@ -318,7 +318,10 @@ date", "AI ✓ translate"); the bottom bar, which has no chip, composes the op
 word back in (`barText`: "Sync yauhen@…", "AI translate").
 AI notes are suffixed with the model that served the request
 (`Assistant.ActiveModel` — with a failover chain, the entry the request
-committed to as "model @ host", so a silent fallback is visible). Every AI op
+committed to, so a silent fallback is visible; rendered via `ai.ShortModel`,
+the bare name shortened to first-10…last-5 runes — the full "model @ host"
+stays in traces).
+Every AI op
 is bracketed into it via `aiActivity` (including the background categorizer and
 the notification gist); label mutations, outbox sweeps that delivered,
 retention prunes, and woken snoozes log as instant completed rows via

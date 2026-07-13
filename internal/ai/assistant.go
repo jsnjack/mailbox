@@ -78,6 +78,23 @@ func (a *Assistant) ActiveModel() string {
 	return ""
 }
 
+// ShortModel reduces a model label to a compact, deterministic log form: the
+// bare model name (any " @ host" suffix dropped); a long name keeps its first
+// 10 and last 5 runes around an ellipsis, so the distinctive tail (a version
+// or quant suffix like "Q5_K_M") survives. The same model always renders the
+// same.
+func ShortModel(s string) string {
+	if i := strings.Index(s, " @ "); i >= 0 {
+		s = s[:i]
+	}
+	const head, tail = 10, 5
+	r := []rune(s)
+	if len(r) <= head+tail+1 { // truncating wouldn't shorten it
+		return s
+	}
+	return string(r[:head]) + "…" + string(r[len(r)-tail:])
+}
+
 // TranslateSegments translates each text snippet into targetLang and returns the
 // translations in the same order. It sends only the text (as a compact JSON
 // array), never the surrounding markup, so the model generates a small fraction

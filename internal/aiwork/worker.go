@@ -259,7 +259,7 @@ func (w *Worker) pass(ctx context.Context, accountID int64) (remaining int, err 
 			done("error: " + firstErr.Error())
 		} else {
 			note := fmt.Sprintf("%d tagged", assigned)
-			if m := w.asst.ActiveModel(); m != "" {
+			if m := ai.ShortModel(w.asst.ActiveModel()); m != "" {
 				note += " · " + m
 			}
 			done(note)
