@@ -319,7 +319,7 @@ func launchUI(mailto string) error {
 		}
 		rt.wg.Add(2)
 		go func() { defer rt.wg.Done(); backgroundSync(actx, engine, act, b, a.ID, a.Email, wake) }()
-		go func() { defer rt.wg.Done(); backgroundSweep(actx, engine, act, b, a.ID) }()
+		go func() { defer rt.wg.Done(); backgroundSweep(actx, engine, act, b, a.ID, a.Email) }()
 		// One-time recovery: re-fetch Gmail messages cached text-only by an older
 		// build that dropped externalized (attachment-id-served) HTML bodies. IMAP
 		// fetches whole bodies, so its text-only mail is genuinely text-only — skip it.
@@ -482,6 +482,14 @@ func launchUI(mailto string) error {
 	// Each hook routes through clientFor, which errors gracefully until a backend
 	// exists for the account.
 	deps.Hub = hub
+	// emailOf resolves an account id to its email for activity reporting (a
+	// point query on the local DB; "" for a removed/unknown account).
+	emailOf := func(accountID int64) string {
+		if a, err := st.GetAccountByID(context.Background(), accountID); err == nil {
+			return a.Email
+		}
+		return ""
+	}
 	clientFor := func(accountID int64) (backend.Backend, error) {
 		accountsMu.Lock()
 		b := backends[accountID]
@@ -496,7 +504,7 @@ func launchUI(mailto string) error {
 		if err != nil {
 			return err
 		}
-		done := act.Begin("fetch", "body")
+		done := act.Begin("fetch", emailOf(accountID), "body")
 		err = engine.FetchBody(ctx, c, accountID, gmailID)
 		done(doneNote(err))
 		return err
@@ -508,7 +516,7 @@ func launchUI(mailto string) error {
 		}
 		err = engine.ModifyLabelsBatch(ctx, c, accountID, gmailIDs, add, remove)
 		// Instant local change + async mirror — log it as a completed op.
-		act.Report("mail", labelChangeSummary(add, remove, len(gmailIDs)), doneNote(err))
+		act.Report("mail", emailOf(accountID), labelChangeSummary(add, remove, len(gmailIDs)), doneNote(err))
 		return err
 	}
 	deps.Send = func(ctx context.Context, accountID int64, msg model.OutgoingMessage) error {
@@ -516,7 +524,7 @@ func launchUI(mailto string) error {
 		if err != nil {
 			return err
 		}
-		done := act.Begin("send", "message")
+		done := act.Begin("send", emailOf(accountID), "message")
 		err = engine.Send(ctx, c, accountID, msg)
 		done(doneNote(err))
 		return err
@@ -534,7 +542,7 @@ func launchUI(mailto string) error {
 		if err != nil {
 			return err
 		}
-		done := act.Begin("draft", "save")
+		done := act.Begin("draft", emailOf(accountID), "save")
 		err = engine.SaveDraft(ctx, c, accountID, msg)
 		done(doneNote(err))
 		return err
@@ -551,7 +559,7 @@ func launchUI(mailto string) error {
 		if err != nil {
 			return "", err
 		}
-		done := act.Begin("attach", "download")
+		done := act.Begin("attach", emailOf(accountID), "download")
 		path, err := engine.OpenAttachment(ctx, c, gmailID, attID)
 		done(doneNote(err))
 		return path, err
@@ -561,7 +569,7 @@ func launchUI(mailto string) error {
 		if err != nil {
 			return err
 		}
-		done := act.Begin("sync", "now")
+		done := act.Begin("sync", emailOf(accountID), "now")
 		n, err := engine.Incremental(ctx, c, accountID)
 		if errors.Is(err, syncer.ErrHistoryExpired) {
 			n, err = engine.Resync(ctx, c, accountID, resyncBackfillLimit)
@@ -578,7 +586,7 @@ func launchUI(mailto string) error {
 		if err != nil {
 			return nil, err
 		}
-		done := act.Begin("search", "all mail")
+		done := act.Begin("search", emailOf(accountID), "all mail")
 		ids, err := engine.SearchServer(ctx, c, accountID, query, max)
 		if err != nil {
 			done(doneNote(err))
@@ -592,7 +600,7 @@ func launchUI(mailto string) error {
 		if err != nil {
 			return err
 		}
-		done := act.Begin("mail", "Mark "+labelID+" read")
+		done := act.Begin("mail", emailOf(accountID), "Mark "+labelID+" read")
 		err = engine.MarkLabelRead(ctx, c, accountID, labelID)
 		done(doneNote(err))
 		return err
@@ -602,7 +610,7 @@ func launchUI(mailto string) error {
 		if err != nil {
 			return err
 		}
-		done := act.Begin("send", "outbox")
+		done := act.Begin("send", emailOf(accountID), "outbox")
 		n, err := engine.SweepOutbox(ctx, c, accountID)
 		if err != nil {
 			done(doneNote(err))
@@ -628,7 +636,7 @@ func launchUI(mailto string) error {
 		if err != nil {
 			return err
 		}
-		done := act.Begin("mail", fmt.Sprintf("Delete %d forever", len(gmailIDs)))
+		done := act.Begin("mail", emailOf(accountID), fmt.Sprintf("Delete %d forever", len(gmailIDs)))
 		err = engine.DeletePermanently(ctx, c, accountID, gmailIDs)
 		done(doneNote(err))
 		return err
@@ -638,7 +646,7 @@ func launchUI(mailto string) error {
 		if err != nil {
 			return 0, err
 		}
-		done := act.Begin("mail", "Empty "+labelID)
+		done := act.Begin("mail", emailOf(accountID), "Empty "+labelID)
 		n, err := engine.EmptyLabel(ctx, c, accountID, labelID)
 		if err != nil {
 			done(doneNote(err))
@@ -854,16 +862,16 @@ const sweepInterval = 45 * time.Second
 
 // backgroundSweep retries queued outbox messages on a timer. A quiet tick (an
 // empty outbox) is not logged — only sweeps that delivered something or failed.
-func backgroundSweep(ctx context.Context, engine *syncer.Engine, act *activity.Hub, b backend.Backend, accountID int64) {
+func backgroundSweep(ctx context.Context, engine *syncer.Engine, act *activity.Hub, b backend.Backend, accountID int64, email string) {
 	ticker := time.NewTicker(sweepInterval)
 	defer ticker.Stop()
 	for {
 		n, err := engine.SweepOutbox(ctx, b, accountID)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "outbox sweep: %v\n", err)
-			act.Report("send", "outbox", doneNote(err))
+			act.Report("send", email, "outbox", doneNote(err))
 		} else if n > 0 {
-			act.Report("send", "outbox", fmt.Sprintf("%d sent", n))
+			act.Report("send", email, "outbox", fmt.Sprintf("%d sent", n))
 		}
 		select {
 		case <-ctx.Done():
@@ -920,14 +928,14 @@ func runRetentionPass(ctx context.Context, st *store.Store, act *activity.Hub) {
 	n, err := st.PruneBodies(ctx, cutoff)
 	if err != nil {
 		slog.Warn("body retention: prune", "err", err)
-		act.Report("mail", "Body retention", doneNote(err))
+		act.Report("mail", "", "Body retention", doneNote(err))
 		return
 	}
 	if n == 0 {
 		return
 	}
 	slog.Info("body retention: pruned old message bodies", "count", n, "days", prefs.BodyRetentionDays)
-	act.Report("mail", "Body retention", fmt.Sprintf("%d bodies (>%dd)", n, prefs.BodyRetentionDays))
+	act.Report("mail", "", "Body retention", fmt.Sprintf("%d bodies (>%dd)", n, prefs.BodyRetentionDays))
 	if n >= retentionVacuumMin {
 		if err := st.Vacuum(ctx); err != nil {
 			slog.Warn("body retention: vacuum", "err", err)
@@ -962,7 +970,7 @@ func backgroundSnoozeWake(ctx context.Context, st *store.Store, hub *syncer.Hub,
 			woke++
 		}
 		if woke > 0 {
-			act.Report("mail", "Snooze woke", fmt.Sprintf("%d", woke))
+			act.Report("mail", "", "Snooze woke", fmt.Sprintf("%d", woke))
 		}
 		select {
 		case <-ctx.Done():
@@ -979,7 +987,7 @@ func backgroundSync(ctx context.Context, engine *syncer.Engine, act *activity.Hu
 	defer ticker.Stop()
 	consecFails := 0
 	for {
-		done := act.Begin("sync", email)
+		done := act.Begin("sync", email, "")
 		var (
 			n   int
 			err error
@@ -1062,7 +1070,7 @@ func backgroundBackfillHTML(ctx context.Context, engine *syncer.Engine, act *act
 		return
 	case <-time.After(htmlBackfillDelay):
 	}
-	done := act.Begin("sync", "HTML for "+email)
+	done := act.Begin("sync", email, "HTML")
 	n, err := engine.BackfillHTMLBodies(ctx, b, accountID, htmlBackfillCap)
 	switch {
 	case err != nil:

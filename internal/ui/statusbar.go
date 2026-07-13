@@ -144,15 +144,21 @@ func doneErr(err error) string {
 	}
 }
 
-// aiActivity reports an AI operation to the status bar; the returned function
-// ends it (pass a note, e.g. a token count or "" ). The log note is suffixed
-// with the model that served the request (failover-aware), so the log shows
-// which chain entry answered. It also records AI health so the status bar can
-// flag a failing provider. Safe when no hub is wired.
+// aiActivity reports an AI operation for the active account to the status bar;
+// the returned function ends it (pass a note, e.g. a token count or "" ). The
+// log note is suffixed with the model that served the request (failover-aware),
+// so the log shows which chain entry answered. It also records AI health so the
+// status bar can flag a failing provider. Safe when no hub is wired.
 func (w *window) aiActivity(label string) func(note string) {
+	return w.aiActivityFor(w.activeEmail, label)
+}
+
+// aiActivityFor is aiActivity for an explicit account (the new-mail gist can
+// run for a non-active account).
+func (w *window) aiActivityFor(email, label string) func(note string) {
 	var end func(string)
 	if w.deps.Activity != nil {
-		end = w.deps.Activity.Begin("ai", label)
+		end = w.deps.Activity.Begin("ai", email, label)
 	}
 	return func(note string) {
 		if end != nil {
@@ -160,6 +166,28 @@ func (w *window) aiActivity(label string) func(note string) {
 		}
 		w.noteAIResult(note)
 	}
+}
+
+// emailByID resolves an account id to its email ("" when unknown).
+func (w *window) emailByID(id int64) string {
+	for _, a := range w.deps.Accounts {
+		if a.ID == id {
+			return a.Email
+		}
+	}
+	return ""
+}
+
+// accountTag maps an activity event's account email to its short display form:
+// the user-assigned name ("Work") when set, else the email; "" stays "".
+func (w *window) accountTag(email string) string {
+	if email == "" {
+		return ""
+	}
+	if n := strings.TrimSpace(w.accountNames[email]); n != "" {
+		return n
+	}
+	return email
 }
 
 // withAIModel appends the serving model to a successful AI note ("2.1 KB ·
@@ -232,15 +260,16 @@ func (w *window) subscribeActivity() {
 
 // onActivity updates the bar (and log) for one event. Main thread only.
 func (w *window) onActivity(e activity.Event) {
-	key := e.Op + "\x00" + e.Label
-	disp := barText(e.Op, e.Label)
+	key := e.Op + "\x00" + e.Account + "\x00" + e.Label
+	tag := w.accountTag(e.Account)
+	disp := barText(e.Op, tag, e.Label)
 	switch e.Phase {
 	case activity.Start:
 		w.statusActive = append(w.statusActive, disp)
 		w.statusStarted[disp] = time.Now()
 		// Concurrent identical ops queue up; Done finishes the oldest (FIFO), so
 		// no row is ever orphaned in the running state.
-		w.statusLogRows[key] = append(w.statusLogRows[key], w.newLogRow(e.Op, e.Label))
+		w.statusLogRows[key] = append(w.statusLogRows[key], w.newLogRow(e.Op, tag, e.Label))
 		logging.Trace("ui: activity start", "op", e.Op, "label", e.Label, "active", len(w.statusActive))
 	case activity.Progress:
 		if e.Total > 0 {
@@ -263,7 +292,7 @@ func (w *window) onActivity(e activity.Event) {
 		} else {
 			// A Report (instant, completed operation) — or a Start published
 			// before the UI subscribed. One row, no duration.
-			row = w.newLogRow(e.Op, e.Label)
+			row = w.newLogRow(e.Op, tag, e.Label)
 			row.started = time.Time{}
 		}
 		var dur time.Duration
@@ -404,13 +433,13 @@ func (w *window) refreshStatusStats() {
 
 // newLogRow prepends one operation's row to the activity log (newest on top,
 // capped at statusLogCap) and returns it for in-place updates. A single dense
-// line per operation:
+// line per operation, the account as its own chip after the kind:
 //
-//	15:04:05 SYNC ▸ Syncing work@… · 1 change(s)              1.2s
+//	15:04:05 SYNC Work ✓ · 1 change(s)              1.2s
 //
 // The note rides inline after the label, dim (error-tinted on failure), with
-// the full text in the tooltip.
-func (w *window) newLogRow(op, label string) *logRow {
+// the full text in a tooltip only when ellipsized.
+func (w *window) newLogRow(op, account, label string) *logRow {
 	r := &logRow{started: time.Now()}
 
 	tim := gtk.NewLabel(time.Now().Format("15:04:05"))
@@ -418,6 +447,12 @@ func (w *window) newLogRow(op, label string) *logRow {
 
 	chip := gtk.NewLabel(strings.ToUpper(op))
 	chip.AddCSSClass("log-chip")
+
+	var acct *gtk.Label
+	if account != "" {
+		acct = gtk.NewLabel(account)
+		acct.AddCSSClass("log-chip")
+	}
 
 	r.status = gtk.NewLabel("▸")
 	r.status.AddCSSClass("log-time")
@@ -444,6 +479,9 @@ func (w *window) newLogRow(op, label string) *logRow {
 	box.AddCSSClass("caption")
 	box.Append(tim)
 	box.Append(chip)
+	if acct != nil {
+		box.Append(acct)
+	}
 	box.Append(r.status)
 	box.Append(lbl)
 	box.Append(r.note)
@@ -478,18 +516,15 @@ func tooltipWhenTruncated(l *gtk.Label) {
 }
 
 // barText renders an in-flight operation for the bottom bar's label, where
-// there is no kind chip: the op word prefixes the terse label ("Sync
-// yauhen@…", "AI translate", "Fetch body"). "mail" labels already read
-// standalone ("Mark INBOX read"), so they get no prefix.
-func barText(op, label string) string {
+// there are no chips: the op word, the account tag, and the terse label
+// composed into one line ("Sync Work", "AI Work translate"). "mail" labels
+// already read standalone ("Mark INBOX read"), so they get no op word.
+func barText(op, account, label string) string {
 	prefix := map[string]string{
 		"sync": "Sync", "ai": "AI", "fetch": "Fetch", "send": "Send",
 		"search": "Search", "attach": "Attachment", "draft": "Draft",
 	}[op]
-	if prefix == "" {
-		return label
-	}
-	return strings.TrimSpace(prefix + " " + label)
+	return strings.Join(strings.Fields(prefix+" "+account+" "+label), " ")
 }
 
 // removeFirst removes the first occurrence of s from xs (order preserved).

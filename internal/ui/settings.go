@@ -42,7 +42,7 @@ func (w *window) openSettings() {
 
 	group := adw.NewPreferencesGroup()
 	group.SetTitle("AI")
-	desc := "Models are tried in order: the first is the primary, the next takes over while it is unreachable (a VPN-only endpoint can fall back to a local model). Changes apply immediately."
+	desc := "Models are tried in order: the first is the primary, the next takes over while it is unreachable. Changes apply immediately."
 	if w.deps.Assistant == nil {
 		desc += " Enabling AI for the first time takes effect after a restart."
 	}

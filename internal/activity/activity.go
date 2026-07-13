@@ -21,12 +21,13 @@ const (
 
 // Event is one unit of reported activity.
 type Event struct {
-	Op    string // category: "sync", "ai", "search", "fetch", "send", "attach"
-	Phase Phase
-	Label string // human-readable, e.g. "Syncing Work" or "Translating"
-	Done  int    // progress numerator (Progress phase); 0 otherwise
-	Total int    // progress denominator; 0 means indeterminate
-	Note  string // extra detail for the log (counts, timing, errors)
+	Op      string // category: "sync", "ai", "search", "fetch", "send", "attach", "draft", "mail"
+	Phase   Phase
+	Account string // email of the account the op ran for ("" = app-wide)
+	Label   string // terse object, e.g. "categorize 3" or "body" ("" when the account says it all)
+	Done    int    // progress numerator (Progress phase); 0 otherwise
+	Total   int    // progress denominator; 0 means indeterminate
+	Note    string // extra detail for the log (counts, timing, errors)
 }
 
 // Hub fans out activity events to all subscribers. The zero value is unusable;
@@ -58,14 +59,15 @@ func (h *Hub) Publish(e Event) {
 }
 
 // Begin reports a Start and returns a function that reports the matching Done;
-// pass it a note (e.g. "+3 messages", "240 tok", an error string). Typical use:
+// pass it a note (e.g. "+3 messages", "240 tok", an error string). account is
+// the email the op runs for ("" for app-wide work). Typical use:
 //
-//	done := hub.Begin("ai", "Translating")
+//	done := hub.Begin("ai", email, "translate")
 //	defer func() { done("240 tok") }()
-func (h *Hub) Begin(op, label string) func(note string) {
-	h.Publish(Event{Op: op, Phase: Start, Label: label})
+func (h *Hub) Begin(op, account, label string) func(note string) {
+	h.Publish(Event{Op: op, Phase: Start, Account: account, Label: label})
 	return func(note string) {
-		h.Publish(Event{Op: op, Phase: Done, Label: label, Note: note})
+		h.Publish(Event{Op: op, Phase: Done, Account: account, Label: label, Note: note})
 	}
 }
 
@@ -73,8 +75,8 @@ func (h *Hub) Begin(op, label string) func(note string) {
 // Start, so no duration): work that is effectively instant or only worth
 // logging when it did something — a label mirror, an outbox sweep that
 // delivered, a retention prune, a woken snooze.
-func (h *Hub) Report(op, label, note string) {
-	h.Publish(Event{Op: op, Phase: Done, Label: label, Note: note})
+func (h *Hub) Report(op, account, label, note string) {
+	h.Publish(Event{Op: op, Phase: Done, Account: account, Label: label, Note: note})
 }
 
 // Subscribe returns a channel of events and an unsubscribe function. The channel

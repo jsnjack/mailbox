@@ -310,12 +310,15 @@ bytes transferred, Gmail API requests + quota units, AI requests + AI bytes
 (`Assistant.Requests`/`Transferred` — counted in the Assistant so they survive a
 live provider swap), DB size, cached-message count) — plus an expandable
 structured activity log: one dense line per operation (monospace clock, a
-neutral kind chip — SYNC/AI/FETCH/SEND/SEARCH/ATTACH/DRAFT/MAIL — the label,
-the result note inline and dim, right-aligned duration), inserted at Start and
-finished in place (✓/✗/–, error-tinted note on failure; capped at 200 rows).
-Labels are terse objects that don't repeat the chip ("SYNC ✓ yauhen@… · up to
-date", "AI ✓ translate"); the bottom bar, which has no chip, composes the op
-word back in (`barText`: "Sync yauhen@…", "AI translate").
+neutral kind chip — SYNC/AI/FETCH/SEND/SEARCH/ATTACH/DRAFT/MAIL — an account
+chip, the label, the result note inline and dim, right-aligned duration),
+inserted at Start and finished in place (✓/✗/–, error-tinted note on failure;
+capped at 200 rows). Every account-scoped event carries `Event.Account` (the
+email — `activity.Hub.Begin/Report` take it; app-wide work passes ""); the UI
+renders it as the account's display name when one is set ("SYNC Work ✓ · up to
+date"). Labels are terse objects that repeat neither chip ("AI Work ✓
+translate"); the bottom bar, which has no chips, composes them back in
+(`barText`: "Sync Work", "AI Work translate").
 AI notes are suffixed with the model that served the request
 (`Assistant.ActiveModel` — with a failover chain, the entry the request
 committed to, so a silent fallback is visible; rendered via `ai.ShortModel`,

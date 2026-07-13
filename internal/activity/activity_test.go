@@ -7,8 +7,8 @@ func TestHubPublishSubscribe(t *testing.T) {
 	ch, cancel := h.Subscribe()
 	defer cancel()
 
-	done := h.Begin("ai", "Translating")
-	if got := <-ch; got.Op != "ai" || got.Phase != Start || got.Label != "Translating" {
+	done := h.Begin("ai", "a@example.com", "translate")
+	if got := <-ch; got.Op != "ai" || got.Phase != Start || got.Account != "a@example.com" || got.Label != "translate" {
 		t.Fatalf("start event wrong: %+v", got)
 	}
 	done("240 tok")
@@ -30,7 +30,7 @@ func TestHubDropsWhenFull(t *testing.T) {
 func TestNilHubIsNoop(t *testing.T) {
 	var h *Hub
 	h.Publish(Event{Op: "x"}) // must not panic
-	done := h.Begin("x", "y")
+	done := h.Begin("x", "", "y")
 	done("z")
 }
 

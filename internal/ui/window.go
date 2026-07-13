@@ -6139,7 +6139,7 @@ func (w *window) notifyNewMail(accountID int64, m model.Message, gist string) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
-		done := w.aiActivity("gist new mail")
+		done := w.aiActivityFor(w.emailByID(accountID), "gist new mail")
 		gist, err := w.deps.Assistant.BriefSummary(ctx, gistContext(m))
 		done(doneErr(err))
 		if err != nil || gist == "" {
