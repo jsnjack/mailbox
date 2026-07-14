@@ -5,10 +5,21 @@
 package activity
 
 import (
+	"fmt"
 	"sync"
 
 	"github.com/jsnjack/mailbox/internal/logging"
 )
+
+// Plural renders a count with its noun ("1 change", "6 changes") so labels and
+// notes never show "(s)" constructions. Pass both forms — English plurals
+// aren't all regular ("bodies").
+func Plural(n int, one, many string) string {
+	if n == 1 {
+		return "1 " + one
+	}
+	return fmt.Sprintf("%d %s", n, many)
+}
 
 // Phase marks where an operation is in its lifecycle.
 type Phase int

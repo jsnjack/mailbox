@@ -63,6 +63,7 @@ type window struct {
 	statusStarted    map[string]time.Time // op label → start time (elapsed + duration)
 	statusProgText   map[string]string    // op label → bounded "N/M" progress text
 	statusLogRows    map[string][]*logRow // op+label → in-flight log rows (FIFO), finished in place
+	statusQuietRows  map[string]*gtk.Box  // op+account+label → last quiet mail-check row (deduped)
 	statusLogLines   int                  // current number of log rows (capped)
 	activityTimer    glib.SourceHandle
 	markReadTimer    glib.SourceHandle // pending "mark thread read" (cancelled if the user navigates away first)
@@ -2784,7 +2785,7 @@ func (w *window) buildAIReplyPopover() *gtk.Popover {
 		spinner.SetHAlign(gtk.AlignStart)
 		spinner.SetSizeRequest(20, 20)
 		sug.Append(spinner)
-		done := w.aiActivity("quick replies")
+		done := w.aiActivity("Suggesting replies")
 		logging.Trace("ui: suggest quick replies", "thread", w.openThreadID, "account", w.activeID)
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -3898,9 +3899,9 @@ func (w *window) generateGists(threadID string, msgs []model.Message) {
 		return
 	}
 	logging.Trace("ui: generate gists", "thread", threadID, "n", len(todo))
-	label := "gist"
+	label := "Summarizing message"
 	if len(todo) > 1 {
-		label = fmt.Sprintf("gists (%d)", len(todo))
+		label = fmt.Sprintf("Summarizing %d messages", len(todo))
 	}
 	done := w.aiActivity(label)
 	go func() {
@@ -5044,7 +5045,7 @@ func (w *window) onTranslate() {
 	w.translationBanner.SetRevealed(true)
 	// Keep the original showing while translating (the banner says "Translating…");
 	// setReaderHTML swaps to the translation in place when it's ready.
-	done := w.aiActivity("translate")
+	done := w.aiActivity("Translating conversation")
 
 	go func() {
 		// 1) Seed from the persisted per-message cache (no AI cost). A message body
@@ -5285,7 +5286,7 @@ func (w *window) onSummarize() {
 	threadID := w.openThreadID
 	acctID := w.activeID
 	contextText := w.threadContextAll()
-	done := w.aiActivity("summarize thread")
+	done := w.aiActivity("Summarizing thread")
 
 	go func() {
 		ch, err := w.deps.Assistant.SummarizeThread(ctx, contextText)
@@ -5387,7 +5388,7 @@ func (w *window) onAnalyze() {
 	acctID := w.activeID
 	gmailID := m.GmailID
 	emailCtx := w.analysisContextFor(m)
-	done := w.aiActivity("phishing check")
+	done := w.aiActivity("Checking for phishing")
 
 	go func() {
 		ch, err := w.deps.Assistant.AnalyzeEmail(ctx, emailCtx)
@@ -6144,7 +6145,7 @@ func (w *window) notifyNewMail(accountID int64, m model.Message, gist string) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
-		done := w.aiActivityFor(w.emailByID(accountID), "gist new mail")
+		done := w.aiActivityFor(w.emailByID(accountID), "Summarizing new mail")
 		gist, err := w.deps.Assistant.BriefSummary(ctx, gistContext(m))
 		done(doneErr(err))
 		if err != nil || gist == "" {

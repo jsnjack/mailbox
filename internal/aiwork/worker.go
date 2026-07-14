@@ -200,7 +200,7 @@ func (w *Worker) pass(ctx context.Context, accountID int64) (remaining int, err 
 		if acc, aerr := w.st.GetAccountByID(ctx, accountID); aerr == nil {
 			email = acc.Email
 		}
-		done = w.act.Begin("ai", email, fmt.Sprintf("categorize %d", len(todo)))
+		done = w.act.Begin("ai", email, "Categorizing "+activity.Plural(len(todo), "conversation", "conversations"))
 	}
 	aiCtx, cancel := context.WithTimeout(ctx, passTimeout)
 	defer cancel()

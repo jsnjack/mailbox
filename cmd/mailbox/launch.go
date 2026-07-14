@@ -533,7 +533,7 @@ func launchUI(mailto string) error {
 		if err != nil {
 			return err
 		}
-		done := act.Begin("fetch", emailOf(accountID), "body")
+		done := act.Begin("fetch", emailOf(accountID), "Fetching message")
 		err = engine.FetchBody(ctx, c, accountID, gmailID)
 		done(doneNote(err))
 		return err
@@ -544,8 +544,22 @@ func launchUI(mailto string) error {
 			return err
 		}
 		err = engine.ModifyLabelsBatch(ctx, c, accountID, gmailIDs, add, remove)
-		// Instant local change + async mirror — log it as a completed op.
-		act.Report("mail", emailOf(accountID), labelChangeSummary(add, remove, len(gmailIDs)), doneNote(err))
+		// Instant local change + async mirror — log it as a completed op,
+		// phrased as the action taken ("Archived", "Filed to Receipts").
+		nameOf := func(id string) string {
+			if n, ok := folderNames[id]; ok {
+				return n
+			}
+			if n, nerr := st.LabelName(ctx, accountID, id); nerr == nil && n != "" {
+				return n
+			}
+			return id
+		}
+		label, note := labelChangeText(add, remove, len(gmailIDs), nameOf)
+		if err != nil {
+			note = doneNote(err)
+		}
+		act.Report("mail", emailOf(accountID), label, note)
 		return err
 	}
 	// Snooze/Unsnooze route through the manager so every snooze is mirrored to
@@ -562,7 +576,7 @@ func launchUI(mailto string) error {
 		if err != nil {
 			return err
 		}
-		done := act.Begin("send", emailOf(accountID), "message")
+		done := act.Begin("send", emailOf(accountID), "Sending message")
 		err = engine.Send(ctx, c, accountID, msg)
 		done(doneNote(err))
 		return err
@@ -580,7 +594,7 @@ func launchUI(mailto string) error {
 		if err != nil {
 			return err
 		}
-		done := act.Begin("draft", emailOf(accountID), "save")
+		done := act.Begin("draft", emailOf(accountID), "Saving draft")
 		err = engine.SaveDraft(ctx, c, accountID, msg)
 		done(doneNote(err))
 		return err
@@ -597,7 +611,7 @@ func launchUI(mailto string) error {
 		if err != nil {
 			return "", err
 		}
-		done := act.Begin("attach", emailOf(accountID), "download")
+		done := act.Begin("attach", emailOf(accountID), "Downloading attachment")
 		path, err := engine.OpenAttachment(ctx, c, gmailID, attID)
 		done(doneNote(err))
 		return path, err
@@ -607,7 +621,7 @@ func launchUI(mailto string) error {
 		if err != nil {
 			return err
 		}
-		done := act.Begin("sync", emailOf(accountID), "now")
+		done := act.Begin("sync", emailOf(accountID), "Checking mail")
 		n, err := engine.Incremental(ctx, c, accountID)
 		if errors.Is(err, syncer.ErrHistoryExpired) {
 			n, err = engine.Resync(ctx, c, accountID, resyncBackfillLimit)
@@ -615,7 +629,7 @@ func launchUI(mailto string) error {
 		if err != nil {
 			done(doneNote(err))
 		} else {
-			done(fmt.Sprintf("%d change(s)", n))
+			done(activity.Plural(n, "change", "changes"))
 		}
 		return err
 	}
@@ -624,12 +638,12 @@ func launchUI(mailto string) error {
 		if err != nil {
 			return nil, err
 		}
-		done := act.Begin("search", emailOf(accountID), "all mail")
+		done := act.Begin("search", emailOf(accountID), "Searching all mail")
 		ids, err := engine.SearchServer(ctx, c, accountID, query, max)
 		if err != nil {
 			done(doneNote(err))
 		} else {
-			done(fmt.Sprintf("%d result(s)", len(ids)))
+			done(activity.Plural(len(ids), "result", "results"))
 		}
 		return ids, err
 	}
@@ -638,7 +652,7 @@ func launchUI(mailto string) error {
 		if err != nil {
 			return err
 		}
-		done := act.Begin("mail", emailOf(accountID), "Mark "+labelID+" read")
+		done := act.Begin("mail", emailOf(accountID), "Marking "+folderName(labelID)+" read")
 		err = engine.MarkLabelRead(ctx, c, accountID, labelID)
 		done(doneNote(err))
 		return err
@@ -648,7 +662,7 @@ func launchUI(mailto string) error {
 		if err != nil {
 			return err
 		}
-		done := act.Begin("send", emailOf(accountID), "outbox")
+		done := act.Begin("send", emailOf(accountID), "Sending queued mail")
 		n, err := engine.SweepOutbox(ctx, c, accountID)
 		if err != nil {
 			done(doneNote(err))
@@ -674,7 +688,7 @@ func launchUI(mailto string) error {
 		if err != nil {
 			return err
 		}
-		done := act.Begin("mail", emailOf(accountID), fmt.Sprintf("Delete %d forever", len(gmailIDs)))
+		done := act.Begin("mail", emailOf(accountID), "Deleting "+activity.Plural(len(gmailIDs), "message", "messages")+" forever")
 		err = engine.DeletePermanently(ctx, c, accountID, gmailIDs)
 		done(doneNote(err))
 		return err
@@ -684,7 +698,7 @@ func launchUI(mailto string) error {
 		if err != nil {
 			return 0, err
 		}
-		done := act.Begin("mail", emailOf(accountID), "Empty "+labelID)
+		done := act.Begin("mail", emailOf(accountID), "Emptying "+folderName(labelID))
 		n, err := engine.EmptyLabel(ctx, c, accountID, labelID)
 		if err != nil {
 			done(doneNote(err))
@@ -706,7 +720,7 @@ func launchUI(mailto string) error {
 			if prev != "" {
 				note = cur + " (was " + prev + ")"
 			}
-			act.Report("ai", "", "model", note)
+			act.Report("ai", "", "AI model", note)
 		})
 		// Background categorization for every connected account — new mail is
 		// tagged as it arrives (plus a catch-up sweep at launch), so switching
@@ -722,20 +736,69 @@ func launchUI(mailto string) error {
 	return ui.Run(deps, mailto)
 }
 
-// labelChangeSummary renders a label mutation for the activity log, e.g.
-// "+TRASH −INBOX · 3 msgs".
-func labelChangeSummary(add, remove []string, n int) string {
-	var parts []string
-	for _, l := range add {
-		parts = append(parts, "+"+l)
+// folderNames maps well-known system label ids to the names the sidebar shows,
+// so activity rows never surface a raw id like "TRASH".
+var folderNames = map[string]string{
+	model.LabelInbox: "Inbox", model.LabelTrash: "Trash", model.LabelSpam: "Spam",
+	model.LabelStarred: "Starred", model.LabelImportant: "Important",
+	model.LabelSent: "Sent", model.LabelDraft: "Drafts", model.LabelUnread: "Unread",
+}
+
+// folderName renders a label id for the activity log: the sidebar name for a
+// system folder, else the id itself (callers resolve user labels beforehand).
+func folderName(id string) string {
+	if n, ok := folderNames[id]; ok {
+		return n
 	}
-	for _, l := range remove {
-		parts = append(parts, "−"+l)
+	return id
+}
+
+// labelChangeText renders a label mutation as the past-tense action the user
+// took ("Archived", "Marked read", "Filed to Receipts") plus a message-count
+// note — the log speaks in actions, never raw label ids. nameOf resolves a
+// user label id to its display name.
+func labelChangeText(add, remove []string, n int, nameOf func(string) string) (label, note string) {
+	has := func(ids []string, want string) bool {
+		for _, id := range ids {
+			if id == want {
+				return true
+			}
+		}
+		return false
+	}
+	note = activity.Plural(n, "message", "messages")
+	switch {
+	case has(add, model.LabelTrash):
+		return "Moved to Trash", note
+	case has(add, model.LabelSpam):
+		return "Marked as spam", note
+	case has(add, model.LabelInbox):
+		return "Moved to Inbox", note
+	case has(remove, model.LabelInbox) && len(add) == 0:
+		return "Archived", note
+	case has(add, model.LabelUnread):
+		return "Marked unread", note
+	case has(remove, model.LabelUnread):
+		return "Marked read", note
+	case has(add, model.LabelStarred):
+		return "Starred", note
+	case has(remove, model.LabelStarred):
+		return "Unstarred", note
+	case len(add) == 1:
+		return "Filed to " + nameOf(add[0]), note
+	}
+	// An unrecognized combination still reads as names, not ids.
+	var parts []string
+	for _, id := range add {
+		parts = append(parts, "+"+nameOf(id))
+	}
+	for _, id := range remove {
+		parts = append(parts, "−"+nameOf(id))
 	}
 	if len(parts) == 0 {
-		parts = append(parts, "labels")
+		return "Changed labels", note
 	}
-	return fmt.Sprintf("%s · %d msg(s)", strings.Join(parts, " "), n)
+	return strings.Join(parts, " "), note
 }
 
 // buildAssistant constructs the AI assistant from the config file + key (keyring
@@ -917,9 +980,9 @@ func backgroundSweep(ctx context.Context, engine *syncer.Engine, act *activity.H
 		n, err := engine.SweepOutbox(ctx, b, accountID)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "outbox sweep: %v\n", err)
-			act.Report("send", email, "outbox", doneNote(err))
+			act.Report("send", email, "Sending queued mail", doneNote(err))
 		} else if n > 0 {
-			act.Report("send", email, "outbox", fmt.Sprintf("%d sent", n))
+			act.Report("send", email, "Sending queued mail", fmt.Sprintf("%d sent", n))
 		}
 		select {
 		case <-ctx.Done():
@@ -976,14 +1039,14 @@ func runRetentionPass(ctx context.Context, st *store.Store, act *activity.Hub) {
 	n, err := st.PruneBodies(ctx, cutoff)
 	if err != nil {
 		slog.Warn("body retention: prune", "err", err)
-		act.Report("mail", "", "Body retention", doneNote(err))
+		act.Report("mail", "", "Pruned old bodies", doneNote(err))
 		return
 	}
 	if n == 0 {
 		return
 	}
 	slog.Info("body retention: pruned old message bodies", "count", n, "days", prefs.BodyRetentionDays)
-	act.Report("mail", "", "Body retention", fmt.Sprintf("%d bodies (>%dd)", n, prefs.BodyRetentionDays))
+	act.Report("mail", "", "Pruned old bodies", fmt.Sprintf("%s older than %d days", activity.Plural(n, "body", "bodies"), prefs.BodyRetentionDays))
 	if n >= retentionVacuumMin {
 		if err := st.Vacuum(ctx); err != nil {
 			slog.Warn("body retention: vacuum", "err", err)
@@ -1004,7 +1067,7 @@ func backgroundSnoozeWake(ctx context.Context, mgr *snooze.Manager, act *activit
 	defer ticker.Stop()
 	for {
 		if woke := mgr.WakeDue(ctx, time.Now()); woke > 0 {
-			act.Report("mail", "", "Snooze woke", fmt.Sprintf("%d", woke))
+			act.Report("mail", "", "Returned from snooze", activity.Plural(woke, "conversation", "conversations"))
 		}
 		select {
 		case <-ctx.Done():
@@ -1023,7 +1086,7 @@ func backgroundSync(ctx context.Context, engine *syncer.Engine, act *activity.Hu
 	defer ticker.Stop()
 	consecFails := 0
 	for {
-		done := act.Begin("sync", email, "")
+		done := act.Begin("sync", email, "Checking mail")
 		var (
 			n   int
 			err error
@@ -1077,7 +1140,7 @@ func backgroundSync(ctx context.Context, engine *syncer.Engine, act *activity.Hu
 			reconcile(ctx)
 		}
 		if n > 0 {
-			done(fmt.Sprintf("%d change(s)", n))
+			done(activity.Plural(n, "change", "changes"))
 		} else {
 			done("up to date")
 		}
@@ -1109,7 +1172,7 @@ func backgroundBackfillHTML(ctx context.Context, engine *syncer.Engine, act *act
 		return
 	case <-time.After(htmlBackfillDelay):
 	}
-	done := act.Begin("sync", email, "HTML")
+	done := act.Begin("sync", email, "Re-fetching HTML bodies")
 	n, err := engine.BackfillHTMLBodies(ctx, b, accountID, htmlBackfillCap)
 	switch {
 	case err != nil:

@@ -26,9 +26,10 @@ const statusLogCap = 200
 // duration and result — instead of separate start/done lines that interleave
 // under concurrency.
 type logRow struct {
+	box     *gtk.Box   // the whole row, so a superseded row can be removed
 	status  *gtk.Label // ▸ running · ✓ ok · ✗ error · – cancelled
 	dur     *gtk.Label // live progress ("3/10") while running, duration when done
-	note    *gtk.Label // result note (counts, errors); hidden while empty
+	note    *gtk.Label // result note (counts, errors); empty until Done
 	started time.Time
 }
 
@@ -41,6 +42,7 @@ func (w *window) buildStatusBar() gtk.Widgetter {
 	w.statusStarted = make(map[string]time.Time)
 	w.statusProgText = make(map[string]string)
 	w.statusLogRows = make(map[string][]*logRow)
+	w.statusQuietRows = make(map[string]*gtk.Box)
 	// Keep the relative idle text ("Synced 2 min ago") honest while nothing is
 	// happening; a cheap label repaint twice a minute.
 	glib.TimeoutSecondsAdd(30, func() bool {
@@ -262,7 +264,7 @@ func (w *window) subscribeActivity() {
 func (w *window) onActivity(e activity.Event) {
 	key := e.Op + "\x00" + e.Account + "\x00" + e.Label
 	tag := w.accountTag(e.Account)
-	disp := barText(e.Op, tag, e.Label)
+	disp := barText(tag, e.Label)
 	switch e.Phase {
 	case activity.Start:
 		w.statusActive = append(w.statusActive, disp)
@@ -314,7 +316,15 @@ func (w *window) onActivity(e activity.Event) {
 		}
 		if e.Note != "" {
 			row.note.SetText("· " + e.Note)
-			row.note.SetVisible(true)
+		}
+		// A quiet mail check repeats every minute per account — keep only the
+		// newest such row so the log records real events, not wallpaper.
+		if e.Op == "sync" && (e.Note == "up to date" || e.Note == "") {
+			if old := w.statusQuietRows[key]; old != nil && old != row.box && old.Parent() != nil {
+				w.statusLogBox.Remove(old)
+				w.statusLogLines--
+			}
+			w.statusQuietRows[key] = row.box
 		}
 		logging.Trace("ui: activity done", "op", e.Op, "label", e.Label, "dur", dur, "note", e.Note)
 		delete(w.statusStarted, disp)
@@ -475,12 +485,13 @@ func (w *window) newLogRow(op, account, label string) *logRow {
 	lbl.SetEllipsize(pango.EllipsizeEnd)
 	tooltipWhenTruncated(lbl)
 
+	// Always visible (even empty) — it is the row's only hexpand child, so
+	// hiding it would let the duration collapse inward off the right edge.
 	r.note = gtk.NewLabel("")
 	r.note.SetXAlign(0)
 	r.note.SetHExpand(true)
 	r.note.SetEllipsize(pango.EllipsizeEnd)
 	r.note.AddCSSClass("log-note")
-	r.note.SetVisible(false)
 	tooltipWhenTruncated(r.note)
 
 	r.dur = gtk.NewLabel("")
@@ -498,6 +509,7 @@ func (w *window) newLogRow(op, account, label string) *logRow {
 	box.Append(lbl)
 	box.Append(r.note)
 	box.Append(r.dur)
+	r.box = box
 
 	w.statusLogBox.Prepend(box)
 	w.statusLogLines++
@@ -528,15 +540,13 @@ func tooltipWhenTruncated(l *gtk.Label) {
 }
 
 // barText renders an in-flight operation for the bottom bar's label, where
-// there are no chips: the op word, the account tag, and the terse label
-// composed into one line ("Sync Work", "AI Work translate"). "mail" labels
-// already read standalone ("Mark INBOX read"), so they get no op word.
-func barText(op, account, label string) string {
-	prefix := map[string]string{
-		"sync": "Sync", "ai": "AI", "fetch": "Fetch", "send": "Send",
-		"search": "Search", "attach": "Attachment", "draft": "Draft",
-	}[op]
-	return strings.Join(strings.Fields(prefix+" "+account+" "+label), " ")
+// there are no chips. Labels are self-describing phrases ("Checking mail",
+// "Summarizing thread"), so the bar just adds which account it's for.
+func barText(account, label string) string {
+	if account == "" {
+		return label
+	}
+	return label + " · " + account
 }
 
 // removeFirst removes the first occurrence of s from xs (order preserved).

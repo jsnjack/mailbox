@@ -127,7 +127,7 @@ func (w *window) suggestSnoozeFor(acctID int64, threadID string) ([]ai.SnoozeSug
 	m := msgs[len(msgs)-1]
 	emailContext := fmt.Sprintf("From: %s\nDate: %s\nSubject: %s\n\n%s",
 		displayFrom(m), m.InternalDate.Format("Mon, 2 Jan 2006 15:04"), m.Subject, w.bodyTextFor(m))
-	done := w.aiActivity("snooze times")
+	done := w.aiActivity("Suggesting snooze times")
 	suggestions, err := w.deps.Assistant.SuggestSnooze(ctx, time.Now(), emailContext)
 	dispatch.Main(func() { done(doneErrCtx(ctx, err)) })
 	return suggestions, err

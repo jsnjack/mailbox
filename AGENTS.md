@@ -336,10 +336,18 @@ chip, the label, the result note inline and dim, right-aligned duration),
 inserted at Start and finished in place (✓/✗/–, error-tinted note on failure;
 capped at 200 rows). Every account-scoped event carries `Event.Account` (the
 email — `activity.Hub.Begin/Report` take it; app-wide work passes ""); the UI
-renders it as the account's display name when one is set ("SYNC Work ✓ · up to
-date"). Labels are terse objects that repeat neither chip ("AI Work ✓
-translate"); the bottom bar, which has no chips, composes them back in
-(`barText`: "Sync Work", "AI Work translate").
+renders it as the account's display name when one is set. Labels speak in
+consistent human phrases, never raw ids or fragments: live operations are
+gerunds ("Checking mail", "Summarizing thread" — right both while running in
+the bar and as a completed ✓ row), instant reports are past tense ("Archived",
+"Snoozed until Jul 20 09:00", "Returned from snooze"), label mutations render
+as the action taken with friendly label names (`labelChangeText`: "Archived",
+"Marked read", "Filed to Receipts" — user-label ids resolved via
+`store.LabelName`), and counts are properly pluralized (`activity.Plural`).
+Quiet mail checks ("up to date", every minute per account) keep only their
+newest row (`statusQuietRows`), so the log records events rather than
+wallpaper. The bottom bar, which has no chips, shows the label plus the
+account (`barText`: "Checking mail · Work").
 AI notes are suffixed with the model that served the request
 (`Assistant.ActiveModel` — with a failover chain, the entry the request
 committed to, so a silent fallback is visible; rendered via `ai.ShortModel`,

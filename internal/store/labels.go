@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -27,6 +28,20 @@ func (s *Store) UpsertLabel(ctx context.Context, l model.Label) error {
 		return fmt.Errorf("upsert label %q: %w", l.GmailID, err)
 	}
 	return nil
+}
+
+// LabelName returns a label's display name, or "" when the id isn't cached.
+func (s *Store) LabelName(ctx context.Context, accountID int64, gmailID string) (string, error) {
+	var name string
+	err := s.reader.QueryRowContext(ctx,
+		`SELECT name FROM labels WHERE account_id = ? AND gmail_id = ?`, accountID, gmailID).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("label name %q: %w", gmailID, err)
+	}
+	return name, nil
 }
 
 // ListLabels returns all labels for an account, ordered by name.

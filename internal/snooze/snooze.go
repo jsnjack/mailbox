@@ -166,7 +166,7 @@ func (m *Manager) Snooze(ctx context.Context, accountID int64, threadID string, 
 	} else if err := m.St.MarkSnoozeMirrored(ctx, accountID, threadID); err != nil {
 		return err
 	}
-	m.Act.Report("mail", m.EmailOf(accountID), "Snooze until "+t.Format("Jan 2 15:04"), note)
+	m.Act.Report("mail", m.EmailOf(accountID), "Snoozed until "+t.Format("Jan 2 15:04"), note)
 	return nil
 }
 
@@ -219,7 +219,7 @@ func (m *Manager) Unsnooze(ctx context.Context, accountID int64, threadID string
 		return err
 	}
 	m.restoreThread(ctx, accountID, threadID)
-	m.Act.Report("mail", m.EmailOf(accountID), "Unsnooze", "")
+	m.Act.Report("mail", m.EmailOf(accountID), "Unsnoozed", "")
 	return nil
 }
 
