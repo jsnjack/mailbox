@@ -23,6 +23,10 @@ type Assistant struct {
 
 	reqs            atomic.Int64 // AI requests issued this session
 	baseIn, baseOut atomic.Int64 // bytes from providers swapped out earlier
+
+	servedMu      sync.Mutex
+	lastServed    string // model the previous request committed to
+	onModelChange func(prev, cur string)
 }
 
 // NewAssistant wraps a provider.
@@ -57,7 +61,54 @@ func (a *Assistant) stream(ctx context.Context, system string, msgs []Msg, opts 
 	if len(opts) > 0 {
 		o = opts[0]
 	}
-	return streamWith(a.provider(), ctx, system, msgs, o)
+	ch, err := streamWith(a.provider(), ctx, system, msgs, o)
+	if err == nil {
+		a.noteServedModel()
+	}
+	return ch, err
+}
+
+// noteServedModel tracks which model the request that just committed was served
+// by, firing the model-change callback when it differs from the previous
+// request's — a failover chain falling back or recovering, or a live settings
+// swap taking effect.
+func (a *Assistant) noteServedModel() {
+	model, _ := a.ModelStatus()
+	if model == "" {
+		return
+	}
+	a.servedMu.Lock()
+	prev := a.lastServed
+	a.lastServed = model
+	cb := a.onModelChange
+	a.servedMu.Unlock()
+	if model == prev || cb == nil {
+		return
+	}
+	logging.Trace("ai: serving model changed", "prev", prev, "model", model)
+	cb(prev, model)
+}
+
+// SetOnModelChange registers cb, called whenever a request commits to a
+// different model than the one before (prev is "" for the session's first
+// request). cb runs on the requesting goroutine, so it must not block.
+func (a *Assistant) SetOnModelChange(cb func(prev, cur string)) {
+	a.servedMu.Lock()
+	a.onModelChange = cb
+	a.servedMu.Unlock()
+}
+
+// ModelStatus reports the model currently serving requests ("model", or
+// "model @ host" in a failover chain) and whether it is a fallback — a chain
+// entry other than the primary. Before any request it names the primary.
+func (a *Assistant) ModelStatus() (model string, fallback bool) {
+	switch p := a.provider().(type) {
+	case interface{ activeModelInfo() (string, bool) }:
+		return p.activeModelInfo()
+	case interface{ activeModel() string }:
+		return p.activeModel(), false
+	}
+	return "", false
 }
 
 // Requests returns how many AI requests this session has issued.

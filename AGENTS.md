@@ -327,7 +327,11 @@ AI notes are suffixed with the model that served the request
 (`Assistant.ActiveModel` — with a failover chain, the entry the request
 committed to, so a silent fallback is visible; rendered via `ai.ShortModel`,
 the bare name shortened to first-10…last-5 runes — the full "model @ host"
-stays in traces).
+stays in traces). A change in the serving model — a failover, a recovery, a
+live settings swap — additionally logs its own row
+(`Assistant.SetOnModelChange` → "AI model · <new> (was <old>)"), and the
+popover's Session section names the current model (`Assistant.ModelStatus`,
+marked "(fallback)" when a non-primary chain entry served last).
 Every AI op
 is bracketed into it via `aiActivity` (including the background categorizer and
 the notification gist); label mutations, outbox sweeps that delivered,
@@ -392,7 +396,7 @@ afterward. The `sync` command and the headless packages build without GTK.
 
 ## Configuration
 
-- Config file: `~/.config/mailbox/config.toml`, `[ai]` table: `provider` (`openai`|`litellm`|`anthropic`), `endpoint` (base URL incl. `/v1`), and the failover chain — either `models` (priority list on the shared endpoint) or `[[ai.chain]]` blocks (each `model` optionally with its own `provider`/`endpoint`, inheriting the top level when blank — the fullest form, for a VPN-only proxy chained to a local model). The first entry is primary; the rest take over when it fails before producing content. Legacy single `model` still reads; on save the primary is mirrored into the top-level fields for downgrade compatibility and an all-same-endpoint chain collapses back to `models`. Editable in-app via Preferences → AI (an expander per model with add/remove/reorder), which applies changes to the running app by swapping the rebuilt provider into the live Assistant (`SetProvider`); only enabling AI for the very first time needs a restart (the AI widgets aren't built). Env overrides: `MAILBOX_AI_{PROVIDER,ENDPOINT,MODEL,KEY}` (`MAILBOX_AI_MODEL` pins a single model, no fallbacks).
+- Config file: `~/.config/mailbox/config.toml`, `[ai]` table: `provider` (`openai`|`litellm`|`anthropic`), `endpoint` (base URL incl. `/v1`), and the failover chain — either `models` (priority list on the shared endpoint) or `[[ai.chain]]` blocks (each `model` optionally with its own `provider`/`endpoint`, inheriting the top level when blank — the fullest form, for a VPN-only proxy chained to a local model). The first entry is primary; the rest take over when it fails before producing content. Legacy single `model` still reads; on save the primary is mirrored into the top-level fields for downgrade compatibility and an all-same-endpoint chain collapses back to `models`. Editable in-app via Preferences → AI (an expander per model with add/remove/reorder and a per-row Test button that live-checks just that entry — a chain-wide test couldn't say which model answered), which applies changes to the running app by swapping the rebuilt provider into the live Assistant (`SetProvider`); only enabling AI for the very first time needs a restart (the AI widgets aren't built). Env overrides: `MAILBOX_AI_{PROVIDER,ENDPOINT,MODEL,KEY}` (`MAILBOX_AI_MODEL` pins a single model, no fallbacks).
 - AI API key: keyring service `mailbox-ai`, one entry per endpoint (user = endpoint; a legacy user = provider entry — what `mailbox set-ai-key` writes — is read as fallback) or `MAILBOX_AI_KEY`; never in the config file. Editable per chain entry in Preferences → AI (each key row mirrors the keyring: typed → stored, cleared → removed).
 - Persistent state (SQLite DB): `~/.local/share/mailbox/mailbox.db`. Preferences → Storage can clear the attachment cache (`config.ClearAttachmentsCache`) and compact the DB (`store.Vacuum` — `VACUUM` + WAL-truncate, reclaiming pages freed by deleted mail; WAL keeps that space otherwise).
 - Account display names: `~/.local/share/mailbox/accounts.json` (email → name).

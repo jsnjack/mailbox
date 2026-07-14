@@ -418,6 +418,17 @@ func (w *window) refreshStatusStats() {
 			lines = append(lines,
 				fmt.Sprintf("AI: %d requests · ↓ %s · ↑ %s", s.AIRequests, humanBytes(s.AIBytesIn), humanBytes(s.AIBytesOut)))
 		}
+		// Which model serves AI requests right now — with a failover chain the
+		// entry the last request committed to, called out when it isn't the
+		// primary.
+		if w.deps.Assistant != nil {
+			if m, fallback := w.deps.Assistant.ModelStatus(); m != "" {
+				if fallback {
+					m += " (fallback)"
+				}
+				lines = append(lines, "AI model: "+m)
+			}
+		}
 		lines = append(lines, fmt.Sprintf("Cache: %s messages · DB %s", humanCount(s.Messages), humanBytes(s.DBBytes)))
 		if s.CacheBytes > 0 {
 			lines = append(lines, fmt.Sprintf("Attachments: %s", humanBytes(s.CacheBytes)))

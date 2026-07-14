@@ -660,6 +660,16 @@ func launchUI(mailto string) error {
 		fmt.Fprintf(os.Stderr, "AI features disabled (%v)\n", err)
 	} else if asst != nil {
 		deps.Assistant = asst
+		// Any change in the model serving requests — a failover to a backup, a
+		// recovery to the primary, a settings swap — drops its own row into the
+		// activity log, so the current model is visible beyond per-op notes.
+		asst.SetOnModelChange(func(prev, cur string) {
+			note := cur
+			if prev != "" {
+				note = cur + " (was " + prev + ")"
+			}
+			act.Report("ai", "", "model", note)
+		})
 		// Background categorization for every connected account — new mail is
 		// tagged as it arrives (plus a catch-up sweep at launch), so switching
 		// accounts shows ready tags instead of kicking off classification.

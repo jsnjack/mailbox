@@ -44,6 +44,13 @@ func (f *failoverProvider) activeModel() string {
 	return f.models[f.served.Load()]
 }
 
+// activeModelInfo is activeModel plus whether that entry is a fallback (any
+// entry but the primary), for status displays that call the fallback out.
+func (f *failoverProvider) activeModelInfo() (string, bool) {
+	i := f.served.Load()
+	return f.models[i], i > 0
+}
+
 func (f *failoverProvider) Name() string { return f.ps[0].Name() }
 
 // cooling reports which entries are inside their post-failure cooldown, and
