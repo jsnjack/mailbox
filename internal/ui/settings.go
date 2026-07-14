@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -98,8 +99,60 @@ func (w *window) openSettings() {
 		u.row.AddRow(u.provider)
 		u.row.AddRow(u.endpoint)
 		u.row.AddRow(u.key)
-		u.model.Connect("changed", func() { entryTitle(u) })
-		u.endpoint.Connect("changed", func() { entryTitle(u) })
+
+		// Each row tests its own settings with a tiny live request — a single
+		// shared button couldn't say which chain entry a result belongs to. The
+		// verdict shows on the button and resets when the row is edited.
+		resetTest := func() {}
+		if w.deps.TestAISettings != nil {
+			const testTip = "Check this model with a tiny live request"
+			test := gtk.NewButtonWithLabel("Test")
+			test.SetTooltipText(testTip)
+			test.SetVAlign(gtk.AlignCenter)
+			resetTest = func() {
+				test.SetLabel("Test")
+				test.RemoveCSSClass("success")
+				test.RemoveCSSClass("error")
+				test.SetTooltipText(testTip)
+			}
+			test.ConnectClicked(func() {
+				e := AIModelEntry{
+					Provider: strings.TrimSpace(u.provider.Text()),
+					Endpoint: strings.TrimSpace(u.endpoint.Text()),
+					Model:    strings.TrimSpace(u.model.Text()),
+					Key:      u.key.Text(),
+				}
+				logging.Trace("ui: settings test AI model", "model", e.Model, "endpoint", e.Endpoint)
+				test.SetSensitive(false)
+				test.SetLabel("Testing…")
+				test.RemoveCSSClass("success")
+				test.RemoveCSSClass("error")
+				test.SetTooltipText(testTip)
+				go func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+					defer cancel()
+					err := w.deps.TestAISettings(ctx, []AIModelEntry{e})
+					dispatch.Main(func() {
+						test.SetSensitive(true)
+						if err != nil {
+							logging.Trace("ui: settings test AI model failed", "model", e.Model, "err", err)
+							test.SetLabel("Failed")
+							test.AddCSSClass("error")
+							test.SetTooltipText(err.Error())
+						} else {
+							logging.Trace("ui: settings test AI model ok", "model", e.Model)
+							test.SetLabel("Connected ✓")
+							test.AddCSSClass("success")
+						}
+					})
+				}()
+			})
+			u.row.AddSuffix(test)
+		}
+		u.model.Connect("changed", func() { entryTitle(u); resetTest() })
+		u.provider.Connect("changed", resetTest)
+		u.endpoint.Connect("changed", func() { entryTitle(u); resetTest() })
+		u.key.Connect("changed", resetTest)
 		entryTitle(u)
 
 		u.up = gtk.NewButtonFromIconName("go-up-symbolic")
@@ -160,9 +213,9 @@ func (w *window) openSettings() {
 		return out
 	}
 
-	// Header buttons: add a model (pre-filled from the last entry, so a fallback
-	// on the same proxy only needs its model name) and test the entered chain
-	// with a tiny live request; the result shows on the button itself.
+	// Header button: add a model (pre-filled from the last entry, so a fallback
+	// on the same proxy only needs its model name). Connection testing lives on
+	// each row, not here — per model, never ambiguous about which one it tested.
 	headerBox := gtk.NewBox(gtk.OrientationHorizontal, 6)
 	addBtn := gtk.NewButtonWithLabel("Add model")
 	addBtn.SetVAlign(gtk.AlignCenter)
@@ -178,38 +231,6 @@ func (w *window) openSettings() {
 		addEntry(e, true)
 	})
 	headerBox.Append(addBtn)
-	if w.deps.TestAISettings != nil {
-		testBtn := gtk.NewButtonWithLabel("Test connection")
-		testBtn.SetVAlign(gtk.AlignCenter)
-		testBtn.ConnectClicked(func() {
-			entries := collectAIEntries()
-			logging.Trace("ui: settings test AI connection", "entries", len(entries))
-			testBtn.SetSensitive(false)
-			testBtn.SetLabel("Testing…")
-			testBtn.RemoveCSSClass("success")
-			testBtn.RemoveCSSClass("error")
-			testBtn.SetTooltipText("")
-			go func() {
-				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-				defer cancel()
-				err := w.deps.TestAISettings(ctx, entries)
-				dispatch.Main(func() {
-					testBtn.SetSensitive(true)
-					if err != nil {
-						logging.Trace("ui: settings test AI connection failed", "err", err)
-						testBtn.SetLabel("Test failed")
-						testBtn.AddCSSClass("error")
-						testBtn.SetTooltipText(err.Error())
-					} else {
-						logging.Trace("ui: settings test AI connection ok")
-						testBtn.SetLabel("Connected ✓")
-						testBtn.AddCSSClass("success")
-					}
-				})
-			}()
-		})
-		headerBox.Append(testBtn)
-	}
 	group.SetHeaderSuffix(headerBox)
 
 	// One naming field per connected account ("Home", "Work", …), each with a
@@ -557,10 +578,18 @@ func (w *window) openSettings() {
 	dialog.ConnectClosed(func() {
 		logging.Trace("ui: settings dialog closed, saving")
 		if w.deps.SaveAISettings != nil {
+			// Save only when something changed: a no-op save would still rebuild
+			// and swap the live provider, resetting the failover chain's
+			// committed entry and breaker state (so the status bar would claim
+			// the primary serves when a fallback does), and re-write the keyring.
 			entries := collectAIEntries()
-			logging.Trace("ui: save AI settings", "entries", len(entries))
-			if err := w.deps.SaveAISettings(entries); err != nil {
-				slog.Warn("ui: save settings", "err", err)
+			if slices.Equal(entries, seeded) {
+				logging.Trace("ui: AI settings unchanged, save skipped")
+			} else {
+				logging.Trace("ui: save AI settings", "entries", len(entries))
+				if err := w.deps.SaveAISettings(entries); err != nil {
+					slog.Warn("ui: save settings", "err", err)
+				}
 			}
 		}
 		w.applyAccountNames(nameRows)
