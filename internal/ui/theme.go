@@ -132,13 +132,13 @@ const appCSS = `
 	background-color: alpha(@warning_color, 0.15);
 	color: @warning_color;
 }
-/* "Snoozed": a thread that just returned from Snooze — the same neutral grey
-   as the Snoozed folder's own badge (below), not the accent/success/warning
-   used by content categories, since this says where the mail came from
-   rather than what it needs. */
+/* "Snoozed": a thread that just returned from Snooze — the one tag that is a
+   reminder the user explicitly asked for, so unlike the quiet content
+   categories it must be noticed: a solid warning pill (the only filled tag),
+   not a pale wash. */
 .cat-snoozed {
-	background-color: alpha(@window_fg_color, 0.12);
-	color: alpha(@window_fg_color, 0.70);
+	background-color: @warning_bg_color;
+	color: @warning_fg_color;
 }
 /* "Categorize failed": the AI attempt errored rather than settling on "no
    category" — a muted error tint so it reads as "still pending, will retry",
