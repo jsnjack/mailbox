@@ -116,6 +116,11 @@ func migrate(db *sql.DB) error {
 		// "already done" set, so it stays a retry candidate instead of being
 		// indistinguishable from a settled category=''.
 		`ALTER TABLE message_categories ADD COLUMN status TEXT NOT NULL DEFAULT 'ok'`,
+		// Snooze label mirroring: whether this snooze has been handed to the
+		// provider (labels applied). The reconciler must treat a never-mirrored
+		// row as "push it out" even though its thread still has INBOX — the
+		// same INBOX that, on a mirrored row, means "unsnoozed elsewhere".
+		`ALTER TABLE snoozes ADD COLUMN mirrored INTEGER NOT NULL DEFAULT 0`,
 	}
 	for _, s := range stmts {
 		if _, err := db.Exec(s); err != nil {

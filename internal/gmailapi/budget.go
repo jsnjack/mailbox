@@ -16,11 +16,13 @@ const gmailPerUserUnitsPerMin = 6000
 
 // Quota unit costs for the API methods we call (from Gmail's published costs).
 const (
-	costHistoryList = 2
-	costMessageList = 5
-	costMessageGet  = 5 // metadata or full
-	costLabelsList  = 1
-	costSend        = 100
+	costHistoryList  = 2
+	costMessageList  = 5
+	costMessageGet   = 5 // metadata or full
+	costLabelsList   = 1
+	costLabelsGet    = 1
+	costLabelsMutate = 5 // labels.create / labels.delete
+	costSend         = 100
 )
 
 // RateBudget is a token bucket over Gmail quota units.

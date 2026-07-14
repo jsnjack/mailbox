@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"time"
 
 	"github.com/diamondburned/gotk4-adwaita/pkg/adw"
 	"github.com/diamondburned/gotk4/pkg/gio/v2"
@@ -148,6 +149,14 @@ type Deps struct {
 	DeleteForever PermanentDeleter
 	EmptyFolder   FolderEmptier
 	Assistant     *ai.Assistant
+
+	// Snooze/Unsnooze hide a conversation until a wake time / wake it now —
+	// instantly via the local snoozes row, and mirrored to the provider as
+	// label state (−INBOX, +Snoozed, +Snoozed/<wake time>) so the snooze holds
+	// on every client and any machine wakes it on schedule (internal/snooze).
+	// Nil (read-only cache mode) falls back to local-only rows.
+	Snooze   func(ctx context.Context, accountID int64, threadID string, until time.Time) error
+	Unsnooze func(ctx context.Context, accountID int64, threadID string) error
 
 	// Activity carries transient "what the app is doing" events for the status
 	// bar (sync, AI, search, fetch). May be nil. Stats, if set, returns a

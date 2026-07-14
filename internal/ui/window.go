@@ -872,7 +872,8 @@ func (w *window) present() {
 const allMailID = "__all_mail__"
 
 // snoozedID is the sentinel "folder" id for the Snoozed view: conversations
-// hidden from the inbox until their wake time (a local table, not a label).
+// hidden from the inbox until their wake time. The local snoozes table drives
+// this view; the provider "Snoozed" labels are its cross-client mirror.
 const snoozedID = "__snoozed__"
 
 // sidebarItem records what a row in the sidebar list maps to. Heading rows are
@@ -1664,10 +1665,8 @@ func (w *window) updateSelectionBar() {
 	w.selectionLabel.SetText(fmt.Sprintf("%d selected", len(w.selected)))
 }
 
-// bulkApply applies a label change to every selected conversation in one batch,
-// then leaves selection mode. The per-thread message resolution (one query per
-// bulkSnooze hides every selected conversation until t (local snooze, like the
-// row menu's), then exits selection mode and refreshes.
+// bulkSnooze hides every selected conversation until t (mirrored to the
+// provider like any snooze), then exits selection mode and refreshes.
 func (w *window) bulkSnooze(t time.Time) {
 	if len(w.selected) == 0 {
 		return
@@ -1682,7 +1681,7 @@ func (w *window) bulkSnooze(t time.Time) {
 	go func() {
 		ctx := context.Background()
 		for _, id := range ids {
-			if err := w.deps.Store.SnoozeThread(ctx, acctID, id, t.Unix()); err != nil {
+			if err := w.snoozeThread(ctx, acctID, id, t); err != nil {
 				slog.Warn("ui: bulk snooze", "thread", id, "err", err)
 			}
 		}
@@ -1693,7 +1692,7 @@ func (w *window) bulkSnooze(t time.Time) {
 			toast.ConnectButtonClicked(func() {
 				go func() {
 					for _, id := range ids {
-						if err := w.deps.Store.UnsnoozeThread(context.Background(), acctID, id); err != nil {
+						if err := w.unsnoozeThread(context.Background(), acctID, id); err != nil {
 							slog.Warn("ui: bulk unsnooze", "thread", id, "err", err)
 						}
 					}
@@ -1710,6 +1709,8 @@ func (w *window) bulkSnooze(t time.Time) {
 	}()
 }
 
+// bulkApply applies a label change to every selected conversation in one batch,
+// then leaves selection mode. The per-thread message resolution (one query per
 // selected thread) runs off the main thread; the label change and the undo
 // toast dispatch back once resolved.
 func (w *window) bulkApply(verb string, add, remove []string) {
@@ -3049,9 +3050,11 @@ func (w *window) applySidebar(labels []model.Label, counts map[int64]int, snooze
 		}
 
 		// User-created labels, alphabetical (ListLabels already orders by name).
+		// The snooze mirror's labels are bookkeeping, not places to browse — the
+		// Snoozed virtual folder above is their UI.
 		firstUser := true
 		for _, l := range labels {
-			if l.Type != model.LabelUser {
+			if l.Type != model.LabelUser || model.IsSnoozeLabel(l.Name) {
 				continue
 			}
 			if firstUser {
@@ -3078,7 +3081,7 @@ func (w *window) sidebarSignature(labels []model.Label, have map[string]bool, in
 		}
 	}
 	for _, l := range labels {
-		if l.Type == model.LabelUser {
+		if l.Type == model.LabelUser && !model.IsSnoozeLabel(l.Name) {
 			b.WriteString("u:" + l.GmailID + "=" + l.Name + ";")
 		}
 	}
@@ -6261,12 +6264,30 @@ func formatWakeTime(t, now time.Time) string {
 	}
 }
 
-// snoozeUntil hides a conversation until t (a local snooze — labels untouched,
-// so nothing syncs to the provider and other clients are unaffected).
+// snoozeThread hides a conversation until t: through the mirror-aware hook
+// when wired (the provider labels carry the snooze to other clients and
+// machines), else the local-only row (read-only cache mode).
+func (w *window) snoozeThread(ctx context.Context, acctID int64, threadID string, t time.Time) error {
+	if w.deps.Snooze != nil {
+		return w.deps.Snooze(ctx, acctID, threadID, t)
+	}
+	return w.deps.Store.SnoozeThread(ctx, acctID, threadID, t.Unix())
+}
+
+// unsnoozeThread is snoozeThread's inverse — same routing.
+func (w *window) unsnoozeThread(ctx context.Context, acctID int64, threadID string) error {
+	if w.deps.Unsnooze != nil {
+		return w.deps.Unsnooze(ctx, acctID, threadID)
+	}
+	return w.deps.Store.UnsnoozeThread(ctx, acctID, threadID)
+}
+
+// snoozeUntil hides a conversation until t — here instantly, and everywhere
+// else via the provider label mirror (any machine wakes it on schedule).
 func (w *window) snoozeUntil(acctID int64, threadID string, t time.Time) {
 	logging.Trace("ui: snooze", "account", acctID, "thread", threadID, "until", t.Unix())
 	go func() {
-		if err := w.deps.Store.SnoozeThread(context.Background(), acctID, threadID, t.Unix()); err != nil {
+		if err := w.snoozeThread(context.Background(), acctID, threadID, t); err != nil {
 			slog.Warn("ui: snooze thread", "thread", threadID, "err", err)
 			return
 		}
@@ -6282,11 +6303,11 @@ func (w *window) snoozeUntil(acctID int64, threadID string, t time.Time) {
 	}()
 }
 
-// unsnooze wakes a conversation now.
+// unsnooze wakes a conversation now, everywhere.
 func (w *window) unsnooze(acctID int64, threadID string) {
 	logging.Trace("ui: unsnooze", "account", acctID, "thread", threadID)
 	go func() {
-		if err := w.deps.Store.UnsnoozeThread(context.Background(), acctID, threadID); err != nil {
+		if err := w.unsnoozeThread(context.Background(), acctID, threadID); err != nil {
 			slog.Warn("ui: unsnooze thread", "thread", threadID, "err", err)
 			return
 		}

@@ -67,6 +67,22 @@ type BatchMetadataFetcher interface {
 	FetchMetadataBatch(ctx context.Context, ids []string) ([]model.Message, error)
 }
 
+// LabelManager is an optional Backend capability: a provider that can create
+// and delete labels implements it. The snooze mirror requires it — accounts
+// whose backend lacks it keep local-only snoozes (hidden on this machine, but
+// still in the inbox everywhere else).
+type LabelManager interface {
+	// EnsureLabel returns the account's label with the given full name,
+	// creating it when absent. hidden marks app bookkeeping (a snooze wake
+	// time): providers that support per-label visibility keep it out of other
+	// clients' label lists.
+	EnsureLabel(ctx context.Context, name string, hidden bool) (model.Label, error)
+	// DeleteLabelIfUnused removes a label by provider id when no message
+	// carries it anymore; a label still in use, or already gone, is left
+	// alone (nil error).
+	DeleteLabelIfUnused(ctx context.Context, id string) error
+}
+
 // Watcher is an optional Backend capability: a provider that can push change
 // notifications (IMAP IDLE) implements it so the app reacts in near-real-time
 // instead of waiting for the next poll. Providers without it (Gmail REST) are

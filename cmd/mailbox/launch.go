@@ -22,6 +22,7 @@ import (
 	"github.com/jsnjack/mailbox/internal/imapbackend"
 	"github.com/jsnjack/mailbox/internal/logging"
 	"github.com/jsnjack/mailbox/internal/model"
+	"github.com/jsnjack/mailbox/internal/snooze"
 	"github.com/jsnjack/mailbox/internal/store"
 	"github.com/jsnjack/mailbox/internal/syncer"
 	"github.com/jsnjack/mailbox/internal/ui"
@@ -281,6 +282,28 @@ func launchUI(mailto string) error {
 		}
 	}
 
+	// emailOf resolves an account id to its email for activity reporting (a
+	// point query on the local DB; "" for a removed/unknown account).
+	emailOf := func(accountID int64) string {
+		if a, err := st.GetAccountByID(context.Background(), accountID); err == nil {
+			return a.Email
+		}
+		return ""
+	}
+
+	// Snooze manager: the local snoozes table plus its provider label mirror,
+	// so a snooze holds (and wakes) on every machine and client. Accounts whose
+	// backend can't manage labels keep local-only snoozes.
+	snoozeMgr := &snooze.Manager{
+		St: st, Engine: engine, Hub: hub, Act: act,
+		BackendFor: func(accountID int64) backend.Backend {
+			accountsMu.Lock()
+			defer accountsMu.Unlock()
+			return backends[accountID]
+		},
+		EmailOf: emailOf,
+	}
+
 	// startAccount builds an account's backend, registers it, and starts its
 	// background sync/sweep (+ IMAP IDLE watch). Used at launch, when the dialog
 	// adds an account (so it syncs immediately — no restart), and on reconnect. Any
@@ -318,7 +341,20 @@ func launchUI(mailto string) error {
 			}()
 		}
 		rt.wg.Add(2)
-		go func() { defer rt.wg.Done(); backgroundSync(actx, engine, act, b, a.ID, a.Email, wake) }()
+		reconcileSnoozes := func(pctx context.Context) {
+			changed, err := snoozeMgr.Reconcile(pctx, a.ID)
+			if err != nil {
+				logging.Trace("launch: snooze reconcile failed", "account", a.ID, "err", err)
+				return
+			}
+			if changed {
+				hub.Publish(syncer.Change{Kind: syncer.MessageUpserted, AccountID: a.ID})
+			}
+		}
+		go func() {
+			defer rt.wg.Done()
+			backgroundSync(actx, engine, act, b, a.ID, a.Email, wake, reconcileSnoozes)
+		}()
 		go func() { defer rt.wg.Done(); backgroundSweep(actx, engine, act, b, a.ID, a.Email) }()
 		// One-time recovery: re-fetch Gmail messages cached text-only by an older
 		// build that dropped externalized (attachment-id-served) HTML bodies. IMAP
@@ -339,8 +375,9 @@ func launchUI(mailto string) error {
 	// bodies older than the window shortly after launch and then daily.
 	go backgroundRetention(ctx, st, act)
 
-	// Snooze wake: return due snoozed conversations to the inbox.
-	go backgroundSnoozeWake(ctx, st, hub, act)
+	// Snooze wake: return due snoozed conversations to the inbox — locally and,
+	// via the label mirror, on every other client.
+	go backgroundSnoozeWake(ctx, snoozeMgr, act)
 
 	// Cumulative metrics for the status bar: cache sizes + per-account API stats.
 	deps.Stats = func() ui.StatusStats {
@@ -482,14 +519,6 @@ func launchUI(mailto string) error {
 	// Each hook routes through clientFor, which errors gracefully until a backend
 	// exists for the account.
 	deps.Hub = hub
-	// emailOf resolves an account id to its email for activity reporting (a
-	// point query on the local DB; "" for a removed/unknown account).
-	emailOf := func(accountID int64) string {
-		if a, err := st.GetAccountByID(context.Background(), accountID); err == nil {
-			return a.Email
-		}
-		return ""
-	}
 	clientFor := func(accountID int64) (backend.Backend, error) {
 		accountsMu.Lock()
 		b := backends[accountID]
@@ -518,6 +547,15 @@ func launchUI(mailto string) error {
 		// Instant local change + async mirror — log it as a completed op.
 		act.Report("mail", emailOf(accountID), labelChangeSummary(add, remove, len(gmailIDs)), doneNote(err))
 		return err
+	}
+	// Snooze/Unsnooze route through the manager so every snooze is mirrored to
+	// the provider (wake-anywhere) — the UI never touches the snoozes table
+	// directly when these are wired.
+	deps.Snooze = func(ctx context.Context, accountID int64, threadID string, until time.Time) error {
+		return snoozeMgr.Snooze(ctx, accountID, threadID, until)
+	}
+	deps.Unsnooze = func(ctx context.Context, accountID int64, threadID string) error {
+		return snoozeMgr.Unsnooze(ctx, accountID, threadID)
 	}
 	deps.Send = func(ctx context.Context, accountID int64, msg model.OutgoingMessage) error {
 		c, err := clientFor(accountID)
@@ -958,28 +996,14 @@ func runRetentionPass(ctx context.Context, st *store.Store, act *activity.Hub) {
 const snoozeWakeInterval = time.Minute
 
 // backgroundSnoozeWake returns conversations whose snooze elapsed to the
-// inbox: the row is marked notified (until > now is what un-hides the thread;
-// the row itself lingers so the list can show a "Snoozed" tag) and a
-// SnoozeWoke change tells the UI to refresh and raise a reminder notification.
-func backgroundSnoozeWake(ctx context.Context, st *store.Store, hub *syncer.Hub, act *activity.Hub) {
+// inbox: locally (the row is marked notified and lingers for the list's
+// "Snoozed" tag; SnoozeWoke drives the refresh + reminder notification) and on
+// every other client via the label mirror (+INBOX, −Snoozed labels).
+func backgroundSnoozeWake(ctx context.Context, mgr *snooze.Manager, act *activity.Hub) {
 	ticker := time.NewTicker(snoozeWakeInterval)
 	defer ticker.Stop()
 	for {
-		due, err := st.DueSnoozes(ctx, time.Now().Unix())
-		if err != nil {
-			slog.Warn("snooze wake: list due", "err", err)
-		}
-		woke := 0
-		for _, sn := range due {
-			if err := st.MarkSnoozeNotified(ctx, sn.AccountID, sn.ThreadID); err != nil {
-				slog.Warn("snooze wake: mark notified", "thread", sn.ThreadID, "err", err)
-				continue
-			}
-			slog.Debug("launch: snooze woke", "account", sn.AccountID, "thread", sn.ThreadID)
-			hub.Publish(syncer.Change{Kind: syncer.SnoozeWoke, AccountID: sn.AccountID, ThreadID: sn.ThreadID})
-			woke++
-		}
-		if woke > 0 {
+		if woke := mgr.WakeDue(ctx, time.Now()); woke > 0 {
 			act.Report("mail", "", "Snooze woke", fmt.Sprintf("%d", woke))
 		}
 		select {
@@ -992,7 +1016,9 @@ func backgroundSnoozeWake(ctx context.Context, st *store.Store, hub *syncer.Hub,
 
 // backgroundSync runs an incremental sync immediately and then on a timer,
 // reporting each pass to the activity hub for the status bar.
-func backgroundSync(ctx context.Context, engine *syncer.Engine, act *activity.Hub, b backend.Backend, accountID int64, email string, wake <-chan struct{}) {
+// reconcile, when non-nil, runs after every successful pass — it converges
+// snooze rows with the label state the pass just pulled in.
+func backgroundSync(ctx context.Context, engine *syncer.Engine, act *activity.Hub, b backend.Backend, accountID int64, email string, wake <-chan struct{}, reconcile func(context.Context)) {
 	ticker := time.NewTicker(syncInterval)
 	defer ticker.Stop()
 	consecFails := 0
@@ -1047,6 +1073,9 @@ func backgroundSync(ctx context.Context, engine *syncer.Engine, act *activity.Hu
 			continue
 		}
 		consecFails = 0
+		if reconcile != nil {
+			reconcile(ctx)
+		}
 		if n > 0 {
 			done(fmt.Sprintf("%d change(s)", n))
 		} else {

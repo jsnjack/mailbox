@@ -168,6 +168,55 @@ func (c *Client) ListLabels(ctx context.Context) ([]*gmail.Label, error) {
 	return resp.Labels, nil
 }
 
+// CreateLabel creates a user label with the given full name (nested with "/").
+// hidden labels are app bookkeeping (snooze wake times): they are created with
+// labelListVisibility=labelHide so other Gmail clients keep them out of their
+// label sidebars (they still exist and stay queryable on messages).
+func (c *Client) CreateLabel(ctx context.Context, name string, hidden bool) (*gmail.Label, error) {
+	logging.TraceContext(ctx, "gmailapi: labels.create", "label", name, "hidden", hidden)
+	spec := &gmail.Label{Name: name, MessageListVisibility: "show", LabelListVisibility: "labelShow"}
+	if hidden {
+		spec.LabelListVisibility = "labelHide"
+	}
+	var created *gmail.Label
+	err := c.do(ctx, costLabelsMutate, func() error {
+		r, e := c.srv.Users.Labels.Create("me", spec).Context(ctx).Do()
+		created = r
+		return e
+	})
+	if err != nil {
+		logging.TraceContext(ctx, "gmailapi: labels.create failed", "label", name, "err", err)
+		return nil, fmt.Errorf("create label %q: %w", name, err)
+	}
+	logging.TraceContext(ctx, "gmailapi: labels.create done", "label", name, "id", created.Id)
+	return created, nil
+}
+
+// GetLabel returns one label with its message/thread counts.
+func (c *Client) GetLabel(ctx context.Context, id string) (*gmail.Label, error) {
+	logging.TraceContext(ctx, "gmailapi: labels.get", "id", id)
+	var l *gmail.Label
+	err := c.do(ctx, costLabelsGet, func() error {
+		r, e := c.srv.Users.Labels.Get("me", id).Context(ctx).Do()
+		l = r
+		return e
+	})
+	if err != nil {
+		return nil, fmt.Errorf("get label %s: %w", id, err)
+	}
+	logging.TraceContext(ctx, "gmailapi: labels.get done", "id", id, "label", l.Name, "messages", l.MessagesTotal, "threads", l.ThreadsTotal)
+	return l, nil
+}
+
+// DeleteLabel removes a user label by id (Gmail also strips it from any
+// messages that still carry it).
+func (c *Client) DeleteLabel(ctx context.Context, id string) error {
+	logging.TraceContext(ctx, "gmailapi: labels.delete", "id", id)
+	return c.do(ctx, costLabelsMutate, func() error {
+		return c.srv.Users.Labels.Delete("me", id).Context(ctx).Do()
+	})
+}
+
 // ListMessageIDs lists message ids matching query (Gmail search syntax; empty for
 // all), newest first, up to max (0 = no limit). Each page costs few quota units.
 func (c *Client) ListMessageIDs(ctx context.Context, query string, max int) ([]string, error) {
@@ -505,6 +554,13 @@ func IsHistoryExpired(err error) bool {
 func IsNotFound(err error) bool {
 	var gerr *googleapi.Error
 	return errors.As(err, &gerr) && gerr.Code == 404
+}
+
+// IsConflict reports whether err is a Gmail 409 — for labels.create, the name
+// already exists (another client or machine created it concurrently).
+func IsConflict(err error) bool {
+	var gerr *googleapi.Error
+	return errors.As(err, &gerr) && gerr.Code == 409
 }
 
 // isRetryableResponse reports whether err is a retryable HTTP error RESPONSE:

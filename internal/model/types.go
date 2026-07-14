@@ -32,6 +32,23 @@ const (
 	AccountIMAP  = "imap"  // generic IMAP/SMTP
 )
 
+// Snooze mirror labels. A snoozed conversation is mirrored to the provider as
+// −INBOX plus two labels: SnoozeLabelRoot (stable membership — where snoozed
+// mail lives in other clients, e.g. the Gmail phone app) and a
+// SnoozeLabelPrefix+stamp child carrying the exact wake time, so any machine
+// running this app can wake it on schedule (see internal/snooze).
+const (
+	SnoozeLabelRoot   = "Snoozed"
+	SnoozeLabelPrefix = SnoozeLabelRoot + "/"
+)
+
+// IsSnoozeLabel reports whether a label name belongs to the snooze mirror —
+// such labels are app bookkeeping and are hidden from label pickers and the
+// sidebar (the Snoozed virtual folder is their UI).
+func IsSnoozeLabel(name string) bool {
+	return name == SnoozeLabelRoot || len(name) > len(SnoozeLabelPrefix) && name[:len(SnoozeLabelPrefix)] == SnoozeLabelPrefix
+}
+
 // Account is a connected mail account. Secrets (OAuth refresh token or IMAP
 // password) are never stored here — they live in the OS keyring, keyed by Email.
 type Account struct {

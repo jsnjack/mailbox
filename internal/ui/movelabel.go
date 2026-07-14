@@ -9,10 +9,11 @@ import (
 	"github.com/jsnjack/mailbox/internal/model"
 )
 
-// userLabels returns acctID's user labels (system labels excluded), for the
-// move/label pickers. The account is passed in — not read from w.activeID — so
-// a picker opened from a row keeps targeting that row's account even if the
-// active account switches while it is open. Nil on error (already logged).
+// userLabels returns acctID's user labels (system labels and the snooze
+// mirror's bookkeeping labels excluded), for the move/label pickers. The
+// account is passed in — not read from w.activeID — so a picker opened from a
+// row keeps targeting that row's account even if the active account switches
+// while it is open. Nil on error (already logged).
 func (w *window) userLabels(acctID int64) []model.Label {
 	labels, err := w.deps.Store.ListLabels(context.Background(), acctID)
 	if err != nil {
@@ -21,7 +22,7 @@ func (w *window) userLabels(acctID int64) []model.Label {
 	}
 	out := labels[:0:0]
 	for _, l := range labels {
-		if l.Type == model.LabelUser {
+		if l.Type == model.LabelUser && !model.IsSnoozeLabel(l.Name) {
 			out = append(out, l)
 		}
 	}

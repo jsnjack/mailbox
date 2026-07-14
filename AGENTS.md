@@ -41,6 +41,7 @@ internal/
   gmailbackend/      implements backend.Backend over gmailapi.Client (owns the Gmail↔domain conversions + the history-walk → upsert/delete id set)
   imapbackend/       implements backend.Backend over IMAP (emersion/go-imap v2): connect/LOGIN, LIST folders→labels (special-use mapped), multi-folder backfill (skips \All/\Flagged/\Important virtuals), FETCH envelope/flags + body (go-message), and incremental sync. Message id = "imap:<uidvalidity>:<uid>:<mailbox>". Incremental (`Changes`) diffs a per-folder UID-set cursor (JSON in sync_cursor): new = current\stored, vanished = stored\current, UIDVALIDITY change re-syncs the folder; CONDSTORE `CHANGEDSINCE` adds flag-change detection when the server supports it (QRESYNC isn't exposed in go-imap beta.8, so deletions use the UID-set diff). Profile seeds the initial cursor. Mutations (flags/moves), delete, SMTP send + Sent APPEND, drafts, attachments, threading (References root), and XOAUTH2 (Gmail-mail/Outlook) are implemented. A small connection pool (`poolSize`, `withConn`) serves the engine's fan-out concurrently — each pooled op is bounded by a watchdog that force-closes the connection on ctx cancel or `pooledOpTimeout` (a socket deadline can't do it: go-imap re-arms the read deadline around every response and parks between responses with none, so a half-open connection would otherwise block until TCP gives up), and `acquire` waits for a slot ctx-aware; `Watch` (optional `backend.Watcher`) holds a dedicated IDLE connection on INBOX and nudges the per-account sync loop's `wake` channel for near-real-time updates (falls back to the 60s poll when the server lacks IDLE). Connection setup uses a dial timeout + a login deadline (cleared afterward so pooled/IDLE reads aren't affected) so a wrong/unreachable host fails fast; a login credential rejection is classified (`AUTHENTICATIONFAILED` code + text fallback) and wrapped with `backend.ErrAuth` so the launcher surfaces the reconnect banner instead of retrying forever.
   sync/              per-account sync workers (backfill ↔ incremental) + notify.Hub; the engine takes a backend.Backend, never a concrete client
+  snooze/            snooze mirroring: local snoozes rows + their provider label mirror ("Snoozed" + hidden "Snoozed/<wake time>" stamps), the wake sweeper, and the post-sync reconciler that makes snoozes hold and wake across machines
   ai/                provider abstraction (OpenAI-compatible + Anthropic), streaming; a failover provider chains the configured models in priority order — each chain entry may carry its own provider/endpoint/key ([[ai.chain]]), so a VPN-only proxy falls back to a local model. It switches on request failure or a stream error before any content, and a circuit breaker skips a failed entry for ~60s (probing after; ignored when every entry is cooling) with a 5s dial timeout so a blackholed endpoint can't stall every request. Classification runs at temperature 0 with tolerant reply parsing — MatchCategory.
   aiwork/            headless background AI worker: categorizes every account's inbox (launch catch-up + sync-event driven, debounced, capped per pass, cooldown on provider failure), persists to the store, publishes AIUpdated
   activity/          headless pub/sub of transient "what is the app doing" events (status bar)
@@ -129,16 +130,32 @@ cached by the thread's message-id fingerprint (`summaryKey`) so reopening is
 instant and a new reply auto-invalidates it; the summary is also **persisted**
 keyed by thread id + that fingerprint (`store.{SetThreadSummary,ThreadSummary}`,
 `thread_summaries` table), so an unchanged thread isn't re-summarized after a
-restart. **Snooze**: a conversation can be hidden until a wake time (local
-`snoozes` table — pure visibility, labels untouched, nothing mirrored): the
-row menu's Snooze flyout offers presets, AI-suggested moments read from the
-email itself (`Assistant.SuggestSnooze` — up to three "YYYY-MM-DD HH:MM|reason"
-lines: an hour before a meeting, the day before a deadline), and a "Pick date…"
-calendar dialog (`openSnoozeDialog`); a Snoozed virtual folder (`snoozedID`,
-neutral grey count pill) lists them, a per-minute sweeper
-(`backgroundSnoozeWake`) returns due threads to the inbox publishing
-`SnoozeWoke` (list refresh + "Reminder" notification), and the inbox query
-excludes unelapsed snoozes. **Calendar invites**: an `.ics` attachment
+restart. **Snooze**: a conversation can be hidden until a wake time. The local
+`snoozes` table drives this machine's UI (instant hide, the Snoozed virtual
+folder, the inbox-query exclusion), and every snooze is **mirrored to the
+provider as label state** (`internal/snooze`): −INBOX (other clients — the
+Gmail phone app included — stop showing it), +`Snoozed` (stable membership,
+browsable elsewhere), and a hidden `Snoozed/<local time + offset>` child
+(`labelListVisibility=labelHide`) carrying the exact wake moment — so a snooze
+made on one machine holds and **wakes everywhere**. `Manager.Reconcile` (after
+every sync pass) converges rows ↔ labels both ways: adopts snoozes made
+elsewhere (exact time parsed from the stamp), cancels a snooze whose thread is
+back in INBOX (woken/unsnoozed on another machine, dragged to inbox on the
+phone, or re-inboxed by a new reply — matching Gmail's own wake-on-reply),
+retimes on a remote re-snooze, and pushes rows the provider doesn't know
+(pre-mirror snoozes migrate themselves). The row menu's Snooze flyout offers
+presets, AI-suggested moments read from the email itself
+(`Assistant.SuggestSnooze` — up to three "YYYY-MM-DD HH:MM|reason" lines: an
+hour before a meeting, the day before a deadline), and a "Pick date…" calendar
+dialog (`openSnoozeDialog`); a Snoozed virtual folder (`snoozedID`, neutral
+grey count pill) lists pending rows; the per-minute sweeper
+(`backgroundSnoozeWake` → `Manager.WakeDue`) marks a due row notified,
+restores INBOX and strips the snooze labels through the engine's ordered
+mirror queue, deletes an emptied wake-time label (`DeleteLabelIfUnused`, via
+`Engine.MirrorOp` so it can't overtake the modify), and publishes `SnoozeWoke`
+(list refresh + "Reminder" notification). Mirror labels are hidden from the
+sidebar and label pickers (`model.IsSnoozeLabel`); an account whose backend
+lacks `backend.LabelManager` (IMAP) keeps local-only snoozes. **Calendar invites**: an `.ics` attachment
 (parsed by the dependency-free `internal/ics`) renders an event card above the
 conversation with Accept/Maybe/Decline that email the iTIP REPLY to the
 organizer via the normal outbox path; CANCEL shows a note. **Unsubscribe**:

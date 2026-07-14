@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/jsnjack/mailbox/internal/logging"
+	"github.com/jsnjack/mailbox/internal/model"
 )
 
 // SnoozeThread hides a conversation from the inbox until the given unix time.
@@ -105,4 +106,155 @@ func (s *Store) SnoozedCount(ctx context.Context, accountID int64) (int, error) 
 		return 0, fmt.Errorf("snoozed count: %w", err)
 	}
 	return n, nil
+}
+
+// SnoozeState is one snoozes row with its bookkeeping flags — the shape the
+// label reconciler works over (see internal/snooze).
+type SnoozeState struct {
+	ThreadID string
+	Until    int64
+	Notified bool
+	Mirrored bool
+}
+
+// ListSnoozes returns every snooze row for an account, pending and woken alike.
+func (s *Store) ListSnoozes(ctx context.Context, accountID int64) ([]SnoozeState, error) {
+	rows, err := s.reader.QueryContext(ctx,
+		`SELECT thread_id, until, notified, mirrored FROM snoozes WHERE account_id = ?`, accountID)
+	if err != nil {
+		return nil, fmt.Errorf("list snoozes: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []SnoozeState
+	for rows.Next() {
+		var st SnoozeState
+		if err := rows.Scan(&st.ThreadID, &st.Until, &st.Notified, &st.Mirrored); err != nil {
+			return nil, fmt.Errorf("scan snooze state: %w", err)
+		}
+		out = append(out, st)
+	}
+	logging.TraceContext(ctx, "store: list snoozes", "account", accountID, "count", len(out))
+	return out, rows.Err()
+}
+
+// MarkSnoozeMirrored records that a snooze's label state has been handed to
+// the provider (directly or adopted from labels another machine pushed).
+func (s *Store) MarkSnoozeMirrored(ctx context.Context, accountID int64, threadID string) error {
+	logging.TraceContext(ctx, "store: mark snooze mirrored", "account", accountID, "thread", threadID)
+	if _, err := s.writer.ExecContext(ctx,
+		`UPDATE snoozes SET mirrored = 1 WHERE account_id = ? AND thread_id = ?`, accountID, threadID); err != nil {
+		return fmt.Errorf("mark snooze mirrored: %w", err)
+	}
+	return nil
+}
+
+// SnoozeLabelState maps each thread that carries a snooze mirror label (the
+// "Snoozed" root or a "Snoozed/<wake time>" child) to those labels — the
+// provider-truth side of snooze reconciliation.
+func (s *Store) SnoozeLabelState(ctx context.Context, accountID int64) (map[string][]model.Label, error) {
+	rows, err := s.reader.QueryContext(ctx, `
+		SELECT DISTINCT m.thread_id, l.gmail_id, l.name
+		FROM labels l
+		JOIN message_labels ml ON ml.account_id = l.account_id AND ml.label_id = l.gmail_id
+		JOIN messages m ON m.rowid = ml.message_rowid
+		WHERE l.account_id = ? AND (l.name = ? OR l.name LIKE ?)`,
+		accountID, model.SnoozeLabelRoot, model.SnoozeLabelPrefix+"%")
+	if err != nil {
+		return nil, fmt.Errorf("snooze label state: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := map[string][]model.Label{}
+	for rows.Next() {
+		var (
+			tid string
+			l   model.Label
+		)
+		if err := rows.Scan(&tid, &l.GmailID, &l.Name); err != nil {
+			return nil, fmt.Errorf("scan snooze label: %w", err)
+		}
+		l.AccountID = accountID
+		out[tid] = append(out[tid], l)
+	}
+	logging.TraceContext(ctx, "store: snooze label state", "account", accountID, "threads", len(out))
+	return out, rows.Err()
+}
+
+// ThreadSnoozeLabels returns the snooze mirror labels present on one thread.
+func (s *Store) ThreadSnoozeLabels(ctx context.Context, accountID int64, threadID string) ([]model.Label, error) {
+	rows, err := s.reader.QueryContext(ctx, `
+		SELECT DISTINCT l.gmail_id, l.name
+		FROM labels l
+		JOIN message_labels ml ON ml.account_id = l.account_id AND ml.label_id = l.gmail_id
+		JOIN messages m ON m.rowid = ml.message_rowid
+		WHERE l.account_id = ? AND m.thread_id = ? AND (l.name = ? OR l.name LIKE ?)`,
+		accountID, threadID, model.SnoozeLabelRoot, model.SnoozeLabelPrefix+"%")
+	if err != nil {
+		return nil, fmt.Errorf("thread snooze labels: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []model.Label
+	for rows.Next() {
+		var l model.Label
+		if err := rows.Scan(&l.GmailID, &l.Name); err != nil {
+			return nil, fmt.Errorf("scan thread snooze label: %w", err)
+		}
+		l.AccountID = accountID
+		out = append(out, l)
+	}
+	return out, rows.Err()
+}
+
+// ThreadsWithInbox reports which of the given threads have at least one message
+// still carrying INBOX.
+func (s *Store) ThreadsWithInbox(ctx context.Context, accountID int64, threadIDs []string) (map[string]bool, error) {
+	out := make(map[string]bool, len(threadIDs))
+	const chunk = 500
+	for start := 0; start < len(threadIDs); start += chunk {
+		end := min(start+chunk, len(threadIDs))
+		batch := threadIDs[start:end]
+		args := make([]any, 0, len(batch)+2)
+		args = append(args, accountID, model.LabelInbox)
+		for _, id := range batch {
+			args = append(args, id)
+		}
+		rows, err := s.reader.QueryContext(ctx, `
+			SELECT DISTINCT m.thread_id
+			FROM messages m
+			JOIN message_labels ml ON ml.message_rowid = m.rowid
+			WHERE m.account_id = ? AND ml.label_id = ? AND m.thread_id IN (`+placeholders(len(batch))+`)`, args...)
+		if err != nil {
+			return nil, fmt.Errorf("threads with inbox: %w", err)
+		}
+		err = func() error {
+			defer func() { _ = rows.Close() }()
+			for rows.Next() {
+				var tid string
+				if err := rows.Scan(&tid); err != nil {
+					return err
+				}
+				out[tid] = true
+			}
+			return rows.Err()
+		}()
+		if err != nil {
+			return nil, fmt.Errorf("threads with inbox: %w", err)
+		}
+	}
+	return out, nil
+}
+
+// DeleteLabel removes a label row and any message_labels rows referencing it —
+// the local shadow of a provider-side label deletion (a snooze wake-time label
+// whose last thread woke).
+func (s *Store) DeleteLabel(ctx context.Context, accountID int64, gmailID string) error {
+	logging.TraceContext(ctx, "store: delete label", "account", accountID, "id", gmailID)
+	if _, err := s.writer.ExecContext(ctx,
+		`DELETE FROM message_labels WHERE account_id = ? AND label_id = ?`, accountID, gmailID); err != nil {
+		return fmt.Errorf("delete label refs: %w", err)
+	}
+	if _, err := s.writer.ExecContext(ctx,
+		`DELETE FROM labels WHERE account_id = ? AND gmail_id = ?`, accountID, gmailID); err != nil {
+		return fmt.Errorf("delete label: %w", err)
+	}
+	return nil
 }

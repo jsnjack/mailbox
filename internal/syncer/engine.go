@@ -838,6 +838,17 @@ func (e *Engine) mirrorAsync(accountID int64, fn func()) {
 	}
 }
 
+// MirrorOp enqueues fn on accountID's ordered mirror queue, after any
+// already-queued label mirrors. Use it for provider bookkeeping that must not
+// overtake a pending label change — e.g. deleting a snooze wake-time label
+// only after the modify that removed it from its last thread has landed. fn
+// must bound its own work (use mirrorCtx-style timeouts).
+func (e *Engine) MirrorOp(accountID int64, fn func()) { e.mirrorAsync(accountID, fn) }
+
+// MirrorCtx returns the bounded context a queued mirror operation should run
+// under (mirrors deliberately outlive the UI action that queued them).
+func MirrorCtx() (context.Context, context.CancelFunc) { return mirrorCtx() }
+
 // mirrorOpTimeout bounds one queued mirror operation. The mirror queue is a
 // single drain goroutine per account, so an unbounded op (the provider clients
 // bound single requests, but retries can stack) would stall every mirror queued

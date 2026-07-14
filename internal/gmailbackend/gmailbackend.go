@@ -26,7 +26,10 @@ func New(c *gmailapi.Client, accountID int64) *Backend {
 	return &Backend{c: c, accountID: accountID}
 }
 
-var _ backend.Backend = (*Backend)(nil)
+var (
+	_ backend.Backend      = (*Backend)(nil)
+	_ backend.LabelManager = (*Backend)(nil)
+)
 
 // Profile returns the account email and the current historyId as the cursor.
 func (b *Backend) Profile(ctx context.Context) (backend.Profile, error) {
@@ -152,6 +155,65 @@ func (b *Backend) ApplyLabels(ctx context.Context, ids []string, add, remove []s
 		return err
 	}
 	logging.TraceContext(ctx, "gmailbackend: ApplyLabels ok", "account", b.accountID, "n", len(ids), "dur", time.Since(start))
+	return nil
+}
+
+// EnsureLabel returns the account's label named name, creating it when absent
+// (backend.LabelManager). A create that loses the race to another client is
+// resolved by re-listing.
+func (b *Backend) EnsureLabel(ctx context.Context, name string, hidden bool) (model.Label, error) {
+	start := time.Now()
+	logging.TraceContext(ctx, "gmailbackend: EnsureLabel", "account", b.accountID, "label", name, "hidden", hidden)
+	ls, err := b.c.ListLabels(ctx)
+	if err != nil {
+		return model.Label{}, err
+	}
+	for _, l := range ls {
+		if l.Name == name {
+			logging.TraceContext(ctx, "gmailbackend: EnsureLabel exists", "account", b.accountID, "label", name, "id", l.Id, "dur", time.Since(start))
+			return gmailapi.ToLabel(b.accountID, l), nil
+		}
+	}
+	created, err := b.c.CreateLabel(ctx, name, hidden)
+	if err != nil {
+		if gmailapi.IsConflict(err) {
+			if ls, lerr := b.c.ListLabels(ctx); lerr == nil {
+				for _, l := range ls {
+					if l.Name == name {
+						logging.TraceContext(ctx, "gmailbackend: EnsureLabel lost create race", "account", b.accountID, "label", name, "id", l.Id)
+						return gmailapi.ToLabel(b.accountID, l), nil
+					}
+				}
+			}
+		}
+		logging.TraceContext(ctx, "gmailbackend: EnsureLabel failed", "account", b.accountID, "label", name, "dur", time.Since(start), "err", err)
+		return model.Label{}, err
+	}
+	logging.TraceContext(ctx, "gmailbackend: EnsureLabel created", "account", b.accountID, "label", name, "id", created.Id, "dur", time.Since(start))
+	return gmailapi.ToLabel(b.accountID, created), nil
+}
+
+// DeleteLabelIfUnused removes the label when no message carries it anymore
+// (backend.LabelManager) — snooze wake-time labels are deleted once their last
+// thread wakes, so they don't pile up. A label still in use or already gone is
+// left alone.
+func (b *Backend) DeleteLabelIfUnused(ctx context.Context, id string) error {
+	l, err := b.c.GetLabel(ctx, id)
+	if err != nil {
+		if gmailapi.IsNotFound(err) {
+			logging.TraceContext(ctx, "gmailbackend: DeleteLabelIfUnused already gone", "account", b.accountID, "id", id)
+			return nil
+		}
+		return err
+	}
+	if l.MessagesTotal > 0 || l.ThreadsTotal > 0 {
+		logging.TraceContext(ctx, "gmailbackend: DeleteLabelIfUnused kept", "account", b.accountID, "id", id, "label", l.Name, "messages", l.MessagesTotal, "threads", l.ThreadsTotal)
+		return nil
+	}
+	if err := b.c.DeleteLabel(ctx, id); err != nil && !gmailapi.IsNotFound(err) {
+		return err
+	}
+	logging.TraceContext(ctx, "gmailbackend: DeleteLabelIfUnused deleted", "account", b.accountID, "id", id, "label", l.Name)
 	return nil
 }
 
