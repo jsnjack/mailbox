@@ -27,7 +27,7 @@ type shortcutDef struct {
 var shortcutDefs = []shortcutDef{
 	{"next", "Next conversation", "j", func(w *window) { w.selectAdjacent(1) }},
 	{"prev", "Previous conversation", "k", func(w *window) { w.selectAdjacent(-1) }},
-	{"reply", "Reply", "r", (*window).onReply},
+	{"reply", "Reply all", "r", (*window).onReplyAll},
 	{"forward", "Forward", "f", (*window).onForward},
 	{"archive", "Archive", "ae", (*window).onArchive},
 	{"trash", "Move to Trash", "#", (*window).onTrash},

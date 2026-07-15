@@ -119,9 +119,11 @@ A sender-authentication badge shows Gmail's SPF/DKIM/DMARC verdict
 → green verified / amber partial / red possible-spoof), plus deterministic
 anti-phishing heuristics (`phishing.go`: display-name spoofing and deceptive
 link text, compared at the registrable-domain level — no AI/network) surfaced as
-an amber caution line; the reader overflow's "Check for phishing" additionally
-runs an on-demand AI phishing analysis (`AnalyzeEmail` — verdict + reasons, fed
-the auth/heuristic signals, shown in the shared AI card), **persisted** per message
+an amber caution line; each message's ⋯ menu's "Check for phishing" additionally
+runs an on-demand AI phishing analysis of that message (`analyzeMessage` →
+`AnalyzeEmail` — verdict + reasons, fed the auth/heuristic signals, shown in the
+shared AI card, titled with the sender when it isn't the newest message),
+**persisted** per message
 (`store.{SetAnalysis,Analysis}`, `message_analyses` table — the message + its
 signals are immutable, so it's reused on re-open without re-running the AI). A thread is rendered newest-message-first, with quoted reply history collapsed
 behind a native <details> "Show quoted text" toggle (`cleanEmailHTML`, same single HTML pass as tracker stripping, no JS). An AI-summary button reveals a card
@@ -290,8 +292,26 @@ changed set/order triggers a full splice — so the list keeps its scroll positi
 instead of rebuilding on every event. `store`
 provides `ListThreadsByLabel`/`ListThreadMessages`/`GetThreadSummaries`. Opening a
 thread renders all its messages stacked in the reader (bodies fetched lazily,
-each a sanitized section); archive/trash apply to the whole thread, reply/star
-to its newest message. A search entry runs instant local FTS5 search
+each a sanitized section); archive/trash apply to the whole thread, the header
+reply button (a SplitButton defaulting to **Reply all** — sender-only Reply and
+Forward in its dropdown, `r` = reply all) and star to its newest message, and
+each stacked message carries an always-visible dim ⋯ in its header
+(`msgMenuIcon`, an inline Adwaita SVG; the `mbaction:menu/<id>` link is
+intercepted by `onDecidePolicy` → `showMessageMenu`, a native popover — the
+rowmenu pattern — anchored at the pointer via a motion controller on the
+WebView) offering Reply all / Reply / Forward / View headers / Check for
+phishing targeting that specific message
+(`replyToMessage`/`forwardMessage`/`viewMessageHeaders`/`analyzeMessage`), so
+any message in the thread can be answered, forwarded, or inspected, not just
+the last. **Action-surface scope model**: the reader header bar and its
+overflow ⋯ act on the conversation (reply-all = continue the conversation via
+its newest message; the overflow holds star/unread/move/spam/trash, Labels…,
+Unsubscribe, Print…, remote-images — never message- or sender-scoped items),
+each message's ⋯ acts on that message, and clicking a sender name opens the
+canonical sender surface (`showSenderActions`: copy address, find emails,
+unsubscribe, trust images — the link underlines on hover so it reads as
+clickable). A search entry runs instant local
+FTS5 search
 (`store.Search`, sanitized into a quoted prefix MATCH) whose hits are grouped
 into threads; clearing it returns to the current label. Every list populate (a
 label switch, a search, the 60s sync refresh) runs its store query off the main

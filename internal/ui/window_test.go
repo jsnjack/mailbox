@@ -208,3 +208,24 @@ func TestCleanAIContext(t *testing.T) {
 		t.Fatalf("whitespace collapse = %q", got)
 	}
 }
+
+// anyStarred is the thread-level star predicate: a conversation is starred as
+// soon as any of its messages is (matching the Starred folder's membership).
+func TestAnyStarred(t *testing.T) {
+	if anyStarred(nil) {
+		t.Fatal("empty thread should not be starred")
+	}
+	msgs := []model.Message{{GmailID: "a"}, {GmailID: "b"}, {GmailID: "c"}}
+	if anyStarred(msgs) {
+		t.Fatal("no message starred → thread not starred")
+	}
+	msgs[0].IsStarred = true // an older reply
+	if !anyStarred(msgs) {
+		t.Fatal("older starred message should star the thread")
+	}
+	msgs[0].IsStarred = false
+	msgs[2].IsStarred = true // the newest
+	if !anyStarred(msgs) {
+		t.Fatal("newest starred message should star the thread")
+	}
+}

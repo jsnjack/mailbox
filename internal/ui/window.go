@@ -168,6 +168,10 @@ type window struct {
 	webview      *webkit.WebView
 	readerZoom   float64 // reader message zoom (Ctrl +/-/0), persisted
 	sanitizer    *bluemonday.Policy
+	// Last pointer position over the WebView (widget coords), tracked by a
+	// motion controller: an in-page click reaches Go as a navigation with no
+	// coordinates, and the per-message ⋯ menu anchors its popover here.
+	readerPtrX, readerPtrY float64
 
 	// reader: the open conversation. openMsg is its newest message (used for
 	// reply/forward/star/unread); openThreadMsgs is all of them (oldest first).
@@ -195,9 +199,8 @@ type window struct {
 	// goroutine for the full fetch timeout. Main-thread only (set/cancelled
 	// in renderConversation and clearReader, which both run on the main thread).
 	renderCancel    context.CancelFunc
-	openHeaders     string           // raw headers of the open (latest) message, for "View headers"
 	lastFetchFailed bool             // true if the last render had fetch failures (for retry menu item)
-	replyBtn        *adw.SplitButton // primary action (Reply); dropdown has Reply all/Forward
+	replyBtn        *adw.SplitButton // primary action (Reply all); dropdown has Reply/Forward
 	aiReplyBtn      *gtk.MenuButton  // AI reply: popover of suggestions + intents
 	archiveBtn      *gtk.Button
 	translateBtn    *gtk.Button
@@ -704,26 +707,47 @@ func (w *window) selectAdjacent(delta int) {
 	w.threadSel.SetSelected(uint(next))
 }
 
+// anyStarred reports whether any message of the conversation is starred — the
+// predicate the Starred folder uses to list a thread, and what unstar undoes.
+func anyStarred(msgs []model.Message) bool {
+	for _, m := range msgs {
+		if m.IsStarred {
+			return true
+		}
+	}
+	return false
+}
+
+// threadStarred reports the open conversation's star state: starred as soon as
+// any of its messages is (an older starred reply keeps the thread in the
+// Starred folder even when the newest message isn't starred).
+func (w *window) threadStarred() bool {
+	return anyStarred(w.openThreadMsgs) || w.openMsg.IsStarred
+}
+
 // toggleStar flips the star on the open conversation. No-op when nothing is open.
 func (w *window) toggleStar() {
 	if w.openMsg.GmailID == "" {
 		return
 	}
-	w.setStarred(!w.openMsg.IsStarred)
+	w.setStarred(!w.threadStarred())
 }
 
 // setStarred adds or removes the star across the whole open conversation
-// (optimistic), keeping openMsg's flag in sync so the overflow checkbox and the
-// 's' shortcut agree. It stars the entire thread, not just the newest message,
-// so unstarring actually removes the conversation from the Starred folder (which
-// lists any thread with any starred message) rather than leaving older replies
-// starred.
+// (optimistic), keeping the cached message flags in sync so the overflow
+// checkbox and the 's' shortcut agree. It stars the entire thread, not just
+// the newest message, so unstarring actually removes the conversation from the
+// Starred folder (which lists any thread with any starred message) rather than
+// leaving older replies starred.
 func (w *window) setStarred(star bool) {
 	if w.openMsg.GmailID == "" {
 		return
 	}
 	logging.Trace("ui: set starred", "thread", w.openThreadID, "id", w.openMsg.GmailID, "star", star, "account", w.activeID)
 	w.openMsg.IsStarred = star
+	for i := range w.openThreadMsgs {
+		w.openThreadMsgs[i].IsStarred = star
+	}
 	msgs := w.openThreadMsgs
 	if len(msgs) == 0 {
 		msgs = []model.Message{w.openMsg}
@@ -2331,10 +2355,16 @@ func (w *window) onDecidePolicy(decision webkit.PolicyDecisioner, dtype webkit.P
 	if uri == "" || strings.HasPrefix(uri, "about:") || strings.HasPrefix(uri, "data:") || strings.HasPrefix(uri, "blob:") {
 		return false // our own rendered content — show it in place
 	}
-	// Our own in-page affordances (the sender link in a message header).
-	if id, ok := strings.CutPrefix(uri, "mbaction:sender/"); ok {
-		if dec, err := url.QueryUnescape(id); err == nil {
-			w.showSenderActions(dec)
+	// Our own in-page affordances (the sender link and the per-message ⋯ menu
+	// in a message header).
+	if act, id, ok := parseMBAction(uri); ok {
+		switch act {
+		case "sender":
+			w.showSenderActions(id)
+		case "menu":
+			w.showMessageMenu(id)
+		default:
+			slog.Debug("ui: unknown mbaction", "uri", uri)
 		}
 		nav.Ignore()
 		return true
@@ -2349,6 +2379,24 @@ func (w *window) onDecidePolicy(decision webkit.PolicyDecisioner, dtype webkit.P
 	}
 	nav.Ignore()
 	return true
+}
+
+// parseMBAction splits an in-page affordance URI ("mbaction:<act>/<escaped
+// message id>") into its action and decoded message id.
+func parseMBAction(uri string) (act, id string, ok bool) {
+	rest, ok := strings.CutPrefix(uri, "mbaction:")
+	if !ok {
+		return "", "", false
+	}
+	act, enc, found := strings.Cut(rest, "/")
+	if !found {
+		return "", "", false
+	}
+	id, err := url.QueryUnescape(enc)
+	if err != nil {
+		return "", "", false
+	}
+	return act, id, true
 }
 
 // openExternal hands a URI or path to the user's default handler via xdg-open,
@@ -2397,6 +2445,12 @@ func (w *window) buildReader() *adw.NavigationPage {
 	// embedding them in the HTML — a big inline image (e.g. a 15 MB banner) would
 	// otherwise inflate the page to tens of MB and stall WebKit's parse.
 	w.webview.Context().RegisterURIScheme("cid", w.serveCID)
+	// Track the pointer over the reader (capture phase — WebKit handles input
+	// internally) so showMessageMenu can anchor its popover at the clicked ⋯.
+	motion := gtk.NewEventControllerMotion()
+	motion.SetPropagationPhase(gtk.PhaseCapture)
+	motion.ConnectMotion(func(x, y float64) { w.readerPtrX, w.readerPtrY = x, y })
+	w.webview.AddController(motion)
 	w.sectionCache = make(map[string]cachedSection)
 	// The view background is what WebKit paints where no content is (resize
 	// gutters, overscroll, the instant before the shell's first paint). Pin it
@@ -2543,34 +2597,35 @@ func (w *window) buildReader() *adw.NavigationPage {
 	hb := adw.NewHeaderBar()
 	hb.SetShowTitle(false) // "Reader" is redundant — drop it for a cleaner header
 
-	// Reply is the primary one-click action (every reference client defaults to
-	// Reply); Reply all and Forward live in the SplitButton's dropdown as a
-	// native menu model.
+	// Reply all is the primary one-click action — it never drops participants
+	// from a group thread, and on a 1:1 email it degrades to a plain reply
+	// (replyAllRecipients dedups down to just the sender). Reply (sender only)
+	// and Forward live in the SplitButton's dropdown as a native menu model.
 	replyMenu := gio.NewMenu()
-	replyMenu.Append("Reply all", "win.reader-reply-all")
+	replyMenu.Append("Reply", "win.reader-reply")
 	replyMenu.Append("Forward", "win.reader-forward")
 
 	w.replyBtn = adw.NewSplitButton()
-	w.replyBtn.SetIconName("mail-reply-sender-symbolic")
-	w.replyBtn.SetTooltipText("Reply (r) — dropdown: Reply all, Forward")
-	a11yLabel(w.replyBtn, "Reply")
-	w.replyBtn.ConnectClicked(w.onReply)
+	w.replyBtn.SetIconName("mail-reply-all-symbolic")
+	w.replyBtn.SetTooltipText("Reply all to conversation (r) — dropdown: Reply, Forward")
+	a11yLabel(w.replyBtn, "Reply all to conversation")
+	w.replyBtn.ConnectClicked(w.onReplyAll)
 	w.replyBtn.SetMenuModel(replyMenu)
 
 	w.archiveBtn = gtk.NewButtonFromIconName("mail-archive-symbolic")
-	w.archiveBtn.SetTooltipText("Archive (a)")
-	a11yLabel(w.archiveBtn, "Archive")
+	w.archiveBtn.SetTooltipText("Archive conversation (a)")
+	a11yLabel(w.archiveBtn, "Archive conversation")
 	w.archiveBtn.ConnectClicked(w.onArchive)
 
 	// AI actions (only useful when an assistant is configured).
 	w.translateBtn = gtk.NewButtonFromIconName("translate-symbolic")
-	w.translateBtn.SetTooltipText("Translate to English (t)")
-	a11yLabel(w.translateBtn, "Translate to English")
+	w.translateBtn.SetTooltipText("Translate conversation to English (t)")
+	a11yLabel(w.translateBtn, "Translate conversation to English")
 	w.translateBtn.ConnectClicked(w.onTranslate)
 
 	w.summaryBtn = gtk.NewButtonFromIconName("summarize-symbolic")
-	w.summaryBtn.SetTooltipText("Summarize thread with AI")
-	a11yLabel(w.summaryBtn, "Summarize thread with AI")
+	w.summaryBtn.SetTooltipText("Summarize conversation with AI")
+	a11yLabel(w.summaryBtn, "Summarize conversation with AI")
 	w.summaryBtn.ConnectClicked(w.onSummarize)
 
 	// AI reply: a popover of AI-suggested quick replies plus reply intents. The
@@ -2594,7 +2649,7 @@ func (w *window) buildReader() *adw.NavigationPage {
 	// items (spam/not-spam, delete-forever, find-from-sender) match the context,
 	// with the toggle states synced first.
 	w.overflowBtn.SetCreatePopupFunc(func(btn *gtk.MenuButton) {
-		w.starAction.SetState(glib.NewVariantBoolean(w.openMsg.IsStarred))
+		w.starAction.SetState(glib.NewVariantBoolean(w.threadStarred()))
 		w.imagesAction.SetState(glib.NewVariantBoolean(w.imagesEnabled))
 		btn.SetPopover(gtk.NewPopoverMenuFromModel(w.buildReaderMenuModel()))
 	})
@@ -2732,6 +2787,13 @@ func (w *window) replyAllInit() (init model.OutgoingMessage, aiContext string, o
 	if m.GmailID == "" {
 		return model.OutgoingMessage{}, "", false
 	}
+	return w.replyAllInitFor(m), w.threadContextFor(m), true
+}
+
+// replyAllInitFor builds the reply-all prefill for a specific message — the
+// open one for the header-bar action, or any message of the open thread for
+// the in-page per-message reply links.
+func (w *window) replyAllInitFor(m model.Message) model.OutgoingMessage {
 	to, cc := replyAllRecipients(m, w.activeEmail)
 	body, quoteHTML := w.replyQuote(m)
 	return model.OutgoingMessage{
@@ -2744,7 +2806,50 @@ func (w *window) replyAllInit() (init model.OutgoingMessage, aiContext string, o
 		InReplyTo:     m.RFC822MsgID,
 		References:    strings.TrimSpace(m.References + " " + m.RFC822MsgID),
 		ThreadID:      m.ThreadID,
-	}, w.threadContextFor(m), true
+	}
+}
+
+// threadMessageByID returns the open conversation's message with the given id
+// — the per-message header icons name their target this way.
+func (w *window) threadMessageByID(gmailID string) (model.Message, bool) {
+	for _, m := range w.openThreadMsgs {
+		if m.GmailID == gmailID {
+			return m, true
+		}
+	}
+	logging.Trace("ui: message not in open thread", "id", gmailID, "thread", w.openThreadID)
+	return model.Message{}, false
+}
+
+// replyToMessage opens a reply compose targeting a specific message of the
+// open conversation (all: reply-all vs sender-only) — the per-message header
+// icons let the user answer any message in a thread, not just the newest.
+func (w *window) replyToMessage(gmailID string, all bool) {
+	if w.deps.Send == nil {
+		return
+	}
+	m, ok := w.threadMessageByID(gmailID)
+	if !ok {
+		return
+	}
+	logging.Trace("ui: reply to message", "id", m.GmailID, "thread", w.openThreadID, "all", all, "account", w.activeID)
+	w.flushMarkRead()
+	if all {
+		w.openCompose(w.replyAllInitFor(m), w.threadContextFor(m), "Reply all")
+	} else {
+		w.openCompose(w.replyInit(m), w.threadContextFor(m), "Reply")
+	}
+}
+
+// forwardMessage forwards a specific message of the open conversation — the
+// per-message header icons' forward action.
+func (w *window) forwardMessage(gmailID string) {
+	if w.deps.Send == nil {
+		return
+	}
+	if m, ok := w.threadMessageByID(gmailID); ok {
+		w.forwardMsg(m)
+	}
 }
 
 // aiReply opens a reply compose for the open message with an AI action applied
@@ -2903,6 +3008,12 @@ func (w *window) onForward() {
 	if m.GmailID == "" {
 		return
 	}
+	w.forwardMsg(m)
+}
+
+// forwardMsg opens a forward compose for m — the newest message via the header
+// bar's dropdown, or any message of the open thread via its header icons.
+func (w *window) forwardMsg(m model.Message) {
 	logging.Trace("ui: forward", "id", m.GmailID, "thread", w.openThreadID, "account", w.activeID)
 	w.flushMarkRead()
 	init := model.OutgoingMessage{
@@ -3235,7 +3346,6 @@ func (w *window) clearReader() {
 	w.openThreadID = ""
 	w.openThreadMsgs = nil
 	w.openMsg = model.Message{}
-	w.openHeaders = ""
 	w.resetTranslation()
 	w.hideSummary()
 	w.showInviteCard(0, nil)
@@ -3793,7 +3903,6 @@ func (w *window) renderConversation(msgs []model.Message) {
 				return // user switched to another conversation while this rendered
 			}
 			w.inlineByCID = inlineImgs // serveCID resolves cid: against this
-			w.openHeaders = latestAuth // raw headers of the latest message (for "View headers")
 			w.lastFetchFailed = len(fetchFailed) > 0
 			w.setTrackerCount(blocked)
 			w.setAuthBadge(verdict)
@@ -4100,7 +4209,13 @@ func (w *window) conversationSection(m model.Message, body model.MessageBody, cl
 		fmt.Fprintf(&hb, ` <span style="color:#888">&lt;%s&gt;</span>`, html.EscapeString(addr))
 	}
 	hb.WriteString(`</a></span>`)
-	fmt.Fprintf(&hb, `<span style="color:#888;white-space:nowrap">%s</span></div>`, formatMsgDate(m.InternalDate, time.Now()))
+	hb.WriteString(`<span style="color:#888;white-space:nowrap">`)
+	hb.WriteString(formatMsgDate(m.InternalDate, time.Now()))
+	// Per-message actions: the header bar acts on the conversation, this ⋯
+	// opens the menu of actions on this specific message (reply/forward when
+	// sending is available, View headers / phishing analysis always).
+	hb.WriteString(msgMenuIcon(m.GmailID))
+	hb.WriteString(`</span></div>`)
 	if to := strings.TrimSpace(m.ToAddrs); to != "" {
 		fmt.Fprintf(&hb, `<div style="color:#888">to %s</div>`, w.formatRecipients(to))
 	}
@@ -4516,6 +4631,10 @@ func (w *window) onDeleteForever() {
 	confirm.Present(w.win)
 }
 
+// onMarkUnread marks the conversation unread by marking only its newest
+// message: one unread message flips the thread's unread state in the list
+// (same as the row menu's Mark as unread), while marking every message would
+// inflate the unread counts.
 func (w *window) onMarkUnread() {
 	if w.openMsg.GmailID != "" {
 		logging.Trace("ui: mark unread", "id", w.openMsg.GmailID, "thread", w.openThreadID, "account", w.activeID)
@@ -4582,12 +4701,7 @@ func (w *window) registerReaderActions() {
 	add("reader-trash", w.onTrash)
 	add("reader-delete-forever", w.onDeleteForever)
 	add("reader-labels", w.showLabelsDialog)
-	add("reader-analyze", w.onAnalyze)
 	add("reader-unsubscribe", w.onUnsubscribe)
-	add("reader-trust-images", w.onTrustImages)
-	add("reader-find-from", func() { w.searchFrom(w.openMsg.FromAddr) })
-	add("reader-copy-sender", w.onCopySender)
-	add("reader-view-headers", w.onViewHeaders)
 	add("reader-print", w.onPrint)
 	add("reader-retry", w.onRetryLoading)
 
@@ -4606,11 +4720,13 @@ func (w *window) registerReaderActions() {
 	w.win.AddAction(w.imagesAction)
 }
 
-// buildReaderMenuModel builds the overflow menu for the current context: star,
-// mark-unread, move/spam/trash, labels, optionally find-from-sender, and the
-// remote-images toggle. (Reply all, Reply, Forward, Archive, Translate and
-// Draft reply are dedicated header controls.) Unlabeled sections render as
-// native separators.
+// buildReaderMenuModel builds the overflow menu — conversation-scoped actions
+// only: star/unread/move/spam/trash, labels, unsubscribe, print, retry, and
+// the remote-images toggle. (Reply all, Reply, Forward, Archive, Translate and
+// Draft reply are dedicated header controls; message-scoped actions live in
+// each message's ⋯ menu — showMessageMenu — and sender actions in the
+// sender-name dialog — showSenderActions.) Unlabeled sections render as native
+// separators.
 func (w *window) buildReaderMenuModel() *gio.Menu {
 	menu := gio.NewMenu()
 	if w.deps.ModifyLabels != nil {
@@ -4633,31 +4749,15 @@ func (w *window) buildReaderMenuModel() *gio.Menu {
 		lbl.Append("Labels…", "win.reader-labels")
 		menu.AppendSection("", lbl)
 	}
-	// On-demand AI phishing/scam analysis (rare, so it lives here rather than the
-	// header). Streams its verdict into the shared AI card.
-	if w.deps.Assistant != nil && w.aiPhishing {
+	// Unsubscribe is about the conversation's mailing list, so it stays here
+	// (Gmail keeps it similarly prominent); the sender utilities live in the
+	// sender-name dialog (showSenderActions).
+	if w.openMsg.ListUnsubscribe != "" {
 		sec := gio.NewMenu()
-		sec.Append("Check for phishing", "win.reader-analyze")
+		sec.Append("Unsubscribe", "win.reader-unsubscribe")
 		menu.AppendSection("", sec)
 	}
-	// Sender utilities: copy the address, and (server-search only) find all mail
-	// from it.
-	if strings.TrimSpace(w.openMsg.FromAddr) != "" {
-		sec := gio.NewMenu()
-		sec.Append("Copy sender address", "win.reader-copy-sender")
-		if w.deps.SearchServer != nil {
-			sec.Append("Find emails from sender", "win.reader-find-from")
-		}
-		if w.openMsg.ListUnsubscribe != "" {
-			sec.Append("Unsubscribe", "win.reader-unsubscribe")
-		}
-		menu.AppendSection("", sec)
-	}
-	// Message utilities: raw headers and print.
 	util := gio.NewMenu()
-	if strings.TrimSpace(w.openHeaders) != "" {
-		util.Append("View headers", "win.reader-view-headers")
-	}
 	util.Append("Print…", "win.reader-print")
 	menu.AppendSection("", util)
 	if w.lastFetchFailed {
@@ -4668,9 +4768,6 @@ func (w *window) buildReaderMenuModel() *gio.Menu {
 
 	img := gio.NewMenu()
 	img.Append("Show remote images", "win.reader-images")
-	if w.blockImages && strings.TrimSpace(w.openMsg.FromAddr) != "" && !w.trustedImgs[strings.ToLower(w.openMsg.FromAddr)] {
-		img.Append("Always load images from this sender", "win.reader-trust-images")
-	}
 	menu.AppendSection("", img)
 	return menu
 }
@@ -4688,22 +4785,6 @@ func (w *window) searchFrom(addr string) {
 	} else {
 		w.refreshList(q)
 	}
-}
-
-// onCopySender copies the open message's sender address to the system clipboard.
-func (w *window) onCopySender() {
-	addr := strings.TrimSpace(w.openMsg.FromAddr)
-	if addr == "" {
-		return
-	}
-	disp := gdk.DisplayGetDefault()
-	if disp == nil {
-		slog.Warn("ui: copy sender — no display")
-		return
-	}
-	disp.Clipboard().SetText(addr)
-	logging.Trace("ui: copy sender address", "addr", addr, "account", w.activeID)
-	w.toast("Copied " + addr)
 }
 
 // formatRawHeaders pretty-prints the stored header blob for the dialog. The
@@ -4738,14 +4819,76 @@ func formatRawHeaders(raw string) string {
 	return "Authentication-Results:\n" + strings.Join(clauses, ";\n")
 }
 
-// onViewHeaders shows the open message's raw headers in a scrollable monospace
-// dialog. The item is only offered when headers are present (buildReaderMenuModel).
-func (w *window) onViewHeaders() {
-	headers := w.openHeaders
-	if strings.TrimSpace(headers) == "" {
+// ensureBody returns m's stored body, fetching it on demand (bounded) when the
+// cache has none — a message of a long thread may never have been opened, so
+// View headers / phishing analysis can't rely on a cached body row. Blocking;
+// run off the main thread.
+func (w *window) ensureBody(ctx context.Context, m model.Message) model.MessageBody {
+	body, err := w.deps.Store.GetBody(ctx, m.RowID)
+	if err == nil && (body.RawHeaders != "" || body.HTML != "" || body.Text != "") {
+		return body
+	}
+	if w.deps.FetchBody == nil {
+		return body
+	}
+	logging.Trace("ui: ensure body fetch", "id", m.GmailID, "account", m.AccountID)
+	fetchCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	if err := w.deps.FetchBody(fetchCtx, m.AccountID, m.GmailID); err != nil {
+		slog.Warn("ui: ensure body fetch", "id", m.GmailID, "err", err)
+		return body
+	}
+	body, _ = w.deps.Store.GetBody(ctx, m.RowID)
+	return body
+}
+
+// viewMessageHeaders shows a message's raw stored headers — any message of the
+// open thread, via its per-message ⋯ menu. The store read (and possible
+// on-demand body fetch) runs off the main thread.
+func (w *window) viewMessageHeaders(m model.Message) {
+	if m.GmailID == "" {
 		return
 	}
-	logging.Trace("ui: view headers", "id", w.openMsg.GmailID, "bytes", len(headers), "account", w.activeID)
+	logging.Trace("ui: view headers", "id", m.GmailID, "account", m.AccountID)
+	threadID := w.openThreadID
+	go func() {
+		body := w.ensureBody(context.Background(), m)
+		headers := strings.TrimSpace(body.RawHeaders)
+		if headers == "" && w.deps.FetchBody != nil {
+			// A body cached before header capture has no stored headers — one
+			// refetch picks them up (the same self-heal the inline-image path
+			// uses). IMAP never stores headers, so its bounded refetch still
+			// ends at the toast below.
+			logging.Trace("ui: view headers refetch", "id", m.GmailID)
+			fetchCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			if err := w.deps.FetchBody(fetchCtx, m.AccountID, m.GmailID); err != nil {
+				slog.Warn("ui: view headers refetch", "id", m.GmailID, "err", err)
+			} else if b2, err := w.deps.Store.GetBody(context.Background(), m.RowID); err == nil {
+				headers = strings.TrimSpace(b2.RawHeaders)
+			}
+			cancel()
+		}
+		dispatch.Main(func() {
+			if w.openThreadID != threadID {
+				logging.Trace("ui: view headers discarded", "id", m.GmailID, "openThread", w.openThreadID)
+				return // the user moved on — don't pop a dialog over another thread
+			}
+			if headers == "" {
+				// IMAP bodies don't store raw headers (only Gmail captures
+				// Authentication-Results), and a fetch may have failed offline.
+				logging.Trace("ui: view headers empty", "id", m.GmailID)
+				w.toast("No headers are available for this message")
+				return
+			}
+			w.showHeadersDialog(headers)
+		})
+	}()
+}
+
+// showHeadersDialog shows raw headers in a scrollable monospace dialog.
+// Main thread only.
+func (w *window) showHeadersDialog(headers string) {
+	logging.Trace("ui: show headers dialog", "bytes", len(headers))
 
 	tv := gtk.NewTextView()
 	tv.SetEditable(false)
@@ -4886,7 +5029,7 @@ func (w *window) showSenderActions(gmailID string) {
 		})
 	}
 	if w.blockImages && addr != "" && !w.trustedImgs[strings.ToLower(addr)] {
-		item("Always load images from this sender", func() { w.onTrustImages() })
+		item("Always load images from this sender", func() { w.trustImagesFrom(addr) })
 	}
 
 	box := gtk.NewBox(gtk.OrientationVertical, 0)
@@ -4951,10 +5094,11 @@ func (w *window) setCaution(warnings []string) {
 	w.cautionLabel.SetVisible(true)
 }
 
-// onTrustImages remembers the open message's sender as image-trusted (their
-// remote images load even while the global default blocks) and shows them now.
-func (w *window) onTrustImages() {
-	addr := strings.ToLower(strings.TrimSpace(w.openMsg.FromAddr))
+// trustImagesFrom remembers a sender as image-trusted (their remote images
+// load even while the global default blocks) and shows images now. addr is the
+// clicked message's sender — not necessarily the newest message's.
+func (w *window) trustImagesFrom(addr string) {
+	addr = strings.ToLower(strings.TrimSpace(addr))
 	if addr == "" || w.trustedImgs[addr] {
 		return
 	}
@@ -5346,12 +5490,12 @@ func (w *window) hideSummary() {
 	}
 }
 
-// onAnalyze runs an on-demand AI phishing/scam analysis of the open message and
-// streams the verdict + reasons into the shared card. It feeds the AI the
-// deterministic signals (auth result, heuristic warnings) alongside the content,
-// and caches by message id so re-running is instant.
-func (w *window) onAnalyze() {
-	m := w.openMsg
+// analyzeMessage runs an on-demand AI phishing/scam analysis of one message —
+// any message of the open thread, via its per-message ⋯ menu — and streams the
+// verdict + reasons into the shared card. It feeds the AI the deterministic
+// signals (auth result, heuristic warnings) alongside the content, and caches
+// by message id so re-running is instant.
+func (w *window) analyzeMessage(m model.Message) {
 	if m.GmailID == "" || w.deps.Assistant == nil || !w.aiPhishing {
 		return
 	}
@@ -5360,7 +5504,13 @@ func (w *window) onAnalyze() {
 		w.summaryCancel = nil
 	}
 	w.cardIcon.SetFromIconName("security-high-symbolic")
-	w.cardTitle.SetText("Security analysis")
+	// The card is shared with the thread summary — name the target when it
+	// isn't the newest message, so it's clear which message was analyzed.
+	title := "Security analysis"
+	if m.GmailID != w.openMsg.GmailID {
+		title += " — " + displayFrom(m)
+	}
+	w.cardTitle.SetText(title)
 	logging.Trace("ui: analyze phishing", "id", m.GmailID, "thread", w.openThreadID, "account", w.activeID)
 	w.summaryRevealer.SetRevealChild(true)
 	key := "analyze:" + m.GmailID
@@ -5387,10 +5537,12 @@ func (w *window) onAnalyze() {
 	threadID := w.openThreadID
 	acctID := w.activeID
 	gmailID := m.GmailID
-	emailCtx := w.analysisContextFor(m)
 	done := w.aiActivity("Checking for phishing")
 
 	go func() {
+		// Assemble the context off the main thread: it reads the stored body and
+		// may fetch it on demand for a message that was never opened.
+		emailCtx := w.analysisContextFor(ctx, m)
 		ch, err := w.deps.Assistant.AnalyzeEmail(ctx, emailCtx)
 		if err != nil {
 			msg := err.Error()
@@ -5438,18 +5590,17 @@ func (w *window) onAnalyze() {
 }
 
 // analysisContextFor assembles the email plus deterministic signals (auth
-// verdict, heuristic warnings) as plain text for the AI analyzer.
-func (w *window) analysisContextFor(m model.Message) string {
+// verdict, heuristic warnings) as plain text for the AI analyzer. Blocking
+// (may fetch the body on demand); run off the main thread.
+func (w *window) analysisContextFor(ctx context.Context, m model.Message) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "From name: %s\nFrom address: %s\nSubject: %s\n", m.FromName, m.FromAddr, m.Subject)
-	body, err := w.deps.Store.GetBody(context.Background(), m.RowID)
-	if err == nil {
-		if v := parseAuthResults(body.RawHeaders); v.level != authUnknown {
-			fmt.Fprintf(&b, "Mail-server authentication check: %s (%s)\n", authLevelWord(v.level), v.detail)
-		}
-		for _, warn := range phishingWarnings(m, body.HTML) {
-			fmt.Fprintf(&b, "Automated warning: %s\n", warn)
-		}
+	body := w.ensureBody(ctx, m)
+	if v := parseAuthResults(body.RawHeaders); v.level != authUnknown {
+		fmt.Fprintf(&b, "Mail-server authentication check: %s (%s)\n", authLevelWord(v.level), v.detail)
+	}
+	for _, warn := range phishingWarnings(m, body.HTML) {
+		fmt.Fprintf(&b, "Automated warning: %s\n", warn)
 	}
 	text := w.bodyTextFor(m)
 	const cap = 6000
@@ -6585,6 +6736,10 @@ body{font-family:sans-serif;margin:8px 16px 16px;color:#222;line-height:1.4;over
 table{table-layout:auto}
 td,th{overflow-wrap:break-word;word-break:normal}
 .mbwrap>div:first-child{border-top:none!important;margin-top:0!important}
+.mbmenu{color:inherit;text-decoration:none;margin-left:12px;opacity:.55}
+.mbmenu:hover{opacity:1}
+.mbmenu svg{width:15px;height:15px;vertical-align:-3px}
+a[href^="mbaction:sender/"]:hover{text-decoration:underline!important}
 img,video{max-width:100%!important;height:auto!important}
 pre{font-family:monospace;white-space:pre-wrap}
 details.mbmsg>summary{cursor:pointer;list-style:none;color:#555;font-size:90%;border-top:1px solid #ddd;margin-top:18px;padding:8px 0 2px}
