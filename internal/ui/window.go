@@ -7,12 +7,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+	"io"
 
 	"log/slog"
 	"net/mail"
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"sort"
@@ -4455,11 +4457,23 @@ func (w *window) showThreadAttachments(atts []threadAttachment) {
 	}
 	for _, ta := range atts {
 		ta := ta
-		btn := gtk.NewButton()
-		btn.SetChild(attachmentChip(ta.att))
-		btn.SetTooltipText(ta.att.MimeType)
-		btn.ConnectClicked(func() { w.openAttachment(ta.accountID, ta.gmailID, ta.att.ID) })
-		w.attachBox.Append(btn)
+		// A linked pair reads as one chip: the name opens the file, the trailing
+		// button saves it somewhere.
+		row := gtk.NewBox(gtk.OrientationHorizontal, 0)
+		row.AddCSSClass("linked")
+
+		open := gtk.NewButton()
+		open.SetChild(attachmentChip(ta.att))
+		open.SetTooltipText(ta.att.MimeType)
+		open.ConnectClicked(func() { w.openAttachment(ta.accountID, ta.gmailID, ta.att.ID) })
+		row.Append(open)
+
+		save := gtk.NewButtonFromIconName("document-save-symbolic")
+		save.SetTooltipText("Save as…")
+		save.ConnectClicked(func() { w.saveAttachment(ta.accountID, ta.gmailID, ta.att) })
+		row.Append(save)
+
+		w.attachBox.Append(row)
 	}
 	w.attachBox.SetVisible(len(atts) > 0)
 }
@@ -4479,6 +4493,64 @@ func (w *window) openAttachment(accountID int64, gmailID string, attID int64) {
 		logging.Trace("ui: open attachment ready", "id", gmailID, "path", path)
 		openExternal(path)
 	}()
+}
+
+// saveAttachment downloads the attachment into the cache (reusing it when
+// already fetched) then prompts for a destination and copies it there.
+func (w *window) saveAttachment(accountID int64, gmailID string, att model.Attachment) {
+	if w.deps.OpenAttach == nil {
+		return
+	}
+	logging.Trace("ui: save attachment", "account", accountID, "id", gmailID, "attID", att.ID)
+	go func() {
+		src, err := w.deps.OpenAttach(context.Background(), accountID, gmailID, att.ID)
+		if err != nil {
+			slog.Warn("ui: save attachment: download", "id", gmailID, "err", err)
+			dispatch.Main(func() { w.toast("Couldn't download attachment") })
+			return
+		}
+		dispatch.Main(func() {
+			dialog := gtk.NewFileDialog()
+			dialog.SetTitle("Save attachment")
+			if att.Filename != "" {
+				dialog.SetInitialName(att.Filename)
+			}
+			dialog.Save(context.Background(), &w.win.Window, func(res gio.AsyncResulter) {
+				file, err := dialog.SaveFinish(res)
+				if err != nil || file == nil {
+					return // cancelled
+				}
+				dst := file.Path()
+				go func() {
+					if err := copyFile(src, dst); err != nil {
+						slog.Warn("ui: save attachment: copy", "dst", dst, "err", err)
+						dispatch.Main(func() { w.toast("Couldn't save attachment") })
+						return
+					}
+					logging.Trace("ui: save attachment done", "id", gmailID, "dst", dst)
+					dispatch.Main(func() { w.toast("Saved " + filepath.Base(dst)) })
+				}()
+			})
+		})
+	}()
+}
+
+// copyFile streams src to dst, overwriting dst if it exists.
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 func attachmentChip(a model.Attachment) *gtk.Box {
