@@ -77,6 +77,12 @@ python3-Xlib with XTEST works for clicks/keys/typing — see the drive.py patter
   driving a prefs-close in a sandbox, check whether a real AI key exists
   (`secret-tool lookup service mailbox-ai` semantics) and don't clear the row.
 
+- **A leftover sandbox instance absorbs your launch.** GApplication is
+  single-instance per app id on the session bus: if an earlier sandbox with the
+  same `MAILBOX_APP_ID` is still running (even from a past session), a new
+  launch just activates it and exits — you screenshot the OLD binary and the
+  change appears to be missing/unverified. Before launching, find and kill any
+  process whose `/proc/<pid>/environ` has `MAILBOX_APP_ID=…sandbox`.
 - Kill by PID you saved at launch; `pgrep -x mailbox` can also match a real
   running instance — check `/proc/<pid>/environ` for `MAILBOX_APP_ID` first.
 - The sandbox truncates `/tmp/mailbox.log`; if you need the real session's
