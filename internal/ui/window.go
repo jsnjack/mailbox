@@ -1566,27 +1566,18 @@ func (w *window) onMarkAllRead() {
 }
 
 // buildSelectionBar constructs the (hidden) bulk-action bar shown in selection
-// mode: a count plus archive / trash / mark-read / cancel.
+// mode: a count, select-all, the two headline actions (archive / trash), a ⋯
+// menu holding the rest (snooze / mark read / move to), and cancel. The bar
+// lives inside the thread-list pane, whose NavigationSplitView width cap
+// (280–360px) loses to any child's minimum width — so the bar keeps few enough
+// buttons (and an ellipsizing label) that its minimum always fits the pane
+// instead of forcing it wider and shrinking the reader.
 func (w *window) buildSelectionBar() {
 	w.selectionLabel = gtk.NewLabel("0 selected")
 	w.selectionLabel.SetXAlign(0)
 	w.selectionLabel.SetHExpand(true)
+	w.selectionLabel.SetEllipsize(pango.EllipsizeEnd)
 	setMargins(w.selectionLabel, 10, 6, 0, 0)
-
-	selectAll := gtk.NewButtonFromIconName("edit-select-all-symbolic")
-	selectAll.SetTooltipText("Select all / none")
-	a11yLabel(selectAll, "Select all / none")
-	selectAll.ConnectClicked(func() {
-		allSelected := len(w.threadByID) > 0 && len(w.selected) >= len(w.threadByID)
-		w.selected = map[string]bool{}
-		if !allSelected {
-			for id := range w.threadByID {
-				w.selected[id] = true
-			}
-		}
-		w.updateSelectionBar()
-		w.refreshList(w.searchEntry.Text()) // re-bind checkboxes
-	})
 
 	archive := gtk.NewButtonFromIconName("mail-archive-symbolic")
 	archive.SetTooltipText("Archive selected")
@@ -1598,58 +1589,13 @@ func (w *window) buildSelectionBar() {
 	a11yLabel(trash, "Move selected to Trash")
 	trash.ConnectClicked(func() { w.bulkApply("Trashed", []string{model.LabelTrash}, []string{model.LabelInbox}) })
 
-	read := gtk.NewButtonFromIconName("mail-read-symbolic")
-	read.SetTooltipText("Mark selected as read")
-	a11yLabel(read, "Mark selected as read")
-	read.ConnectClicked(func() { w.bulkApply("Marked read", nil, []string{model.LabelUnread}) })
-
-	// Bulk snooze: a popover of the quick presets, applied to every selected
-	// conversation (Monday-morning triage in one sweep).
-	snooze := gtk.NewButtonFromIconName("alarm-symbolic")
-	snooze.SetTooltipText("Snooze selected")
-	a11yLabel(snooze, "Snooze selected")
-	snooze.ConnectClicked(func() {
-		if len(w.selected) == 0 {
-			return
-		}
-		pop := gtk.NewPopover()
-		pop.SetParent(snooze)
-		pbox := gtk.NewBox(gtk.OrientationVertical, 0)
-		pbox.AddCSSClass("menu")
-		pbox.AddCSSClass("rowmenu")
-		for _, p := range snoozePresets(time.Now()) {
-			p := p
-			lbl := gtk.NewLabel(p.label + " (" + p.t.Format("Mon 15:04") + ")")
-			lbl.SetXAlign(0)
-			lbl.SetHExpand(true)
-			b := gtk.NewButton()
-			b.SetChild(lbl)
-			b.AddCSSClass("flat")
-			b.ConnectClicked(func() {
-				pop.Popdown()
-				w.bulkSnooze(p.t)
-			})
-			pbox.Append(b)
-		}
-		pop.SetChild(pbox)
-		pop.ConnectClosed(func() { pop.Unparent() })
-		pop.Popup()
-	})
-
-	moveTo := gtk.NewButtonFromIconName("folder-symbolic")
-	moveTo.SetTooltipText("Move selected to a label")
-	a11yLabel(moveTo, "Move selected to a label")
-	moveTo.ConnectClicked(func() {
-		if len(w.selected) == 0 {
-			return
-		}
-		// Capture the account owning the selection now: a mid-dialog account
-		// switch must not offer another account's labels (their ids are
-		// per-account and wouldn't exist on the selected messages' account).
-		w.showMoveToDialog(w.activeID, func(labelID, name string) {
-			w.bulkApply("Moved to "+name, []string{labelID}, moveLocationRemovals)
-		})
-	})
+	// The remaining bulk actions live behind a ⋯ menu (rowmenu pattern — see
+	// showRowMenu for why hand-built flat buttons, not a GMenu model), so the
+	// bar's minimum width stays under the pane's.
+	more := gtk.NewButtonFromIconName("view-more-symbolic")
+	more.SetTooltipText("More actions")
+	a11yLabel(more, "More bulk actions")
+	more.ConnectClicked(func() { w.showBulkMoreMenu(more) })
 
 	cancel := gtk.NewButtonFromIconName("window-close-symbolic")
 	cancel.AddCSSClass("flat")
@@ -1661,14 +1607,101 @@ func (w *window) buildSelectionBar() {
 	w.selectionBar.AddCSSClass("toolbar")
 	setMargins(w.selectionBar, 6, 6, 4, 4)
 	w.selectionBar.Append(w.selectionLabel)
-	w.selectionBar.Append(selectAll)
 	w.selectionBar.Append(archive)
 	w.selectionBar.Append(trash)
-	w.selectionBar.Append(snooze)
-	w.selectionBar.Append(read)
-	w.selectionBar.Append(moveTo)
+	w.selectionBar.Append(more)
 	w.selectionBar.Append(cancel)
 	w.selectionBar.SetVisible(false)
+}
+
+// showBulkMoreMenu opens the selection bar's ⋯ menu: the bulk actions that
+// don't earn a top-level button — select all/none, snooze presets (a nested
+// flyout), mark read, and move-to-label.
+func (w *window) showBulkMoreMenu(parent gtk.Widgetter) {
+	logging.Trace("ui: show bulk more menu", "selected", len(w.selected))
+	pop := gtk.NewPopover()
+	pop.SetParent(parent)
+	pop.ConnectClosed(func() { pop.Unparent() })
+
+	box := gtk.NewBox(gtk.OrientationVertical, 0)
+	box.AddCSSClass("menu")
+	box.AddCSSClass("rowmenu")
+
+	item := func(parent *gtk.Box, label string, fn func()) {
+		lbl := gtk.NewLabel(label)
+		lbl.SetXAlign(0)
+		lbl.SetHExpand(true)
+		b := gtk.NewButton()
+		b.SetChild(lbl)
+		b.AddCSSClass("flat")
+		b.ConnectClicked(func() {
+			logging.Trace("ui: bulk more menu action", "action", label, "selected", len(w.selected))
+			pop.Popdown()
+			fn()
+		})
+		parent.Append(b)
+	}
+
+	item(box, "Select all / none", func() {
+		allSelected := len(w.threadByID) > 0 && len(w.selected) >= len(w.threadByID)
+		w.selected = map[string]bool{}
+		if !allSelected {
+			for id := range w.threadByID {
+				w.selected[id] = true
+			}
+		}
+		w.updateSelectionBar()
+		w.refreshList(w.searchEntry.Text()) // re-bind checkboxes
+	})
+	box.Append(gtk.NewSeparator(gtk.OrientationHorizontal))
+
+	// Bulk snooze: a nested flyout of the quick presets, applied to every
+	// selected conversation (Monday-morning triage in one sweep).
+	snPop := gtk.NewPopover()
+	snPop.SetHasArrow(false)
+	snPop.SetPosition(gtk.PosRight)
+	snBox := gtk.NewBox(gtk.OrientationVertical, 0)
+	snBox.AddCSSClass("menu")
+	snBox.AddCSSClass("rowmenu")
+	for _, p := range snoozePresets(time.Now()) {
+		p := p
+		item(snBox, p.label+" ("+p.t.Format("Mon 15:04")+")", func() {
+			snPop.Popdown()
+			w.bulkSnooze(p.t)
+		})
+	}
+	snPop.SetChild(snBox)
+	snLbl := gtk.NewLabel("Snooze")
+	snLbl.SetXAlign(0)
+	snLbl.SetHExpand(true)
+	snRow := gtk.NewBox(gtk.OrientationHorizontal, 6)
+	snRow.Append(snLbl)
+	snRow.Append(gtk.NewImageFromIconName("pan-end-symbolic"))
+	snBtn := gtk.NewButton()
+	snBtn.SetChild(snRow)
+	snBtn.AddCSSClass("flat")
+	snBtn.ConnectClicked(func() {
+		snPop.SetParent(snBtn)
+		snPop.Popup()
+	})
+	snPop.ConnectClosed(func() { snPop.Unparent() })
+	box.Append(snBtn)
+
+	item(box, "Mark read", func() { w.bulkApply("Marked read", nil, []string{model.LabelUnread}) })
+	item(box, "Move to…", func() {
+		if len(w.selected) == 0 {
+			return
+		}
+		// Capture the account owning the selection now: a mid-dialog account
+		// switch must not offer another account's labels (their ids are
+		// per-account and wouldn't exist on the selected messages' account).
+		w.showMoveToDialog(w.activeID, func(labelID, name string) {
+			w.bulkApply("Moved to "+name, []string{labelID}, moveLocationRemovals)
+		})
+	})
+
+	pop.SetChild(box)
+	pop.Popup()
 }
 
 // setSelectMode enters/leaves multi-select triage, re-binding the list so rows
