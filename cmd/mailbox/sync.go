@@ -171,6 +171,11 @@ func buildGmailService(ctx context.Context, cc auth.ClientConfig, account string
 		if err := auth.SaveRefreshToken(prof.EmailAddress, tok.RefreshToken); err != nil {
 			return nil, "", err
 		}
+		// Stamp the sign-in moment so the UI can say how old the credential is
+		// when it later expires (best-effort — visibility only).
+		if err := config.SaveConnectedTime(prof.EmailAddress, time.Now()); err != nil {
+			logging.Trace("sync: save connected time failed", "email", prof.EmailAddress, "err", err)
+		}
 	}
 	return srv, prof.EmailAddress, nil
 }

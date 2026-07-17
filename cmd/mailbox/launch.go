@@ -444,6 +444,11 @@ func launchUI(mailto string) error {
 				return 0, err
 			}
 		}
+		// Stamp the sign-in moment so the UI can say how old a credential is
+		// when it later expires (best-effort — visibility only).
+		if err := config.SaveConnectedTime(acct.Email, time.Now()); err != nil {
+			logging.Trace("launch: save connected time failed", "email", acct.Email, "err", err)
+		}
 		if err := upsertAccountKeepingCursor(ctx, st, acct.Email, atype); err != nil {
 			return 0, err
 		}
@@ -473,8 +478,9 @@ func launchUI(mailto string) error {
 			_ = auth.DeleteIMAPSecret(acc.Email)
 			_ = config.DeleteIMAPAccount(acc.Email)
 		}
-		_ = config.SaveAccountName(acc.Email, "")      // blank removes the name entry
-		_ = config.SaveAccountSignature(acc.Email, "") // blank removes the override
+		_ = config.SaveAccountName(acc.Email, "")            // blank removes the name entry
+		_ = config.SaveAccountSignature(acc.Email, "")       // blank removes the override
+		_ = config.SaveConnectedTime(acc.Email, time.Time{}) // zero removes the sign-in stamp
 		return nil
 	}
 	deps.OAuthConnect = func(ctx context.Context, kind config.AuthKind) (string, string, error) {

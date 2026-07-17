@@ -126,11 +126,12 @@ type window struct {
 	selected          map[string]bool // selected thread ids
 	selectionBar      *gtk.Box
 	selectionLabel    *gtk.Label
-	readOnlyBanner    *adw.Banner // revealed when no Gmail client (live features off)
-	outboxBanner      *adw.Banner // revealed when sends are queued/failed
-	emptyFolderBanner *adw.Banner // revealed in Trash/Spam to empty them permanently
-	authBanner        *adw.Banner // revealed when an account's sign-in expired/was revoked
-	authExpiredID     int64       // the account the auth banner's Reconnect targets (0 = none/unknown)
+	readOnlyBanner    *adw.Banner    // revealed when no Gmail client (live features off)
+	outboxBanner      *adw.Banner    // revealed when sends are queued/failed
+	emptyFolderBanner *adw.Banner    // revealed in Trash/Spam to empty them permanently
+	authBanner        *adw.Banner    // revealed when an account's sign-in expired/was revoked
+	authExpiredID     int64          // the account the auth banner's Reconnect targets (0 = none/unknown)
+	authReported      map[int64]bool // accounts whose expiry already got an activity-log row (AuthExpired repeats every failed sync pass)
 	searchEntry       *gtk.SearchEntry
 	suppressSearch    bool   // guards SetText from firing a search during label switch
 	serverSearch      bool   // current search is a Gmail server-side search, not local FTS
@@ -310,6 +311,7 @@ func newWindow(app *adw.Application, deps Deps) *window {
 		accountBadges:    map[int64]*gtk.Label{},
 		readerZoom:       1.0,
 		selected:         map[string]bool{},
+		authReported:     map[int64]bool{},
 		categories:       map[string]string{},
 		categorizedMsg:   map[string]string{},
 		manualCat:        map[string]bool{},
@@ -1131,6 +1133,7 @@ func (w *window) addAccount(a AccountInfo) {
 		w.authExpiredID = 0
 		w.authBanner.SetRevealed(false)
 	}
+	delete(w.authReported, a.ID) // a future expiry earns a fresh activity row
 	for _, e := range w.deps.Accounts {
 		if e.ID == a.ID {
 			return // already present (a reconnect re-adds the same id)
@@ -1179,6 +1182,7 @@ func (w *window) removeAccountFromUI(id int64) {
 		w.authExpiredID = 0
 		w.authBanner.SetRevealed(false)
 	}
+	delete(w.authReported, id)
 	if len(w.deps.Accounts) == 0 {
 		// Back to a clean first-run state.
 		w.activeID, w.activeEmail = 0, ""
@@ -6214,21 +6218,49 @@ func (w *window) onChange(c syncer.Change) {
 	case syncer.AuthExpired:
 		// The account's sign-in expired/was revoked; surface it (it won't recover
 		// without re-login) and name the account so multi-account users know which.
-		email := ""
+		email, acctType := "", ""
 		for _, a := range w.deps.Accounts {
 			if a.ID == c.AccountID {
-				email = a.Email
+				email, acctType = a.Email, a.Type
 				break
 			}
 		}
-		logging.Trace("ui: auth expired banner", "account", c.AccountID, "email", email)
-		w.authExpiredID = c.AccountID // the Reconnect button re-authenticates this one
+		// How old was the credential? Recorded at sign-in (connected.json), so an
+		// expiry names its age instead of looking arbitrary — a Google OAuth app
+		// left in "Testing" publishing status expires sign-ins after 7 days, and
+		// the age is what makes that pattern recognizable.
+		age, days := "", -1
 		if email != "" {
+			if t, ok := loadConnectedTime(email); ok {
+				days = int(time.Since(t).Hours() / 24)
+				age = signInAgePhrase(t, time.Now())
+			}
+		}
+		logging.Trace("ui: auth expired banner", "account", c.AccountID, "email", email, "type", acctType, "signInDays", days)
+		w.authExpiredID = c.AccountID // the Reconnect button re-authenticates this one
+		switch {
+		case email != "" && age != "":
+			w.authBanner.SetTitle("Sign-in expired for " + email + " (signed in " + age + ") — reconnect to keep syncing")
+		case email != "":
 			w.authBanner.SetTitle("Sign-in expired for " + email + " — reconnect to keep syncing")
-		} else {
+		default:
 			w.authBanner.SetTitle("An account's sign-in expired — reconnect to keep syncing")
 		}
 		w.authBanner.SetRevealed(true)
+		// One activity-log row per expiry (the sync loop republishes AuthExpired
+		// on every failed pass), carrying the age and — when the age fits the
+		// weekly pattern on a Google account — the likely cause.
+		if !w.authReported[c.AccountID] {
+			w.authReported[c.AccountID] = true
+			note := ""
+			if age != "" {
+				note = "signed in " + age
+				if acctType == model.AccountGmail && days >= 6 && days <= 8 {
+					note += " — Google apps in Testing mode expire sign-ins after 7 days; publish the app to Production to stop this"
+				}
+			}
+			w.deps.Activity.Report("mail", email, "Sign-in expired", note)
+		}
 	}
 	if c.Kind != syncer.MessageUpserted || c.GmailID == "" {
 		return

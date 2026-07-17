@@ -244,6 +244,16 @@ func (w *window) openSettings() {
 		r := adw.NewEntryRow()
 		r.SetTitle(a.Email)
 		r.SetText(w.accountNames[a.Email])
+		// When the sign-in moment is known, show its age — the number that makes
+		// a recurring weekly expiry (Google OAuth app in Testing mode) visible.
+		if t, ok := loadConnectedTime(a.Email); ok {
+			age := gtk.NewLabel("Signed in " + signInAgePhrase(t, time.Now()))
+			age.AddCSSClass("dim-label")
+			age.AddCSSClass("caption")
+			age.SetVAlign(gtk.AlignCenter)
+			age.SetTooltipText("Signed in " + t.Format("Jan 2, 2006 15:04"))
+			r.AddSuffix(age)
+		}
 		if w.deps.RemoveAccount != nil {
 			rm := gtk.NewButtonFromIconName("user-trash-symbolic")
 			rm.SetTooltipText("Remove account")
@@ -683,4 +693,26 @@ func (w *window) confirmRemoveAccount(a AccountInfo, onRemoved func()) {
 		}()
 	})
 	dialog.Present(w.win)
+}
+
+// loadConnectedTime returns the recorded sign-in moment for an account email
+// (stamped when its credential was saved) and whether one is known.
+func loadConnectedTime(email string) (time.Time, bool) {
+	times, _ := config.LoadConnectedTimes()
+	t, ok := times[email]
+	return t, ok && !t.IsZero()
+}
+
+// signInAgePhrase says how long ago a sign-in happened, in the activity log's
+// human voice: "today", "yesterday", "12 days ago".
+func signInAgePhrase(t, now time.Time) string {
+	days := int(now.Sub(t).Hours() / 24)
+	switch {
+	case days <= 0:
+		return "today"
+	case days == 1:
+		return "yesterday"
+	default:
+		return fmt.Sprintf("%d days ago", days)
+	}
 }
