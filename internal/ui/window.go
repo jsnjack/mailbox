@@ -2748,12 +2748,57 @@ func (w *window) setActionsSensitive(on bool) {
 
 // replyTarget is the address(es) a reply should go to: the Reply-To header when
 // the sender set one (some senders route replies elsewhere — lists, no-reply
-// aliases), otherwise the From address.
+// aliases), otherwise the From address with its display name (like Gmail's
+// compose prefill).
 func replyTarget(m model.Message) string {
 	if rt := strings.TrimSpace(m.ReplyTo); rt != "" {
 		return rt
 	}
-	return m.FromAddr
+	return addressToken(m.FromName, m.FromAddr)
+}
+
+// addressToken renders "Name <addr>" safely for a comma-separated recipient
+// line: a plain name stays unquoted (like Gmail's compose), one with specials
+// is quoted via net/mail so a comma in it can't split the list, and one that
+// would need RFC 2047 encoding is dropped — the encoded form is unreadable in
+// a compose entry — leaving the bare address.
+func addressToken(name, addr string) string {
+	name = strings.TrimSpace(name)
+	switch {
+	case name == "":
+		return addr
+	case plainName(name):
+		return name + " <" + addr + ">"
+	}
+	s := (&mail.Address{Name: name, Address: addr}).String()
+	if strings.Contains(s, "=?") {
+		return addr
+	}
+	return s
+}
+
+// plainName reports whether a display name needs no quoting or encoding in a
+// recipient line (ASCII letters/digits/space and -/' only).
+func plainName(s string) bool {
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == ' ', r == '-', r == '\'':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// replyToLine is the To line for a sender-only reply to m. Replying to your
+// own message continues it to its original recipients (Gmail behavior) rather
+// than addressing yourself.
+func replyToLine(m model.Message, own bool) string {
+	if own && strings.TrimSpace(m.ToAddrs) != "" {
+		return m.ToAddrs
+	}
+	return replyTarget(m)
 }
 
 // isGitHubNotification reports whether m is a GitHub notification email
@@ -2795,7 +2840,7 @@ func (w *window) replyQuote(m model.Message) (body, quoteHTML string) {
 func (w *window) replyInit(m model.Message) model.OutgoingMessage {
 	body, quoteHTML := w.replyQuote(m)
 	return model.OutgoingMessage{
-		To:            replyTarget(m),
+		To:            replyToLine(m, w.isOwnAddress(m.FromAddr)),
 		Subject:       ensureRePrefix(m.Subject),
 		Body:          body,
 		QuoteHTML:     quoteHTML,
@@ -3025,8 +3070,12 @@ func aiPopRow(text string, wrap bool) *gtk.Button {
 	return b
 }
 
-// replyAllRecipients computes To (original sender + original To) and Cc (original
-// Cc), excluding the account's own address and de-duplicating.
+// replyAllRecipients computes To (reply target + original To) and Cc (original
+// Cc), excluding the account's own address and de-duplicating across both
+// lines. Display names are preserved (Gmail-like, via addressToken). Bcc is
+// never carried into a reply, matching Gmail. When every candidate was you (a
+// note to yourself), To falls back to the reply target so the compose never
+// opens with no recipient.
 func replyAllRecipients(m model.Message, self string) (to, cc string) {
 	seen := map[string]bool{strings.ToLower(strings.TrimSpace(self)): true}
 	collect := func(raw string) []string {
@@ -3041,12 +3090,15 @@ func replyAllRecipients(m model.Message, self string) (to, cc string) {
 				continue
 			}
 			seen[key] = true
-			out = append(out, a.Address)
+			out = append(out, addressToken(a.Name, a.Address))
 		}
 		return out
 	}
 	toList := append(collect(replyTarget(m)), collect(m.ToAddrs)...)
 	ccList := collect(m.CcAddrs)
+	if len(toList) == 0 && len(ccList) == 0 {
+		return replyTarget(m), ""
+	}
 	return strings.Join(toList, ", "), strings.Join(ccList, ", ")
 }
 

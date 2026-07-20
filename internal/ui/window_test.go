@@ -267,3 +267,62 @@ func TestFormatRecipients(t *testing.T) {
 		t.Fatalf("unparseable list should not link: %s", got)
 	}
 }
+
+// addressToken renders "Name <addr>" safely for a comma-separated recipient
+// line: names with specials get quoted, non-ASCII names (which would need
+// RFC 2047 encoding — unreadable in a compose entry) fall back to the address.
+func TestAddressToken(t *testing.T) {
+	cases := []struct{ name, addr, want string }{
+		{"", "a@x.com", "a@x.com"},
+		{"Alice", "a@x.com", "Alice <a@x.com>"},
+		{"Doe, John", "j@x.com", `"Doe, John" <j@x.com>`},
+		{"Пётр", "p@x.com", "p@x.com"},
+	}
+	for _, c := range cases {
+		if got := addressToken(c.name, c.addr); got != c.want {
+			t.Fatalf("addressToken(%q, %q) = %q, want %q", c.name, c.addr, got, c.want)
+		}
+	}
+}
+
+// Replying (sender-only) to your own message continues it to its original
+// recipients — Gmail behavior — instead of addressing yourself.
+func TestReplyToLine(t *testing.T) {
+	m := model.Message{FromAddr: "me@self.com", ToAddrs: "Bob <bob@x.com>, carol@x.com"}
+	if got := replyToLine(m, true); got != "Bob <bob@x.com>, carol@x.com" {
+		t.Fatalf("own message: got %q", got)
+	}
+	// Someone else's message: normal reply target (with display name).
+	other := model.Message{FromName: "Alice", FromAddr: "alice@x.com", ToAddrs: "me@self.com"}
+	if got := replyToLine(other, false); got != "Alice <alice@x.com>" {
+		t.Fatalf("other's message: got %q", got)
+	}
+	// Own message with no To recorded: fall back to the reply target.
+	if got := replyToLine(model.Message{FromAddr: "me@self.com"}, true); got != "me@self.com" {
+		t.Fatalf("own message without To: got %q", got)
+	}
+}
+
+// Reply-all preserves display names and falls back to the reply target when
+// every candidate was excluded (a note to yourself).
+func TestReplyAllRecipientNames(t *testing.T) {
+	m := model.Message{
+		FromName: "Alice", FromAddr: "alice@x.com",
+		ToAddrs: "Bob Smith <bob@x.com>, me@self.com",
+		CcAddrs: "Carol <carol@x.com>",
+	}
+	to, cc := replyAllRecipients(m, "me@self.com")
+	if to != "Alice <alice@x.com>, Bob Smith <bob@x.com>" {
+		t.Fatalf("to = %q", to)
+	}
+	if cc != "Carol <carol@x.com>" {
+		t.Fatalf("cc = %q", cc)
+	}
+
+	// Note to yourself: everyone excluded → reply to yourself, not to no one.
+	self := model.Message{FromAddr: "me@self.com", ToAddrs: "me@self.com"}
+	to, cc = replyAllRecipients(self, "me@self.com")
+	if to != "me@self.com" || cc != "" {
+		t.Fatalf("note-to-self: to=%q cc=%q", to, cc)
+	}
+}
