@@ -29,6 +29,7 @@ func ToMessage(accountID int64, m *gmail.Message) model.Message {
 		ReplyTo:      headerValue(headers, "Reply-To"),
 		ToAddrs:      headerValue(headers, "To"),
 		CcAddrs:      headerValue(headers, "Cc"),
+		BccAddrs:     headerValue(headers, "Bcc"),
 		Subject:      headerValue(headers, "Subject"),
 		// Gmail's snippet is HTML-escaped (e.g. "it&#39;s"); store it as plain text.
 		Snippet:        html.UnescapeString(m.Snippet),

@@ -17,7 +17,7 @@ import (
 const msgCols = `m.rowid, m.account_id, m.gmail_id, m.thread_id, m.internal_date, ` +
 	`m.from_name, m.from_addr, m.reply_to, m.to_addrs, m.cc_addrs, m.subject, m.snippet, ` +
 	`m.rfc822_msgid, m.in_reply_to, m.references_hdr, m.is_unread, m.is_starred, ` +
-	`m.has_attachments, m.size_estimate, m.body_fetched, m.list_unsubscribe, m.list_unsub_post`
+	`m.has_attachments, m.size_estimate, m.body_fetched, m.list_unsubscribe, m.list_unsub_post, m.bcc_addrs`
 
 // UpsertMessage inserts or updates a message's metadata, replaces its label set,
 // and refreshes its full-text index entry. It returns the message's local rowid.
@@ -99,8 +99,8 @@ func upsertMessageTx(ctx context.Context, tx *sql.Tx, m model.Message) (int64, e
 			account_id, gmail_id, thread_id, internal_date, from_name, from_addr,
 			reply_to, to_addrs, cc_addrs, subject, snippet, rfc822_msgid, in_reply_to,
 			references_hdr, is_unread, is_starred, has_attachments, size_estimate,
-			list_unsubscribe, list_unsub_post)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+			list_unsubscribe, list_unsub_post, bcc_addrs)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(account_id, gmail_id) DO UPDATE SET
 			thread_id=excluded.thread_id, internal_date=excluded.internal_date,
 			from_name=excluded.from_name, from_addr=excluded.from_addr,
@@ -110,12 +110,13 @@ func upsertMessageTx(ctx context.Context, tx *sql.Tx, m model.Message) (int64, e
 			references_hdr=excluded.references_hdr, is_unread=excluded.is_unread,
 			is_starred=excluded.is_starred, has_attachments=excluded.has_attachments,
 			size_estimate=excluded.size_estimate,
-			list_unsubscribe=excluded.list_unsubscribe, list_unsub_post=excluded.list_unsub_post
+			list_unsubscribe=excluded.list_unsubscribe, list_unsub_post=excluded.list_unsub_post,
+			bcc_addrs=excluded.bcc_addrs
 		RETURNING rowid`,
 		m.AccountID, m.GmailID, m.ThreadID, idate, m.FromName, m.FromAddr,
 		m.ReplyTo, m.ToAddrs, m.CcAddrs, m.Subject, m.Snippet, m.RFC822MsgID, m.InReplyTo,
 		m.References, b2i(m.IsUnread), b2i(m.IsStarred), b2i(m.HasAttachments), m.SizeEstimate,
-		m.ListUnsubscribe, b2i(m.ListUnsubOneClick),
+		m.ListUnsubscribe, b2i(m.ListUnsubOneClick), m.BccAddrs,
 	).Scan(&rowid)
 	if err != nil {
 		return 0, fmt.Errorf("upsert message %q: %w", m.GmailID, err)
@@ -877,17 +878,19 @@ func scanMessage(sc rowScanner) (model.Message, error) {
 		fetched int
 		unsub   sql.NullString
 		unsubP  int
+		bcc     sql.NullString
 		strs    = make([]sql.NullString, 10) // from_name..references_hdr text columns
 	)
 	if err := sc.Scan(
 		&m.RowID, &m.AccountID, &m.GmailID, &m.ThreadID, &idate,
 		&strs[0], &strs[1], &strs[2], &strs[3], &strs[4], &strs[5],
 		&strs[6], &strs[7], &strs[8], &strs[9],
-		&unread, &starred, &hasAtt, &size, &fetched, &unsub, &unsubP,
+		&unread, &starred, &hasAtt, &size, &fetched, &unsub, &unsubP, &bcc,
 	); err != nil {
 		return model.Message{}, err
 	}
 	m.ListUnsubscribe, m.ListUnsubOneClick = unsub.String, unsubP != 0
+	m.BccAddrs = bcc.String
 	m.FromName, m.FromAddr, m.ReplyTo = strs[0].String, strs[1].String, strs[2].String
 	m.ToAddrs, m.CcAddrs = strs[3].String, strs[4].String
 	m.Subject, m.Snippet = strs[5].String, strs[6].String

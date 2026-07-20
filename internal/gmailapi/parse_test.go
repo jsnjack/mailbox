@@ -145,3 +145,19 @@ func TestHasAttachments(t *testing.T) {
 		t.Fatal("did not expect attachments")
 	}
 }
+
+// Bcc appears only on the user's own copies (sent, drafts); it must survive
+// the metadata conversion so draft re-edit and the reader keep it.
+func TestToMessageCapturesBcc(t *testing.T) {
+	m := ToMessage(1, &gmail.Message{
+		Id: "m1",
+		Payload: &gmail.MessagePart{Headers: []*gmail.MessagePartHeader{
+			{Name: "To", Value: "a@x.com"},
+			{Name: "Cc", Value: "b@x.com"},
+			{Name: "Bcc", Value: "Secret <c@x.com>"},
+		}},
+	})
+	if m.ToAddrs != "a@x.com" || m.CcAddrs != "b@x.com" || m.BccAddrs != "Secret <c@x.com>" {
+		t.Fatalf("to/cc/bcc = %q/%q/%q", m.ToAddrs, m.CcAddrs, m.BccAddrs)
+	}
+}

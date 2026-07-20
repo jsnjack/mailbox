@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS messages (
   body_fetched    INTEGER NOT NULL DEFAULT 0,
   list_unsubscribe TEXT NOT NULL DEFAULT '',   -- List-Unsubscribe header value ('' = none)
   list_unsub_post  INTEGER NOT NULL DEFAULT 0, -- 1 when List-Unsubscribe-Post offers RFC 8058 one-click
+  bcc_addrs        TEXT NOT NULL DEFAULT '',   -- only ever set on own sent/draft copies
   UNIQUE (account_id, gmail_id)
 );
 

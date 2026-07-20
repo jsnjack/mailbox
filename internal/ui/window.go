@@ -3677,6 +3677,7 @@ func (w *window) openDraftForEdit(threadID string) {
 			w.openCompose(model.OutgoingMessage{
 				To:         strings.TrimSpace(dm.ToAddrs),
 				Cc:         strings.TrimSpace(dm.CcAddrs),
+				Bcc:        strings.TrimSpace(dm.BccAddrs),
 				Subject:    dm.Subject,
 				Body:       body,
 				InReplyTo:  dm.InReplyTo,
@@ -4277,6 +4278,11 @@ func (w *window) conversationSection(m model.Message, body model.MessageBody, cl
 	}
 	if cc := strings.TrimSpace(m.CcAddrs); cc != "" {
 		fmt.Fprintf(&hb, `<div style="color:#888">cc %s</div>`, w.formatRecipients(cc))
+	}
+	// Only your own copies (sent mail, drafts) ever carry Bcc — shown like
+	// Gmail shows it on a sent message.
+	if bcc := strings.TrimSpace(m.BccAddrs); bcc != "" {
+		fmt.Fprintf(&hb, `<div style="color:#888">bcc %s</div>`, w.formatRecipients(bcc))
 	}
 	hb.WriteString(`</div>`)
 	hb.WriteString(gistCard(m.GmailID, gist))

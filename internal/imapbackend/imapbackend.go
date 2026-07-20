@@ -861,6 +861,7 @@ func (b *Backend) toMessage(mailbox string, uidv uint32, buf *imapclient.FetchMe
 		}
 		m.ToAddrs = addrList(env.To)
 		m.CcAddrs = addrList(env.Cc)
+		m.BccAddrs = addrList(env.Bcc) // only present on own sent/draft copies
 		if !env.Date.IsZero() && m.InternalDate.IsZero() {
 			m.InternalDate = env.Date
 		}

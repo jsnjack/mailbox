@@ -88,16 +88,19 @@ type Thread struct {
 // Message is the metadata for a single message. The body lives in MessageBody
 // and is loaded lazily when the message is opened.
 type Message struct {
-	RowID          int64
-	AccountID      int64
-	GmailID        string
-	ThreadID       string
-	InternalDate   time.Time
-	FromName       string
-	FromAddr       string
-	ReplyTo        string // Reply-To header (raw); replies target this over From when set
-	ToAddrs        string
-	CcAddrs        string
+	RowID        int64
+	AccountID    int64
+	GmailID      string
+	ThreadID     string
+	InternalDate time.Time
+	FromName     string
+	FromAddr     string
+	ReplyTo      string // Reply-To header (raw); replies target this over From when set
+	ToAddrs      string
+	CcAddrs      string
+	// BccAddrs is only ever non-empty on the user's own copies (sent mail,
+	// drafts) — a received message never carries the Bcc header.
+	BccAddrs       string
 	Subject        string
 	Snippet        string
 	RFC822MsgID    string

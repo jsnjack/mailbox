@@ -668,3 +668,25 @@ func TestSearchMalformedInputDoesNotError(t *testing.T) {
 		}
 	}
 }
+
+// bcc_addrs must survive the upsert→get roundtrip (draft re-edit and the
+// reader's bcc line depend on it).
+func TestMessageBccRoundtrip(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	acc := seedAccount(t, s)
+	if _, err := s.UpsertMessage(ctx, model.Message{
+		AccountID: acc, GmailID: "b1", ThreadID: "b1",
+		InternalDate: time.Unix(100, 0),
+		ToAddrs:      "a@x.com", CcAddrs: "b@x.com", BccAddrs: "Secret <c@x.com>",
+	}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	m, err := s.GetMessage(ctx, acc, "b1")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if m.BccAddrs != "Secret <c@x.com>" {
+		t.Fatalf("BccAddrs = %q", m.BccAddrs)
+	}
+}
