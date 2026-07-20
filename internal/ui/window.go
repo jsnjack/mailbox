@@ -155,6 +155,11 @@ type window struct {
 	// one background pass, instead of one main-thread GetMessage per event.
 	notifyQueue     []notifyCandidate
 	notifyScheduled bool
+	// userUnread records messages the user explicitly marked unread (reader
+	// toggle, row menu, or undoing a mark-read), keyed account/gmailID. The
+	// self-sent auto-clear in checkNewMail must never fight an explicit mark
+	// when the change echoes back from the provider. Main thread only.
+	userUnread map[string]bool
 	// unreadRefreshPending coalesces per-account unread-pill refreshes triggered
 	// by bursts of sibling-account sync events (the query runs off-thread).
 	unreadRefreshPending bool
@@ -319,6 +324,7 @@ func newWindow(app *adw.Application, deps Deps) *window {
 		inlineRefetched:  map[string]bool{},
 		gistRequested:    map[string]bool{},
 		appliedGists:     map[string]string{},
+		userUnread:       map[string]bool{},
 	}
 	w.accountNames, _ = config.LoadAccountNames()
 	w.rebuildKeymap()
@@ -4578,13 +4584,13 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer in.Close()
+	defer func() { _ = in.Close() }()
 	out, err := os.Create(dst)
 	if err != nil {
 		return err
 	}
 	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
+		_ = out.Close()
 		return err
 	}
 	return out.Close()
@@ -5894,6 +5900,14 @@ func (w *window) applyLabels(msgs []model.Message, add, remove []string, after f
 	if w.deps.ModifyLabels == nil || len(msgs) == 0 {
 		return
 	}
+	if slices.Contains(add, model.LabelUnread) {
+		// An explicit mark-unread (reader toggle, row menu, or undoing a
+		// mark-read): remember it so the self-sent auto-clear in checkNewMail
+		// doesn't revert it when the change echoes back from the provider.
+		for _, m := range msgs {
+			w.userUnread[selfUnreadKey(m.AccountID, m.GmailID)] = true
+		}
+	}
 	accountID := msgs[0].AccountID
 	ids := make([]string, len(msgs))
 	for i, m := range msgs {
@@ -6273,6 +6287,15 @@ func (w *window) onChange(c syncer.Change) {
 type notifyCandidate struct {
 	accountID int64
 	gmailID   string
+	// userMarked snapshots userUnread on the main thread before the check runs
+	// off it: the user explicitly marked this message unread, so the self-sent
+	// auto-clear must leave it alone.
+	userMarked bool
+}
+
+// selfUnreadKey keys userUnread entries across accounts.
+func selfUnreadKey(accountID int64, gmailID string) string {
+	return fmt.Sprintf("%d/%s", accountID, gmailID)
 }
 
 // notifyCoalesceMS is how long queued notification checks wait for a burst of
@@ -6293,6 +6316,9 @@ func (w *window) queueNewMailCheck(accountID int64, gmailID string) {
 		batch := w.notifyQueue
 		w.notifyQueue = nil
 		w.notifyScheduled = false
+		for i := range batch {
+			batch[i].userMarked = w.userUnread[selfUnreadKey(batch[i].accountID, batch[i].gmailID)]
+		}
 		logging.Trace("ui: new-mail check batch", "n", len(batch))
 		go w.checkNewMail(batch)
 		return false
@@ -6309,6 +6335,7 @@ func (w *window) checkNewMail(batch []notifyCandidate) {
 	}
 	ctx := context.Background()
 	var hits []hit
+	selfUnread := map[int64][]string{}
 	for _, c := range batch {
 		m, err := w.deps.Store.GetMessage(ctx, c.accountID, c.gmailID)
 		if err != nil || !m.IsUnread || !m.InternalDate.After(w.startTime) {
@@ -6317,15 +6344,32 @@ func (w *window) checkNewMail(batch []notifyCandidate) {
 		if w.isOwnAddress(m.FromAddr) {
 			// A message this app sent (a reply, or self-addressed mail) —
 			// Gmail can legitimately label its own sent copy INBOX+UNREAD, but
-			// it isn't new mail to look at, so don't notify.
-			logging.Trace("ui: new-mail check skip self-sent", "id", m.GmailID, "from", m.FromAddr)
+			// it isn't new mail to look at, so don't notify. When the copy is
+			// genuinely the user's outgoing message (SENT — not spoofed From),
+			// the unread state came from the provider merging a looped-back
+			// copy (e.g. a recipient alias forwarding into this mailbox), so
+			// clear it too — unless the user explicitly marked it unread.
+			logging.Trace("ui: new-mail check skip self-sent", "id", m.GmailID, "from", m.FromAddr, "user_marked", c.userMarked)
+			if hasLabel(m, model.LabelSent) && !c.userMarked {
+				selfUnread[c.accountID] = append(selfUnread[c.accountID], m.GmailID)
+			}
 			continue
 		}
 		if hasLabel(m, model.LabelInbox) {
 			hits = append(hits, hit{accountID: c.accountID, msg: m})
 		}
 	}
-	logging.Trace("ui: new-mail check done", "batch", len(batch), "notify", len(hits))
+	if w.deps.ModifyLabels != nil {
+		for accountID, ids := range selfUnread {
+			// Optimistic local change + provider mirror, so the thread stops
+			// rendering bold here, on other machines, and on the phone.
+			logging.Trace("ui: clear self-sent unread", "account", accountID, "n", len(ids))
+			if err := w.deps.ModifyLabels(ctx, accountID, ids, nil, []string{model.LabelUnread}); err != nil {
+				slog.Warn("ui: clear self-sent unread", "n", len(ids), "err", err)
+			}
+		}
+	}
+	logging.Trace("ui: new-mail check done", "batch", len(batch), "notify", len(hits), "self_unread", len(selfUnread))
 	if len(hits) == 0 {
 		return
 	}
