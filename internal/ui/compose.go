@@ -779,29 +779,46 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 		// Refine with AI: rewrite the selection — or, with nothing selected, the
 		// user's own writing (grammarRange: everything above the signature/quote,
 		// i.e. the whole body of a new message, just the reply text of a reply) —
-		// to a free-text instruction entered in a popover.
-		refineEntry := gtk.NewEntry()
-		refineEntry.SetPlaceholderText("e.g. shorter, more formal…")
-		refineEntry.SetWidthChars(28)
+		// to a free-text instruction entered in a popover. The instruction is
+		// multiline (a fuller brief refines better than one line); Enter submits,
+		// Shift+Enter inserts a newline.
+		hint := gtk.NewLabel("e.g. shorter, more formal…")
+		hint.AddCSSClass("dim-label")
+		hint.SetXAlign(0)
+		refineView := gtk.NewTextView()
+		refineView.SetWrapMode(gtk.WrapWordChar)
+		refineView.SetAcceptsTab(false) // Tab moves focus to Refine rather than inserting a tab
+		refineView.SetLeftMargin(6)
+		refineView.SetRightMargin(6)
+		refineView.SetTopMargin(6)
+		refineView.SetBottomMargin(6)
+		refineScroller := gtk.NewScrolledWindow()
+		refineScroller.SetPolicy(gtk.PolicyNever, gtk.PolicyAutomatic)
+		refineScroller.SetMinContentHeight(64)
+		refineScroller.SetSizeRequest(280, -1)
+		refineScroller.SetChild(refineView)
+		refineScroller.AddCSSClass("card")
 		refineGo := gtk.NewButtonWithLabel("Refine")
 		refineGo.AddCSSClass("suggested-action")
+		refineGo.SetHAlign(gtk.AlignEnd)
 
-		row := gtk.NewBox(gtk.OrientationHorizontal, 6)
-		setMargins(row, 6, 6, 6, 6)
-		row.Append(refineEntry)
-		row.Append(refineGo)
+		col := gtk.NewBox(gtk.OrientationVertical, 6)
+		setMargins(col, 6, 6, 6, 6)
+		col.Append(hint)
+		col.Append(refineScroller)
+		col.Append(refineGo)
 		pop := gtk.NewPopover()
-		pop.SetChild(row)
+		pop.SetChild(col)
 
 		refineBtn := gtk.NewMenuButton()
 		refineBtn.SetIconName("document-edit-symbolic")
 		refineBtn.SetTooltipText("Refine with AI — rewrites the selection (or your whole text) to your instruction")
 		a11yLabel(refineBtn, "Refine with AI")
 		refineBtn.SetPopover(pop)
-		pop.ConnectShow(func() { refineEntry.GrabFocus() })
+		pop.ConnectShow(func() { refineView.GrabFocus() })
 
 		runRefine := func() {
-			instruction := strings.TrimSpace(refineEntry.Text())
+			instruction := strings.TrimSpace(bodyText(refineView.Buffer()))
 			if instruction == "" {
 				return
 			}
@@ -851,7 +868,17 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 				})
 			}()
 		}
-		refineEntry.ConnectActivate(runRefine)
+		// Capture phase: the TextView would otherwise consume Return as a newline.
+		refineKeys := gtk.NewEventControllerKey()
+		refineKeys.SetPropagationPhase(gtk.PhaseCapture)
+		refineKeys.ConnectKeyPressed(func(keyval, _ uint, state gdk.ModifierType) bool {
+			if (keyval == gdk.KEY_Return || keyval == gdk.KEY_KP_Enter) && state&gdk.ShiftMask == 0 {
+				runRefine()
+				return true
+			}
+			return false
+		})
+		refineView.AddController(refineKeys)
 		refineGo.ConnectClicked(runRefine)
 		hb.PackEnd(refineBtn)
 	}
