@@ -229,3 +229,41 @@ func TestAnyStarred(t *testing.T) {
 		t.Fatal("newest starred message should star the thread")
 	}
 }
+
+// formatRecipients: every recipient is an address-card link (mbaction:rcpt)
+// labeled "me"/display-name/address, and long lists collapse behind an
+// in-place "+N more" toggle instead of dropping the tail.
+func TestFormatRecipients(t *testing.T) {
+	w := &window{deps: Deps{Accounts: []AccountInfo{{ID: 1, Email: "me@self.com"}}}}
+
+	got := w.formatRecipients("Me <me@self.com>, Bob Smith <bob@x.com>, carol@x.com")
+	for _, want := range []string{
+		`>me</a>`, `>Bob Smith</a>`, `>carol@x.com</a>`, // labels
+		`href="mbaction:rcpt/`,              // each is a card link
+		`title="bob@x.com"`,                 // full address on hover
+		`%22Bob+Smith%22+%3Cbob%40x.com%3E`, // RFC 5322 token, query-escaped
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("formatRecipients missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "mbmore") {
+		t.Fatalf("3 recipients should not collapse: %s", got)
+	}
+
+	long := w.formatRecipients("a@x.com, b@x.com, c@x.com, d@x.com, e@x.com")
+	for _, want := range []string{
+		`<span class="mbrest" hidden>`, // tail present but collapsed
+		`>d@x.com</a>`, `>e@x.com</a>`, // ...containing the hidden recipients
+		`data-more="+2 more"`, `>+2 more</a>`,
+	} {
+		if !strings.Contains(long, want) {
+			t.Fatalf("collapsed list missing %q in:\n%s", want, long)
+		}
+	}
+
+	// Unparseable input falls back to escaped text, no links.
+	if got := w.formatRecipients("undisclosed-recipients:;"); strings.Contains(got, "mbaction") {
+		t.Fatalf("unparseable list should not link: %s", got)
+	}
+}

@@ -2406,6 +2406,8 @@ func (w *window) onDecidePolicy(decision webkit.PolicyDecisioner, dtype webkit.P
 		switch act {
 		case "sender":
 			w.showSenderActions(id)
+		case "rcpt":
+			w.showRecipientActions(id)
 		case "menu":
 			w.showMessageMenu(id)
 		default:
@@ -4197,10 +4199,17 @@ func formatMsgDate(t, now time.Time) string {
 	return t.Format("Jan 2, 2006 15:04")
 }
 
+// rcptShown is how many recipients a To/Cc line shows before collapsing the
+// rest behind "+N more" (expanded in place by the shell script — no re-render,
+// so the reader's scroll position survives).
+const rcptShown = 3
+
 // formatRecipients renders a recipient list compactly: the user's own
 // addresses become "me" (the mail being addressed to you is the routine case),
-// others show their display name, and long lists truncate to "+N" — the full
-// raw list stays on hover. Senders keep their full address elsewhere (an
+// others show their display name, and long lists collapse to "+N more". Every
+// recipient is a link opening its address card (mbaction:rcpt — copy, search,
+// compose; the same pattern as the sender name), and each shows its full
+// address on hover. Senders keep their full address inline elsewhere (an
 // anti-phishing choice); recipients don't need it.
 func (w *window) formatRecipients(list string) string {
 	own := make(map[string]bool, len(w.deps.Accounts))
@@ -4213,23 +4222,25 @@ func (w *window) formatRecipients(list string) string {
 	}
 	var parts []string
 	for _, a := range addrs {
+		label := a.Address
 		switch {
 		case own[strings.ToLower(a.Address)]:
-			parts = append(parts, "me")
+			label = "me"
 		case a.Name != "":
-			parts = append(parts, a.Name)
-		default:
-			parts = append(parts, a.Address)
+			label = a.Name
 		}
+		// a.String() re-serializes "Name <addr>" so the card gets both parts;
+		// QueryEscape keeps the href attribute-safe.
+		parts = append(parts, fmt.Sprintf(`<a href="mbaction:rcpt/%s" class="mbrcpt" title="%s">%s</a>`,
+			url.QueryEscape(a.String()), html.EscapeString(a.Address), html.EscapeString(label)))
 	}
-	shown := parts
-	suffix := ""
-	if len(parts) > 3 {
-		shown = parts[:3]
-		suffix = fmt.Sprintf(" +%d", len(parts)-3)
+	if len(parts) <= rcptShown {
+		return strings.Join(parts, ", ")
 	}
-	return `<span title="` + html.EscapeString(list) + `">` +
-		html.EscapeString(strings.Join(shown, ", ")) + suffix + `</span>`
+	more := fmt.Sprintf("+%d more", len(parts)-rcptShown)
+	return strings.Join(parts[:rcptShown], ", ") +
+		`<span class="mbrest" hidden>, ` + strings.Join(parts[rcptShown:], ", ") + `</span> ` +
+		`<a href="#" class="mbmore" data-more="` + more + `" data-less="show less">` + more + `</a>`
 }
 
 // conversationSection renders one message's header + body and returns the HTML
@@ -5110,6 +5121,58 @@ func (w *window) showSenderActions(gmailID string) {
 	addr := strings.TrimSpace(m.FromAddr)
 	logging.Trace("ui: sender actions", "id", gmailID, "addr", addr)
 
+	w.addressActionsDialog(addr, func(item func(label string, fn func())) {
+		if w.deps.SearchServer != nil {
+			item("Find emails from "+displayFrom(m), func() { w.searchFrom(addr) })
+		}
+		if m.ListUnsubscribe != "" {
+			item("Unsubscribe", func() {
+				if t, ok := parseListUnsubscribe(m.ListUnsubscribe, m.ListUnsubOneClick); ok {
+					w.performUnsubscribe(m.AccountID, displayFrom(m), t, nil)
+				}
+			})
+		}
+		if w.blockImages && addr != "" && !w.trustedImgs[strings.ToLower(addr)] {
+			item("Always load images from this sender", func() { w.trustImagesFrom(addr) })
+		}
+	})
+}
+
+// showRecipientActions presents the address card for a recipient in a message
+// header (To/Cc) — the same surface the sender name opens, minus the
+// sender-only items (unsubscribe, image trust). token is the RFC 5322 form
+// carried by the mbaction:rcpt link ("Name <addr>" or a bare address).
+func (w *window) showRecipientActions(token string) {
+	addr, name := strings.TrimSpace(token), ""
+	if p, err := mail.ParseAddress(token); err == nil {
+		addr, name = strings.TrimSpace(p.Address), p.Name
+	}
+	if addr == "" {
+		return
+	}
+	logging.Trace("ui: recipient actions", "addr", addr, "name", name)
+
+	w.addressActionsDialog(addr, func(item func(label string, fn func())) {
+		who := name
+		if who == "" {
+			who = addr
+		}
+		if w.deps.SearchServer != nil {
+			item("Find emails from "+who, func() { w.searchFrom(addr) })
+		}
+		if w.deps.Send != nil {
+			item("New message to this address", func() {
+				w.openCompose(model.OutgoingMessage{To: formatContact(model.Contact{Name: name, Address: addr})}, "", "New message")
+			})
+		}
+	})
+}
+
+// addressActionsDialog is the shared scaffold of the sender/recipient address
+// cards: a small boxed-list dialog titled with the address, opening with a
+// "Copy address" row; build appends the surface-specific rows via item (each
+// row closes the dialog before acting).
+func (w *window) addressActionsDialog(addr string, build func(item func(label string, fn func()))) {
 	list := gtk.NewListBox()
 	list.AddCSSClass("boxed-list")
 	list.SetSelectionMode(gtk.SelectionNone)
@@ -5133,19 +5196,7 @@ func (w *window) showSenderActions(gmailID string) {
 			w.toast("Copied " + addr)
 		}
 	})
-	if w.deps.SearchServer != nil {
-		item("Find emails from "+displayFrom(m), func() { w.searchFrom(addr) })
-	}
-	if m.ListUnsubscribe != "" {
-		item("Unsubscribe", func() {
-			if t, ok := parseListUnsubscribe(m.ListUnsubscribe, m.ListUnsubOneClick); ok {
-				w.performUnsubscribe(m.AccountID, displayFrom(m), t, nil)
-			}
-		})
-	}
-	if w.blockImages && addr != "" && !w.trustedImgs[strings.ToLower(addr)] {
-		item("Always load images from this sender", func() { w.trustImagesFrom(addr) })
-	}
+	build(item)
 
 	box := gtk.NewBox(gtk.OrientationVertical, 0)
 	setMargins(box, 12, 12, 6, 12)
@@ -6921,6 +6972,10 @@ td,th{overflow-wrap:break-word;word-break:normal}
 .mbmenu:hover{opacity:1}
 .mbmenu svg{width:15px;height:15px;vertical-align:-3px}
 a[href^="mbaction:sender/"]:hover{text-decoration:underline!important}
+a.mbrcpt{color:inherit;text-decoration:none}
+a.mbrcpt:hover{text-decoration:underline}
+a.mbmore{color:#1a5fb4;text-decoration:none;white-space:nowrap}
+a.mbmore:hover{text-decoration:underline}
 img,video{max-width:100%!important;height:auto!important}
 pre{font-family:monospace;white-space:pre-wrap}
 details.mbmsg>summary{cursor:pointer;list-style:none;color:#555;font-size:90%;border-top:1px solid #ddd;margin-top:18px;padding:8px 0 2px}
@@ -6959,6 +7014,11 @@ details.mbmsg[open]>summary .mbprev{display:none}
 		// never needs CSS escaping.
 		`window.__mbGist=function(id,text){if(!wrap)return;wrap.querySelectorAll('.mbgist').forEach(function(el){` +
 		`if(el.dataset.mid!==id)return;var t=el.querySelector('.mbgist-text');if(t){t.textContent=text;}el.hidden=false;});fit();};` +
+		// "+N more" on a To/Cc line toggles the collapsed recipients in place
+		// (delegated: header HTML arrives later via __mbSet innerHTML swaps).
+		`document.addEventListener('click',function(e){var t=e.target&&e.target.closest?e.target.closest('a.mbmore'):null;if(!t)return;` +
+		`e.preventDefault();var r=t.parentNode.querySelector('.mbrest');if(!r)return;r.hidden=!r.hidden;` +
+		`t.textContent=r.hidden?t.dataset.more:t.dataset.less;fit();},true);` +
 		`try{window.webkit.messageHandlers.` + shellReadyHandler + `.postMessage(true);}catch(e){}}` +
 		`if(document.readyState!=='loading'){setup();}else{document.addEventListener('DOMContentLoaded',setup);}})();</script>`
 
