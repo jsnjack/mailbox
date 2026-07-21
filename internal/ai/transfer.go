@@ -2,7 +2,6 @@ package ai
 
 import (
 	"io"
-	"net"
 	"net/http"
 	"sync/atomic"
 	"time"
@@ -29,8 +28,8 @@ func (c *transferCounter) snapshot() (in, out int64) { return c.in.Load(), c.out
 // and identifies the app via User-Agent, with a short dial bound (see
 // aiDialTimeout).
 func countingClient(timeout time.Duration, c *transferCounter) *http.Client {
-	tr := http.DefaultTransport.(*http.Transport).Clone()
-	tr.DialContext = (&net.Dialer{Timeout: aiDialTimeout, KeepAlive: 30 * time.Second}).DialContext
+	tr := httpclient.BaseTransport()
+	tr.DialContext = httpclient.Dialer(aiDialTimeout).DialContext
 	return &http.Client{
 		Timeout:   timeout,
 		Transport: &countingTransport{base: &httpclient.Transport{Base: tr}, c: c},

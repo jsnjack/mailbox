@@ -24,6 +24,7 @@ import (
 	"github.com/emersion/go-imap/v2/imapclient"
 	gomail "github.com/emersion/go-message/mail"
 	"github.com/jsnjack/mailbox/internal/backend"
+	"github.com/jsnjack/mailbox/internal/httpclient"
 	"github.com/jsnjack/mailbox/internal/logging"
 	"github.com/jsnjack/mailbox/internal/model"
 )
@@ -156,19 +157,19 @@ func (b *Backend) dial(handler *imapclient.UnilateralDataHandler) (*imapclient.C
 	switch b.cfg.Security {
 	case SecurityTLS:
 		var tcp net.Conn
-		if tcp, err = net.DialTimeout("tcp", addr, dialTimeout); err == nil {
+		if tcp, err = httpclient.Dialer(dialTimeout).DialContext(context.Background(), "tcp", addr); err == nil {
 			raw = &countingConn{Conn: tcp, stats: b.stats}
 			cl = imapclient.New(tls.Client(raw, tlsCfg), opts)
 		}
 	case SecurityNone:
 		var tcp net.Conn
-		if tcp, err = net.DialTimeout("tcp", addr, dialTimeout); err == nil {
+		if tcp, err = httpclient.Dialer(dialTimeout).DialContext(context.Background(), "tcp", addr); err == nil {
 			raw = &countingConn{Conn: tcp, stats: b.stats}
 			cl = imapclient.New(raw, opts)
 		}
 	case SecuritySTARTTLS:
 		var tcp net.Conn
-		if tcp, err = net.DialTimeout("tcp", addr, dialTimeout); err == nil {
+		if tcp, err = httpclient.Dialer(dialTimeout).DialContext(context.Background(), "tcp", addr); err == nil {
 			raw = &countingConn{Conn: tcp, stats: b.stats}
 			// The STARTTLS handshake does I/O, so bound it with the login deadline
 			// before it runs (the block below refreshes the deadline for LOGIN, then

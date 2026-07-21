@@ -12,8 +12,9 @@ import "net/http"
 var UserAgent = "mailbox"
 
 // Transport sets User-Agent on every request that doesn't already carry one (a
-// caller-set header always wins), then delegates to Base (http.DefaultTransport
-// if nil).
+// caller-set header always wins), then delegates to Base (a shared BaseTransport
+// if nil — see dial.go for why that, and not the raw http.DefaultTransport, is
+// the safe default).
 type Transport struct {
 	Base http.RoundTripper
 }
@@ -25,7 +26,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	base := t.Base
 	if base == nil {
-		base = http.DefaultTransport
+		base = sharedBase
 	}
 	return base.RoundTrip(req)
 }

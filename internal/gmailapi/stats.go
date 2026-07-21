@@ -50,6 +50,10 @@ func (c *Client) Stats() StatsSnapshot { return c.stats.Snapshot() }
 // request/quota counters land in the same Stats.
 func NewService(ctx context.Context, ts oauth2.TokenSource, stats *Stats) (*gmail.Service, error) {
 	logging.TraceContext(ctx, "gmailapi: newService", "token_source", ts != nil)
+	// Pin the base transport's dialer to Go's own DNS resolver (see
+	// httpclient.BaseTransport) before oauth2 builds its client, else it falls
+	// back to the raw http.DefaultTransport's cgo resolver.
+	ctx = context.WithValue(ctx, oauth2.HTTPClient, &http.Client{Transport: httpclient.BaseTransport()})
 	httpClient := oauth2.NewClient(ctx, ts) // an *http.Client whose Transport adds auth
 	// No httpClient.Timeout: that caps the WHOLE response (upload + headers +
 	// body), which deterministically kills large attachment transfers on slow

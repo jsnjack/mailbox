@@ -18,6 +18,7 @@ import (
 	"github.com/emersion/go-imap/v2/imapclient"
 	gomail "github.com/emersion/go-message/mail"
 	"github.com/emersion/go-smtp"
+	"github.com/jsnjack/mailbox/internal/httpclient"
 	"github.com/jsnjack/mailbox/internal/logging"
 	"github.com/jsnjack/mailbox/internal/model"
 )
@@ -271,7 +272,7 @@ func (b *Backend) smtpSend(ctx context.Context, from string, to []string, msg []
 	// connect with a timeout and honors ctx (like the IMAP dial), so a wrong or
 	// unreachable SMTP host fails fast instead of hanging a send on the OS TCP
 	// timeout.
-	dialer := &net.Dialer{Timeout: dialTimeout}
+	dialer := httpclient.Dialer(dialTimeout)
 	raw, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return fmt.Errorf("smtp dial %s: %w", addr, err)
