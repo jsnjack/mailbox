@@ -2388,6 +2388,9 @@ func (w *window) onRefresh() {
 // (about:/data:/blob:) loads in place, but a link the user clicks opens in their
 // default handler (browser, mail client) instead of navigating inside the
 // WebView. Unsupported schemes (file:, javascript:, …) are blocked outright.
+// A NewWindowAction (WebKit's native "Open Image/Link in New Window" context-menu
+// action) never gets a real window — the app has no secondary WebView to host
+// one — so its target is resolved and handed to the same external-open path.
 func (w *window) onDecidePolicy(decision webkit.PolicyDecisioner, dtype webkit.PolicyDecisionType) bool {
 	if dtype != webkit.PolicyDecisionTypeNavigationAction && dtype != webkit.PolicyDecisionTypeNewWindowAction {
 		return false // resource loads (images/css) use default handling
@@ -2397,6 +2400,11 @@ func (w *window) onDecidePolicy(decision webkit.PolicyDecisioner, dtype webkit.P
 		return false
 	}
 	uri := nav.NavigationAction().Request().URI()
+	if dtype == webkit.PolicyDecisionTypeNewWindowAction {
+		w.openNewWindowTarget(uri)
+		nav.Ignore()
+		return true
+	}
 	if uri == "" || strings.HasPrefix(uri, "about:") || strings.HasPrefix(uri, "data:") || strings.HasPrefix(uri, "blob:") {
 		return false // our own rendered content — show it in place
 	}
@@ -2426,6 +2434,63 @@ func (w *window) onDecidePolicy(decision webkit.PolicyDecisioner, dtype webkit.P
 	}
 	nav.Ignore()
 	return true
+}
+
+// openNewWindowTarget resolves a WebKit "new window" navigation target (from
+// the native "Open Image/Link in New Window" context-menu action) to
+// something xdg-open can actually show. A cid: inline attachment isn't a
+// scheme any external viewer understands, so it resolves against the same
+// w.inlineByCID map serveCID streams from and opens the cached file directly;
+// everything else (a remote image, a plain link) is handed over as-is, same
+// as a regular clicked link.
+func (w *window) openNewWindowTarget(uri string) {
+	if cid, ok := strings.CutPrefix(uri, "cid:"); ok {
+		if dec, err := url.PathUnescape(cid); err == nil {
+			cid = dec
+		}
+		cid = strings.Trim(cid, "<>")
+		img, ok := w.inlineByCID[cid]
+		if !ok {
+			slog.Debug("ui: open in new window: unknown cid", "cid", cid)
+			return
+		}
+		logging.Trace("ui: open inline image externally", "cid", cid, "path", img.path)
+		openExternal(img.path)
+		return
+	}
+	if uri == "" || strings.HasPrefix(uri, "about:") || strings.HasPrefix(uri, "data:") || strings.HasPrefix(uri, "blob:") {
+		return // our own rendered content, nothing external to show
+	}
+	logging.Trace("ui: open in new window", "uri", uri)
+	openExternal(uri)
+}
+
+// onContextMenu runs before WebKit shows its native context menu. It swaps out
+// the "Open Image in New Window" / "Open Link in New Window" stock items —
+// each normally spawns a new window via the "create" signal, which the app
+// never handles (no secondary WebView to give it), so left alone they select
+// but silently do nothing — for a custom action that resolves the same
+// target through openNewWindowTarget instead. Per WebKit's own docs, tapping
+// the existing item's GAction can observe activation but can't stop the
+// broken stock behavior, so the item itself must be replaced.
+func (w *window) onContextMenu(menu *webkit.ContextMenu, hit *webkit.HitTestResult) bool {
+	for i, item := range menu.Items() {
+		var label, uri string
+		switch item.StockAction() {
+		case webkit.ContextMenuActionOpenImageInNewWindow:
+			label, uri = "Open Image in New Window", hit.ImageURI()
+		case webkit.ContextMenuActionOpenLinkInNewWindow:
+			label, uri = "Open Link in New Window", hit.LinkURI()
+		default:
+			continue
+		}
+		logging.Trace("ui: patched context menu action", "action", item.StockAction().String(), "uri", uri)
+		act := gio.NewSimpleAction("mb-open-new-window", nil)
+		act.ConnectActivate(func(*glib.Variant) { w.openNewWindowTarget(uri) })
+		menu.Remove(item)
+		menu.Insert(webkit.NewContextMenuItemFromGaction(act, label, nil), i)
+	}
+	return false // show the (patched) menu
 }
 
 // parseMBAction splits an in-page affordance URI ("mbaction:<act>/<escaped
@@ -2543,6 +2608,11 @@ func (w *window) buildReader() *adw.NavigationPage {
 	// Keep the reader a viewer: clicked links open in the default browser, never
 	// inside the WebView.
 	w.webview.ConnectDecidePolicy(w.onDecidePolicy)
+	// WebKit's native "Open Image/Link in New Window" context-menu actions go
+	// straight to the "create" signal (never through decide-policy) to spawn the
+	// new window; patch them before the menu shows since the app has nothing to
+	// give "create" to host one.
+	w.webview.ConnectContextMenu(w.onContextMenu)
 
 	w.header = gtk.NewLabel("")
 	w.header.SetXAlign(0)
