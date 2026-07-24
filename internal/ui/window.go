@@ -3026,10 +3026,13 @@ func (w *window) aiReply(auto composeAutoAI) {
 	w.openCompose(init, aiContext, "Reply", auto)
 }
 
-// buildAIReplyPopover builds the reader's AI-reply popover: AI-suggested quick
-// replies at the top (fetched async; tap → compose prefilled with that reply) and
-// reply intents below (tap → AI drafts a full reply in that direction). Rebuilt
-// on each open so suggestions match the current message.
+// buildAIReplyPopover builds the reader's AI-reply popover: reply intents
+// first (tap → AI drafts a full reply in that direction), then AI-suggested
+// quick replies below (fetched async; tap → compose prefilled with that
+// reply). The async section trails the fixed intents so its streaming-in
+// results grow the popover downward instead of shoving the intents down
+// while the user is picking one. Rebuilt on each open so suggestions match
+// the current message.
 func (w *window) buildAIReplyPopover() *gtk.Popover {
 	pop := gtk.NewPopover()
 	box := gtk.NewBox(gtk.OrientationVertical, 4)
@@ -3043,7 +3046,29 @@ func (w *window) buildAIReplyPopover() *gtk.Popover {
 		return pop
 	}
 
+	if w.aiDraft {
+		box.Append(aiPopLabel("Write a reply that…"))
+		for _, p := range replyPresets() {
+			instr := p.instruction
+			row := aiPopRow("↳ "+p.label, false)
+			row.ConnectClicked(func() {
+				pop.Popdown()
+				w.aiReply(composeAutoAI{instruction: instr})
+			})
+			box.Append(row)
+		}
+		custom := aiPopRow("✎ Custom instruction…", false)
+		custom.ConnectClicked(func() {
+			pop.Popdown()
+			w.aiReply(composeAutoAI{openDialog: true})
+		})
+		box.Append(custom)
+	}
+
 	if w.aiSmartReplies {
+		if w.aiDraft {
+			box.Append(gtk.NewSeparator(gtk.OrientationHorizontal))
+		}
 		// AI-suggested quick replies (one call per open; results stream in).
 		box.Append(aiPopLabel("Suggested replies"))
 		sug := gtk.NewBox(gtk.OrientationVertical, 4)
@@ -3085,28 +3110,6 @@ func (w *window) buildAIReplyPopover() *gtk.Popover {
 				}
 			})
 		}()
-	}
-
-	if w.aiDraft {
-		if w.aiSmartReplies {
-			box.Append(gtk.NewSeparator(gtk.OrientationHorizontal))
-		}
-		box.Append(aiPopLabel("Write a reply that…"))
-		for _, p := range replyPresets() {
-			instr := p.instruction
-			row := aiPopRow("↳ "+p.label, false)
-			row.ConnectClicked(func() {
-				pop.Popdown()
-				w.aiReply(composeAutoAI{instruction: instr})
-			})
-			box.Append(row)
-		}
-		custom := aiPopRow("✎ Custom instruction…", false)
-		custom.ConnectClicked(func() {
-			pop.Popdown()
-			w.aiReply(composeAutoAI{openDialog: true})
-		})
-		box.Append(custom)
 	}
 
 	pop.SetChild(box)

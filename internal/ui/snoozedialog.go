@@ -40,36 +40,6 @@ func (w *window) openSnoozeDialog(acctID int64, threadID string) {
 		box.Append(b)
 	}
 
-	// AI suggestions: read the conversation and propose the useful moments (an
-	// hour before a meeting, the day before a deadline). Load in the
-	// background; the rows only appear when the email actually implies times.
-	if w.deps.Assistant != nil && w.aiSnoozeSuggestions {
-		aiBox := gtk.NewBox(gtk.OrientationVertical, 10)
-		placeholder := gtk.NewButtonWithLabel("Reading the email…")
-		placeholder.SetSensitive(false)
-		aiBox.Append(placeholder)
-		box.Append(aiBox)
-		go func() {
-			suggestions, err := w.suggestSnoozeFor(acctID, threadID)
-			dispatch.Main(func() {
-				aiBox.Remove(placeholder)
-				if err != nil {
-					return
-				}
-				for _, sug := range suggestions {
-					sug := sug
-					label := "✨ " + formatWakeTime(sug.At, time.Now())
-					if sug.Reason != "" {
-						label += " — " + sug.Reason
-					}
-					b := gtk.NewButtonWithLabel(label)
-					b.ConnectClicked(func() { apply(sug.At) })
-					aiBox.Append(b)
-				}
-			})
-		}()
-	}
-
 	box.Append(gtk.NewSeparator(gtk.OrientationHorizontal))
 
 	// Custom date + time.
@@ -102,6 +72,39 @@ func (w *window) openSnoozeDialog(acctID int64, threadID string) {
 		apply(t)
 	})
 	box.Append(confirm)
+
+	// AI suggestions: read the conversation and propose the useful moments (an
+	// hour before a meeting, the day before a deadline). Load in the
+	// background; the rows only appear when the email actually implies times.
+	// Placed last so the calendar/time-picker/Snooze button above stay put
+	// while the suggestions stream in.
+	if w.deps.Assistant != nil && w.aiSnoozeSuggestions {
+		box.Append(gtk.NewSeparator(gtk.OrientationHorizontal))
+		aiBox := gtk.NewBox(gtk.OrientationVertical, 10)
+		placeholder := gtk.NewButtonWithLabel("Reading the email…")
+		placeholder.SetSensitive(false)
+		aiBox.Append(placeholder)
+		box.Append(aiBox)
+		go func() {
+			suggestions, err := w.suggestSnoozeFor(acctID, threadID)
+			dispatch.Main(func() {
+				aiBox.Remove(placeholder)
+				if err != nil {
+					return
+				}
+				for _, sug := range suggestions {
+					sug := sug
+					label := "✨ " + formatWakeTime(sug.At, time.Now())
+					if sug.Reason != "" {
+						label += " — " + sug.Reason
+					}
+					b := gtk.NewButtonWithLabel(label)
+					b.ConnectClicked(func() { apply(sug.At) })
+					aiBox.Append(b)
+				}
+			})
+		}()
+	}
 
 	scroller := gtk.NewScrolledWindow()
 	scroller.SetPolicy(gtk.PolicyNever, gtk.PolicyAutomatic)
