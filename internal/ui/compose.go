@@ -987,9 +987,48 @@ func (w *window) askAIIntent(parent gtk.Widgetter, isReply bool, threadContext s
 		onInstruction(instruction)
 	}
 
+	for _, q := range presets {
+		instr := q.instruction
+		b := gtk.NewButton()
+		l := gtk.NewLabel(q.label)
+		l.SetXAlign(0)
+		l.SetHExpand(true)
+		b.SetChild(l)
+		b.AddCSSClass("flat")
+		b.ConnectClicked(func() { choose(instr) })
+		box.Append(b)
+	}
+
+	box.Append(gtk.NewSeparator(gtk.OrientationHorizontal))
+
+	// Multiline free-text instruction: a longer brief ("decline but offer next
+	// week, keep it warm") drafts a better reply than a single line allows.
+	entry := gtk.NewTextView()
+	entry.SetWrapMode(gtk.WrapWordChar)
+	entry.SetAcceptsTab(false) // Tab moves focus to Generate rather than inserting a tab
+	entry.SetLeftMargin(6)
+	entry.SetRightMargin(6)
+	entry.SetTopMargin(6)
+	entry.SetBottomMargin(6)
+	entryScroller := gtk.NewScrolledWindow()
+	entryScroller.SetPolicy(gtk.PolicyNever, gtk.PolicyAutomatic)
+	entryScroller.SetMinContentHeight(64)
+	entryScroller.SetChild(entry)
+	entryScroller.AddCSSClass("card")
+	box.Append(entryScroller)
+
+	gen := gtk.NewButtonWithLabel("Generate")
+	gen.AddCSSClass("suggested-action")
+	gen.SetHAlign(gtk.AlignEnd)
+	gen.ConnectClicked(func() { choose(strings.TrimSpace(bodyText(entry.Buffer()))) })
+	box.Append(gen)
+
 	// Ready-to-send quick replies (for a reply) — gated behind a button so they
-	// are only generated (and tokens spent) when the user asks.
+	// are only generated (and tokens spent) when the user asks. Placed last so
+	// that generating replies grows the dialog downward instead of shoving the
+	// presets/entry/Generate button (already visible above) further down.
 	if isReply && strings.TrimSpace(threadContext) != "" && onQuickReply != nil && w.deps.Assistant != nil && w.aiSmartReplies {
+		box.Append(gtk.NewSeparator(gtk.OrientationHorizontal))
 		quick := gtk.NewBox(gtk.OrientationVertical, 4)
 		box.Append(quick)
 		clearQuick := func() {
@@ -1048,51 +1087,13 @@ func (w *window) askAIIntent(parent gtk.Widgetter, isReply bool, threadContext s
 							})
 							quick.Append(rb)
 						}
-						quick.Append(gtk.NewSeparator(gtk.OrientationHorizontal))
 					})
 				}()
 			})
 			quick.Append(btn)
-			quick.Append(gtk.NewSeparator(gtk.OrientationHorizontal))
 		}
 		showSuggestButton()
 	}
-
-	for _, q := range presets {
-		instr := q.instruction
-		b := gtk.NewButton()
-		l := gtk.NewLabel(q.label)
-		l.SetXAlign(0)
-		l.SetHExpand(true)
-		b.SetChild(l)
-		b.AddCSSClass("flat")
-		b.ConnectClicked(func() { choose(instr) })
-		box.Append(b)
-	}
-
-	box.Append(gtk.NewSeparator(gtk.OrientationHorizontal))
-
-	// Multiline free-text instruction: a longer brief ("decline but offer next
-	// week, keep it warm") drafts a better reply than a single line allows.
-	entry := gtk.NewTextView()
-	entry.SetWrapMode(gtk.WrapWordChar)
-	entry.SetAcceptsTab(false) // Tab moves focus to Generate rather than inserting a tab
-	entry.SetLeftMargin(6)
-	entry.SetRightMargin(6)
-	entry.SetTopMargin(6)
-	entry.SetBottomMargin(6)
-	entryScroller := gtk.NewScrolledWindow()
-	entryScroller.SetPolicy(gtk.PolicyNever, gtk.PolicyAutomatic)
-	entryScroller.SetMinContentHeight(64)
-	entryScroller.SetChild(entry)
-	entryScroller.AddCSSClass("card")
-	box.Append(entryScroller)
-
-	gen := gtk.NewButtonWithLabel("Generate")
-	gen.AddCSSClass("suggested-action")
-	gen.SetHAlign(gtk.AlignEnd)
-	gen.ConnectClicked(func() { choose(strings.TrimSpace(bodyText(entry.Buffer()))) })
-	box.Append(gen)
 
 	dialog.SetChild(box)
 	dialog.Present(parent)

@@ -118,10 +118,23 @@ func (w *window) showRowMenu(row gtk.Widgetter, threadID string, x, y float64) {
 		snBox := gtk.NewBox(gtk.OrientationVertical, 0)
 		snBox.AddCSSClass("menu")
 		snBox.AddCSSClass("rowmenu")
-		// The AI suggestions lead the flyout: fetching starts when the flyout
-		// opens and each moment the email implies (an hour before a meeting,
-		// the day before a deadline) becomes its own clickable item; the
-		// placeholder silently disappears when the email implies nothing.
+		for _, p := range snoozePresets(time.Now()) {
+			p := p
+			item(snBox, p.label+" ("+p.t.Format("Mon 15:04")+")", func() {
+				snPop.Popdown()
+				w.snoozeUntil(acct, threadID, p.t)
+			})
+		}
+		item(snBox, "Pick date…", func() {
+			snPop.Popdown()
+			w.openSnoozeDialog(acct, threadID)
+		})
+		// The AI suggestions trail the fixed presets: fetching starts when the
+		// flyout opens and each moment the email implies (an hour before a
+		// meeting, the day before a deadline) becomes its own clickable item;
+		// the placeholder silently disappears when the email implies nothing.
+		// Placed last so loading/populating it grows the flyout downward
+		// instead of shoving the presets/Pick date… above it around.
 		var aiBox *gtk.Box
 		var aiPlaceholder *gtk.Button
 		var aiFetched bool
@@ -137,17 +150,6 @@ func (w *window) showRowMenu(row gtk.Widgetter, threadID string, x, y float64) {
 			aiBox.Append(aiPlaceholder)
 			snBox.Append(aiBox)
 		}
-		for _, p := range snoozePresets(time.Now()) {
-			p := p
-			item(snBox, p.label+" ("+p.t.Format("Mon 15:04")+")", func() {
-				snPop.Popdown()
-				w.snoozeUntil(acct, threadID, p.t)
-			})
-		}
-		item(snBox, "Pick date…", func() {
-			snPop.Popdown()
-			w.openSnoozeDialog(acct, threadID)
-		})
 		snPop.SetChild(snBox)
 		snBtn := flyoutBtn("Snooze", snPop)
 		snBtn.ConnectClicked(func() {
