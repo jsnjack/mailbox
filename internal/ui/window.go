@@ -3592,6 +3592,7 @@ func (w *window) setZoom(z float64) {
 	logging.Trace("ui: set zoom", "zoom", z)
 	w.readerZoom = z
 	w.webview.SetZoomLevel(z)
+	evalJS(w.webview, readerRefitScript)
 	w.saveViewState()
 }
 
@@ -4133,6 +4134,10 @@ func (w *window) setReaderHTML(inner string) {
 // shellReadyHandler is the script-message channel the reader shell announces
 // itself on once __mbSet is installed; buildReader flushes queued content then.
 const shellReadyHandler = "shellready"
+
+// readerRefitScript schedules the shell's fit-to-width pass after WebKit has
+// applied a native page-zoom change.
+const readerRefitScript = "window.__mbFit&&window.__mbFit();"
 
 // gistBatchCap bounds how many missing gists one thread render may queue for
 // generation; a longer thread's remainder is picked up on a later open.
@@ -5672,6 +5677,7 @@ func (w *window) buildSummaryCard() *gtk.Revealer {
 	w.summaryLabel = gtk.NewLabel("")
 	w.summaryLabel.SetXAlign(0)
 	w.summaryLabel.SetWrap(true)
+	w.summaryLabel.SetWrapMode(pango.WrapWordChar)
 	w.summaryLabel.SetSelectable(true)
 
 	card := gtk.NewBox(gtk.OrientationVertical, 6)
@@ -7095,7 +7101,8 @@ func readerShellHTML() string {
 	// their min-content — so email fits the reader with neither a horizontal
 	// scrollbar nor cropping.
 	const style = `
-body{font-family:sans-serif;margin:8px 16px 16px;color:#222;line-height:1.4;overflow-wrap:anywhere}
+html{overflow-x:hidden}
+body{font-family:sans-serif;margin:8px 16px 16px;color:#222;line-height:1.4;overflow-x:hidden;overflow-wrap:anywhere}
 table{table-layout:auto}
 td,th{overflow-wrap:break-word;word-break:normal}
 .mbwrap>div:first-child{border-top:none!important;margin-top:0!important}
@@ -7132,24 +7139,25 @@ details.mbmsg[open]>summary .mbprev{display:none}
 	// covering everything the content references. The ready postMessage lets the
 	// app know __mbSet exists before it starts swapping.
 	nonce := randNonce()
-	script := `<script nonce="` + nonce + `">(function(){var wrap;function fit(){var b=document.body;if(!b||!wrap)return;` +
-		`wrap.style.transform='none';wrap.style.width='auto';var avail=b.clientWidth,natural=wrap.scrollWidth;` +
+	script := `<script nonce="` + nonce + `">(function(){var wrap,fitFrame=0;function fit(){var b=document.body;if(!b||!wrap)return;` +
+		`b.style.height='';wrap.style.transform='none';wrap.style.width='auto';var avail=b.clientWidth,natural=wrap.scrollWidth;` +
 		`if(natural>avail+1&&natural>0){var s=avail/natural;wrap.style.width=natural+'px';wrap.style.transformOrigin='top left';wrap.style.transform='scale('+s+')';b.style.height=(wrap.offsetHeight*s)+'px';}else{b.style.height='';}}` +
-		`function setup(){var b=document.body;if(!b)return;wrap=document.createElement('div');wrap.className='mbwrap';b.appendChild(wrap);b.style.overflowX='hidden';window.addEventListener('resize',fit);` +
+		`function requestFit(){if(fitFrame)cancelAnimationFrame(fitFrame);fitFrame=requestAnimationFrame(function(){fitFrame=0;fit();});}` +
+		`function setup(){var b=document.body;if(!b)return;wrap=document.createElement('div');wrap.className='mbwrap';b.appendChild(wrap);window.__mbFit=requestFit;window.addEventListener('resize',requestFit);` +
 		`window.__mbSet=function(h){wrap.innerHTML=h;window.scrollTo(0,0);fit();` +
-		`wrap.querySelectorAll('img').forEach(function(i){if(!i.complete){i.addEventListener('load',fit,{once:true});}});};` +
+		`wrap.querySelectorAll('img').forEach(function(i){if(!i.complete){i.addEventListener('load',requestFit,{once:true});}});};` +
 		// __mbGist fills a message's hidden AI-summary placeholder in place (no
 		// content swap, so the scroll position survives). The text rides in as a
 		// JS string and lands via textContent — nothing to inject. Placeholders
 		// are matched by dataset comparison, not a selector, so a message id
 		// never needs CSS escaping.
 		`window.__mbGist=function(id,text){if(!wrap)return;wrap.querySelectorAll('.mbgist').forEach(function(el){` +
-		`if(el.dataset.mid!==id)return;var t=el.querySelector('.mbgist-text');if(t){t.textContent=text;}el.hidden=false;});fit();};` +
+		`if(el.dataset.mid!==id)return;var t=el.querySelector('.mbgist-text');if(t){t.textContent=text;}el.hidden=false;});requestFit();};` +
 		// "+N more" on a To/Cc line toggles the collapsed recipients in place
 		// (delegated: header HTML arrives later via __mbSet innerHTML swaps).
 		`document.addEventListener('click',function(e){var t=e.target&&e.target.closest?e.target.closest('a.mbmore'):null;if(!t)return;` +
 		`e.preventDefault();var r=t.parentNode.querySelector('.mbrest');if(!r)return;r.hidden=!r.hidden;` +
-		`t.textContent=r.hidden?t.dataset.more:t.dataset.less;fit();},true);` +
+		`t.textContent=r.hidden?t.dataset.more:t.dataset.less;requestFit();},true);` +
 		`try{window.webkit.messageHandlers.` + shellReadyHandler + `.postMessage(true);}catch(e){}}` +
 		`if(document.readyState!=='loading'){setup();}else{document.addEventListener('DOMContentLoaded',setup);}})();</script>`
 

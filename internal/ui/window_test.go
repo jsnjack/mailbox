@@ -285,6 +285,22 @@ func TestAddressToken(t *testing.T) {
 	}
 }
 
+func TestReaderShellRefitsAfterZoom(t *testing.T) {
+	shell := readerShellHTML()
+	for _, want := range []string{
+		"html{overflow-x:hidden}",
+		"window.__mbFit=requestFit",
+		"window.addEventListener('resize',requestFit)",
+	} {
+		if !strings.Contains(shell, want) {
+			t.Fatalf("reader shell missing zoom-fit safeguard %q", want)
+		}
+	}
+	if !strings.Contains(readerRefitScript, "__mbFit") {
+		t.Fatalf("zoom refit script does not call the reader fit hook: %q", readerRefitScript)
+	}
+}
+
 // Replying (sender-only) to your own message continues it to its original
 // recipients — Gmail behavior — instead of addressing yourself.
 func TestReplyToLine(t *testing.T) {
