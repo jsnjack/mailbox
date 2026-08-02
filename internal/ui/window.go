@@ -1371,7 +1371,8 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 	// toggle state synced first.
 	w.listMenuBtn.SetCreatePopupFunc(func(btn *gtk.MenuButton) {
 		w.unreadAction.SetState(glib.NewVariantBoolean(w.unreadOnly))
-		btn.SetPopover(gtk.NewPopoverMenuFromModel(w.buildListMenuModel()))
+		menu := gtk.NewPopoverMenuFromModel(w.buildListMenuModel())
+		btn.SetPopover(&menu.Popover)
 	})
 	hb.PackEnd(w.listMenuBtn)
 
@@ -2768,7 +2769,8 @@ func (w *window) buildReader() *adw.NavigationPage {
 	w.overflowBtn.SetCreatePopupFunc(func(btn *gtk.MenuButton) {
 		w.starAction.SetState(glib.NewVariantBoolean(w.threadStarred()))
 		w.imagesAction.SetState(glib.NewVariantBoolean(w.imagesEnabled))
-		btn.SetPopover(gtk.NewPopoverMenuFromModel(w.buildReaderMenuModel()))
+		menu := gtk.NewPopoverMenuFromModel(w.buildReaderMenuModel())
+		btn.SetPopover(&menu.Popover)
 	})
 
 	hb.PackStart(w.replyBtn)
