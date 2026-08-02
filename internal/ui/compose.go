@@ -21,6 +21,7 @@ import (
 	"github.com/diamondburned/gotk4/pkg/gdk/v4"
 	"github.com/diamondburned/gotk4/pkg/gio/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
+	"github.com/diamondburned/gotk4/pkg/pango"
 	"github.com/jsnjack/mailbox/internal/ai"
 	"github.com/jsnjack/mailbox/internal/config"
 	"github.com/jsnjack/mailbox/internal/dispatch"
@@ -184,7 +185,11 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 	var attachIDs []int // parallel to attachments; ids stay stable across removals
 	attachSeq := 0
 	attachmentsChanged := false // any user add/remove (init carryover doesn't count)
-	attachRow := gtk.NewBox(gtk.OrientationHorizontal, 6)
+	attachRow := gtk.NewFlowBox()
+	attachRow.SetSelectionMode(gtk.SelectionNone)
+	attachRow.SetColumnSpacing(6)
+	attachRow.SetRowSpacing(6)
+	attachRow.SetHomogeneous(false)
 	attachRow.SetVisible(false)
 	attachmentIndex := func(id int) int {
 		for i, v := range attachIDs {
@@ -206,7 +211,10 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 
 		inner := gtk.NewBox(gtk.OrientationHorizontal, 4)
 		inner.Append(gtk.NewImageFromIconName("mail-attachment-symbolic"))
-		inner.Append(gtk.NewLabel(att.Filename))
+		name := gtk.NewLabel(att.Filename)
+		name.SetEllipsize(pango.EllipsizeMiddle)
+		name.SetMaxWidthChars(28)
+		inner.Append(name)
 		if len(att.Data) > 0 {
 			size := gtk.NewLabel(humanBytes(int64(len(att.Data))))
 			size.AddCSSClass("dim-label")
@@ -518,13 +526,22 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 
 	attachBtn.ConnectClicked(func() {
 		dialog := gtk.NewFileDialog()
-		dialog.SetTitle("Attach a file")
-		dialog.Open(context.Background(), &win.Window, func(res gio.AsyncResulter) {
-			file, err := dialog.OpenFinish(res)
-			if err != nil || file == nil {
+		dialog.SetTitle("Attach files")
+		dialog.OpenMultiple(context.Background(), &win.Window, func(res gio.AsyncResulter) {
+			files, err := dialog.OpenMultipleFinish(res)
+			if err != nil || files == nil {
 				return // cancelled
 			}
-			attachFile(file.Path())
+			for i := uint(0); i < files.NItems(); i++ {
+				item := files.Item(i)
+				if item == nil {
+					continue
+				}
+				file, ok := item.CastType(gio.GTypeFile).(*gio.File)
+				if ok {
+					attachFile(file.Path())
+				}
+			}
 		})
 	})
 

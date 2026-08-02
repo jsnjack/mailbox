@@ -339,7 +339,8 @@ the thread list immediately (the reload is async last-request-wins; under
 heavy churn the old account's threads would otherwise linger for seconds) and
 traces the click→content latency ("switch account content visible"). The AI-draft dialog offers on-demand quick replies
 (`SmartReplies`, behind a "Suggest quick replies" button).
-Compose supports attachments (a file picker adds them; `BuildMIME` emits
+Compose supports attachments (the file picker accepts multiple files and shows
+them as wrapping, width-bounded chips; `BuildMIME` emits
 multipart/mixed with base64 parts). Sending uses Undo Send: the compose closes
 and the message is held ~5s behind an "Undo" toast (`deferSend`) before it goes
 out; a failed send is queued to the `outbox` table and retried by a background
