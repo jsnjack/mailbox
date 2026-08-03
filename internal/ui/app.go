@@ -206,9 +206,6 @@ type Deps struct {
 // already-running instance, so clicking a mailto link reuses the open window.
 func Run(deps Deps, mailto string) error {
 	logging.Trace("ui: run", "app_id", applicationID(), "accounts", len(deps.Accounts), "mailto", mailto != "")
-	// Notifications are routed by the desktop environment via the app id's
-	// installed desktop entry; make sure one exists before any can fire.
-	ensureDesktopFile()
 	// HandlesOpen so a mailto: URI passed on the command line is delivered to the
 	// "open" handler (and forwarded to the primary instance when one is running).
 	app := adw.NewApplication(applicationID(), gio.ApplicationHandlesOpen)

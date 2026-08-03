@@ -180,22 +180,21 @@ the watermark (`engine.Resync` on `ErrHistoryExpired`); a revoked/expired refres
 token (`auth.IsAuthError`) instead publishes `AuthExpired`, which reveals a
 "reconnect" banner (it can't recover without re-login). (GNOME routes a notification only when it can resolve the
 GApplication app-id `com.jsnjack.mailbox` to an installed `*.desktop` entry; the
-RPM ships `com.jsnjack.mailbox.desktop` under `/usr/share/applications`, and for a
-binary run from `bin/` `ensureDesktopFile` self-installs a user-level entry —
-pointed at the running binary — into `~/.local/share/applications` at startup,
-skipping it when a system or user entry already exists so it never shadows a
-real install.)
-The desktop entry registers `MimeType=x-scheme-handler/mailto;` with `Exec=mailbox
-%u`, so the app appears under GNOME's Default Apps → Mail and can be set as the
-default mail client. The GApplication uses `ApplicationHandlesOpen`: a clicked
+RPM ships `com.jsnjack.mailbox.desktop` under `/usr/share/applications`.
+Development binaries do not install a user-level entry because it would shadow
+the packaged application.)
+The desktop entry registers `MimeType=x-scheme-handler/mailto;` with
+`Exec=/usr/bin/mailbox %u`, so it always launches the RPM-owned binary rather
+than another `mailbox` earlier on `PATH`. The app appears under GNOME's Default
+Apps → Mail and can be set as the default mail client. The GApplication uses
+`ApplicationHandlesOpen`: a clicked
 `mailto:` URI is delivered to the `open` handler (and routed to an
 already-running instance), which opens a prefilled compose (`parseMailto` →
 `composeFromMailto`, handling both the plain `mailto:` and GIO's normalised
 `mailto:///` forms). `main` strips the `mailto:` arg before cobra parses (the
 root command has subcommands) — `SetArgs` with a non-nil empty slice, since
 `SetArgs(nil)` falls back to `os.Args`. The RPM's `%post` runs
-`update-desktop-database` so the registration takes effect on install; the dev
-self-install runs it too.
+`update-desktop-database` so the registration takes effect on install.
 Reply / reply-all / forward / new compose in a separate window. Compose is a
 plain-text editor, but outgoing mail is multipart/alternative (text +
 quoted-printable HTML via `backend.BuildMIME`; nested in multipart/mixed with
