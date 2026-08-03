@@ -307,8 +307,8 @@ overflow ⋯ act on the conversation (reply-all = continue the conversation via
 its newest message; the overflow holds star/unread/move/spam/trash, Labels…,
 Unsubscribe, Print…, remote-images — never message- or sender-scoped items),
 each message's ⋯ acts on that message, and clicking a sender name opens the
-canonical sender surface (`showSenderActions`: copy address, find emails,
-unsubscribe, trust images — the link underlines on hover so it reads as
+canonical sender surface (`showSenderActions`: copy address, find emails, and
+trust images — the link underlines on hover so it reads as
 clickable). A search entry runs instant local
 FTS5 search
 (`store.Search`, sanitized into a quoted prefix MATCH) whose hits are grouped

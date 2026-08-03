@@ -5263,13 +5263,6 @@ func (w *window) showSenderActions(gmailID string) {
 		if w.deps.SearchServer != nil {
 			item("Find emails from "+displayFrom(m), func() { w.searchFrom(addr) })
 		}
-		if m.ListUnsubscribe != "" {
-			item("Unsubscribe", func() {
-				if t, ok := parseListUnsubscribe(m.ListUnsubscribe, m.ListUnsubOneClick); ok {
-					w.performUnsubscribe(m.AccountID, displayFrom(m), t, nil)
-				}
-			})
-		}
 		if w.blockImages && addr != "" && !w.trustedImgs[strings.ToLower(addr)] {
 			item("Always load images from this sender", func() { w.trustImagesFrom(addr) })
 		}
@@ -5278,7 +5271,7 @@ func (w *window) showSenderActions(gmailID string) {
 
 // showRecipientActions presents the address card for a recipient in a message
 // header (To/Cc) — the same surface the sender name opens, minus the
-// sender-only items (unsubscribe, image trust). token is the RFC 5322 form
+// sender-only image-trust item. token is the RFC 5322 form
 // carried by the mbaction:rcpt link ("Name <addr>" or a bare address).
 func (w *window) showRecipientActions(token string) {
 	addr, name := strings.TrimSpace(token), ""
