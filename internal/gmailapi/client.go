@@ -301,6 +301,23 @@ func (c *Client) GetMessageFull(ctx context.Context, id string) (*gmail.Message,
 	return msg, nil
 }
 
+// GetThreadMetadata fetches every message in a Gmail thread without bodies.
+func (c *Client) GetThreadMetadata(ctx context.Context, id string) (*gmail.Thread, error) {
+	logging.TraceContext(ctx, "gmailapi: threads.get metadata", "id", id)
+	var thread *gmail.Thread
+	err := c.do(ctx, costThreadGet, func() error {
+		r, e := c.srv.Users.Threads.Get("me", id).
+			Format("metadata").MetadataHeaders(metadataHeaders...).Context(ctx).Do()
+		thread = r
+		return e
+	})
+	if err != nil {
+		return nil, fmt.Errorf("get thread metadata %s: %w", id, err)
+	}
+	logging.TraceContext(ctx, "gmailapi: threads.get metadata done", "id", id, "messages", len(thread.Messages))
+	return thread, nil
+}
+
 // Send transmits a raw RFC 5322 message. threadID (optional) files it into an
 // existing Gmail conversation. It returns the new message id.
 func (c *Client) Send(ctx context.Context, raw []byte, threadID string) (string, error) {

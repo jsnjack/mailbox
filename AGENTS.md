@@ -94,8 +94,11 @@ the default display in `build`) tints only three things, all from the system
 soft accent-tinted AI summary card. Folder icons stay the theme foreground and
 the account switcher is plain text (no avatars).
 
-UI state (implemented): 3-pane shell renders the cached account live; clicking a
-message lazily fetches + sanitizes + renders its body (WebKit; remote images off
+UI state (implemented): 3-pane shell renders the cached account live; opening a
+Gmail conversation first hydrates its complete server-side message membership
+once (persisted in `thread_hydrations`, so a capped backfill cannot leave older
+messages and their attachments invisible), then lazily fetches + sanitizes +
+renders its bodies (WebKit; remote images off
 behind a toggle). The reader sanitizes with an email-tuned bluemonday policy
 (`emailPolicy`, keeps inline styles + tables so HTML mail isn't broken). The
 WebView loads **one persistent shell page** (`readerShellHTML`: styles, CSP, and

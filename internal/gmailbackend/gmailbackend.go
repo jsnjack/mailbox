@@ -27,8 +27,9 @@ func New(c *gmailapi.Client, accountID int64) *Backend {
 }
 
 var (
-	_ backend.Backend      = (*Backend)(nil)
-	_ backend.LabelManager = (*Backend)(nil)
+	_ backend.Backend               = (*Backend)(nil)
+	_ backend.LabelManager          = (*Backend)(nil)
+	_ backend.ThreadMetadataFetcher = (*Backend)(nil)
 )
 
 // Profile returns the account email and the current historyId as the cursor.
@@ -93,6 +94,24 @@ func (b *Backend) FetchMetadata(ctx context.Context, id string) (model.Message, 
 	msg := gmailapi.ToMessage(b.accountID, m)
 	logging.TraceContext(ctx, "gmailbackend: FetchMetadata ok", "account", b.accountID, "id", id, "threadID", msg.ThreadID, "from", msg.FromAddr, "subject", msg.Subject, "dur", time.Since(start))
 	return msg, nil
+}
+
+// FetchThreadMetadata fetches metadata for every message Gmail associates with
+// a thread, including older members omitted by a capped local backfill.
+func (b *Backend) FetchThreadMetadata(ctx context.Context, threadID string) ([]model.Message, error) {
+	start := time.Now()
+	logging.TraceContext(ctx, "gmailbackend: FetchThreadMetadata", "account", b.accountID, "thread", threadID)
+	t, err := b.c.GetThreadMetadata(ctx, threadID)
+	if err != nil {
+		logging.TraceContext(ctx, "gmailbackend: FetchThreadMetadata failed", "account", b.accountID, "thread", threadID, "dur", time.Since(start), "err", err)
+		return nil, err
+	}
+	msgs := make([]model.Message, 0, len(t.Messages))
+	for _, m := range t.Messages {
+		msgs = append(msgs, gmailapi.ToMessage(b.accountID, m))
+	}
+	logging.TraceContext(ctx, "gmailbackend: FetchThreadMetadata ok", "account", b.accountID, "thread", threadID, "messages", len(msgs), "dur", time.Since(start))
+	return msgs, nil
 }
 
 // FetchBody fetches the full message and extracts body + attachment metadata.

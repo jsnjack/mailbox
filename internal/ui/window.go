@@ -3617,9 +3617,18 @@ func (w *window) showThread(threadID string) {
 	gen := w.openGen
 	acctID := w.activeID
 	go func() {
+		if w.deps.HydrateThread != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), threadHydrateTimeout)
+			if _, err := w.deps.HydrateThread(ctx, acctID, threadID); err != nil {
+				// Opening mail must remain useful offline: hydration repairs a
+				// partial cache when possible, but never hides what is already local.
+				logging.Trace("ui: hydrate thread failed; using cache", "thread", threadID, "err", err)
+			}
+			cancel()
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), openThreadTimeout)
-		defer cancel()
 		msgs, err := w.deps.Store.ListThreadMessages(ctx, acctID, threadID)
+		cancel()
 		dispatch.Main(func() {
 			if gen != w.openGen {
 				logging.Trace("ui: show thread superseded", "thread", threadID)
@@ -3643,6 +3652,10 @@ func (w *window) showThread(threadID string) {
 // bound of its own — this keeps a click from waiting forever on a saturated
 // pool.
 const openThreadTimeout = 10 * time.Second
+
+// threadHydrateTimeout bounds the one-time provider lookup that completes a
+// conversation omitted by a capped backfill. Failure falls back to local mail.
+const threadHydrateTimeout = 15 * time.Second
 
 // showThreadMsgs is showThread's main-thread continuation once the thread's
 // messages have been read.

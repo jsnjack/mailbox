@@ -19,6 +19,7 @@ const (
 	costHistoryList  = 2
 	costMessageList  = 5
 	costMessageGet   = 5 // metadata or full
+	costThreadGet    = 10
 	costLabelsList   = 1
 	costLabelsGet    = 1
 	costLabelsMutate = 5 // labels.create / labels.delete

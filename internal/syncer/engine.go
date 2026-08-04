@@ -323,6 +323,51 @@ func (e *Engine) SearchServer(ctx context.Context, b backend.Backend, accountID 
 	return ids, nil
 }
 
+// HydrateThread caches every provider-side member of a conversation once. A
+// capped initial backfill can contain a newer reply without the older message
+// that started the thread; providers without server-side conversations are a
+// no-op. It returns the number of messages newly added to the cache.
+func (e *Engine) HydrateThread(ctx context.Context, b backend.Backend, accountID int64, threadID string) (int, error) {
+	fetcher, ok := b.(backend.ThreadMetadataFetcher)
+	if !ok {
+		return 0, nil
+	}
+	done, err := e.Store.ThreadHydrated(ctx, accountID, threadID)
+	if err != nil {
+		return 0, err
+	}
+	if done {
+		return 0, nil
+	}
+
+	msgs, err := fetcher.FetchThreadMetadata(ctx, threadID)
+	if err != nil {
+		return 0, fmt.Errorf("fetch thread metadata: %w", err)
+	}
+	ids := make([]string, 0, len(msgs))
+	for _, m := range msgs {
+		ids = append(ids, m.GmailID)
+	}
+	existing, err := e.Store.ExistingMessageIDs(ctx, accountID, ids)
+	if err != nil {
+		return 0, fmt.Errorf("check thread messages: %w", err)
+	}
+	if len(msgs) > 0 {
+		if err := e.Store.UpsertMessages(ctx, msgs); err != nil {
+			return 0, fmt.Errorf("cache thread metadata: %w", err)
+		}
+	}
+	if err := e.Store.MarkThreadHydrated(ctx, accountID, threadID); err != nil {
+		return 0, err
+	}
+	added := len(msgs) - len(existing)
+	logging.TraceContext(ctx, "syncer: HydrateThread done", "account", accountID, "thread", threadID, "messages", len(msgs), "added", added)
+	if added > 0 {
+		e.publish(Change{Kind: MessageUpserted, AccountID: accountID, ThreadID: threadID, Count: added})
+	}
+	return added, nil
+}
+
 // DeletePermanently removes messages for good (server batchDelete + local
 // delete). Used for "Delete forever" from Trash/Spam; cannot be undone.
 func (e *Engine) DeletePermanently(ctx context.Context, b backend.Backend, accountID int64, gmailIDs []string) error {

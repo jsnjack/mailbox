@@ -150,6 +150,16 @@ CREATE TABLE IF NOT EXISTS thread_summaries (
   PRIMARY KEY (account_id, thread_id)
 );
 
+-- Records conversations whose complete server-side membership has been fetched.
+-- A capped initial backfill can contain a reply without the older message it
+-- answers; the reader hydrates that thread once, then this marker avoids a
+-- provider request on every subsequent open.
+CREATE TABLE IF NOT EXISTS thread_hydrations (
+  account_id      INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  thread_id       TEXT NOT NULL,
+  PRIMARY KEY (account_id, thread_id)
+);
+
 -- AI security analysis (phishing/scam verdict + reasons) per message, keyed by
 -- the message's Gmail id. The message and its auth/heuristic signals are
 -- immutable, so the analysis never goes stale; persisted so re-opening a message

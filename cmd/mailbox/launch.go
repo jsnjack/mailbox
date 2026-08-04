@@ -653,6 +653,13 @@ func launchUI(mailto string) error {
 		}
 		return ids, err
 	}
+	deps.HydrateThread = func(ctx context.Context, accountID int64, threadID string) (int, error) {
+		c, err := clientFor(accountID)
+		if err != nil {
+			return 0, err
+		}
+		return engine.HydrateThread(ctx, c, accountID, threadID)
+	}
 	deps.MarkAllRead = func(ctx context.Context, accountID int64, labelID string) error {
 		c, err := clientFor(accountID)
 		if err != nil {

@@ -81,6 +81,10 @@ type SyncNow func(ctx context.Context, accountID int64) error
 // returns the matching message ids.
 type ServerSearcher func(ctx context.Context, accountID int64, query string, max int) ([]string, error)
 
+// ThreadHydrator caches provider-side conversation members omitted by a capped
+// initial backfill. It returns how many messages were newly cached.
+type ThreadHydrator func(ctx context.Context, accountID int64, threadID string) (int, error)
+
 // LabelReader marks every unread message in a label as read.
 type LabelReader func(ctx context.Context, accountID int64, labelID string) error
 
@@ -142,6 +146,7 @@ type Deps struct {
 	OpenAttach    AttachmentOpener
 	Sync          SyncNow
 	SearchServer  ServerSearcher
+	HydrateThread ThreadHydrator
 	MarkAllRead   LabelReader
 	SweepOutbox   OutboxSweeper
 	RetryOutbox   OutboxAction

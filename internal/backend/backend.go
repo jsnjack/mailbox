@@ -67,6 +67,14 @@ type BatchMetadataFetcher interface {
 	FetchMetadataBatch(ctx context.Context, ids []string) ([]model.Message, error)
 }
 
+// ThreadMetadataFetcher is an optional Backend capability for providers that
+// can enumerate every message belonging to a server-side conversation. It lets
+// a capped local backfill repair an incomplete thread when the user opens it.
+type ThreadMetadataFetcher interface {
+	// FetchThreadMetadata returns every message in threadID with metadata only.
+	FetchThreadMetadata(ctx context.Context, threadID string) ([]model.Message, error)
+}
+
 // LabelManager is an optional Backend capability: a provider that can create
 // and delete labels implements it. The snooze mirror requires it — accounts
 // whose backend lacks it keep local-only snoozes (hidden on this machine, but
