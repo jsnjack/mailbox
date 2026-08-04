@@ -209,6 +209,25 @@ func TestCleanAIContext(t *testing.T) {
 	}
 }
 
+func TestSingleLineText(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"plain subject", "Weekly update", "Weekly update"},
+		{"embedded blank line", "Nobody announces it.\n\nThe team does… 💡", "Nobody announces it. The team does… 💡"},
+		{"mixed whitespace", "  Quarterly\tresults\r\n are ready  ", "Quarterly results are ready"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := singleLineText(tt.in); got != tt.want {
+				t.Fatalf("singleLineText(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
 // anyStarred is the thread-level star predicate: a conversation is starred as
 // soon as any of its messages is (matching the Starred folder's membership).
 func TestAnyStarred(t *testing.T) {

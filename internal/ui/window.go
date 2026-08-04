@@ -6968,7 +6968,7 @@ func threadRow(t model.ThreadSummary, outgoing bool, category string, manualCat 
 	}
 	box.Append(top)
 
-	subjText := m.Subject
+	subjText := singleLineText(m.Subject)
 	if strings.TrimSpace(subjText) == "" {
 		subjText = "(no subject)"
 	}
@@ -7008,7 +7008,7 @@ func threadRow(t model.ThreadSummary, outgoing bool, category string, manualCat 
 	if m.Snippet != "" {
 		// Decode any HTML entities in older cached snippets (new ones arrive
 		// already decoded); harmless on plain text.
-		snip := gtk.NewLabel(html.UnescapeString(m.Snippet))
+		snip := gtk.NewLabel(singleLineText(html.UnescapeString(m.Snippet)))
 		snip.SetXAlign(0)
 		snip.SetEllipsize(pango.EllipsizeEnd)
 		snip.AddCSSClass("dim-label")
@@ -7016,6 +7016,10 @@ func threadRow(t model.ThreadSummary, outgoing bool, category string, manualCat 
 		box.Append(snip)
 	}
 	return box
+}
+
+func singleLineText(s string) string {
+	return strings.Join(strings.Fields(s), " ")
 }
 
 // relativeDate renders a compact timestamp relative to now: a clock time for
