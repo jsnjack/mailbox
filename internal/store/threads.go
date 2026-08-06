@@ -26,6 +26,17 @@ func (s *Store) ListThreadsByLabel(ctx context.Context, accountID int64, labelID
 			SELECT 1 FROM snoozes sn
 			WHERE sn.account_id = m.account_id AND sn.thread_id = m.thread_id AND sn.until > unixepoch())`
 	}
+	// A local-first draft is the authoritative editable copy. Hide the provider
+	// message it came from (and the provider replacement created by autosave),
+	// otherwise Drafts would show two rows for the same compose.
+	draftFilter := ""
+	if labelID == model.LabelDraft {
+		draftFilter = ` AND NOT EXISTS (
+			SELECT 1 FROM local_drafts ld
+			WHERE ld.account_id = m.account_id AND ld.state <> 'deleting'
+			AND m.gmail_id <> ld.local_id
+			AND (m.gmail_id = ld.source_message_id OR m.gmail_id = ld.provider_message_id))`
+	}
 	// Exactly one row per thread: the labeled message with the greatest
 	// (internal_date, rowid). The rowid tiebreak avoids duplicate rows when two
 	// messages share a whole-second internal_date, and ordering by rowid means a
@@ -44,7 +55,7 @@ func (s *Store) ListThreadsByLabel(ctx context.Context, accountID int64, labelID
 			WHERE m2.account_id = m.account_id AND m2.thread_id = m.thread_id
 			ORDER BY m2.internal_date DESC, m2.rowid DESC
 			LIMIT 1
-		)`+snoozeFilter+`
+		)`+snoozeFilter+draftFilter+`
 		ORDER BY m.internal_date DESC, m.rowid DESC
 		LIMIT ? OFFSET ?`,
 		accountID, labelID, accountID, labelID, limit, offset)

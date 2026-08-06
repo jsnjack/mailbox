@@ -18,14 +18,21 @@ import (
 // window elapses. draftID, when non-empty, is the source draft to delete once the
 // send succeeds.
 func (s *Store) EnqueueOutbox(ctx context.Context, accountID int64, threadID, draftID string, rfc822 []byte, notBefore int64) (int64, error) {
+	return s.EnqueueOutboxFromDraft(ctx, accountID, threadID, draftID, "", rfc822, notBefore)
+}
+
+// EnqueueOutboxFromDraft is EnqueueOutbox plus the durable local draft whose
+// cached copy must be removed only after delivery succeeds. Keeping it through
+// Undo Send and failed delivery leaves a recoverable editable copy.
+func (s *Store) EnqueueOutboxFromDraft(ctx context.Context, accountID int64, threadID, draftID, localDraftID string, rfc822 []byte, notBefore int64) (int64, error) {
 	uuid, err := randomUUID()
 	if err != nil {
 		return 0, err
 	}
 	logging.TraceContext(ctx, "store: enqueue outbox", "account", accountID, "thread", threadID, "uuid", uuid, "bytes", len(rfc822), "not_before", notBefore)
 	res, err := s.writer.ExecContext(ctx, `
-		INSERT INTO outbox (local_uuid, account_id, thread_id, draft_id, rfc822, state, not_before)
-		VALUES (?, ?, ?, ?, ?, 'queued', ?)`, uuid, accountID, threadID, draftID, rfc822, notBefore)
+		INSERT INTO outbox (local_uuid, account_id, thread_id, draft_id, local_draft_id, rfc822, state, not_before)
+		VALUES (?, ?, ?, ?, ?, ?, 'queued', ?)`, uuid, accountID, threadID, draftID, localDraftID, rfc822, notBefore)
 	if err != nil {
 		logging.TraceContext(ctx, "store: enqueue outbox", "account", accountID, "uuid", uuid, "err", err)
 		return 0, fmt.Errorf("enqueue outbox: %w", err)
@@ -42,7 +49,7 @@ func (s *Store) EnqueueOutbox(ctx context.Context, accountID int64, threadID, dr
 // first. now is unix seconds (passed in so the caller controls the clock).
 func (s *Store) ListSendableOutbox(ctx context.Context, accountID int64, maxAttempts int, now int64) ([]model.OutboxItem, error) {
 	rows, err := s.reader.QueryContext(ctx, `
-		SELECT id, local_uuid, account_id, thread_id, draft_id, rfc822, state, attempts, last_error, not_before
+		SELECT id, local_uuid, account_id, thread_id, draft_id, local_draft_id, rfc822, state, attempts, last_error, not_before
 		FROM outbox
 		WHERE account_id = ? AND state IN ('queued','failed') AND attempts < ? AND not_before <= ?
 		ORDER BY id`, accountID, maxAttempts, now)
@@ -65,16 +72,18 @@ func scanOutbox(rows *sql.Rows) ([]model.OutboxItem, error) {
 	var out []model.OutboxItem
 	for rows.Next() {
 		var (
-			it       model.OutboxItem
-			threadID sql.NullString
-			draftID  sql.NullString
-			lastErr  sql.NullString
+			it           model.OutboxItem
+			threadID     sql.NullString
+			draftID      sql.NullString
+			localDraftID sql.NullString
+			lastErr      sql.NullString
 		)
-		if err := rows.Scan(&it.ID, &it.LocalUUID, &it.AccountID, &threadID, &draftID, &it.RFC822, &it.State, &it.Attempts, &lastErr, &it.NotBefore); err != nil {
+		if err := rows.Scan(&it.ID, &it.LocalUUID, &it.AccountID, &threadID, &draftID, &localDraftID, &it.RFC822, &it.State, &it.Attempts, &lastErr, &it.NotBefore); err != nil {
 			return nil, fmt.Errorf("scan outbox: %w", err)
 		}
 		it.ThreadID = threadID.String
 		it.DraftID = draftID.String
+		it.LocalDraftID = localDraftID.String
 		it.LastError = lastErr.String
 		out = append(out, it)
 	}
@@ -105,7 +114,7 @@ func (s *Store) CountPendingOutbox(ctx context.Context, accountID int64, now int
 // seconds; a send still in its undo window is omitted.
 func (s *Store) ListPendingOutbox(ctx context.Context, accountID int64, now int64) ([]model.OutboxItem, error) {
 	rows, err := s.reader.QueryContext(ctx, `
-		SELECT id, local_uuid, account_id, thread_id, draft_id, rfc822, state, attempts, last_error, not_before
+		SELECT id, local_uuid, account_id, thread_id, draft_id, local_draft_id, rfc822, state, attempts, last_error, not_before
 		FROM outbox
 		WHERE account_id = ? AND state IN ('queued','failed') AND not_before <= ?
 		ORDER BY id`, accountID, now)

@@ -347,7 +347,7 @@ func appendMessage(cl *imapclient.Client, mailbox string, msg []byte, flags ...i
 
 // SaveDraft APPENDs raw to the Drafts folder (with \Draft) and returns the new
 // draft's provider id (empty when the server lacks UIDPLUS, so no stable id).
-func (b *Backend) SaveDraft(ctx context.Context, raw []byte, threadID string) (string, error) {
+func (b *Backend) SaveDraft(ctx context.Context, raw []byte, threadID string) (model.DraftRef, error) {
 	logging.TraceContext(ctx, "imapbackend: save draft", "account", b.cfg.Email, "bytes", len(raw), "threadID", threadID)
 	var draftID string
 	err := b.withConn(ctx, func(c *conn) error {
@@ -371,24 +371,27 @@ func (b *Backend) SaveDraft(ctx context.Context, raw []byte, threadID string) (s
 		logging.Trace("imapbackend: save draft ok", "id", draftID)
 		return nil
 	})
-	return draftID, err
+	if err != nil {
+		return model.DraftRef{}, err
+	}
+	return model.DraftRef{DraftID: draftID, MessageID: draftID, ThreadID: threadID}, nil
 }
 
 // UpdateDraft replaces an existing draft: IMAP has no in-place edit, so append
 // the replacement FIRST and only then delete the old message — if the append
 // fails the user still has the old draft, and if the delete fails the worst
 // case is a duplicate draft, never a lost one.
-func (b *Backend) UpdateDraft(ctx context.Context, draftID string, raw []byte, threadID string) (string, error) {
+func (b *Backend) UpdateDraft(ctx context.Context, draftID string, raw []byte, threadID string) (model.DraftRef, error) {
 	logging.TraceContext(ctx, "imapbackend: update draft", "account", b.cfg.Email, "draftID", draftID, "bytes", len(raw))
 	newID, err := b.SaveDraft(ctx, raw, threadID)
 	if err != nil {
 		logging.TraceContext(ctx, "imapbackend: update draft append failed (old draft kept)", "draftID", draftID, "err", err)
-		return "", err
+		return model.DraftRef{}, err
 	}
 	if err := b.DeleteDraft(ctx, draftID); err != nil {
 		// Non-fatal: the new draft is safely stored; a stale duplicate may remain
 		// until the user deletes it or the next update succeeds.
-		logging.TraceContext(ctx, "imapbackend: update draft: delete of old draft failed (duplicate may remain)", "draftID", draftID, "newID", newID, "err", err)
+		logging.TraceContext(ctx, "imapbackend: update draft: delete of old draft failed (duplicate may remain)", "draftID", draftID, "newID", newID.DraftID, "err", err)
 	}
 	return newID, nil
 }

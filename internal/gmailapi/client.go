@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/jsnjack/mailbox/internal/logging"
+	"github.com/jsnjack/mailbox/internal/model"
 	gmail "google.golang.org/api/gmail/v1"
 	"google.golang.org/api/googleapi"
 )
@@ -339,8 +340,9 @@ func (c *Client) Send(ctx context.Context, raw []byte, threadID string) (string,
 	return sent.Id, nil
 }
 
-// SaveDraft stores a raw RFC 5322 message as a Gmail draft, returning the draft id.
-func (c *Client) SaveDraft(ctx context.Context, raw []byte, threadID string) (string, error) {
+// SaveDraft stores a raw RFC 5322 message as a Gmail draft, returning both the
+// draft resource id and its underlying message/thread ids.
+func (c *Client) SaveDraft(ctx context.Context, raw []byte, threadID string) (model.DraftRef, error) {
 	logging.TraceContext(ctx, "gmailapi: drafts.create", "bytes", len(raw), "thread_id", threadID)
 	var draft *gmail.Draft
 	err := c.do(ctx, costMessageGet, func() error {
@@ -353,14 +355,15 @@ func (c *Client) SaveDraft(ctx context.Context, raw []byte, threadID string) (st
 		return e
 	})
 	if err != nil {
-		return "", fmt.Errorf("create draft: %w", err)
+		return model.DraftRef{}, fmt.Errorf("create draft: %w", err)
 	}
-	logging.TraceContext(ctx, "gmailapi: drafts.create done", "id", draft.Id)
-	return draft.Id, nil
+	ref := gmailDraftRef(draft)
+	logging.TraceContext(ctx, "gmailapi: drafts.create done", "id", ref.DraftID, "message_id", ref.MessageID)
+	return ref, nil
 }
 
 // UpdateDraft replaces the contents of an existing draft, returning its id.
-func (c *Client) UpdateDraft(ctx context.Context, draftID string, raw []byte, threadID string) (string, error) {
+func (c *Client) UpdateDraft(ctx context.Context, draftID string, raw []byte, threadID string) (model.DraftRef, error) {
 	logging.TraceContext(ctx, "gmailapi: drafts.update", "id", draftID, "bytes", len(raw), "thread_id", threadID)
 	var draft *gmail.Draft
 	err := c.do(ctx, costMessageGet, func() error {
@@ -373,10 +376,23 @@ func (c *Client) UpdateDraft(ctx context.Context, draftID string, raw []byte, th
 		return e
 	})
 	if err != nil {
-		return "", fmt.Errorf("update draft: %w", err)
+		return model.DraftRef{}, fmt.Errorf("update draft: %w", err)
 	}
-	logging.TraceContext(ctx, "gmailapi: drafts.update done", "id", draft.Id)
-	return draft.Id, nil
+	ref := gmailDraftRef(draft)
+	logging.TraceContext(ctx, "gmailapi: drafts.update done", "id", ref.DraftID, "message_id", ref.MessageID)
+	return ref, nil
+}
+
+func gmailDraftRef(d *gmail.Draft) model.DraftRef {
+	if d == nil {
+		return model.DraftRef{}
+	}
+	ref := model.DraftRef{DraftID: d.Id}
+	if d.Message != nil {
+		ref.MessageID = d.Message.Id
+		ref.ThreadID = d.Message.ThreadId
+	}
+	return ref
 }
 
 // DeleteDraft permanently removes a draft (used after its edited contents have

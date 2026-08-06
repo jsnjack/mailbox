@@ -54,9 +54,11 @@ func (c *countingBackend) Delete(context.Context, []string) error { return nil }
 func (c *countingBackend) Changes(context.Context, string) ([]string, []string, string, error) {
 	return nil, nil, "", nil
 }
-func (c *countingBackend) SaveDraft(context.Context, []byte, string) (string, error) { return "", nil }
-func (c *countingBackend) UpdateDraft(context.Context, string, []byte, string) (string, error) {
-	return "", nil
+func (c *countingBackend) SaveDraft(context.Context, []byte, string) (model.DraftRef, error) {
+	return model.DraftRef{}, nil
+}
+func (c *countingBackend) UpdateDraft(context.Context, string, []byte, string) (model.DraftRef, error) {
+	return model.DraftRef{}, nil
 }
 func (c *countingBackend) DeleteDraft(context.Context, string) error {
 	c.draftDeletes.Add(1)

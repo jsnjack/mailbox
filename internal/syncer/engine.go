@@ -598,11 +598,19 @@ func (e *Engine) EnqueueSend(ctx context.Context, accountID int64, msg model.Out
 	if err != nil {
 		return 0, err
 	}
-	id, err := e.Store.EnqueueOutbox(ctx, accountID, msg.ThreadID, msg.DraftID, raw, notBefore)
+	// A local draft may have learned its provider draft id during a background
+	// autosave after this compose snapshot was gathered. Carry the freshest id
+	// into the outbox so delivery can retire the provider draft too.
+	if msg.LocalDraftID != "" {
+		if d, derr := e.Store.LocalDraft(ctx, msg.LocalDraftID); derr == nil && d.ProviderDraftID != "" {
+			msg.DraftID = d.ProviderDraftID
+		}
+	}
+	id, err := e.Store.EnqueueOutboxFromDraft(ctx, accountID, msg.ThreadID, msg.DraftID, msg.LocalDraftID, raw, notBefore)
 	if err != nil {
 		return 0, err
 	}
-	logging.TraceContext(ctx, "syncer: enqueue send", "account", accountID, "id", id, "not_before", notBefore, "draft", msg.DraftID)
+	logging.TraceContext(ctx, "syncer: enqueue send", "account", accountID, "id", id, "not_before", notBefore, "draft", msg.DraftID, "local_draft", msg.LocalDraftID)
 	e.publish(Change{Kind: SendStateChanged, AccountID: accountID})
 	return id, nil
 }
@@ -675,6 +683,103 @@ func (e *Engine) SaveDraft(ctx context.Context, b backend.Backend, accountID int
 	return nil
 }
 
+// SaveDraftLocal stores a compose snapshot locally before any network work.
+// The returned id is stable across autosaves and makes the draft immediately
+// available in the normal Drafts folder while offline.
+func (e *Engine) SaveDraftLocal(ctx context.Context, accountID int64, msg model.OutgoingMessage) (string, error) {
+	id, err := e.Store.SaveLocalDraft(ctx, accountID, msg)
+	if err != nil {
+		return "", err
+	}
+	e.publish(Change{Kind: MessageUpserted, AccountID: accountID, GmailID: id, ThreadID: id})
+	return id, nil
+}
+
+// SweepLocalDrafts mirrors queued local edits and deletion tombstones to the
+// provider. Synced snapshots remain in SQLite as the offline-authoritative copy
+// until the user sends or discards them.
+func (e *Engine) SweepLocalDrafts(ctx context.Context, b backend.Backend, accountID int64) (int, error) {
+	if b == nil {
+		return 0, nil
+	}
+	done := 0
+	for {
+		drafts, err := e.Store.PendingLocalDrafts(ctx, accountID, 50)
+		if err != nil {
+			return done, err
+		}
+		if len(drafts) == 0 {
+			return done, nil
+		}
+		for _, d := range drafts {
+			providerDraftID := d.ProviderDraftID
+			if providerDraftID == "" && d.SourceMessageID != "" && !store.IsLocalDraftID(d.SourceMessageID) {
+				providerDraftID, err = b.FindDraftID(ctx, d.SourceMessageID)
+				if err != nil {
+					_ = e.Store.FailLocalDraft(ctx, d.LocalID, d.Revision, err)
+					return done, err
+				}
+			}
+
+			if d.State == store.LocalDraftDeleting {
+				if providerDraftID != "" {
+					if err := b.DeleteDraft(ctx, providerDraftID); err != nil {
+						_ = e.Store.FailLocalDraft(ctx, d.LocalID, d.Revision, err)
+						return done, err
+					}
+				}
+				if err := e.Store.CompleteLocalDraft(ctx, d.LocalID); err != nil {
+					return done, err
+				}
+				done++
+				continue
+			}
+
+			raw, err := backend.BuildMIME(d.Message)
+			if err != nil {
+				_ = e.Store.FailLocalDraft(ctx, d.LocalID, d.Revision, err)
+				return done, err
+			}
+			var ref model.DraftRef
+			if providerDraftID != "" {
+				ref, err = b.UpdateDraft(ctx, providerDraftID, raw, d.Message.ThreadID)
+			} else {
+				ref, err = b.SaveDraft(ctx, raw, d.Message.ThreadID)
+			}
+			if err != nil {
+				_ = e.Store.FailLocalDraft(ctx, d.LocalID, d.Revision, err)
+				return done, err
+			}
+			if ref.DraftID == "" {
+				ref.DraftID = providerDraftID
+			}
+			if err := e.Store.RecordLocalDraftSynced(ctx, d.LocalID, d.Revision, ref); err != nil && !errors.Is(err, store.ErrNotFound) {
+				return done, err
+			}
+			done++
+		}
+		if len(drafts) < 50 {
+			return done, nil
+		}
+	}
+}
+
+// QueueLocalDraftSweep serializes draft mirroring with the account's other
+// provider mutations. SQLite remains authoritative if this in-memory nudge is
+// dropped; reconnect and the periodic sweeper nudge it again.
+func (e *Engine) QueueLocalDraftSweep(accountID int64, b backend.Backend) {
+	if b == nil {
+		return
+	}
+	e.mirrorAsync(accountID, func() {
+		ctx, cancel := mirrorCtx()
+		defer cancel()
+		if n, err := e.SweepLocalDrafts(ctx, b, accountID); err != nil {
+			slog.Default().Warn("local drafts: mirror to provider", "account", accountID, "completed", n, "err", err)
+		}
+	})
+}
+
 // SweepOutbox retries queued/failed messages for an account, returning how many
 // were sent. It is run periodically in the background.
 func (e *Engine) SweepOutbox(ctx context.Context, b backend.Backend, accountID int64) (int, error) {
@@ -724,11 +829,7 @@ func (e *Engine) SweepOutbox(ctx context.Context, b backend.Backend, accountID i
 					// below, so finish its bookkeeping here too: drop the source
 					// draft (else it lingers in Drafts duplicating the sent mail)
 					// and cache the sent message.
-					if it.DraftID != "" {
-						if derr := b.DeleteDraft(ctx, it.DraftID); derr != nil {
-							slog.Default().Warn("outbox: delete source draft after dedup", "id", it.DraftID, "err", derr)
-						}
-					}
+					e.retireSentDraft(ctx, b, accountID, it)
 					e.storeSentMessage(ctx, b, accountID, ids[0])
 					e.publish(Change{Kind: SendStateChanged, AccountID: accountID})
 					continue
@@ -750,11 +851,7 @@ func (e *Engine) SweepOutbox(ctx context.Context, b backend.Backend, accountID i
 		}
 		// The message left the drafts for the outbox; drop the source draft now that
 		// it has been delivered, so it doesn't linger as a duplicate.
-		if it.DraftID != "" {
-			if derr := b.DeleteDraft(ctx, it.DraftID); derr != nil {
-				slog.Default().Warn("outbox: delete source draft after send", "id", it.DraftID, "err", derr)
-			}
-		}
+		e.retireSentDraft(ctx, b, accountID, it)
 		// Reflect the sent message in the local cache so it joins the conversation
 		// immediately, rather than only after the next incremental sync.
 		e.storeSentMessage(ctx, b, accountID, sentID)
@@ -762,6 +859,26 @@ func (e *Engine) SweepOutbox(ctx context.Context, b backend.Backend, accountID i
 		sent++
 	}
 	return sent, nil
+}
+
+// retireSentDraft removes the draft source after delivery. A local-first draft
+// becomes a durable deletion tombstone and is drained on the provider-mirror
+// FIFO; this also orders deletion after any autosave already in flight, so that
+// autosave cannot recreate an orphan draft after the message was sent.
+func (e *Engine) retireSentDraft(ctx context.Context, b backend.Backend, accountID int64, it model.OutboxItem) {
+	if it.LocalDraftID != "" {
+		if err := e.Store.MarkLocalDraftDeleting(ctx, it.LocalDraftID); err != nil && !errors.Is(err, store.ErrNotFound) {
+			slog.Default().Warn("outbox: retire local source draft", "id", it.LocalDraftID, "err", err)
+			return
+		}
+		e.QueueLocalDraftSweep(accountID, b)
+		return
+	}
+	if it.DraftID != "" {
+		if err := b.DeleteDraft(ctx, it.DraftID); err != nil {
+			slog.Default().Warn("outbox: delete source draft after send", "id", it.DraftID, "err", err)
+		}
+	}
 }
 
 // sweepMuFor returns accountID's sweep mutex, creating it on first use.

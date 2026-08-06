@@ -166,6 +166,12 @@ type OutgoingMessage struct {
 	References string // existing References plus the original Message-ID
 	ThreadID   string // Gmail threadId, so Gmail files it in the conversation
 	DraftID    string // when set, this edits/sends an existing Gmail draft
+	// LocalDraftID identifies the durable SQLite draft used for autosave and
+	// offline editing. SourceMessageID is the cached provider message from which
+	// that local draft was opened; it lets a reconnect resolve the provider's
+	// separate draft resource id before updating, avoiding a duplicate.
+	LocalDraftID    string
+	SourceMessageID string
 	// QuoteHTML is compose-side only: the replied-to/forwarded message's
 	// sanitized HTML, carried into the compose window so the send can embed the
 	// original's real formatting in the HTML alternative's quote. BuildMIME
@@ -185,6 +191,31 @@ type OutgoingMessage struct {
 	CalendarMethod string
 }
 
+// DraftRef identifies the provider objects created or replaced by a draft
+// save. Gmail has distinct draft/message ids; IMAP normally uses one message id
+// for both. Returning both lets the local cache suppress the provider copy while
+// its richer, offline-editable local draft is authoritative.
+type DraftRef struct {
+	DraftID   string
+	MessageID string
+	ThreadID  string
+}
+
+// LocalDraft is a durable compose snapshot and its provider-mirroring state.
+type LocalDraft struct {
+	LocalID           string
+	AccountID         int64
+	SourceMessageID   string
+	ProviderDraftID   string
+	ProviderMessageID string
+	Message           OutgoingMessage
+	State             string
+	Revision          int64
+	Attempts          int
+	LastError         string
+	UpdatedAt         time.Time
+}
+
 // Contact is a correspondent derived from cached mail, used for recipient
 // autocomplete. Count and LastSeen drive ranking (most/recently used first).
 type Contact struct {
@@ -196,16 +227,17 @@ type Contact struct {
 
 // OutboxItem is a queued outgoing message awaiting (re)send.
 type OutboxItem struct {
-	ID        int64
-	LocalUUID string
-	AccountID int64
-	ThreadID  string
-	DraftID   string // source draft to delete once the send succeeds
-	RFC822    []byte
-	State     string // queued | failed
-	Attempts  int
-	LastError string
-	NotBefore int64 // unix seconds; not sendable until now >= NotBefore (0 = ASAP)
+	ID           int64
+	LocalUUID    string
+	AccountID    int64
+	ThreadID     string
+	DraftID      string // source draft to delete once the send succeeds
+	LocalDraftID string // local compose snapshot removed after delivery
+	RFC822       []byte
+	State        string // queued | failed
+	Attempts     int
+	LastError    string
+	NotBefore    int64 // unix seconds; not sendable until now >= NotBefore (0 = ASAP)
 }
 
 // Attachment points to an attachment's bytes; the bytes are stored on disk

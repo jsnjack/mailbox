@@ -316,29 +316,29 @@ func (b *Backend) Send(ctx context.Context, raw []byte, threadID string) (string
 }
 
 // SaveDraft creates a new Gmail draft.
-func (b *Backend) SaveDraft(ctx context.Context, raw []byte, threadID string) (string, error) {
+func (b *Backend) SaveDraft(ctx context.Context, raw []byte, threadID string) (model.DraftRef, error) {
 	start := time.Now()
 	logging.TraceContext(ctx, "gmailbackend: SaveDraft", "account", b.accountID, "bytes", len(raw), "threadID", threadID)
-	id, err := b.c.SaveDraft(ctx, raw, threadID)
+	ref, err := b.c.SaveDraft(ctx, raw, threadID)
 	if err != nil {
 		logging.TraceContext(ctx, "gmailbackend: SaveDraft failed", "account", b.accountID, "threadID", threadID, "dur", time.Since(start), "err", err)
-		return "", err
+		return model.DraftRef{}, err
 	}
-	logging.TraceContext(ctx, "gmailbackend: SaveDraft ok", "account", b.accountID, "draftID", id, "threadID", threadID, "dur", time.Since(start))
-	return id, nil
+	logging.TraceContext(ctx, "gmailbackend: SaveDraft ok", "account", b.accountID, "draftID", ref.DraftID, "threadID", ref.ThreadID, "dur", time.Since(start))
+	return ref, nil
 }
 
 // UpdateDraft replaces an existing Gmail draft.
-func (b *Backend) UpdateDraft(ctx context.Context, draftID string, raw []byte, threadID string) (string, error) {
+func (b *Backend) UpdateDraft(ctx context.Context, draftID string, raw []byte, threadID string) (model.DraftRef, error) {
 	start := time.Now()
 	logging.TraceContext(ctx, "gmailbackend: UpdateDraft", "account", b.accountID, "draftID", draftID, "bytes", len(raw), "threadID", threadID)
-	id, err := b.c.UpdateDraft(ctx, draftID, raw, threadID)
+	ref, err := b.c.UpdateDraft(ctx, draftID, raw, threadID)
 	if err != nil {
 		logging.TraceContext(ctx, "gmailbackend: UpdateDraft failed", "account", b.accountID, "draftID", draftID, "dur", time.Since(start), "err", err)
-		return "", err
+		return model.DraftRef{}, err
 	}
-	logging.TraceContext(ctx, "gmailbackend: UpdateDraft ok", "account", b.accountID, "draftID", id, "threadID", threadID, "dur", time.Since(start))
-	return id, nil
+	logging.TraceContext(ctx, "gmailbackend: UpdateDraft ok", "account", b.accountID, "draftID", ref.DraftID, "threadID", ref.ThreadID, "dur", time.Since(start))
+	return ref, nil
 }
 
 // DeleteDraft removes a Gmail draft.

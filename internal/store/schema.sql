@@ -103,9 +103,31 @@ CREATE TABLE IF NOT EXISTS outbox (
   attempts        INTEGER NOT NULL DEFAULT 0,
   last_error      TEXT,
   draft_id        TEXT,                            -- source draft to delete after a successful send
+  local_draft_id  TEXT,                            -- local compose snapshot removed after delivery
   not_before      INTEGER NOT NULL DEFAULT 0,      -- unix seconds; a send held for its undo window is invisible to the sweeper until now >= not_before (0 = send ASAP)
   created_at      INTEGER NOT NULL DEFAULT (unixepoch())
 );
+
+-- Local-first drafts. payload is a JSON model.OutgoingMessage (including
+-- attachment bytes); a small synthetic DRAFT message supplies the normal list
+-- UI while this row remains the authoritative editable copy. revision prevents
+-- an older in-flight provider save from marking newer edits as synchronized.
+CREATE TABLE IF NOT EXISTS local_drafts (
+  local_id             TEXT PRIMARY KEY,
+  account_id           INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  source_message_id    TEXT NOT NULL DEFAULT '',
+  provider_draft_id    TEXT NOT NULL DEFAULT '',
+  provider_message_id  TEXT NOT NULL DEFAULT '',
+  payload              BLOB NOT NULL,
+  state                TEXT NOT NULL DEFAULT 'queued', -- queued|synced|failed|deleting
+  revision             INTEGER NOT NULL DEFAULT 1,
+  attempts             INTEGER NOT NULL DEFAULT 0,
+  last_error           TEXT NOT NULL DEFAULT '',
+  updated_at           INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
+CREATE INDEX IF NOT EXISTS idx_local_drafts_account_state
+  ON local_drafts(account_id, state, updated_at);
 
 -- Ordered, durable provider mirrors for optimistic local label changes. The UI
 -- commits the local message state and this row in one transaction, then the

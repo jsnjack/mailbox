@@ -140,11 +140,13 @@ type Backend interface {
 	// files it into an existing conversation. Returns the new provider message id.
 	Send(ctx context.Context, raw []byte, threadID string) (string, error)
 
-	// SaveDraft stores raw as a new draft and returns its provider draft id.
-	SaveDraft(ctx context.Context, raw []byte, threadID string) (string, error)
+	// SaveDraft stores raw as a new draft and returns its provider draft/message
+	// identities (distinct on Gmail, normally identical on IMAP).
+	SaveDraft(ctx context.Context, raw []byte, threadID string) (model.DraftRef, error)
 
-	// UpdateDraft replaces an existing draft's content, returning its draft id.
-	UpdateDraft(ctx context.Context, draftID string, raw []byte, threadID string) (string, error)
+	// UpdateDraft replaces an existing draft's content and returns the replacement
+	// identities.
+	UpdateDraft(ctx context.Context, draftID string, raw []byte, threadID string) (model.DraftRef, error)
 
 	// DeleteDraft removes a draft by its provider draft id.
 	DeleteDraft(ctx context.Context, draftID string) error
