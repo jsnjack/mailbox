@@ -8,6 +8,19 @@ import (
 	"github.com/jsnjack/mailbox/internal/model"
 )
 
+func TestDraftContentFingerprintIgnoresProviderBookkeeping(t *testing.T) {
+	a := model.OutgoingMessage{To: "a@example.com", Body: "body", DraftID: "d1", LocalDraftID: "l1", SourceMessageID: "m1"}
+	b := a
+	b.DraftID, b.LocalDraftID, b.SourceMessageID = "d2", "l2", "m2"
+	if draftContentFingerprint(a) != draftContentFingerprint(b) {
+		t.Fatal("provider bookkeeping changed content fingerprint")
+	}
+	b.Body = "edited"
+	if draftContentFingerprint(a) == draftContentFingerprint(b) {
+		t.Fatal("body edit did not change content fingerprint")
+	}
+}
+
 func TestStripTrailingSignoff(t *testing.T) {
 	tests := []struct {
 		name, in, want string

@@ -780,6 +780,37 @@ func (e *Engine) QueueLocalDraftSweep(accountID int64, b backend.Backend) {
 	})
 }
 
+// DiscardDraft removes a draft from the local UI immediately and queues its
+// provider deletion. It works without a live backend; the tombstone is retried
+// on reconnect rather than turning a right-click into a silent no-op.
+func (e *Engine) DiscardDraft(ctx context.Context, b backend.Backend, accountID int64, threadID string) error {
+	if store.IsLocalDraftID(threadID) {
+		if err := e.Store.MarkLocalDraftDeleting(ctx, threadID); err != nil {
+			return err
+		}
+	} else {
+		msgs, err := e.Store.ListThreadMessages(ctx, accountID, threadID)
+		if err != nil {
+			return err
+		}
+		if len(msgs) == 0 {
+			return store.ErrNotFound
+		}
+		// The action is reachable only from the Drafts view, whose summary was
+		// selected through the DRAFT label. ListThreadMessages intentionally does
+		// not hydrate per-message label slices, so use its newest message.
+		draft := &msgs[len(msgs)-1]
+		if _, err := e.Store.QueueProviderDraftDelete(ctx, accountID, draft.GmailID, "", draft.ThreadID); err != nil {
+			return err
+		}
+	}
+	e.publish(Change{Kind: MessageDeleted, AccountID: accountID, ThreadID: threadID})
+	if b != nil {
+		e.QueueLocalDraftSweep(accountID, b)
+	}
+	return nil
+}
+
 // SweepOutbox retries queued/failed messages for an account, returning how many
 // were sent. It is run periodically in the background.
 func (e *Engine) SweepOutbox(ctx context.Context, b backend.Backend, accountID int64) (int, error) {

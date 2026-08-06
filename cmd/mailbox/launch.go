@@ -599,15 +599,21 @@ func launchUI(mailto string) error {
 	deps.EnqueueSend = func(ctx context.Context, accountID int64, msg model.OutgoingMessage, notBefore int64) (int64, error) {
 		return engine.EnqueueSend(ctx, accountID, msg, notBefore)
 	}
-	deps.SaveDraft = func(ctx context.Context, accountID int64, msg model.OutgoingMessage) error {
-		c, err := clientFor(accountID)
-		if err != nil {
-			return err
-		}
-		done := act.Begin("draft", emailOf(accountID), "Saving draft")
-		err = engine.SaveDraft(ctx, c, accountID, msg)
+	deps.SaveDraft = func(ctx context.Context, accountID int64, msg model.OutgoingMessage) (string, error) {
+		done := act.Begin("draft", emailOf(accountID), "Saving draft locally")
+		id, err := engine.SaveDraftLocal(ctx, accountID, msg)
 		done(doneNote(err))
-		return err
+		if err != nil {
+			return "", err
+		}
+		if c, backendErr := clientFor(accountID); backendErr == nil {
+			engine.QueueLocalDraftSweep(accountID, c)
+		}
+		return id, nil
+	}
+	deps.DeleteDraft = func(ctx context.Context, accountID int64, threadID string) error {
+		c, _ := clientFor(accountID) // local deletion remains valid while offline
+		return engine.DiscardDraft(ctx, c, accountID, threadID)
 	}
 	deps.FindDraftID = func(ctx context.Context, accountID int64, gmailID string) (string, error) {
 		c, err := clientFor(accountID)

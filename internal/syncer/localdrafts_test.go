@@ -92,3 +92,34 @@ func TestSweepLocalDraftsUpdatesThenDeletesProviderDraft(t *testing.T) {
 		t.Fatalf("provider updates=%d deletes=%d", updates, deletes)
 	}
 }
+
+func TestDiscardProviderDraftQueuesOfflineDeletion(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	acct, err := s.UpsertAccount(ctx, model.Account{Email: "drafts@example.com", Type: model.AccountGmail})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpsertMessages(ctx, []model.Message{{
+		AccountID: acct, GmailID: "provider-message", ThreadID: "thread-1",
+		Subject: "discard me", Labels: []string{model.LabelDraft},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	e := NewEngine(s, nil)
+	if err := e.DiscardDraft(ctx, nil, acct, "thread-1"); err != nil {
+		t.Fatal(err)
+	}
+	threads, err := s.ListThreadsByLabel(ctx, acct, model.LabelDraft, 50, 0)
+	if err != nil || len(threads) != 0 {
+		t.Fatalf("drafts after offline discard = %+v, %v", threads, err)
+	}
+	pending, err := s.PendingLocalDrafts(ctx, acct, 10)
+	if err != nil || len(pending) != 1 || pending[0].State != store.LocalDraftDeleting || pending[0].SourceMessageID != "provider-message" {
+		t.Fatalf("delete tombstone = %+v, %v", pending, err)
+	}
+}

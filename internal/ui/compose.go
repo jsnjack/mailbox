@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"html"
 	"log/slog"
@@ -13,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -49,7 +51,7 @@ type composeOpts struct {
 func (w *window) openCompose(init model.OutgoingMessage, aiContext, title string, auto ...composeAutoAI) {
 	// Fresh composes/replies/forwards get the default signature; an existing
 	// draft or a reopened (undone) message already contains its body verbatim.
-	w.openComposeOpts(init, aiContext, title, composeOpts{addSignature: init.DraftID == ""}, auto...)
+	w.openComposeOpts(init, aiContext, title, composeOpts{addSignature: init.DraftID == "" && init.LocalDraftID == ""}, auto...)
 }
 
 // composeFromMailto opens a compose window prefilled from a mailto: URI (clicked
@@ -106,6 +108,17 @@ func newMsgPresets() []aiPreset {
 		{"Follow up", "Write a polite follow-up."},
 		{"Make a request", "Politely ask for something."},
 	}
+}
+
+// draftContentFingerprint compares user-visible compose content while ignoring
+// bookkeeping ids that can change when the provider mirror completes.
+func draftContentFingerprint(msg model.OutgoingMessage) string {
+	msg.LocalDraftID = ""
+	msg.DraftID = ""
+	msg.SourceMessageID = ""
+	b, _ := json.Marshal(msg) // OutgoingMessage contains only JSON-safe fields.
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }
 
 func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title string, opts composeOpts, auto ...composeAutoAI) {
@@ -184,7 +197,9 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 	var attachments []model.OutgoingAttachment
 	var attachIDs []int // parallel to attachments; ids stay stable across removals
 	attachSeq := 0
-	attachmentsChanged := false // any user add/remove (init carryover doesn't count)
+	// Assigned after gather/save state exists. Attachment callbacks are built
+	// earlier, so this placeholder lets them join the same autosave path.
+	scheduleAutosave := func() {}
 	attachRow := gtk.NewFlowBox()
 	attachRow.SetSelectionMode(gtk.SelectionNone)
 	attachRow.SetColumnSpacing(6)
@@ -247,11 +262,11 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 			logging.Trace("ui: compose attachment removed", "name", attachments[i].Filename, "left", len(attachments)-1)
 			attachments = append(attachments[:i], attachments[i+1:]...)
 			attachIDs = append(attachIDs[:i], attachIDs[i+1:]...)
-			attachmentsChanged = true
 			attachRow.Remove(chip)
 			if len(attachments) == 0 {
 				attachRow.SetVisible(false)
 			}
+			scheduleAutosave()
 		})
 		chip.Append(rm)
 		attachRow.Append(chip)
@@ -278,13 +293,12 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 			dispatch.Main(func() {
 				logging.Trace("ui: compose attachment added", "name", name, "mime", mtype, "bytes", len(data), "total", len(attachments)+1)
 				addAttachment(model.OutgoingAttachment{Filename: name, MimeType: mtype, Data: data})
-				attachmentsChanged = true
+				scheduleAutosave()
 			})
 		}()
 	}
 
-	// Carry over any attachments from init (e.g. a reopened/undone message);
-	// these are prefilled, not user changes, so attachmentsChanged stays false.
+	// Carry over any attachments from init (e.g. a reopened/undone message).
 	for _, a := range init.Attachments {
 		addAttachment(a)
 	}
@@ -381,6 +395,14 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 		accountDD = gtk.NewDropDownFromStrings(emails)
 		accountDD.SetSelected(uint(active))
 		accountDD.SetHExpand(true)
+		// A provider/local draft is account-scoped and cannot safely be moved by
+		// changing From; a fresh compose remains selectable and autosaves under
+		// whichever account is chosen.
+		if init.LocalDraftID != "" || init.SourceMessageID != "" || init.DraftID != "" {
+			accountDD.SetSensitive(false)
+		} else {
+			accountDD.Connect("notify::selected", func() { scheduleAutosave() })
+		}
 		fromRow := gtk.NewBox(gtk.OrientationHorizontal, 8)
 		fromRow.Append(gtk.NewLabel("From"))
 		fromRow.Append(accountDD)
@@ -427,50 +449,137 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 	}
 	win.SetContent(tv)
 
-	// sent becomes true once the message is sent, saved as a draft, or the user
-	// confirms discarding it — so the close-request guard lets the window close.
-	sent := false
+	// finished bypasses the close guard after Send or an explicit discard. Merely
+	// saving no longer closes compose: manual save and autosave keep the window
+	// open, like other modern mail clients.
+	finished := false
+	var draftStateMu sync.Mutex
+	localDraftID := init.LocalDraftID
+	savedFingerprint := ""
+	startDirtyPending := opts.startDirty
+	closed := false
+	var saveSerial sync.Mutex
+	var autosaveMu sync.Mutex
+	var autosaveTimer *time.Timer
 
 	gather := func() model.OutgoingMessage {
 		body := bodyText(buf)
+		draftStateMu.Lock()
+		localID := localDraftID
+		draftStateMu.Unlock()
 		return model.OutgoingMessage{
-			From:        selectedAccount().Email,
-			To:          strings.TrimSpace(toEntry.Text()),
-			Cc:          strings.TrimSpace(ccEntry.Text()),
-			Bcc:         strings.TrimSpace(bccEntry.Text()),
-			Subject:     subjEntry.Text(),
-			Body:        body,
-			HTMLBody:    buildHTMLBody(body, initQuote, init.QuoteHTML),
-			InReplyTo:   init.InReplyTo,
-			References:  init.References,
-			ThreadID:    init.ThreadID,
-			DraftID:     init.DraftID,
-			Attachments: attachments,
+			From:            selectedAccount().Email,
+			To:              strings.TrimSpace(toEntry.Text()),
+			Cc:              strings.TrimSpace(ccEntry.Text()),
+			Bcc:             strings.TrimSpace(bccEntry.Text()),
+			Subject:         subjEntry.Text(),
+			Body:            body,
+			HTMLBody:        buildHTMLBody(body, initQuote, init.QuoteHTML),
+			InReplyTo:       init.InReplyTo,
+			References:      init.References,
+			ThreadID:        init.ThreadID,
+			DraftID:         init.DraftID,
+			LocalDraftID:    localID,
+			SourceMessageID: init.SourceMessageID,
+			QuoteHTML:       init.QuoteHTML,
+			SkipSignature:   init.SkipSignature,
+			Attachments:     attachments,
 		}
 	}
+	savedFingerprint = draftContentFingerprint(gather())
 
-	// dirty reports whether the user has changed anything from the initial draft
-	// (a reply/forward starts with prefilled, unedited content). An undo-send
-	// reopen starts dirty: its init IS user-authored content, so closing it
-	// unchanged must still prompt rather than silently discard.
+	// dirty compares against the latest successful local save, not only the
+	// initial contents. Closing after autosave is therefore safe and prompt-free.
 	dirty := func() bool {
-		if opts.startDirty {
+		draftStateMu.Lock()
+		startDirty := startDirtyPending
+		saved := savedFingerprint
+		draftStateMu.Unlock()
+		if startDirty {
 			return true
 		}
-		c := gather()
-		return strings.TrimSpace(c.To) != strings.TrimSpace(init.To) ||
-			strings.TrimSpace(c.Cc) != strings.TrimSpace(init.Cc) ||
-			strings.TrimSpace(c.Bcc) != strings.TrimSpace(init.Bcc) ||
-			c.Subject != init.Subject ||
-			c.Body != init.Body ||
-			// Tracked explicitly — a forward carries the original's attachments
-			// (prefilled, not user changes), and add+remove could leave the
-			// count equal while the set differs.
-			attachmentsChanged
+		return draftContentFingerprint(gather()) != saved
 	}
 
+	stopAutosave := func() {
+		autosaveMu.Lock()
+		if autosaveTimer != nil {
+			autosaveTimer.Stop()
+			autosaveTimer = nil
+		}
+		autosaveMu.Unlock()
+	}
+
+	// saveSnapshot serializes saves from this window. A second edit can be
+	// captured while the first DB write is finishing, but it reuses the stable id
+	// and updates the saved fingerprint only for its own exact snapshot.
+	saveSnapshot := func(msg model.OutgoingMessage, accountID int64, quiet bool, done func(error)) {
+		go func() {
+			saveSerial.Lock()
+			draftStateMu.Lock()
+			msg.LocalDraftID = localDraftID
+			draftStateMu.Unlock()
+			id, err := w.deps.SaveDraft(context.Background(), accountID, msg)
+			if err == nil {
+				msg.LocalDraftID = id
+				draftStateMu.Lock()
+				localDraftID = id
+				savedFingerprint = draftContentFingerprint(msg)
+				startDirtyPending = false
+				draftStateMu.Unlock()
+			}
+			saveSerial.Unlock()
+			dispatch.Main(func() {
+				draftStateMu.Lock()
+				isClosed := closed
+				draftStateMu.Unlock()
+				if !isClosed {
+					status.SetVisible(true)
+					if err != nil {
+						status.SetText("Could not save draft locally: " + err.Error())
+					} else if quiet {
+						status.SetText("Draft saved locally")
+					}
+				}
+				if done != nil {
+					done(err)
+				}
+			})
+		}()
+	}
+
+	const autosaveDelay = 1500 * time.Millisecond
+	scheduleAutosave = func() {
+		if w.deps.SaveDraft == nil {
+			return
+		}
+		msg := gather() // GTK values are captured on the main thread.
+		accountID := selectedAccount().ID
+		autosaveMu.Lock()
+		if autosaveTimer != nil {
+			autosaveTimer.Stop()
+		}
+		autosaveTimer = time.AfterFunc(autosaveDelay, func() {
+			draftStateMu.Lock()
+			isClosed := closed
+			draftStateMu.Unlock()
+			if !isClosed {
+				saveSnapshot(msg, accountID, true, nil)
+			}
+		})
+		autosaveMu.Unlock()
+	}
+	for _, entry := range []*gtk.Entry{toEntry, ccEntry, bccEntry, subjEntry} {
+		entry.Connect("changed", scheduleAutosave)
+	}
+	buf.Connect("changed", scheduleAutosave)
+
 	win.ConnectCloseRequest(func() bool {
-		if sent || !dirty() {
+		if finished || !dirty() {
+			draftStateMu.Lock()
+			closed = true
+			draftStateMu.Unlock()
+			stopAutosave()
 			cancelAI()
 			saveComposeSize()
 			return false // allow the close
@@ -489,35 +598,40 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 			switch response {
 			case "discard":
 				logging.Trace("ui: compose discard on close")
-				sent = true // bypass the guard on the programmatic close below
+				finished = true // bypass the guard on the programmatic close below
+				draftStateMu.Lock()
+				closed = true
+				draftStateMu.Unlock()
+				stopAutosave()
 				cancelAI()
 				win.Close()
 			case "save":
+				stopAutosave()
 				msg := gather()
 				acctID := selectedAccount().ID
 				logging.Trace("ui: compose save draft on close", "account", acctID, "to", msg.To, "subject", msg.Subject)
 				// Save before closing: only dismiss the window once the draft is
 				// safely stored. If the save fails the window stays open with the
 				// content intact, so a transient failure can't silently drop it.
-				go func() {
-					err := w.deps.SaveDraft(context.Background(), acctID, msg)
-					dispatch.Main(func() {
-						if err != nil {
-							slog.Warn("ui: save draft on close", "err", err)
-							logging.Trace("ui: compose save draft on close failed", "err", err)
-							alert := adw.NewAlertDialog("Couldn't save draft",
-								"Saving the draft failed: "+err.Error()+"\n\nThe message is still open, so you can try again.")
-							alert.AddResponse("ok", "OK")
-							alert.SetDefaultResponse("ok")
-							alert.SetCloseResponse("ok")
-							alert.Present(win)
-							return
-						}
-						sent = true // bypass the close guard for the programmatic close
-						cancelAI()
-						win.Close()
-					})
-				}()
+				saveSnapshot(msg, acctID, false, func(err error) {
+					if err != nil {
+						slog.Warn("ui: save draft on close", "err", err)
+						logging.Trace("ui: compose save draft on close failed", "err", err)
+						alert := adw.NewAlertDialog("Couldn't save draft",
+							"Saving the draft failed: "+err.Error()+"\n\nThe message is still open, so you can try again.")
+						alert.AddResponse("ok", "OK")
+						alert.SetDefaultResponse("ok")
+						alert.SetCloseResponse("ok")
+						alert.Present(win)
+						return
+					}
+					finished = true // bypass the close guard for the programmatic close
+					draftStateMu.Lock()
+					closed = true
+					draftStateMu.Unlock()
+					cancelAI()
+					win.Close()
+				})
 			}
 		})
 		confirm.Present(win)
@@ -569,7 +683,11 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 			"subject", msg.Subject, "attachments", len(msg.Attachments), "draft_id", msg.DraftID, "thread_id", msg.ThreadID)
 		// Close immediately and hand off to the delayed-send queue, which shows an
 		// "Undo" toast for a few seconds before the message actually goes out.
-		sent = true
+		finished = true
+		draftStateMu.Lock()
+		closed = true
+		draftStateMu.Unlock()
+		stopAutosave()
 		w.deferSend(acctID, msg)
 		win.Close()
 	}
@@ -639,27 +757,24 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 
 	if draftBtn != nil {
 		draftBtn.ConnectClicked(func() {
+			stopAutosave()
 			msg := gather()
 			acctID := selectedAccount().ID
-			logging.Trace("ui: compose save draft", "account", acctID, "to", msg.To, "subject", msg.Subject, "draft_id", msg.DraftID)
+			logging.Trace("ui: compose save draft", "account", acctID, "to", msg.To, "subject", msg.Subject, "draft_id", msg.DraftID, "local_draft", msg.LocalDraftID)
 			draftBtn.SetSensitive(false)
 			status.SetVisible(true)
-			status.SetText("Saving draft…")
-			go func() {
-				err := w.deps.SaveDraft(context.Background(), acctID, msg)
-				dispatch.Main(func() {
-					if err != nil {
-						slog.Warn("ui: save draft", "err", err)
-						logging.Trace("ui: compose save draft failed", "err", err)
-						status.SetText("Could not save draft: " + err.Error())
-						draftBtn.SetSensitive(true)
-						return
-					}
-					logging.Trace("ui: compose save draft done", "account", acctID)
-					sent = true
-					win.Close()
-				})
-			}()
+			status.SetText("Saving draft locally…")
+			saveSnapshot(msg, acctID, false, func(err error) {
+				draftBtn.SetSensitive(true)
+				if err != nil {
+					slog.Warn("ui: save draft", "err", err)
+					logging.Trace("ui: compose save draft failed", "err", err)
+					status.SetText("Could not save draft locally: " + err.Error())
+					return
+				}
+				logging.Trace("ui: compose save draft done", "account", acctID)
+				status.SetText("Draft saved locally")
+			})
 		})
 	}
 

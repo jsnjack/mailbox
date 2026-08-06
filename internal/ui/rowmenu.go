@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/diamondburned/gotk4-adwaita/pkg/adw"
 	"github.com/jsnjack/mailbox/internal/dispatch"
 
 	"github.com/diamondburned/gotk4/pkg/gdk/v4"
@@ -25,8 +26,9 @@ import (
 // buttons owned by a plain GtkPopover sidestep the action machinery entirely.
 func (w *window) showRowMenu(row gtk.Widgetter, threadID string, x, y float64) {
 	t, ok := w.threadByID[threadID]
-	if !ok || w.deps.ModifyLabels == nil {
-		logging.Trace("ui: row menu skipped", "id", threadID, "found", ok, "can_modify", w.deps.ModifyLabels != nil)
+	canDraft := w.current == model.LabelDraft && w.deps.DeleteDraft != nil
+	if !ok || (w.deps.ModifyLabels == nil && !canDraft) {
+		logging.Trace("ui: row menu skipped", "id", threadID, "found", ok, "can_modify", w.deps.ModifyLabels != nil, "can_delete_draft", canDraft)
 		return
 	}
 	// Capture the account this row belongs to now, so an action still targets the
@@ -70,6 +72,18 @@ func (w *window) showRowMenu(row gtk.Widgetter, threadID string, x, y float64) {
 		parent.Append(b)
 	}
 	sep := func() { box.Append(gtk.NewSeparator(gtk.OrientationHorizontal)) }
+
+	// Drafts are provider resources, not ordinary messages: adding TRASH and
+	// removing INBOX is a no-op because they carry DRAFT, not INBOX. Give them a
+	// contextual menu whose destructive action queues Drafts.Delete instead.
+	if w.current == model.LabelDraft {
+		item(box, "Edit draft", func() { w.openDraftForEdit(threadID) })
+		sep()
+		item(box, "Discard draft…", func() { w.confirmDiscardDraft(acct, threadID) })
+		pop.SetChild(box)
+		pop.Popup()
+		return
+	}
 
 	if w.current == model.LabelTrash || w.current == model.LabelSpam {
 		item(box, "Move to Inbox", func() {
@@ -246,6 +260,33 @@ func (w *window) showRowMenu(row gtk.Widgetter, threadID string, x, y float64) {
 
 	pop.SetChild(box)
 	pop.Popup()
+}
+
+func (w *window) confirmDiscardDraft(accountID int64, threadID string) {
+	confirm := adw.NewAlertDialog("Discard draft?", "This removes the draft from this device and your mail provider. This cannot be undone.")
+	confirm.AddResponse("cancel", "Cancel")
+	confirm.AddResponse("discard", "Discard")
+	confirm.SetResponseAppearance("discard", adw.ResponseDestructive)
+	confirm.SetDefaultResponse("cancel")
+	confirm.SetCloseResponse("cancel")
+	confirm.ConnectResponse(func(response string) {
+		if response != "discard" {
+			return
+		}
+		go func() {
+			err := w.deps.DeleteDraft(context.Background(), accountID, threadID)
+			dispatch.Main(func() {
+				if err != nil {
+					w.toast("Couldn't discard draft: " + err.Error())
+					return
+				}
+				w.toast("Draft discarded")
+				w.refreshList(w.searchEntry.Text())
+				w.loadLabels()
+			})
+		}()
+	})
+	confirm.Present(w.win)
 }
 
 // threadModifyAll applies a label delta to every message in a thread (loaded

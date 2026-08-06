@@ -39,6 +39,7 @@ import (
 	"github.com/jsnjack/mailbox/internal/dispatch"
 	"github.com/jsnjack/mailbox/internal/logging"
 	"github.com/jsnjack/mailbox/internal/model"
+	"github.com/jsnjack/mailbox/internal/store"
 	"github.com/jsnjack/mailbox/internal/syncer"
 	"github.com/microcosm-cc/bluemonday"
 )
@@ -3768,6 +3769,18 @@ func (w *window) openDraftForEdit(threadID string) {
 	w.toast("Opening draft…")
 	go func() {
 		ctx := context.Background()
+		// Local-first drafts contain the complete compose payload (including
+		// attachments), so reopening them never needs the network.
+		if store.IsLocalDraftID(threadID) {
+			d, err := w.deps.Store.LocalDraft(ctx, threadID)
+			if err != nil {
+				slog.Warn("ui: load local draft", "id", threadID, "err", err)
+				dispatch.Main(func() { w.toast("Couldn't open this draft") })
+				return
+			}
+			dispatch.Main(func() { w.openCompose(d.Message, "", "Edit draft") })
+			return
+		}
 		// Read off the main thread (a background VACUUM would block a
 		// synchronous read here — see showThread) and bounded like any other
 		// store read behind a click.
@@ -3792,8 +3805,16 @@ func (w *window) openDraftForEdit(threadID string) {
 			fetchCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 			if err := w.deps.FetchBody(fetchCtx, dm.AccountID, dm.GmailID); err != nil {
 				slog.Warn("ui: fetch draft body", "id", dm.GmailID, "err", err)
+			} else {
+				dm.BodyFetched = true
 			}
 			cancel()
+		}
+		if !dm.BodyFetched {
+			// Never replace an unfetched provider draft with its short list snippet:
+			// saving that offline would destroy most of the original body.
+			dispatch.Main(func() { w.toast("This draft's full body isn't available offline yet") })
+			return
 		}
 		// Our drafts are text/plain — use the text verbatim so re-editing is
 		// lossless; fall back to HTML-reduced-to-text or the snippet.
@@ -3808,23 +3829,26 @@ func (w *window) openDraftForEdit(threadID string) {
 		}
 		draftID := ""
 		if w.deps.FindDraftID != nil {
-			if id, err := w.deps.FindDraftID(ctx, acctID, dm.GmailID); err != nil {
+			findCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+			if id, err := w.deps.FindDraftID(findCtx, acctID, dm.GmailID); err != nil {
 				slog.Warn("ui: find draft id", "id", dm.GmailID, "err", err)
 			} else {
 				draftID = id
 			}
+			cancel()
 		}
 		dispatch.Main(func() {
 			w.openCompose(model.OutgoingMessage{
-				To:         strings.TrimSpace(dm.ToAddrs),
-				Cc:         strings.TrimSpace(dm.CcAddrs),
-				Bcc:        strings.TrimSpace(dm.BccAddrs),
-				Subject:    dm.Subject,
-				Body:       body,
-				InReplyTo:  dm.InReplyTo,
-				References: dm.References,
-				ThreadID:   dm.ThreadID,
-				DraftID:    draftID,
+				To:              strings.TrimSpace(dm.ToAddrs),
+				Cc:              strings.TrimSpace(dm.CcAddrs),
+				Bcc:             strings.TrimSpace(dm.BccAddrs),
+				Subject:         dm.Subject,
+				Body:            body,
+				InReplyTo:       dm.InReplyTo,
+				References:      dm.References,
+				ThreadID:        dm.ThreadID,
+				DraftID:         draftID,
+				SourceMessageID: dm.GmailID,
 			}, "", "Edit draft")
 		})
 	}()

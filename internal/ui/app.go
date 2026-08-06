@@ -60,6 +60,13 @@ type LabelModifier func(ctx context.Context, accountID int64, gmailIDs []string,
 // Sender transmits an outgoing message from the given account.
 type Sender func(ctx context.Context, accountID int64, msg model.OutgoingMessage) error
 
+// DraftSaver persists a compose snapshot locally and returns its stable id.
+// Provider mirroring happens asynchronously, so saving remains useful offline.
+type DraftSaver func(ctx context.Context, accountID int64, msg model.OutgoingMessage) (string, error)
+
+// DraftDeleter hides a draft locally and queues provider deletion.
+type DraftDeleter func(ctx context.Context, accountID int64, threadID string) error
+
 // SendEnqueuer persists an outgoing message to the outbox with a not_before
 // watermark (unix seconds) and returns its outbox id. The message is durable the
 // instant this returns; the sweeper delivers it once now >= notBefore. Recipient
@@ -141,7 +148,8 @@ type Deps struct {
 	ModifyLabels  LabelModifier // batch: applies to a slice of message ids
 	Send          Sender
 	EnqueueSend   SendEnqueuer
-	SaveDraft     Sender
+	SaveDraft     DraftSaver
+	DeleteDraft   DraftDeleter
 	FindDraftID   DraftFinder
 	OpenAttach    AttachmentOpener
 	Sync          SyncNow
