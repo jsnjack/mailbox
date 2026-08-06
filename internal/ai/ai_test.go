@@ -373,15 +373,31 @@ func TestLoadConfigAndOverrides(t *testing.T) {
 
 func TestNewProvider(t *testing.T) {
 	for _, p := range []string{"openai", "litellm", "anthropic"} {
-		if _, err := NewProvider(Config{Provider: p, Endpoint: "http://x/v1", Model: "m"}, StaticKey("k")); err != nil {
+		if _, err := NewProvider(Config{Provider: p, Endpoint: "https://x/v1", Model: "m"}, StaticKey("k")); err != nil {
 			t.Fatalf("provider %q: %v", p, err)
 		}
 	}
-	if _, err := NewProvider(Config{Provider: "bogus", Endpoint: "http://x/v1", Model: "m"}, StaticKey("k")); err == nil {
+	if _, err := NewProvider(Config{Provider: "bogus", Endpoint: "https://x/v1", Model: "m"}, StaticKey("k")); err == nil {
 		t.Fatal("expected error for unknown provider")
 	}
-	if _, err := NewProvider(Config{Provider: "openai", Endpoint: "http://x/v1"}, nil); err == nil {
+	if _, err := NewProvider(Config{Provider: "openai", Endpoint: "https://x/v1"}, nil); err == nil {
 		t.Fatal("expected error for no model")
+	}
+}
+
+func TestValidateEndpointRequiresSecureRemoteTransport(t *testing.T) {
+	for _, endpoint := range []string{"https://models.example/v1", "http://localhost:11434/v1", "http://127.0.0.1:11434/v1", "http://[::1]:11434/v1"} {
+		if err := validateEndpoint(endpoint, false); err != nil {
+			t.Errorf("validateEndpoint(%q): %v", endpoint, err)
+		}
+	}
+	for _, endpoint := range []string{"http://argus:4000/v1", "ftp://models.example/v1", "models.example/v1", "https://user:secret@models.example/v1"} {
+		if err := validateEndpoint(endpoint, false); err == nil {
+			t.Errorf("validateEndpoint(%q) unexpectedly succeeded", endpoint)
+		}
+	}
+	if err := validateEndpoint("http://argus:4000/v1", true); err != nil {
+		t.Fatalf("explicit insecure opt-in rejected: %v", err)
 	}
 }
 
@@ -389,10 +405,11 @@ func TestNewProvider(t *testing.T) {
 // entry's key is looked up for its own provider+endpoint.
 func TestNewProviderChain(t *testing.T) {
 	cfg := Config{
-		Provider: "litellm",
-		Endpoint: "http://argus:4000/v1",
+		Provider:          "litellm",
+		Endpoint:          "http://argus:4000/v1",
+		AllowInsecureHTTP: true,
 		Chain: []ModelConfig{
-			{Model: "big"},
+			{Model: "big", AllowInsecureHTTP: true},
 			{Model: "granite", Provider: "openai", Endpoint: "http://localhost:11434/v1"},
 		},
 	}
@@ -507,7 +524,7 @@ func TestSaveConfigChainRoundTrip(t *testing.T) {
 	in := Config{
 		Provider: "litellm",
 		Chain: []ModelConfig{
-			{Model: "big", Endpoint: "http://argus:4000/v1"},
+			{Model: "big", Endpoint: "http://argus:4000/v1", AllowInsecureHTTP: true},
 			{Model: "granite", Provider: "openai", Endpoint: "http://localhost:11434/v1"},
 		},
 	}
@@ -519,10 +536,10 @@ func TestSaveConfigChainRoundTrip(t *testing.T) {
 		t.Fatalf("LoadConfig: %v", err)
 	}
 	chain := got.ResolvedChain()
-	if len(chain) != 2 || chain[0].Endpoint != "http://argus:4000/v1" || chain[1].Endpoint != "http://localhost:11434/v1" {
+	if len(chain) != 2 || chain[0].Endpoint != "http://argus:4000/v1" || !chain[0].AllowInsecureHTTP || chain[1].Endpoint != "http://localhost:11434/v1" {
 		t.Fatalf("chain round-trip = %+v", chain)
 	}
-	if got.Model != "big" || got.Endpoint != "http://argus:4000/v1" {
+	if got.Model != "big" || got.Endpoint != "http://argus:4000/v1" || !got.AllowInsecureHTTP {
 		t.Fatalf("legacy mirror = model %q endpoint %q, want the primary's", got.Model, got.Endpoint)
 	}
 	if !got.Configured() {

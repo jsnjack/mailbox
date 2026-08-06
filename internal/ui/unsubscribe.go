@@ -72,9 +72,15 @@ func (w *window) performUnsubscribe(acctID int64, sender string, t unsubTargets,
 	}
 	switch {
 	case t.OneClickURL != "":
-		logging.Trace("ui: unsubscribe one-click", "sender", sender, "url", t.OneClickURL)
+		if err := validateOneClickURL(t.OneClickURL); err != nil {
+			logging.Trace("ui: unsubscribe ignored unsafe one-click target", "sender", sender, "err", err)
+			t.OneClickURL = ""
+			w.performUnsubscribe(acctID, sender, t, done)
+			return
+		}
+		logging.Trace("ui: unsubscribe one-click", "sender", sender)
 		go func() {
-			client := &http.Client{Timeout: 20 * time.Second, Transport: &httpclient.Transport{}}
+			client := unsubscribeClient()
 			resp, err := client.Post(t.OneClickURL, "application/x-www-form-urlencoded",
 				strings.NewReader("List-Unsubscribe=One-Click"))
 			outcome := "Unsubscribed from " + sender
@@ -112,6 +118,30 @@ func (w *window) performUnsubscribe(acctID int64, sender string, t unsubTargets,
 		logging.Trace("ui: unsubscribe via browser", "sender", sender, "url", t.URL)
 		openExternal(t.URL)
 		report("Unsubscribe page opened in the browser")
+	}
+}
+
+func validateOneClickURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" {
+		return fmt.Errorf("one-click unsubscribe requires an absolute HTTPS URL")
+	}
+	if u.User != nil {
+		return fmt.Errorf("one-click unsubscribe URL contains credentials")
+	}
+	return nil
+}
+
+func unsubscribeClient() *http.Client {
+	return &http.Client{
+		Timeout:   20 * time.Second,
+		Transport: &httpclient.Transport{Base: httpclient.PublicTransport(5 * time.Second)},
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return fmt.Errorf("too many unsubscribe redirects")
+			}
+			return validateOneClickURL(req.URL.String())
+		},
 	}
 }
 

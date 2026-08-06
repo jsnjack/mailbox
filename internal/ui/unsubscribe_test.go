@@ -2,6 +2,19 @@ package ui
 
 import "testing"
 
+func TestValidateOneClickURL(t *testing.T) {
+	for _, good := range []string{"https://list.example.com/unsub", "https://list.example.com:8443/u?id=1"} {
+		if err := validateOneClickURL(good); err != nil {
+			t.Errorf("%q rejected: %v", good, err)
+		}
+	}
+	for _, bad := range []string{"http://list.example.com/u", "https:relative", "https://user:pass@list.example.com/u", "javascript:alert(1)"} {
+		if err := validateOneClickURL(bad); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+}
+
 func TestParseListUnsubscribe(t *testing.T) {
 	cases := []struct {
 		name     string

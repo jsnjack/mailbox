@@ -2,9 +2,11 @@ package ai
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 	"github.com/jsnjack/mailbox/internal/logging"
@@ -16,6 +18,10 @@ import (
 type Config struct {
 	Provider string `toml:"provider"` // "openai" | "litellm" | "anthropic"
 	Endpoint string `toml:"endpoint"` // base URL including /v1
+	// AllowInsecureHTTP explicitly permits a non-loopback http:// endpoint.
+	// Without it, message content and API keys may only use HTTPS (localhost
+	// remains allowed for local models).
+	AllowInsecureHTTP bool `toml:"allow_insecure_http,omitempty"`
 	// Model is the single-model form, kept for existing config files; Models
 	// (priority order — first is primary, the rest are fallbacks) wins when set.
 	Model  string   `toml:"model"`
@@ -30,9 +36,10 @@ type Config struct {
 // own provider kind and endpoint. Blank fields inherit the top-level [ai]
 // values, so same-endpoint chains stay terse.
 type ModelConfig struct {
-	Model    string `toml:"model"`
-	Provider string `toml:"provider,omitempty"`
-	Endpoint string `toml:"endpoint,omitempty"`
+	Model             string `toml:"model"`
+	Provider          string `toml:"provider,omitempty"`
+	Endpoint          string `toml:"endpoint,omitempty"`
+	AllowInsecureHTTP bool   `toml:"allow_insecure_http,omitempty"`
 }
 
 // ModelList returns the models in priority order: Models when set, else the
@@ -69,7 +76,7 @@ func (c Config) ResolvedChain() []ModelConfig {
 		return out
 	}
 	for _, m := range c.ModelList() {
-		out = append(out, ModelConfig{Model: m, Provider: c.Provider, Endpoint: c.Endpoint})
+		out = append(out, ModelConfig{Model: m, Provider: c.Provider, Endpoint: c.Endpoint, AllowInsecureHTTP: c.AllowInsecureHTTP})
 	}
 	return out
 }
@@ -130,7 +137,7 @@ func SaveConfig(path string, cfg Config) error {
 		plain := true
 		var models []string
 		for _, e := range cfg.ResolvedChain() {
-			if e.Provider != cfg.Provider || e.Endpoint != cfg.Endpoint {
+			if e.Provider != cfg.Provider || e.Endpoint != cfg.Endpoint || e.AllowInsecureHTTP != cfg.AllowInsecureHTTP {
 				plain = false
 				break
 			}
@@ -149,6 +156,7 @@ func SaveConfig(path string, cfg Config) error {
 		if len(cfg.Chain) > 0 {
 			cfg.Provider = chain[0].Provider
 			cfg.Endpoint = chain[0].Endpoint
+			cfg.AllowInsecureHTTP = chain[0].AllowInsecureHTTP
 			cfg.Models = nil // the chain is authoritative; don't disagree
 		} else if len(chain) == 1 {
 			cfg.Models = nil
@@ -210,6 +218,9 @@ func NewProvider(cfg Config, keyFor KeyFunc) (Provider, error) {
 		return nil, fmt.Errorf("no ai model configured")
 	}
 	build := func(e ModelConfig) (Provider, error) {
+		if err := validateEndpoint(e.Endpoint, e.AllowInsecureHTTP); err != nil {
+			return nil, err
+		}
 		key := ""
 		if keyFor != nil {
 			key = keyFor(e.Provider, e.Endpoint)
@@ -240,6 +251,29 @@ func NewProvider(cfg Config, keyFor KeyFunc) (Provider, error) {
 		labels[i] = e.Model + " @ " + endpointHost(e.Endpoint)
 	}
 	return newFailoverProvider(ps, labels), nil
+}
+
+func validateEndpoint(endpoint string, allowInsecure bool) error {
+	u, err := url.Parse(strings.TrimSpace(endpoint))
+	if err != nil || u.Hostname() == "" || !u.IsAbs() {
+		return fmt.Errorf("AI endpoint must be an absolute HTTP(S) URL")
+	}
+	if u.User != nil {
+		return fmt.Errorf("AI endpoint must not contain credentials")
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+		return nil
+	case "http":
+		host := strings.Trim(strings.ToLower(u.Hostname()), "[]")
+		ip := net.ParseIP(host)
+		if host == "localhost" || (ip != nil && ip.IsLoopback()) || allowInsecure {
+			return nil
+		}
+		return fmt.Errorf("AI endpoint %q uses unencrypted HTTP; use HTTPS or explicitly enable insecure HTTP for a trusted VPN/LAN endpoint", endpoint)
+	default:
+		return fmt.Errorf("AI endpoint must use HTTPS (HTTP is allowed only for localhost or with explicit opt-in)")
+	}
 }
 
 // endpointHost reduces an endpoint URL to its host for display.

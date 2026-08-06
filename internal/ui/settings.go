@@ -53,12 +53,13 @@ func (w *window) openSettings() {
 	// re-adds the rows (PreferencesGroup has no move API), so each expander is
 	// kept in entryRows alongside its field widgets.
 	type aiEntryUI struct {
-		row      *adw.ExpanderRow
-		model    *adw.EntryRow
-		provider *adw.EntryRow
-		endpoint *adw.EntryRow
-		key      *adw.PasswordEntryRow
-		up       *gtk.Button
+		row       *adw.ExpanderRow
+		model     *adw.EntryRow
+		provider  *adw.EntryRow
+		endpoint  *adw.EntryRow
+		key       *adw.PasswordEntryRow
+		allowHTTP *adw.SwitchRow
+		up        *gtk.Button
 	}
 	var entryRows []*aiEntryUI
 	var inGroup []*adw.ExpanderRow // rows currently added to the group
@@ -92,12 +93,17 @@ func (w *window) openSettings() {
 		u.endpoint = adw.NewEntryRow()
 		u.endpoint.SetTitle("Endpoint (base URL incl. /v1)")
 		u.endpoint.SetText(e.Endpoint)
+		u.allowHTTP = adw.NewSwitchRow()
+		u.allowHTTP.SetTitle("Allow insecure HTTP")
+		u.allowHTTP.SetSubtitle("Only for a trusted VPN/LAN endpoint. Message content and API keys are otherwise sent unencrypted.")
+		u.allowHTTP.SetActive(e.AllowInsecureHTTP)
 		u.key = adw.NewPasswordEntryRow()
 		u.key.SetTitle("API key (stored in the system keyring)")
 		u.key.SetText(e.Key)
 		u.row.AddRow(u.model)
 		u.row.AddRow(u.provider)
 		u.row.AddRow(u.endpoint)
+		u.row.AddRow(u.allowHTTP)
 		u.row.AddRow(u.key)
 
 		// Each row tests its own settings with a tiny live request — a single
@@ -117,10 +123,11 @@ func (w *window) openSettings() {
 			}
 			test.ConnectClicked(func() {
 				e := AIModelEntry{
-					Provider: strings.TrimSpace(u.provider.Text()),
-					Endpoint: strings.TrimSpace(u.endpoint.Text()),
-					Model:    strings.TrimSpace(u.model.Text()),
-					Key:      u.key.Text(),
+					Provider:          strings.TrimSpace(u.provider.Text()),
+					Endpoint:          strings.TrimSpace(u.endpoint.Text()),
+					Model:             strings.TrimSpace(u.model.Text()),
+					Key:               u.key.Text(),
+					AllowInsecureHTTP: u.allowHTTP.Active(),
 				}
 				logging.Trace("ui: settings test AI model", "model", e.Model, "endpoint", e.Endpoint)
 				test.SetSensitive(false)
@@ -152,6 +159,7 @@ func (w *window) openSettings() {
 		u.model.Connect("changed", func() { entryTitle(u); resetTest() })
 		u.provider.Connect("changed", resetTest)
 		u.endpoint.Connect("changed", func() { entryTitle(u); resetTest() })
+		u.allowHTTP.Connect("notify::active", resetTest)
 		u.key.Connect("changed", resetTest)
 		entryTitle(u)
 
@@ -200,10 +208,11 @@ func (w *window) openSettings() {
 		var out []AIModelEntry
 		for _, u := range entryRows {
 			e := AIModelEntry{
-				Provider: strings.TrimSpace(u.provider.Text()),
-				Endpoint: strings.TrimSpace(u.endpoint.Text()),
-				Model:    strings.TrimSpace(u.model.Text()),
-				Key:      u.key.Text(),
+				Provider:          strings.TrimSpace(u.provider.Text()),
+				Endpoint:          strings.TrimSpace(u.endpoint.Text()),
+				Model:             strings.TrimSpace(u.model.Text()),
+				Key:               u.key.Text(),
+				AllowInsecureHTTP: u.allowHTTP.Active(),
 			}
 			if e.Provider == "" && e.Endpoint == "" && e.Model == "" {
 				continue
@@ -226,6 +235,7 @@ func (w *window) openSettings() {
 			e.Provider = strings.TrimSpace(last.provider.Text())
 			e.Endpoint = strings.TrimSpace(last.endpoint.Text())
 			e.Key = last.key.Text()
+			e.AllowInsecureHTTP = last.allowHTTP.Active()
 		}
 		logging.Trace("ui: settings add AI model", "entries", len(entryRows)+1)
 		addEntry(e, true)

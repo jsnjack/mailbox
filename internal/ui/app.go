@@ -130,10 +130,11 @@ type StatusStats struct {
 // AIModelEntry is one entry of the AI failover chain as shown in Preferences: a
 // model on its provider+endpoint, with the endpoint's API key ("" = keyless).
 type AIModelEntry struct {
-	Provider string
-	Endpoint string
-	Model    string
-	Key      string
+	Provider          string
+	Endpoint          string
+	Model             string
+	Key               string
+	AllowInsecureHTTP bool
 }
 
 // Deps are the dependencies the UI needs. FetchBody, ModifyLabels and Hub may be

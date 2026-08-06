@@ -6,10 +6,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -17,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/jsnjack/mailbox/internal/httpclient"
 )
 
 const maxImageBytes = 10 << 20 // 10 MiB per external image
@@ -216,67 +216,21 @@ func allowedImageMIME(mimeType string) bool {
 }
 
 func safeClient() *http.Client {
-	dialer := &net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}
-	resolver := net.DefaultResolver
-	transport := &http.Transport{
-		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          20,
-		MaxIdleConnsPerHost:   2,
-		IdleConnTimeout:       30 * time.Second,
-		TLSHandshakeTimeout:   5 * time.Second,
-		ResponseHeaderTimeout: 8 * time.Second,
-		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
-			host, port, err := net.SplitHostPort(address)
-			if err != nil {
-				return nil, err
-			}
-			ips, err := resolver.LookupIPAddr(ctx, host)
-			if err != nil {
-				return nil, err
-			}
-			if len(ips) == 0 {
-				return nil, errors.New("external image host resolved to no addresses")
-			}
-			for _, candidate := range ips {
-				if blockedIP(candidate.IP) {
-					return nil, fmt.Errorf("external image host resolves to a private address")
-				}
-			}
-			var dialErr error
-			for _, candidate := range ips {
-				conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(candidate.IP.String(), port))
-				if err == nil {
-					return conn, nil
-				}
-				dialErr = errors.Join(dialErr, err)
-			}
-			return nil, dialErr
-		},
-	}
+	transport := httpclient.PublicTransport(5 * time.Second)
+	transport.MaxIdleConns = 20
+	transport.MaxIdleConnsPerHost = 2
+	transport.IdleConnTimeout = 30 * time.Second
+	transport.TLSHandshakeTimeout = 5 * time.Second
+	transport.ResponseHeaderTimeout = 8 * time.Second
 	return &http.Client{
 		Transport: transport,
 		Timeout:   12 * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 5 {
-				return errors.New("too many external image redirects")
+				return fmt.Errorf("too many external image redirects")
 			}
 			_, err := normalizeURL(req.URL.String())
 			return err
 		},
 	}
-}
-
-func blockedIP(ip net.IP) bool {
-	if ip == nil || !ip.IsGlobalUnicast() || ip.IsPrivate() || ip.IsLoopback() || ip.IsUnspecified() ||
-		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() {
-		return true
-	}
-	// Carrier-grade NAT and the documentation ranges are not public origins.
-	for _, cidr := range []string{"100.64.0.0/10", "192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24", "2001:db8::/32"} {
-		_, network, _ := net.ParseCIDR(cidr)
-		if network.Contains(ip) {
-			return true
-		}
-	}
-	return false
 }

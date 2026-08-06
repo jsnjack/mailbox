@@ -33,6 +33,10 @@ func countingClient(timeout time.Duration, c *transferCounter) *http.Client {
 	return &http.Client{
 		Timeout:   timeout,
 		Transport: &countingTransport{base: &httpclient.Transport{Base: tr}, c: c},
+		// AI API endpoints are configured bases, not browser URLs. Refusing
+		// redirects prevents an HTTPS endpoint from forwarding message content or
+		// Authorization headers to an unexpected (possibly HTTP) origin.
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
 }
 

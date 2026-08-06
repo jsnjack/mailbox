@@ -2,7 +2,6 @@ package remotecache
 
 import (
 	"context"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -41,16 +40,5 @@ func TestCacheRejectsHTMLDisguisedAsImage(t *testing.T) {
 	c := NewWithClient(t.TempDir(), srv.Client())
 	if _, ok, err := c.Get(context.Background(), srv.URL, true); err == nil || ok {
 		t.Fatalf("disguised HTML accepted: ok=%v err=%v", ok, err)
-	}
-}
-
-func TestBlockedIP(t *testing.T) {
-	for _, raw := range []string{"127.0.0.1", "10.1.2.3", "169.254.1.1", "::1", "100.64.0.1", "192.0.2.1"} {
-		if !blockedIP(net.ParseIP(raw)) {
-			t.Errorf("%s was not blocked", raw)
-		}
-	}
-	if blockedIP(net.ParseIP("8.8.8.8")) {
-		t.Fatal("public address was blocked")
 	}
 }

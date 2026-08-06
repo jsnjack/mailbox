@@ -137,11 +137,15 @@ func launchUI(mailto string) error {
 		chainConfig := func(entries []ui.AIModelEntry) ai.Config {
 			var cfg ai.Config
 			for _, e := range entries {
-				cfg.Chain = append(cfg.Chain, ai.ModelConfig{Model: e.Model, Provider: e.Provider, Endpoint: e.Endpoint})
+				cfg.Chain = append(cfg.Chain, ai.ModelConfig{
+					Model: e.Model, Provider: e.Provider, Endpoint: e.Endpoint,
+					AllowInsecureHTTP: e.AllowInsecureHTTP,
+				})
 			}
 			if len(entries) > 0 {
 				cfg.Provider = entries[0].Provider
 				cfg.Endpoint = entries[0].Endpoint
+				cfg.AllowInsecureHTTP = entries[0].AllowInsecureHTTP
 			}
 			return cfg
 		}
@@ -172,7 +176,10 @@ func launchUI(mailto string) error {
 				if key == "" {
 					key, _ = keyring.Get(aiKeyringService, e.Provider) // legacy per-provider entry
 				}
-				out = append(out, ui.AIModelEntry{Provider: e.Provider, Endpoint: e.Endpoint, Model: e.Model, Key: key})
+				out = append(out, ui.AIModelEntry{
+					Provider: e.Provider, Endpoint: e.Endpoint, Model: e.Model, Key: key,
+					AllowInsecureHTTP: e.AllowInsecureHTTP,
+				})
 			}
 			return out
 		}
