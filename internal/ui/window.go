@@ -39,6 +39,7 @@ import (
 	"github.com/jsnjack/mailbox/internal/dispatch"
 	"github.com/jsnjack/mailbox/internal/logging"
 	"github.com/jsnjack/mailbox/internal/model"
+	"github.com/jsnjack/mailbox/internal/remotecache"
 	"github.com/jsnjack/mailbox/internal/store"
 	"github.com/jsnjack/mailbox/internal/syncer"
 	"github.com/microcosm-cc/bluemonday"
@@ -92,6 +93,7 @@ type window struct {
 	sidebar      []sidebarItem            // one entry per row in labelBox (incl. headings)
 	sidebarSig   string                   // signature of the rendered sidebar, to skip no-op rebuilds
 	sectionCache map[string]cachedSection // rendered message sections, reused across thread re-opens
+	remoteImages *remotecache.Cache       // allowed external images, persisted for offline rendering
 	current      string
 	activeID     int64 // the account currently shown
 	activeEmail  string
@@ -328,6 +330,9 @@ func newWindow(app *adw.Application, deps Deps) *window {
 		userUnread:       map[string]bool{},
 	}
 	w.accountNames, _ = config.LoadAccountNames()
+	if dir, err := config.RemoteImagesDir(); err == nil {
+		w.remoteImages = remotecache.New(dir)
+	}
 	w.rebuildKeymap()
 	w.trustedImgs = map[string]bool{}
 	if p, err := config.LoadPrefs(); err == nil {
@@ -2440,11 +2445,8 @@ func (w *window) onDecidePolicy(decision webkit.PolicyDecisioner, dtype webkit.P
 
 // openNewWindowTarget resolves a WebKit "new window" navigation target (from
 // the native "Open Image/Link in New Window" context-menu action) to
-// something xdg-open can actually show. A cid: inline attachment isn't a
-// scheme any external viewer understands, so it resolves against the same
-// w.inlineByCID map serveCID streams from and opens the cached file directly;
-// everything else (a remote image, a plain link) is handed over as-is, same
-// as a regular clicked link.
+// something xdg-open can actually show. cid: and mbcache: resources resolve to
+// their cached files; ordinary links are handed over as-is.
 func (w *window) openNewWindowTarget(uri string) {
 	if cid, ok := strings.CutPrefix(uri, "cid:"); ok {
 		if dec, err := url.PathUnescape(cid); err == nil {
@@ -2458,6 +2460,20 @@ func (w *window) openNewWindowTarget(uri string) {
 		}
 		logging.Trace("ui: open inline image externally", "cid", cid, "path", img.path)
 		openExternal(img.path)
+		return
+	}
+	if key, ok := strings.CutPrefix(uri, "mbcache:"); ok {
+		key = strings.TrimPrefix(key, "//")
+		if w.remoteImages == nil {
+			return
+		}
+		entry, ok := w.remoteImages.Open(key)
+		if !ok {
+			slog.Debug("ui: open in new window: unknown cached image")
+			return
+		}
+		logging.Trace("ui: open cached external image", "path", entry.Path)
+		openExternal(entry.Path)
 		return
 	}
 	if uri == "" || strings.HasPrefix(uri, "about:") || strings.HasPrefix(uri, "data:") || strings.HasPrefix(uri, "blob:") {
@@ -2559,6 +2575,7 @@ func (w *window) buildReader() *adw.NavigationPage {
 	// embedding them in the HTML — a big inline image (e.g. a 15 MB banner) would
 	// otherwise inflate the page to tens of MB and stall WebKit's parse.
 	w.webview.Context().RegisterURIScheme("cid", w.serveCID)
+	w.webview.Context().RegisterURIScheme("mbcache", w.serveRemoteImage)
 	// Track the pointer over the reader (capture phase — WebKit handles input
 	// internally) so showMessageMenu can anchor its popover at the clicked ⋯.
 	motion := gtk.NewEventControllerMotion()
@@ -2600,9 +2617,9 @@ func (w *window) buildReader() *adw.NavigationPage {
 	// per-render nonce and default-src 'none' blocks all network (no fetch/XHR
 	// exfiltration, no iframes), so only our own script ever executes.
 	settings.SetEnableJavascript(true)
-	// Images load by default (unless blocked globally in Preferences); tracking
-	// pixels are stripped from the HTML before rendering (stripTrackers), so opens
-	// aren't leaked. The overflow toggle can still block remote images per message.
+	// External images are blocked by default for new profiles. When explicitly
+	// enabled they are fetched by the hardened cache client and rendered only via
+	// mbcache:, never directly from an email-controlled origin.
 	w.imagesEnabled = !w.blockImages
 	settings.SetAutoLoadImages(w.imagesEnabled)
 	w.webview.SetVExpand(true)
@@ -3918,6 +3935,7 @@ func (w *window) renderConversation(msgs []model.Message) {
 			refetched[m.GmailID] = true
 		}
 	}
+	loadRemoteImages := w.imagesEnabled
 	logging.Trace("ui: render conversation", "thread", threadID, "msgs", len(msgs), "cachedSections", len(cached))
 	// Cancel a still-running previous render (rapid thread open, a background
 	// refresh, a re-render) so its in-flight body fetches abort immediately
@@ -4090,6 +4108,11 @@ func (w *window) renderConversation(msgs []model.Message) {
 			b.WriteString(sec)
 		}
 		out := b.String()
+		out, cachedRemote := w.cacheRemoteImages(renderCtx, out, loadRemoteImages)
+		if renderCtx.Err() != nil {
+			logging.Trace("ui: external image pass cancelled", "thread", threadID)
+			return
+		}
 		verdict := parseAuthResults(latestAuth)
 		warnings := phishingWarnings(latest, latestHTML)
 		// Gather attachment rows + download inline images here (off the main
@@ -4101,7 +4124,7 @@ func (w *window) renderConversation(msgs []model.Message) {
 			"trackers", blocked, "auth", verdict.level, "fetch", fetchDur, "sanitize", time.Since(sanitizeStart))
 		logging.Trace("ui: render conversation ready", "thread", threadID, "msgs", len(msgs), "fetched", fetched,
 			"newSections", len(fresh), "trackers", blocked, "auth", verdict.level, "warnings", len(warnings),
-			"attachments", len(atts), "inlineImages", len(inlineImgs), "bytes", len(out), "html", logging.Body(out),
+			"attachments", len(atts), "inlineImages", len(inlineImgs), "cachedRemoteImages", cachedRemote, "bytes", len(out), "html", logging.Body(out),
 			"fetch", fetchDur, "sanitize", time.Since(sanitizeStart))
 		dispatch.Main(func() {
 			w.mergeSectionCache(fresh) // cache newly-rendered sections (main thread)
@@ -7197,8 +7220,8 @@ details.mbmsg[open]>summary .mbprev{display:none}
 		`try{window.webkit.messageHandlers.` + shellReadyHandler + `.postMessage(true);}catch(e){}}` +
 		`if(document.readyState!=='loading'){setup();}else{document.addEventListener('DOMContentLoaded',setup);}})();</script>`
 
-	csp := "default-src 'none'; img-src http: https: data: cid:; media-src http: https: data:; " +
-		"style-src 'unsafe-inline'; script-src 'nonce-" + nonce + "'; font-src http: https: data:"
+	csp := "default-src 'none'; img-src data: cid: mbcache:; media-src data: cid: mbcache:; " +
+		"style-src 'unsafe-inline'; script-src 'nonce-" + nonce + "'; font-src data:"
 
 	return `<!doctype html><html><head><meta charset="utf-8">` +
 		`<meta http-equiv="Content-Security-Policy" content="` + csp + `">` +

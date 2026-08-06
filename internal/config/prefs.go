@@ -11,12 +11,16 @@ import (
 )
 
 // Prefs holds general user preferences that don't belong in the [ai] config or
-// the per-window state. Zero values are the defaults, so a missing file behaves
-// like the out-of-the-box behaviour (remote images load).
+// the per-window state.
 type Prefs struct {
 	// BlockRemoteImages, when true, stops the reader loading remote images by
-	// default (the per-message toggle can still override). Default false.
+	// default (the per-message toggle can still override). Default true for a
+	// missing preference file; an existing explicit false remains honored.
 	BlockRemoteImages bool `json:"block_remote_images"`
+	// RemoteImagesConfigured distinguishes an explicit opt-in from the old
+	// pre-privacy default (whose serialized false meant "load automatically").
+	// Old files without this marker migrate to blocked on their next load.
+	RemoteImagesConfigured bool `json:"remote_images_configured,omitempty"`
 	// DisableInboxCategories, when true, turns off the automatic AI categorization
 	// of inbox mail. Default false (categorization on), stored inverted so the
 	// out-of-the-box behaviour is the zero value's opposite.
@@ -64,15 +68,18 @@ func LoadPrefs() (Prefs, error) {
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			logging.Trace("config: load prefs (defaults)", "path", path)
-			return Prefs{}, nil
+			return defaultPrefs(), nil
 		}
 		logging.Trace("config: load prefs failed", "path", path, "err", err)
 		return Prefs{}, fmt.Errorf("read prefs: %w", err)
 	}
-	var p Prefs
+	p := defaultPrefs()
 	if err := json.Unmarshal(data, &p); err != nil {
 		logging.Trace("config: load prefs corrupt (ignored)", "path", path, "err", err)
-		return Prefs{}, nil // ignore a corrupt file
+		return defaultPrefs(), nil // ignore a corrupt file
+	}
+	if !p.RemoteImagesConfigured {
+		p.BlockRemoteImages = true
 	}
 	logging.Trace("config: load prefs", "path", path, "blockRemoteImages", p.BlockRemoteImages,
 		"disableInboxCategories", p.DisableInboxCategories, "disableGist", p.DisableGist,
@@ -82,6 +89,8 @@ func LoadPrefs() (Prefs, error) {
 		"disablePhishingAnalysis", p.DisablePhishingAnalysis, "disableSnoozeSuggestions", p.DisableSnoozeSuggestions)
 	return p, nil
 }
+
+func defaultPrefs() Prefs { return Prefs{BlockRemoteImages: true} }
 
 // SavePrefs persists the general preferences, creating the config dir if needed.
 func SavePrefs(p Prefs) error {

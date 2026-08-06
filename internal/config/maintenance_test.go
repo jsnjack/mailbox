@@ -39,3 +39,25 @@ func TestClearAttachmentsCache(t *testing.T) {
 		t.Fatalf("cache not empty after clear: %d entries", len(entries))
 	}
 }
+
+func TestClearMailCacheIncludesNestedRemoteImages(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(t.TempDir(), "cache"))
+	attachments, _ := AttachmentsDir()
+	remote, _ := RemoteImagesDir()
+	if err := os.MkdirAll(filepath.Join(attachments, "aa"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(remote, "bb"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(attachments, "aa", "one"), make([]byte, 30), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(remote, "bb", "two"), make([]byte, 70), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	freed, err := ClearMailCache()
+	if err != nil || freed != 100 {
+		t.Fatalf("ClearMailCache = %d, %v, want 100", freed, err)
+	}
+}

@@ -73,6 +73,16 @@ func AttachmentsDir() (string, error) {
 	return filepath.Join(dir, "attachments"), nil
 }
 
+// RemoteImagesDir returns the content-addressed cache for external images that
+// were explicitly allowed to load.
+func RemoteImagesDir() (string, error) {
+	dir, err := CacheDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "remote-images"), nil
+}
+
 // EnsureDirs creates the config, data, and attachment directories if missing.
 func EnsureDirs() error {
 	cfg, err := ConfigDir()
@@ -87,8 +97,12 @@ func EnsureDirs() error {
 	if err != nil {
 		return err
 	}
-	logging.Trace("config: ensure dirs", "config", cfg, "data", data, "attachments", att)
-	for _, d := range []string{cfg, data, att} {
+	remote, err := RemoteImagesDir()
+	if err != nil {
+		return err
+	}
+	logging.Trace("config: ensure dirs", "config", cfg, "data", data, "attachments", att, "remote_images", remote)
+	for _, d := range []string{cfg, data, att, remote} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			logging.Trace("config: ensure dir failed", "path", d, "err", err)
 			return fmt.Errorf("create %s: %w", d, err)

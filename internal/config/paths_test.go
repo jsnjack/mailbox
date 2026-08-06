@@ -26,6 +26,7 @@ func TestXDGPaths(t *testing.T) {
 		{"config file", ConfigFilePath, filepath.Join(cfgHome, "mailbox", "config.toml")},
 		{"db path", DBPath, filepath.Join(dataHome, "mailbox", "mailbox.db")},
 		{"attachments", AttachmentsDir, filepath.Join(cacheHome, "mailbox", "attachments")},
+		{"remote images", RemoteImagesDir, filepath.Join(cacheHome, "mailbox", "remote-images")},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -49,7 +50,7 @@ func TestEnsureDirs(t *testing.T) {
 	if err := EnsureDirs(); err != nil {
 		t.Fatalf("EnsureDirs: %v", err)
 	}
-	for _, fn := range []func() (string, error){ConfigDir, DataDir, AttachmentsDir} {
+	for _, fn := range []func() (string, error){ConfigDir, DataDir, AttachmentsDir, RemoteImagesDir} {
 		dir, _ := fn()
 		fi, err := os.Stat(dir)
 		if err != nil || !fi.IsDir() {

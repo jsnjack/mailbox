@@ -332,17 +332,20 @@ func (w *window) openSettings() {
 		}
 	}
 
-	// Privacy: a global default for loading remote images (tracking pixels are
-	// always stripped regardless).
+	// Privacy: a global default for loading external images. New profiles start
+	// blocked; explicitly loaded images are cached for later offline viewing.
 	imgRow := adw.NewSwitchRow()
-	imgRow.SetTitle("Load remote images")
-	imgRow.SetSubtitle("Tracking pixels are always blocked. Turn off to block all remote images by default.")
+	imgRow.SetTitle("Load external images automatically")
+	imgRow.SetSubtitle("External images can reveal when you opened a message. Allowed images are cached for offline viewing.")
 	imgRow.SetActive(!w.blockImages)
 	imgRow.Connect("notify::active", func() {
 		load := imgRow.Active()
 		logging.Trace("ui: setting changed", "pref", "load_remote_images", "old", !w.blockImages, "new", load)
 		w.blockImages = !load
-		savePref(func(p *config.Prefs) { p.BlockRemoteImages = !load })
+		savePref(func(p *config.Prefs) {
+			p.BlockRemoteImages = !load
+			p.RemoteImagesConfigured = true
+		})
 		w.setImagesEnabled(load)
 	})
 	privacyGroup := adw.NewPreferencesGroup()
@@ -440,21 +443,21 @@ func (w *window) openSettings() {
 			})
 	}
 
-	// Storage: clear the (re-downloadable) attachment cache.
+	// Storage: clear re-downloadable attachments and external images.
 	clearRow := adw.NewActionRow()
-	clearRow.SetTitle("Cached attachments")
-	clearRow.SetSubtitle("Downloaded attachments are kept on disk for quick reopening.")
+	clearRow.SetTitle("Cached mail files")
+	clearRow.SetSubtitle("Attachments and allowed external images are kept for quick offline reopening.")
 	clearBtn := gtk.NewButtonWithLabel("Clear")
 	clearBtn.SetVAlign(gtk.AlignCenter)
 	clearBtn.ConnectClicked(func() {
-		logging.Trace("ui: settings clear attachment cache")
-		freed, err := config.ClearAttachmentsCache()
+		logging.Trace("ui: settings clear mail cache")
+		freed, err := config.ClearMailCache()
 		if err != nil {
-			slog.Warn("ui: clear attachments cache", "err", err)
+			slog.Warn("ui: clear mail cache", "err", err)
 			clearRow.SetSubtitle("Couldn't clear the cache.")
 			return
 		}
-		logging.Trace("ui: settings cleared attachment cache", "freed", freed)
+		logging.Trace("ui: settings cleared mail cache", "freed", freed)
 		clearRow.SetSubtitle(fmt.Sprintf("Cleared — freed %s.", humanBytes(freed)))
 		clearBtn.SetSensitive(false)
 	})

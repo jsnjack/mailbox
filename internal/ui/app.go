@@ -120,7 +120,7 @@ type StatusStats struct {
 	BytesIn    int64 // bytes received from the mail APIs (Gmail/IMAP)
 	BytesOut   int64 // bytes sent to the mail APIs (Gmail/IMAP)
 	DBBytes    int64 // size of the SQLite cache on disk
-	CacheBytes int64 // size of the attachment cache on disk
+	CacheBytes int64 // size of re-downloadable attachment/external-image files
 	Messages   int64 // cached message count
 	AIRequests int64 // AI requests issued this session (all ops)
 	AIBytesIn  int64 // bytes received from the AI provider(s)

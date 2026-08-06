@@ -441,7 +441,7 @@ func (w *window) refreshStatusStats() {
 		}
 		lines = append(lines, fmt.Sprintf("Cache: %s messages · DB %s", humanCount(s.Messages), humanBytes(s.DBBytes)))
 		if s.CacheBytes > 0 {
-			lines = append(lines, fmt.Sprintf("Attachments: %s", humanBytes(s.CacheBytes)))
+			lines = append(lines, fmt.Sprintf("Cached files: %s", humanBytes(s.CacheBytes)))
 		}
 		logging.Trace("ui: refresh session stats", "requests", s.Requests, "quota", s.QuotaUnits,
 			"bytes_in", s.BytesIn, "bytes_out", s.BytesOut,

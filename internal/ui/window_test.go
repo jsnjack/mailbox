@@ -318,6 +318,9 @@ func TestReaderShellRefitsAfterZoom(t *testing.T) {
 	if !strings.Contains(readerRefitScript, "__mbFit") {
 		t.Fatalf("zoom refit script does not call the reader fit hook: %q", readerRefitScript)
 	}
+	if strings.Contains(shell, "img-src http:") || !strings.Contains(shell, "img-src data: cid: mbcache:") {
+		t.Fatal("reader CSP permits direct external image loads")
+	}
 }
 
 // Replying (sender-only) to your own message continues it to its original
