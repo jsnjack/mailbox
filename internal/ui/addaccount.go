@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/diamondburned/gotk4-adwaita/pkg/adw"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
@@ -42,6 +43,8 @@ func (w *window) openAddAccount(prefill *addAccountPrefill) {
 	}
 
 	dialog := adw.NewPreferencesDialog()
+	dialogCtx, cancelDialog := context.WithCancel(context.Background())
+	dialog.ConnectClosed(cancelDialog)
 	dialog.SetTitle("Add account")
 	if prefill != nil && prefill.reconnect {
 		dialog.SetTitle("Reconnect account")
@@ -147,6 +150,11 @@ func (w *window) openAddAccount(prefill *addAccountPrefill) {
 	footerGroup := adw.NewPreferencesGroup()
 	footerGroup.Add(footer)
 	page.Add(footerGroup)
+	setBusy := func(busy bool) {
+		idGroup.SetSensitive(!busy)
+		advGroup.SetSensitive(!busy)
+		addBtn.SetSensitive(!busy)
+	}
 
 	// gather builds the account config from the form.
 	gather := func() (config.IMAPAccount, config.Preset) {
@@ -166,16 +174,26 @@ func (w *window) openAddAccount(prefill *addAccountPrefill) {
 	finish := func(acct config.IMAPAccount, secret string) {
 		logging.Trace("ui: add account persist", "email", acct.Email, "auth", acct.Auth,
 			"imap_host", acct.IMAPHost, "smtp_host", acct.SMTPHost, "secret_len", len(secret))
+		// Once persistence starts, keep the dialog alive until the keyring,
+		// config, database, and runtime have converged. OAuth/connection testing
+		// remains freely cancelable; this short final phase must not be interrupted
+		// halfway and leave an orphaned credential.
+		dialog.SetCanClose(false)
+		status.SetText("Saving account…")
 		go func() {
-			id, err := w.deps.AddIMAPAccount(context.Background(), acct, secret)
+			persistCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			id, err := w.deps.AddIMAPAccount(persistCtx, acct, secret)
 			dispatch.Main(func() {
 				if err != nil {
 					logging.Trace("ui: add account persist failed", "email", acct.Email, "err", err)
 					status.SetText("Couldn't add account: " + friendlyConnError(err))
-					addBtn.SetSensitive(true)
+					dialog.SetCanClose(true)
+					setBusy(false)
 					return
 				}
 				logging.Trace("ui: add account persisted", "email", acct.Email, "id", id)
+				dialog.SetCanClose(true)
 				dialog.Close()
 				atype := model.AccountIMAP
 				if acct.Auth == config.AuthGmailREST {
@@ -194,7 +212,7 @@ func (w *window) openAddAccount(prefill *addAccountPrefill) {
 			return
 		}
 		logging.Trace("ui: add account test&add clicked", "email", acct.Email, "auth", p.Auth)
-		addBtn.SetSensitive(false)
+		setBusy(true)
 
 		// OAuth providers (Gmail REST, Gmail-IMAP, Outlook): sign in via the
 		// browser to obtain a refresh token, then add.
@@ -210,12 +228,15 @@ func (w *window) openAddAccount(prefill *addAccountPrefill) {
 			status.SetText("Opening your browser to sign in…")
 			logging.Trace("ui: add account oauth begin", "auth", p.Auth, "email", acct.Email)
 			go func() {
-				email, tok, err := w.deps.OAuthConnect(context.Background(), p.Auth)
+				email, tok, err := w.deps.OAuthConnect(dialogCtx, p.Auth)
 				dispatch.Main(func() {
+					if dialogCtx.Err() != nil {
+						return
+					}
 					if err != nil {
 						logging.Trace("ui: add account oauth failed", "auth", p.Auth, "err", err)
 						status.SetText("Sign-in failed: " + err.Error())
-						addBtn.SetSensitive(true)
+						setBusy(false)
 						return
 					}
 					logging.Trace("ui: add account oauth ok", "auth", p.Auth, "verified_email", email, "token_present", tok != "", "token_len", len(tok))
@@ -234,19 +255,22 @@ func (w *window) openAddAccount(prefill *addAccountPrefill) {
 		// Password providers: validate the connection, then add.
 		if strings.TrimSpace(passwordRow.Text()) == "" {
 			status.SetText("Enter your password (or app password).")
-			addBtn.SetSensitive(true)
+			setBusy(false)
 			return
 		}
 		pw := passwordRow.Text()
 		status.SetText("Testing connection…")
 		logging.Trace("ui: add account test connection", "email", acct.Email, "imap_host", acct.IMAPHost, "password_len", len(pw))
 		go func() {
-			err := w.deps.TestIMAPAccount(context.Background(), acct, pw)
+			err := w.deps.TestIMAPAccount(dialogCtx, acct, pw)
 			dispatch.Main(func() {
+				if dialogCtx.Err() != nil {
+					return
+				}
 				if err != nil {
 					logging.Trace("ui: add account test failed", "email", acct.Email, "err", err)
 					status.SetText("Connection failed: " + friendlyConnError(err))
-					addBtn.SetSensitive(true)
+					setBusy(false)
 					return
 				}
 				logging.Trace("ui: add account test ok", "email", acct.Email)

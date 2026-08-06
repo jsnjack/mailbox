@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"os/exec"
+	"time"
 
 	"github.com/jsnjack/mailbox/internal/logging"
 	"golang.org/x/oauth2"
@@ -96,34 +97,60 @@ func loginWithConfig(ctx context.Context, conf *oauth2.Config, authOpts ...oauth
 		err  error
 	}
 	resCh := make(chan result, 1)
+	publish := func(res result) {
+		// Browsers can retry or prefetch a callback. Never let a duplicate request
+		// pin an HTTP handler (and therefore Server.Shutdown) after the first result
+		// has already won or the dialog was closed.
+		select {
+		case resCh <- res:
+		case <-ctx.Done():
+		default:
+		}
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed.", http.StatusMethodNotAllowed)
+			return
+		}
 		q := r.URL.Query()
 		logging.TraceContext(ctx, "auth: oauth callback received")
 		if e := q.Get("error"); e != "" {
 			http.Error(w, "Authorization failed. You can close this tab.", http.StatusBadRequest)
 			logging.TraceContext(ctx, "auth: oauth authorization denied", "reason", e)
-			resCh <- result{err: fmt.Errorf("authorization denied: %s", e)}
+			publish(result{err: fmt.Errorf("authorization denied: %s", e)})
 			return
 		}
 		if q.Get("state") != state {
 			http.Error(w, "State mismatch. You can close this tab.", http.StatusBadRequest)
 			logging.TraceContext(ctx, "auth: oauth state mismatch")
-			resCh <- result{err: errors.New("state mismatch (possible CSRF)")}
+			publish(result{err: errors.New("state mismatch (possible CSRF)")})
 			return
 		}
-		logging.TraceContext(ctx, "auth: oauth state validated", "hasCode", q.Get("code") != "")
+		code := q.Get("code")
+		if code == "" {
+			http.Error(w, "Authorization code missing. You can close this tab.", http.StatusBadRequest)
+			publish(result{err: errors.New("authorization callback contained no code")})
+			return
+		}
+		logging.TraceContext(ctx, "auth: oauth state validated", "hasCode", true)
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
 		_, _ = w.Write([]byte("<html><body>Signed in. You can close this tab and return to mailbox.</body></html>"))
-		resCh <- result{code: q.Get("code")}
+		publish(result{code: code})
 	})
 
-	srv := &http.Server{Handler: mux}
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 10 * time.Second}
 	go func() {
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logging.TraceContext(ctx, "auth: loopback server", "err", err)
 		}
 	}()
-	defer func() { _ = srv.Shutdown(context.Background()) }()
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
+	}()
 
 	if err := openBrowser(authURL); err != nil {
 		// Not fatal — the user can open the URL manually.

@@ -16,6 +16,17 @@ CREATE TABLE IF NOT EXISTS accounts (
   created_at      INTEGER NOT NULL DEFAULT (unixepoch())
 );
 
+-- Removing an account crosses SQLite, the OS keyring, and several config
+-- files. The account row and this cleanup intent are committed atomically;
+-- external artifacts are then removed and retried on later launches until all
+-- have succeeded. It deliberately has no account foreign key because it must
+-- outlive the account row.
+CREATE TABLE IF NOT EXISTS pending_account_cleanups (
+  email           TEXT PRIMARY KEY,
+  account_type    TEXT NOT NULL,
+  created_at      INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
 CREATE TABLE IF NOT EXISTS labels (
   account_id      INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
   gmail_id        TEXT NOT NULL,     -- e.g. "INBOX", "Label_42"

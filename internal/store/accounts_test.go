@@ -126,6 +126,13 @@ func TestDeleteAccount(t *testing.T) {
 	if err := s.DeleteAccount(ctx, drop); err != nil {
 		t.Fatalf("DeleteAccount: %v", err)
 	}
+	cleanups, err := s.PendingAccountCleanups(ctx)
+	if err != nil {
+		t.Fatalf("PendingAccountCleanups: %v", err)
+	}
+	if len(cleanups) != 1 || cleanups[0].Email != "drop@example.com" || cleanups[0].AccountType != model.AccountGmail {
+		t.Fatalf("pending cleanups = %+v", cleanups)
+	}
 
 	// The account row is gone.
 	if _, err := s.GetAccountByID(ctx, drop); !errors.Is(err, ErrNotFound) {
@@ -144,6 +151,30 @@ func TestDeleteAccount(t *testing.T) {
 	}
 	if hits, _ := s.Search(ctx, keep, "keeper", 50); len(hits) != 1 {
 		t.Fatalf("kept account has %d FTS hits, want 1", len(hits))
+	}
+	if err := s.CompleteAccountCleanup(ctx, "drop@example.com"); err != nil {
+		t.Fatalf("CompleteAccountCleanup: %v", err)
+	}
+	if cleanups, _ := s.PendingAccountCleanups(ctx); len(cleanups) != 0 {
+		t.Fatalf("completed cleanup remains: %+v", cleanups)
+	}
+}
+
+func TestReaddingAccountCancelsPendingCleanup(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	id, err := s.UpsertAccount(ctx, model.Account{Email: "again@example.com", Type: model.AccountIMAP})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteAccount(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UpsertAccount(ctx, model.Account{Email: "again@example.com", Type: model.AccountIMAP}); err != nil {
+		t.Fatal(err)
+	}
+	if cleanups, _ := s.PendingAccountCleanups(ctx); len(cleanups) != 0 {
+		t.Fatalf("re-added account still queued for cleanup: %+v", cleanups)
 	}
 }
 

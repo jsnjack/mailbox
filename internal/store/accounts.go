@@ -32,19 +32,30 @@ func (s *Store) UpsertAccount(ctx context.Context, a model.Account) (int64, erro
 		atype = model.AccountGmail
 	}
 	var id int64
-	err := s.writer.QueryRowContext(ctx, `
-		INSERT INTO accounts (email, display_name, account_type, token_expiry, scopes, sync_cursor, backfilled_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(email) DO UPDATE SET
-			display_name = excluded.display_name,
-			account_type = excluded.account_type,
-			token_expiry = excluded.token_expiry,
-			scopes       = excluded.scopes,
-			sync_cursor  = excluded.sync_cursor,
-			backfilled_at = excluded.backfilled_at
-		RETURNING id`,
-		a.Email, a.DisplayName, atype, expiry, strings.Join(a.Scopes, " "), a.SyncCursor, backfilled,
-	).Scan(&id)
+	err := s.withTx(ctx, func(tx *sql.Tx) error {
+		if err := tx.QueryRowContext(ctx, `
+			INSERT INTO accounts (email, display_name, account_type, token_expiry, scopes, sync_cursor, backfilled_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(email) DO UPDATE SET
+				display_name = excluded.display_name,
+				account_type = excluded.account_type,
+				token_expiry = excluded.token_expiry,
+				scopes       = excluded.scopes,
+				sync_cursor  = excluded.sync_cursor,
+				backfilled_at = excluded.backfilled_at
+			RETURNING id`,
+			a.Email, a.DisplayName, atype, expiry, strings.Join(a.Scopes, " "), a.SyncCursor, backfilled,
+		).Scan(&id); err != nil {
+			return err
+		}
+		// A re-add of an email intentionally supersedes an unfinished cleanup
+		// from a prior removal. Clearing it in the same transaction prevents a
+		// later startup sweep from deleting the newly saved credential.
+		if _, err := tx.ExecContext(ctx, `DELETE FROM pending_account_cleanups WHERE email = ?`, a.Email); err != nil {
+			return fmt.Errorf("cancel pending account cleanup: %w", err)
+		}
+		return nil
+	})
 	if err != nil {
 		logging.TraceContext(ctx, "store: upsert account", "account", a.Email, "err", err)
 		return 0, fmt.Errorf("upsert account %q: %w", a.Email, err)
@@ -169,6 +180,24 @@ func (s *Store) DeleteAccount(ctx context.Context, accountID int64) error {
 		}
 	}
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
+		var email, accountType string
+		if err := tx.QueryRowContext(ctx,
+			`SELECT email, account_type FROM accounts WHERE id = ?`, accountID,
+		).Scan(&email, &accountType); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil // already removed; any existing cleanup intent remains
+			}
+			return fmt.Errorf("read account cleanup identity: %w", err)
+		}
+		if accountType == "" {
+			accountType = model.AccountGmail
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO pending_account_cleanups (email, account_type) VALUES (?, ?)
+			ON CONFLICT(email) DO UPDATE SET account_type = excluded.account_type`,
+			email, accountType); err != nil {
+			return fmt.Errorf("queue account cleanup: %w", err)
+		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM accounts WHERE id = ?`, accountID); err != nil {
 			return fmt.Errorf("delete account %d: %w", accountID, err)
 		}
@@ -179,6 +208,46 @@ func (s *Store) DeleteAccount(ctx context.Context, accountID int64) error {
 		return err
 	}
 	logging.TraceContext(ctx, "store: delete account done", "account", accountID, "chunks", chunks, "dur", time.Since(start))
+	return nil
+}
+
+// PendingAccountCleanup is a durable request to erase credentials and
+// per-account configuration after the corresponding SQLite account was
+// removed.
+type PendingAccountCleanup struct {
+	Email       string
+	AccountType string
+}
+
+// PendingAccountCleanups returns cleanup intents oldest-first.
+func (s *Store) PendingAccountCleanups(ctx context.Context) ([]PendingAccountCleanup, error) {
+	rows, err := s.reader.QueryContext(ctx, `
+		SELECT email, account_type FROM pending_account_cleanups ORDER BY created_at, email`)
+	if err != nil {
+		return nil, fmt.Errorf("list pending account cleanups: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []PendingAccountCleanup
+	for rows.Next() {
+		var item PendingAccountCleanup
+		if err := rows.Scan(&item.Email, &item.AccountType); err != nil {
+			return nil, fmt.Errorf("scan pending account cleanup: %w", err)
+		}
+		out = append(out, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list pending account cleanups: %w", err)
+	}
+	return out, nil
+}
+
+// CompleteAccountCleanup removes a cleanup intent after every external
+// artifact has been deleted successfully.
+func (s *Store) CompleteAccountCleanup(ctx context.Context, email string) error {
+	if _, err := s.writer.ExecContext(ctx,
+		`DELETE FROM pending_account_cleanups WHERE email = ?`, email); err != nil {
+		return fmt.Errorf("complete account cleanup %q: %w", email, err)
+	}
 	return nil
 }
 

@@ -49,6 +49,47 @@ func aiKeyFor(provider, endpoint string) string {
 	return k
 }
 
+// sweepPendingAccountCleanups erases credentials and per-account config for
+// accounts whose SQLite rows have already been removed. The cleanup intent is
+// durable, so a locked keyring or transient filesystem error is retried at the
+// next launch. A re-add atomically cancels the intent in Store.UpsertAccount.
+func sweepPendingAccountCleanups(ctx context.Context, st *store.Store) error {
+	items, err := st.PendingAccountCleanups(ctx)
+	if err != nil {
+		return err
+	}
+	var sweepErr error
+	for _, item := range items {
+		var cleanupErr error
+		if item.AccountType == model.AccountGmail || item.AccountType == "" {
+			if err := auth.DeleteRefreshToken(item.Email); err != nil && !errors.Is(err, keyring.ErrNotFound) {
+				cleanupErr = errors.Join(cleanupErr, err)
+			}
+		} else {
+			if err := auth.DeleteIMAPSecret(item.Email); err != nil && !errors.Is(err, keyring.ErrNotFound) {
+				cleanupErr = errors.Join(cleanupErr, err)
+			}
+			cleanupErr = errors.Join(cleanupErr, config.DeleteIMAPAccount(item.Email))
+		}
+		cleanupErr = errors.Join(cleanupErr,
+			config.SaveAccountName(item.Email, ""),
+			config.SaveAccountSignature(item.Email, ""),
+			config.SaveConnectedTime(item.Email, time.Time{}),
+		)
+		if cleanupErr != nil {
+			logging.TraceContext(ctx, "launch: account cleanup deferred", "email", item.Email, "err", cleanupErr)
+			sweepErr = errors.Join(sweepErr, fmt.Errorf("clean up %s: %w", item.Email, cleanupErr))
+			continue
+		}
+		if err := st.CompleteAccountCleanup(ctx, item.Email); err != nil {
+			sweepErr = errors.Join(sweepErr, err)
+			continue
+		}
+		logging.TraceContext(ctx, "launch: account cleanup complete", "email", item.Email)
+	}
+	return sweepErr
+}
+
 // syncInterval is how often the background incremental sync runs while the GUI
 // is open.
 const syncInterval = 60 * time.Second
@@ -114,6 +155,9 @@ func launchUI(mailto string) error {
 	defer func() { _ = st.Close() }()
 
 	ctx := context.Background()
+	if err := sweepPendingAccountCleanups(ctx, st); err != nil {
+		slog.Warn("some removed-account cleanup will be retried", "err", err)
+	}
 	accounts, err := st.ListAccounts(ctx)
 	if err != nil {
 		return err
@@ -440,19 +484,56 @@ func launchUI(mailto string) error {
 			return 0, fmt.Errorf("no credentials to save")
 		}
 		atype := model.AccountIMAP
+		// Snapshot any existing credential/config so a failed reconnect does not
+		// replace a working account with half-written settings.
+		var oldSecret string
+		var hadSecret bool
+		loadSecret := auth.LoadIMAPSecret
+		saveSecret := auth.SaveIMAPSecret
+		deleteSecret := auth.DeleteIMAPSecret
+		if acct.Auth == config.AuthGmailREST {
+			loadSecret = auth.LoadRefreshToken
+			saveSecret = auth.SaveRefreshToken
+			deleteSecret = auth.DeleteRefreshToken
+		}
+		if prior, err := loadSecret(acct.Email); err == nil {
+			oldSecret, hadSecret = prior, true
+		} else if !errors.Is(err, keyring.ErrNotFound) {
+			return 0, fmt.Errorf("read existing credential before update: %w", err)
+		}
+		oldIMAP, hadIMAP, err := config.LoadIMAPAccount(acct.Email)
+		if err != nil {
+			return 0, fmt.Errorf("read existing account config: %w", err)
+		}
+		rollback := func() error {
+			var rollbackErr error
+			if hadSecret {
+				rollbackErr = errors.Join(rollbackErr, saveSecret(acct.Email, oldSecret))
+			} else if err := deleteSecret(acct.Email); err != nil && !errors.Is(err, keyring.ErrNotFound) {
+				rollbackErr = errors.Join(rollbackErr, err)
+			}
+			if acct.Auth != config.AuthGmailREST {
+				if hadIMAP {
+					rollbackErr = errors.Join(rollbackErr, config.SaveIMAPAccount(oldIMAP))
+				} else {
+					rollbackErr = errors.Join(rollbackErr, config.DeleteIMAPAccount(acct.Email))
+				}
+			}
+			return rollbackErr
+		}
 		if acct.Auth == config.AuthGmailREST {
 			// Gmail REST: native backend — token under the Gmail keyring, a
 			// gmail-type account, no IMAP server config.
-			if err := auth.SaveRefreshToken(acct.Email, secret); err != nil {
+			if err := saveSecret(acct.Email, secret); err != nil {
 				return 0, err
 			}
 			atype = model.AccountGmail
 		} else {
-			if err := auth.SaveIMAPSecret(acct.Email, secret); err != nil {
+			if err := saveSecret(acct.Email, secret); err != nil {
 				return 0, err
 			}
 			if err := config.SaveIMAPAccount(acct); err != nil {
-				return 0, err
+				return 0, errors.Join(err, rollback())
 			}
 		}
 		// Stamp the sign-in moment so the UI can say how old a credential is
@@ -460,12 +541,9 @@ func launchUI(mailto string) error {
 		if err := config.SaveConnectedTime(acct.Email, time.Now()); err != nil {
 			logging.Trace("launch: save connected time failed", "email", acct.Email, "err", err)
 		}
-		if err := upsertAccountKeepingCursor(ctx, st, acct.Email, atype); err != nil {
-			return 0, err
-		}
-		saved, err := st.GetAccountByEmail(ctx, acct.Email)
+		saved, err := upsertAccountKeepingCursor(ctx, st, acct.Email, atype)
 		if err != nil {
-			return 0, err
+			return 0, errors.Join(err, rollback())
 		}
 		// Start syncing it now — no restart needed.
 		if err := startAccount(saved); err != nil {
@@ -474,7 +552,7 @@ func launchUI(mailto string) error {
 		return saved.ID, nil
 	}
 	deps.RemoveAccount = func(ctx context.Context, accountID int64) error {
-		acc, err := st.GetAccountByID(ctx, accountID)
+		_, err := st.GetAccountByID(ctx, accountID)
 		if err != nil {
 			return fmt.Errorf("look up account: %w", err)
 		}
@@ -482,16 +560,12 @@ func launchUI(mailto string) error {
 		if err := st.DeleteAccount(ctx, accountID); err != nil {
 			return fmt.Errorf("delete cached data: %w", err)
 		}
-		// Best-effort secret + per-account config cleanup; a missing entry is fine.
-		if acc.Type == model.AccountGmail {
-			_ = auth.DeleteRefreshToken(acc.Email)
-		} else {
-			_ = auth.DeleteIMAPSecret(acc.Email)
-			_ = config.DeleteIMAPAccount(acc.Email)
+		// The store committed a durable cleanup intent in the same transaction as
+		// the account-row deletion. Try it now for immediate erasure; failures are
+		// safe to report only in logs because they remain queued for next launch.
+		if err := sweepPendingAccountCleanups(context.WithoutCancel(ctx), st); err != nil {
+			logging.TraceContext(ctx, "launch: removed account cleanup queued", "account", accountID, "err", err)
 		}
-		_ = config.SaveAccountName(acc.Email, "")            // blank removes the name entry
-		_ = config.SaveAccountSignature(acc.Email, "")       // blank removes the override
-		_ = config.SaveConnectedTime(acc.Email, time.Time{}) // zero removes the sign-in stamp
 		return nil
 	}
 	deps.OAuthConnect = func(ctx context.Context, kind config.AuthKind) (string, string, error) {
@@ -887,14 +961,18 @@ func buildIMAPBackend(ctx context.Context, a model.Account) (backend.Backend, er
 // upsertAccountKeepingCursor creates or updates an account by email without
 // blanking an existing one's sync cursor / backfill timestamp — re-adding an
 // account (e.g. to fix a password) must not trigger a needless full re-sync.
-func upsertAccountKeepingCursor(ctx context.Context, st *store.Store, email, accountType string) error {
+func upsertAccountKeepingCursor(ctx context.Context, st *store.Store, email, accountType string) (model.Account, error) {
 	acct := model.Account{Email: email, Type: accountType}
 	if existing, err := st.GetAccountByEmail(ctx, email); err == nil {
 		acct = existing // preserve cursor, backfilled_at, scopes, display name
 		acct.Type = accountType
 	}
-	_, err := st.UpsertAccount(ctx, acct)
-	return err
+	id, err := st.UpsertAccount(ctx, acct)
+	if err != nil {
+		return model.Account{}, err
+	}
+	acct.ID = id
+	return acct, nil
 }
 
 // usernameOf is the IMAP/SMTP login username (the email unless overridden).
