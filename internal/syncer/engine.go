@@ -802,43 +802,82 @@ func messageIDOf(rfc822 []byte) string {
 }
 
 // ModifyLabelsBatch applies the same label change to many messages: it updates
-// every message locally first (instant, optimistic), publishes a single change,
-// then mirrors the change to Gmail in one BatchModify call. This keeps archiving
-// or marking a whole conversation to O(1) network round-trips and one UI refresh
-// instead of one per message. Next incremental sync reconciles any divergence.
+// every message locally and records the provider mirror in the same transaction,
+// publishes a single change, then nudges the ordered mirror queue. This keeps the
+// UI instant while making offline work durable across failures and restarts.
 func (e *Engine) ModifyLabelsBatch(ctx context.Context, b backend.Backend, accountID int64, gmailIDs []string, add, remove []string) error {
 	if len(gmailIDs) == 0 {
 		return nil
 	}
 	start := time.Now()
-	// Apply every id in one transaction (one commit/fsync) instead of a tx per
-	// message; missing ids are skipped inside the store.
-	if err := e.Store.ModifyLabelsBatch(ctx, accountID, gmailIDs, add, remove); err != nil {
-		return fmt.Errorf("modify labels (local): %w", err)
+	// Apply every id and enqueue its provider mirror in one transaction. A crash
+	// can therefore leave neither half or both halves, never a local-only action
+	// with no record of what the provider still needs.
+	if err := e.Store.ModifyLabelsBatchAndEnqueue(ctx, accountID, gmailIDs, add, remove); err != nil {
+		return fmt.Errorf("modify labels and enqueue: %w", err)
 	}
 	// One coarse event (no GmailID) so the UI refreshes once, not per message.
 	e.publish(Change{Kind: MessageUpserted, AccountID: accountID})
 	slog.Default().Debug("engine: ModifyLabelsBatch (local)",
 		"n", len(gmailIDs), "add", add, "remove", remove, "dur", time.Since(start))
 
-	// Mirror to Gmail off the calling path so the UI updates instantly off the
-	// local change instead of waiting on the round-trip (e.g. unstarring should
-	// leave the Starred folder at once). Ordered per account (see mirrorAsync): an
-	// action and a later Undo that reverses it must reach the provider in the order
-	// the user made them — otherwise a slow first call could be overtaken by the
-	// second, leaving Gmail (and, since sync is Gmail→local, the cache after the
-	// next sync) in the wrong final state. A failure is logged; the next
-	// incremental sync reconciles any divergence.
+	// Drain off the calling path. The durable rows are ordered by id, so an action
+	// and a later Undo reach the provider in the order the user made them.
 	if b != nil {
-		e.mirrorAsync(accountID, func() {
-			ctx, cancel := mirrorCtx()
-			defer cancel()
-			if err := b.ApplyLabels(ctx, gmailIDs, add, remove); err != nil {
-				slog.Default().Warn("modify labels: mirror to provider", "n", len(gmailIDs), "err", err)
-			}
-		})
+		e.QueuePendingLabelSweep(accountID, b)
 	}
 	return nil
+}
+
+// SweepPendingLabelOps applies durable optimistic label mirrors oldest-first.
+// The first provider failure stops the pass so a later Undo cannot overtake the
+// action it reverses. The failed row remains queued for the next background tick
+// or account reconnect.
+func (e *Engine) SweepPendingLabelOps(ctx context.Context, b backend.Backend, accountID int64) (int, error) {
+	if b == nil {
+		return 0, nil
+	}
+	done := 0
+	for {
+		ops, err := e.Store.PendingLabelOps(ctx, accountID, 100)
+		if err != nil {
+			return done, err
+		}
+		if len(ops) == 0 {
+			return done, nil
+		}
+		for _, op := range ops {
+			if err := b.ApplyLabels(ctx, op.MessageIDs, op.Add, op.Remove); err != nil {
+				if ferr := e.Store.FailPendingLabelOp(ctx, op.ID, err); ferr != nil {
+					return done, errors.Join(err, ferr)
+				}
+				return done, err
+			}
+			if err := e.Store.CompletePendingLabelOp(ctx, op.ID); err != nil {
+				return done, err
+			}
+			done++
+		}
+		if len(ops) < 100 {
+			return done, nil
+		}
+	}
+}
+
+// QueuePendingLabelSweep serializes a durable-label drain with the account's
+// other provider mirrors. Dropping this in-memory nudge is harmless: the rows
+// remain in SQLite and the periodic sweeper/reconnect will nudge it again.
+func (e *Engine) QueuePendingLabelSweep(accountID int64, b backend.Backend) {
+	if b == nil {
+		return
+	}
+	e.mirrorAsync(accountID, func() {
+		ctx, cancel := mirrorCtx()
+		defer cancel()
+		if n, err := e.SweepPendingLabelOps(ctx, b, accountID); err != nil {
+			slog.Default().Warn("pending labels: mirror to provider", "account", accountID, "completed", n, "err", err)
+		}
+	})
 }
 
 // mirrorAsync runs fn on accountID's serial mirror queue, off the caller's path
@@ -937,11 +976,8 @@ func (e *Engine) StopAccount(accountID int64) <-chan struct{} {
 	return done
 }
 
-// MarkLabelRead marks every unread message in a label as read: optimistically
-// in the store, then mirrored to the provider with a single batch call. The
-// mirror goes through the same per-account FIFO as ModifyLabelsBatch so it
-// cannot overtake (or be overtaken by) an earlier label change or its Undo; a
-// mirror failure is logged and reconciled by the next incremental sync.
+// MarkLabelRead marks every unread message in a label as read through the same
+// durable optimistic path as every other label mutation.
 func (e *Engine) MarkLabelRead(ctx context.Context, b backend.Backend, accountID int64, labelID string) error {
 	defer func(start time.Time) {
 		slog.Default().Debug("engine: MarkLabelRead", "label", labelID, "dur", time.Since(start))
@@ -953,18 +989,12 @@ func (e *Engine) MarkLabelRead(ctx context.Context, b backend.Backend, accountID
 	if len(ids) == 0 {
 		return nil
 	}
-	if err := e.Store.MarkLabelReadLocal(ctx, accountID, labelID); err != nil {
+	if err := e.Store.ModifyLabelsBatchAndEnqueue(ctx, accountID, ids, nil, []string{model.LabelUnread}); err != nil {
 		return fmt.Errorf("mark label read: %w", err)
 	}
 	e.publish(Change{Kind: LabelsSynced, AccountID: accountID})
 	if b != nil {
-		e.mirrorAsync(accountID, func() {
-			ctx, cancel := mirrorCtx()
-			defer cancel()
-			if err := b.ApplyLabels(ctx, ids, nil, []string{model.LabelUnread}); err != nil {
-				slog.Default().Warn("mark label read: mirror to provider", "label", labelID, "n", len(ids), "err", err)
-			}
-		})
+		e.QueuePendingLabelSweep(accountID, b)
 	}
 	return nil
 }

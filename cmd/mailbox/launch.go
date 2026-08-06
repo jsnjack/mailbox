@@ -324,6 +324,9 @@ func launchUI(mailto string) error {
 		backends[a.ID] = b
 		running[a.ID] = rt
 		accountsMu.Unlock()
+		// Resume label operations that were queued while the account was offline
+		// or while a previous runtime was shutting down.
+		engine.QueuePendingLabelSweep(a.ID, b)
 		// A wake channel lets a push notification (IMAP IDLE) trigger an immediate
 		// sync instead of waiting for the poll tick. All Add()s happen here, before
 		// any goroutine can finish, so stopAccount's Wait can't race them.
@@ -990,6 +993,9 @@ func backgroundSweep(ctx context.Context, engine *syncer.Engine, act *activity.H
 	ticker := time.NewTicker(sweepInterval)
 	defer ticker.Stop()
 	for {
+		// Label mutations share the outbox's retry cadence. The actual drain is
+		// serialized on the engine's per-account provider queue.
+		engine.QueuePendingLabelSweep(accountID, b)
 		n, err := engine.SweepOutbox(ctx, b, accountID)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "outbox sweep: %v\n", err)

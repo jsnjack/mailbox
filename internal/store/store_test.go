@@ -30,7 +30,7 @@ func TestOpenAppliesSchema(t *testing.T) {
 	wantTables := []string{
 		"accounts", "labels", "threads", "messages",
 		"message_labels", "message_bodies", "attachments",
-		"outbox", "thread_hydrations", "messages_fts",
+		"outbox", "pending_label_ops", "thread_hydrations", "messages_fts",
 	}
 	for _, name := range wantTables {
 		t.Run(name, func(t *testing.T) {

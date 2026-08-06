@@ -107,6 +107,24 @@ CREATE TABLE IF NOT EXISTS outbox (
   created_at      INTEGER NOT NULL DEFAULT (unixepoch())
 );
 
+-- Ordered, durable provider mirrors for optimistic local label changes. The UI
+-- commits the local message state and this row in one transaction, then the
+-- sync engine drains rows oldest-first. A network failure therefore survives a
+-- restart instead of silently losing an offline archive/star/read operation.
+CREATE TABLE IF NOT EXISTS pending_label_ops (
+  id              INTEGER PRIMARY KEY,
+  account_id      INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  message_ids     TEXT NOT NULL,       -- JSON []string
+  add_labels      TEXT NOT NULL,       -- JSON []string
+  remove_labels   TEXT NOT NULL,       -- JSON []string
+  attempts        INTEGER NOT NULL DEFAULT 0,
+  last_error      TEXT NOT NULL DEFAULT '',
+  created_at      INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_label_ops_account
+  ON pending_label_ops(account_id, id);
+
 -- AI-assigned inbox category per message, keyed by the message's Gmail id. This
 -- is UI-derived (not Gmail) data, persisted so categorization runs once per
 -- email instead of every launch. category is one of the known buckets, or '' to
