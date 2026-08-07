@@ -217,12 +217,11 @@ type window struct {
 	aiReplyBtn      *gtk.MenuButton  // AI reply: popover of suggestions + intents
 	archiveBtn      *gtk.Button
 	translateBtn    *gtk.Button
-	overflowBtn     *gtk.MenuButton   // star/unread/trash/images live here (native menu model)
+	overflowBtn     *gtk.MenuButton   // secondary reader actions (native menu model)
 	starAction      *gio.SimpleAction // stateful: the open message's Starred toggle
-	imagesAction    *gio.SimpleAction // stateful: the reader's remote-images toggle
 	unreadAction    *gio.SimpleAction // stateful: the thread-list "show unread only" filter
 	imagesEnabled   bool              // whether remote images are loaded in the reader
-	blockImages     bool              // global default: block remote images (Preferences)
+	blockImages     bool              // global remote-image opt-out (Preferences)
 
 	// AI inbox categorization: per-thread category cache (thread id → category),
 	// computed in the background for the inbox. inboxCategories gates it.
@@ -283,7 +282,6 @@ type window struct {
 	sendUndoSecs        int             // undo-send window in seconds (0 = default 5)
 	keymap              map[uint]func() // single-key shortcuts (configurable; see shortcuts.go)
 	readerCatTag        *gtk.Label      // thread category pill in the reader header
-	trustedImgs         map[string]bool // lowercased senders whose images always load
 
 	// AI thread summary: a button reveals a card that streams a summary in.
 	// summaryCache memoizes by the thread's message fingerprint, so reopening is
@@ -337,7 +335,6 @@ func newWindow(app *adw.Application, deps Deps) *window {
 		w.remoteImages = remotecache.New(dir)
 	}
 	w.rebuildKeymap()
-	w.trustedImgs = map[string]bool{}
 	if p, err := config.LoadPrefs(); err == nil {
 		w.blockImages = p.BlockRemoteImages
 		w.inboxCategories = !p.DisableInboxCategories
@@ -352,9 +349,6 @@ func newWindow(app *adw.Application, deps Deps) *window {
 		w.aiPhishing = !p.DisablePhishingAnalysis
 		w.aiSnoozeSuggestions = !p.DisableSnoozeSuggestions
 		w.sendUndoSecs = p.SendUndoSeconds
-		for _, a := range p.TrustedImageSenders {
-			w.trustedImgs[strings.ToLower(a)] = true
-		}
 	}
 	if len(deps.Accounts) > 0 {
 		w.activeID = deps.Accounts[0].ID
@@ -2678,9 +2672,9 @@ func (w *window) buildReader() *adw.NavigationPage {
 	// per-render nonce and default-src 'none' blocks all network (no fetch/XHR
 	// exfiltration, no iframes), so only our own script ever executes.
 	settings.SetEnableJavascript(true)
-	// External images are blocked by default for new profiles. When explicitly
-	// enabled they are fetched by the hardened cache client and rendered only via
-	// mbcache:, never directly from an email-controlled origin.
+	// External images are fetched by the hardened cache client and rendered only
+	// via mbcache:, never directly from an email-controlled origin. The global
+	// privacy preference can opt out.
 	w.imagesEnabled = !w.blockImages
 	settings.SetAutoLoadImages(w.imagesEnabled)
 	w.webview.SetVExpand(true)
@@ -2843,19 +2837,18 @@ func (w *window) buildReader() *adw.NavigationPage {
 		btn.SetPopover(w.buildAIReplyPopover())
 	})
 
-	// Secondary actions (phishing analysis, star, mark-unread, trash, images) live
+	// Secondary actions (phishing analysis, star, mark-unread, trash) live
 	// in the overflow — analysis is on-demand and rare, so it doesn't earn a slot.
 	w.overflowBtn = gtk.NewMenuButton()
 	w.overflowBtn.SetIconName("view-more-symbolic")
 	w.overflowBtn.SetTooltipText("More actions")
 	a11yLabel(w.overflowBtn, "More actions")
 	// A native menu model (standard GTK4): normal-weight rows, native checkmarks
-	// for the toggles, automatic separators. Rebuilt on each open so the dynamic
+	// for toggles, automatic separators. Rebuilt on each open so the dynamic
 	// items (spam/not-spam, delete-forever, find-from-sender) match the context,
-	// with the toggle states synced first.
+	// with the star state synced first.
 	w.overflowBtn.SetCreatePopupFunc(func(btn *gtk.MenuButton) {
 		w.starAction.SetState(glib.NewVariantBoolean(w.threadStarred()))
-		w.imagesAction.SetState(glib.NewVariantBoolean(w.imagesEnabled))
 		menu := gtk.NewPopoverMenuFromModel(w.buildReaderMenuModel())
 		btn.SetPopover(&menu.Popover)
 	})
@@ -3758,9 +3751,8 @@ func (w *window) showThreadMsgs(threadID string, msgs []model.Message) {
 	w.openMsg = msgs[len(msgs)-1] // newest, for reply/forward/star/unread
 	w.resetTranslation()          // a freshly opened thread shows the original
 	w.hideSummary()               // collapse any summary from the previous thread
-	// Per-open image policy: the global default, overridden for trusted
-	// senders (Preferences knows them via "Always load images from …").
-	if want := !w.blockImages || w.trustedImgs[strings.ToLower(w.openMsg.FromAddr)]; want != w.imagesEnabled {
+	// Re-apply the global policy after a one-conversation "Show images" override.
+	if want := !w.blockImages; want != w.imagesEnabled {
 		w.imagesEnabled = want
 		w.webview.Settings().SetAutoLoadImages(want)
 	}
@@ -5121,17 +5113,11 @@ func (w *window) registerReaderActions() {
 	})
 	w.win.AddAction(w.starAction)
 
-	w.imagesAction = gio.NewSimpleActionStateful("reader-images", nil, glib.NewVariantBoolean(true))
-	w.imagesAction.ConnectChangeState(func(v *glib.Variant) {
-		w.imagesAction.SetState(v)
-		w.setImagesEnabled(v.Boolean())
-	})
-	w.win.AddAction(w.imagesAction)
 }
 
 // buildReaderMenuModel builds the overflow menu — conversation-scoped actions
-// only: star/unread/move/spam/trash, labels, unsubscribe, print, retry, and
-// the remote-images toggle. (Reply all, Reply, Forward, Archive, Translate and
+// only: star/unread/move/spam/trash, labels, unsubscribe, print, and retry.
+// (Reply all, Reply, Forward, Archive, Translate and
 // Draft reply are dedicated header controls; message-scoped actions live in
 // each message's ⋯ menu — showMessageMenu — and sender actions in the
 // sender-name dialog — showSenderActions.) Unlabeled sections render as native
@@ -5175,9 +5161,6 @@ func (w *window) buildReaderMenuModel() *gio.Menu {
 		menu.AppendSection("", retry)
 	}
 
-	img := gio.NewMenu()
-	img.Append("Show remote images", "win.reader-images")
-	menu.AppendSection("", img)
 	return menu
 }
 
@@ -5407,15 +5390,11 @@ func (w *window) showSenderActions(gmailID string) {
 		if w.deps.SearchServer != nil {
 			item("Find emails from "+displayFrom(m), func() { w.searchFrom(addr) })
 		}
-		if w.blockImages && addr != "" && !w.trustedImgs[strings.ToLower(addr)] {
-			item("Always load images from this sender", func() { w.trustImagesFrom(addr) })
-		}
 	})
 }
 
 // showRecipientActions presents the address card for a recipient in a message
-// header (To/Cc) — the same surface the sender name opens, minus the
-// sender-only image-trust item. token is the RFC 5322 form
+// header (To/Cc) — the same surface the sender name opens. token is the RFC 5322 form
 // carried by the mbaction:rcpt link ("Name <addr>" or a bare address).
 func (w *window) showRecipientActions(token string) {
 	addr, name := strings.TrimSpace(token), ""
@@ -5533,25 +5512,6 @@ func (w *window) setCaution(warnings []string) {
 	}
 	w.cautionLabel.SetText("⚠ " + strings.Join(warnings, " "))
 	w.cautionLabel.SetVisible(true)
-}
-
-// trustImagesFrom remembers a sender as image-trusted (their remote images
-// load even while the global default blocks) and shows images now. addr is the
-// clicked message's sender — not necessarily the newest message's.
-func (w *window) trustImagesFrom(addr string) {
-	addr = strings.ToLower(strings.TrimSpace(addr))
-	if addr == "" || w.trustedImgs[addr] {
-		return
-	}
-	logging.Trace("ui: trust images", "sender", addr)
-	w.trustedImgs[addr] = true
-	p, _ := config.LoadPrefs()
-	p.TrustedImageSenders = append(p.TrustedImageSenders, addr)
-	if err := config.SavePrefs(p); err != nil {
-		slog.Warn("ui: save prefs", "err", err)
-	}
-	w.toast("Images from " + addr + " will always load")
-	w.setImagesEnabled(true)
 }
 
 // setImagesEnabled toggles remote-image loading and re-renders the open thread

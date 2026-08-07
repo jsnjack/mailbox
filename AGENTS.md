@@ -98,8 +98,8 @@ UI state (implemented): 3-pane shell renders the cached account live; opening a
 Gmail conversation first hydrates its complete server-side message membership
 once (persisted in `thread_hydrations`, so a capped backfill cannot leave older
 messages and their attachments invisible), then lazily fetches + sanitizes +
-renders its bodies (WebKit; remote images off
-behind a toggle). The reader sanitizes with an email-tuned bluemonday policy
+renders its bodies (WebKit; remote images load through a hardened local cache,
+with a global privacy opt-out). The reader sanitizes with an email-tuned bluemonday policy
 (`emailPolicy`, keeps inline styles + tables so HTML mail isn't broken). The
 WebView loads **one persistent shell page** (`readerShellHTML`: styles, CSP, and
 a fit-to-width script that scales over-wide email to the pane) and every
@@ -451,7 +451,7 @@ afterward. The `sync` command and the headless packages build without GTK.
 - Default signature: `~/.config/mailbox/signature.txt` (plain text, may be empty); per-account overrides in `~/.config/mailbox/signatures.json` (email → signature).
 - Keyboard shortcut overrides: `~/.config/mailbox/shortcuts.json` (action id → keys).
 - View state (last folder, unread filter, reader zoom): `~/.local/share/mailbox/view.json`.
-- General prefs (block remote images by default, body retention window): `~/.config/mailbox/prefs.json`. Body retention (Preferences → Storage, default off) prunes cached bodies older than N days (`store.PruneBodies` — metadata/header search kept, body re-fetched on open, body-derived AI caches + attachment rows pruned too); applied on change and by a daily background pass (`backgroundRetention`), with an auto-`Vacuum` after a large prune.
+- General prefs (automatic remote-image loading, body retention window): `~/.config/mailbox/prefs.json`. Body retention (Preferences → Storage, default off) prunes cached bodies older than N days (`store.PruneBodies` — metadata/header search kept, body re-fetched on open, body-derived AI caches + attachment rows pruned too); applied on change and by a daily background pass (`backgroundRetention`), with an auto-`Vacuum` after a large prune.
 - Attachment cache: `~/.cache/mailbox/attachments/` (content-addressed by sha256).
 - Secrets (OAuth refresh tokens, AI API keys): OS keyring via Secret Service.
 - Trace log: `/tmp/mailbox.log` (truncated each start; enabled with `--trace`).
@@ -463,7 +463,7 @@ afterward. The `sync` command and the headless packages build without GTK.
 - Gmail REST API, not IMAP — native labels/threads, `history.list` incremental sync, server-side search.
 - Local SQLite + FTS5 as source of truth; metadata separate from bodies; bodies lazy-loaded.
 - Desktop polls `history.list` (no public endpoint for Pub/Sub push). Backfill fetches metadata concurrently (`backfillWorkers`) but commits in `store.UpsertMessages` batches of `backfillBatch` (200) — one transaction/fsync and FTS reindex per batch, not per message; incremental sync likewise batches its deletes (`store.DeleteMessages`) and upserts into one transaction each, then publishes a per-id `MessageUpserted` so new-mail notifications still fire.
-- HTML email rendered in a locked-down WebKitGTK view: email-tuned sanitizer (keeps styling), remote images blocked by default, links open externally. One persistent shell page; conversations are swapped in by script, never by navigation (kills WebKit's black content-swap flash). Its fit-to-width pass reruns after every reader zoom change so a reset cannot retain stale scaled dimensions or horizontal overflow. JavaScript is enabled only to run the trusted shell script, fenced off by a nonce CSP with `default-src 'none'` so no email script can run or phone home. AI translate renders in place (markup-preserving) with a revert toggle.
+- HTML email rendered in a locked-down WebKitGTK view: email-tuned sanitizer (keeps styling), remote images loaded through the local cache with tracker stripping and a global opt-out, links open externally. One persistent shell page; conversations are swapped in by script, never by navigation (kills WebKit's black content-swap flash). Its fit-to-width pass reruns after every reader zoom change so a reset cannot retain stale scaled dimensions or horizontal overflow. JavaScript is enabled only to run the trusted shell script, fenced off by a nonce CSP with `default-src 'none'` so no email script can run or phone home. AI translate renders in place (markup-preserving) with a revert toggle.
 - AI provider is user-configurable behind one `Provider` interface (OpenAI-compatible covers the LiteLLM proxy + OpenAI; Anthropic direct).
 - Distribution is RPM (GTK4/WebKit cannot be statically linked into a single binary).
 

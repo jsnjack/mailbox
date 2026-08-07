@@ -342,11 +342,10 @@ func (w *window) openSettings() {
 		}
 	}
 
-	// Privacy: a global default for loading external images. New profiles start
-	// blocked; explicitly loaded images are cached for later offline viewing.
+	// Privacy: a global opt-out for loading external images.
 	imgRow := adw.NewSwitchRow()
 	imgRow.SetTitle("Load external images automatically")
-	imgRow.SetSubtitle("External images can reveal when you opened a message. Allowed images are cached for offline viewing.")
+	imgRow.SetSubtitle("Tracking pixels are removed and images are cached for offline viewing. Turn this off for maximum privacy.")
 	imgRow.SetActive(!w.blockImages)
 	imgRow.Connect("notify::active", func() {
 		load := imgRow.Active()
@@ -354,7 +353,6 @@ func (w *window) openSettings() {
 		w.blockImages = !load
 		savePref(func(p *config.Prefs) {
 			p.BlockRemoteImages = !load
-			p.RemoteImagesConfigured = true
 		})
 		w.setImagesEnabled(load)
 	})
