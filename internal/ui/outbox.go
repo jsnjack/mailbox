@@ -184,11 +184,12 @@ func (w *window) outboxRow(acct AccountInfo, it model.OutboxItem, showAccount bo
 	status.SetXAlign(0)
 	status.SetWrap(true)
 	status.AddCSSClass("caption")
-	if it.State == "failed" {
+	switch it.State {
+	case "failed":
 		status.AddCSSClass("error")
-	} else if it.State == "uncertain" {
+	case "uncertain":
 		status.AddCSSClass("warning")
-	} else {
+	default:
 		status.AddCSSClass("dim-label")
 	}
 	info.Append(status)

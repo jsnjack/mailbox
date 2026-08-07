@@ -311,7 +311,7 @@ func (w *window) openAddAccount(prefill *addAccountPrefill) {
 			return
 		}
 		if err := validateAccountSettings(acct); err != nil {
-			status.SetText(err.Error())
+			status.SetText(formError(err))
 			return
 		}
 		if acct.IMAPSecurity == "none" || acct.SMTPSecurity == "none" {
@@ -451,21 +451,29 @@ func securityValue(selected uint) string {
 func validateAccountSettings(a config.IMAPAccount) error {
 	parsed, err := mail.ParseAddress(a.Email)
 	if err != nil || !strings.EqualFold(parsed.Address, a.Email) {
-		return errors.New("Enter a valid email address.")
+		return errors.New("enter a valid email address")
 	}
 	if a.Auth == config.AuthGmailREST {
 		return nil
 	}
 	if strings.TrimSpace(a.Username) == "" {
-		return errors.New("Enter a login username.")
+		return errors.New("enter a login username")
 	}
 	if strings.TrimSpace(a.IMAPHost) == "" || a.IMAPPort < 1 || a.IMAPPort > 65535 {
-		return errors.New("Enter a valid IMAP server and port.")
+		return errors.New("enter a valid IMAP server and port")
 	}
 	if strings.TrimSpace(a.SMTPHost) == "" || a.SMTPPort < 1 || a.SMTPPort > 65535 {
-		return errors.New("Enter a valid SMTP server and port.")
+		return errors.New("enter a valid SMTP server and port")
 	}
 	return nil
+}
+
+func formError(err error) string {
+	if err == nil || err.Error() == "" {
+		return ""
+	}
+	s := err.Error()
+	return strings.ToUpper(s[:1]) + s[1:] + "."
 }
 
 func itoa(n int) string {

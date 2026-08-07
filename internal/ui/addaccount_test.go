@@ -1,10 +1,17 @@
 package ui
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/jsnjack/mailbox/internal/config"
 )
+
+func TestFormError(t *testing.T) {
+	if got := formError(errors.New("enter a login username")); got != "Enter a login username." {
+		t.Fatalf("formError = %q", got)
+	}
+}
 
 func TestValidateAccountSettings(t *testing.T) {
 	valid := config.IMAPAccount{
