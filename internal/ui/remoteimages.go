@@ -13,6 +13,8 @@ import (
 
 	xhtml "golang.org/x/net/html"
 
+	"github.com/aymerick/douceur/css"
+	"github.com/aymerick/douceur/parser"
 	"github.com/diamondburned/gotk4-webkitgtk/pkg/webkit/v6"
 	"github.com/diamondburned/gotk4/pkg/gio/v2"
 	"github.com/jsnjack/mailbox/internal/logging"
@@ -26,6 +28,7 @@ const (
 
 var (
 	cssRemoteURLRe = regexp.MustCompile(`(?i)url\(\s*(['"]?)(https?://[^'")\s]+)['"]?\s*\)`)
+	cssImportRe    = regexp.MustCompile(`(?is)@import\s+[^;]+;`)
 	srcsetRemoteRe = regexp.MustCompile(`(?i)https?://[^\s,]+`)
 )
 
@@ -120,12 +123,12 @@ func collectRemoteImageURLs(root *xhtml.Node, limit int) []string {
 						add(raw)
 					}
 				case "style":
-					collectCSSURLs(a.Val, add)
+					collectInlineCSSImageURLs(a.Val, add)
 				}
 			}
 		}
 		if n.Type == xhtml.TextNode && n.Parent != nil && n.Parent.Type == xhtml.ElementNode && n.Parent.Data == "style" {
-			collectCSSURLs(n.Data, add)
+			collectStylesheetImageURLs(n.Data, add)
 		}
 		for child := n.FirstChild; child != nil; child = child.NextSibling {
 			walk(child)
@@ -133,6 +136,53 @@ func collectRemoteImageURLs(root *xhtml.Node, limit int) []string {
 	}
 	walk(root)
 	return out
+}
+
+func collectInlineCSSImageURLs(cssText string, add func(string)) {
+	// Inline email CSS frequently omits the final semicolon, which douceur's
+	// declaration parser rejects. Split the simple declaration list here; a URL
+	// containing a semicolon is left unfetched rather than guessed at.
+	for _, declaration := range strings.Split(cssText, ";") {
+		property, value, ok := strings.Cut(declaration, ":")
+		if ok && cssPropertyDisplaysImage(property) {
+			collectCSSURLs(value, add)
+		}
+	}
+}
+
+func collectStylesheetImageURLs(cssText string, add func(string)) {
+	stylesheet, err := parser.Parse(cssText)
+	if err != nil {
+		return
+	}
+	var walk func([]*css.Rule)
+	walk = func(rules []*css.Rule) {
+		for _, rule := range rules {
+			collectCSSDeclarationURLs(rule.Declarations, add)
+			walk(rule.Rules)
+		}
+	}
+	walk(stylesheet.Rules)
+}
+
+func collectCSSDeclarationURLs(declarations []*css.Declaration, add func(string)) {
+	for _, declaration := range declarations {
+		if !cssPropertyDisplaysImage(declaration.Property) {
+			continue
+		}
+		collectCSSURLs(declaration.Value, add)
+	}
+}
+
+func cssPropertyDisplaysImage(property string) bool {
+	switch strings.ToLower(strings.TrimSpace(property)) {
+	case "background", "background-image", "border-image", "border-image-source",
+		"content", "list-style", "list-style-image", "mask", "mask-image",
+		"-webkit-mask", "-webkit-mask-image":
+		return true
+	default:
+		return false
+	}
 }
 
 func collectCSSURLs(cssText string, add func(string)) {
@@ -216,7 +266,11 @@ func rewriteSrcset(value string, entries map[string]remotecache.Entry) (string, 
 }
 
 func rewriteCSSURLs(cssText string, entries map[string]remotecache.Entry, changed *bool) string {
-	return cssRemoteURLRe.ReplaceAllStringFunc(cssText, func(match string) string {
+	withoutImports := cssImportRe.ReplaceAllStringFunc(cssText, func(string) string {
+		*changed = true
+		return ""
+	})
+	return cssRemoteURLRe.ReplaceAllStringFunc(withoutImports, func(match string) string {
 		parts := cssRemoteURLRe.FindStringSubmatch(match)
 		if len(parts) < 3 {
 			return match

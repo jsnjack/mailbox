@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/jsnjack/mailbox/internal/remotecache"
@@ -32,11 +33,42 @@ func TestCacheRemoteImagesRewritesAndReusesOffline(t *testing.T) {
 	}
 }
 
+func TestCacheRemoteImagesNeverFetchesNonImageCSSResources(t *testing.T) {
+	var mu sync.Mutex
+	requests := map[string]int{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests[r.URL.Path]++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write([]byte("\x89PNG\r\n\x1a\nimage"))
+	}))
+	defer srv.Close()
+	w := &window{remoteImages: remotecache.NewWithClient(t.TempDir(), srv.Client())}
+	source := `<style>` +
+		`@import "` + srv.URL + `/import.css";` +
+		`@font-face{font-family:x;src:url(` + srv.URL + `/font.woff2)}` +
+		`.hero{background-image:url(` + srv.URL + `/hero.png)}` +
+		`.pointer{cursor:url(` + srv.URL + `/cursor.png),auto}` +
+		`</style><div class="hero">Hello</div>`
+	got, cached, missing := w.cacheRemoteImages(context.Background(), source, true)
+	mu.Lock()
+	defer mu.Unlock()
+	if cached != 1 || missing != 0 || requests["/hero.png"] != 1 {
+		t.Fatalf("cached=%d missing=%d requests=%v: %s", cached, missing, requests, got)
+	}
+	for _, path := range []string{"/import.css", "/font.woff2", "/cursor.png"} {
+		if requests[path] != 0 || strings.Contains(got, srv.URL+path) {
+			t.Fatalf("non-image CSS resource %s survived or was requested: requests=%v html=%s", path, requests, got)
+		}
+	}
+}
+
 func TestCacheRemoteImagesRemovesUnapprovedNetworkURLs(t *testing.T) {
 	w := &window{remoteImages: remotecache.NewWithClient(t.TempDir(), http.DefaultClient)}
 	source := `<img src="https://tracking.example/pixel.png"><div style="background:url(https://tracking.example/bg.png)">x</div>`
 	got, cached, missing := w.cacheRemoteImages(context.Background(), source, false)
 	if cached != 0 || missing != 2 || strings.Contains(got, "http") || strings.Contains(got, "src=") {
-		t.Fatalf("blocked external URLs survived: %s", got)
+		t.Fatalf("cached=%d missing=%d, blocked external URLs survived: %s", cached, missing, got)
 	}
 }

@@ -113,7 +113,9 @@ plus the sanitizer (inserted innerHTML never executes scripts) mean no
 email-supplied script can run or reach the network. Remote images load by default, but tracking pixels are stripped before
 render (`cleanEmailHTML`/`scopeEmailCSS`: tiny or hidden images and backgrounds,
 hidden ancestors, and known open/read/pixel URL patterns across HTML and CSS) and
-the count is surfaced as a "🛡 N trackers blocked" indicator.
+the count is surfaced as a "🛡 N trackers blocked" indicator. The cache prefetcher
+parses CSS declarations and fetches only image-bearing properties; remote
+`@import`, fonts, cursors, and other CSS resources are removed without a request.
 A plain-text body (and the snippet fallback) is HTML-escaped into a `<pre>` with
 bare http(s) URLs auto-linkified (`linkifyText` — explicit-scheme match only, so
 no false positives or non-http schemes), so links in text-only mail (CI/cron/
