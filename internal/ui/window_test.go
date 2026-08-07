@@ -327,6 +327,19 @@ func TestReaderShellRefitsAfterZoom(t *testing.T) {
 	}
 }
 
+func TestAllowedExternalLink(t *testing.T) {
+	for _, raw := range []string{"https://example.com", "HTTP://example.com", "mailto:a@example.com", "ftps://files.example.com/x"} {
+		if !allowedExternalLink(raw) {
+			t.Errorf("allowedExternalLink(%q) = false", raw)
+		}
+	}
+	for _, raw := range []string{"javascript:alert(1)", "file:///etc/passwd", "mbaction:sender/x", "data:text/html,x", "", "://bad"} {
+		if allowedExternalLink(raw) {
+			t.Errorf("allowedExternalLink(%q) = true", raw)
+		}
+	}
+}
+
 // Replying (sender-only) to your own message continues it to its original
 // recipients — Gmail behavior — instead of addressing yourself.
 func TestReplyToLine(t *testing.T) {

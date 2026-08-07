@@ -2477,12 +2477,10 @@ func (w *window) onDecidePolicy(decision webkit.PolicyDecisioner, dtype webkit.P
 		nav.Ignore()
 		return true
 	}
-	switch {
-	case strings.HasPrefix(uri, "http://"), strings.HasPrefix(uri, "https://"),
-		strings.HasPrefix(uri, "mailto:"), strings.HasPrefix(uri, "ftp://"), strings.HasPrefix(uri, "ftps://"):
+	if allowedExternalLink(uri) {
 		logging.Trace("ui: open external link", "uri", uri)
 		openExternal(uri)
-	default:
+	} else {
 		slog.Debug("ui: blocked navigation to unsupported scheme", "uri", uri)
 	}
 	nav.Ignore()
@@ -2525,8 +2523,25 @@ func (w *window) openNewWindowTarget(uri string) {
 	if uri == "" || strings.HasPrefix(uri, "about:") || strings.HasPrefix(uri, "data:") || strings.HasPrefix(uri, "blob:") {
 		return // our own rendered content, nothing external to show
 	}
-	logging.Trace("ui: open in new window", "uri", uri)
-	openExternal(uri)
+	if allowedExternalLink(uri) {
+		logging.Trace("ui: open in new window", "uri", uri)
+		openExternal(uri)
+	} else {
+		slog.Debug("ui: blocked new-window target with unsupported scheme", "uri", uri)
+	}
+}
+
+func allowedExternalLink(raw string) bool {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return false
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http", "https", "mailto", "ftp", "ftps":
+		return true
+	default:
+		return false
+	}
 }
 
 // onContextMenu runs before WebKit shows its native context menu. It swaps out
