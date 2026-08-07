@@ -68,6 +68,24 @@ func TestScopeCSS(t *testing.T) {
 	}
 }
 
+func TestScopeEmailCSSStripsTrackingResources(t *testing.T) {
+	in := `.hidden{display:none;background-image:url("https://img.example.com/hidden.png")}` +
+		`.visible{background-image:url("https://img.example.com/hero.png")}` +
+		`.tracker{background-image:url("https://img.example.com/beacon.gif?id=42")}`
+	out, blocked := scopeEmailCSS(in, ".m1")
+	if blocked != 2 {
+		t.Fatalf("blocked = %d, want 2: %s", blocked, out)
+	}
+	for _, bad := range []string{"hidden.png", "beacon.gif"} {
+		if strings.Contains(out, bad) {
+			t.Fatalf("tracking resource %q survived: %s", bad, out)
+		}
+	}
+	if !strings.Contains(out, "hero.png") {
+		t.Fatalf("visible background was removed: %s", out)
+	}
+}
+
 func TestEmailPolicyStripsDangerousContent(t *testing.T) {
 	p := emailPolicy()
 	in := `<p onclick="steal()" style="color:red">hi</p>` +

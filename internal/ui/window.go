@@ -2719,7 +2719,7 @@ func (w *window) buildReader() *adw.NavigationPage {
 	w.trackerLabel.AddCSSClass("dim-label")
 	w.trackerLabel.AddCSSClass("caption")
 	w.trackerLabel.SetVAlign(gtk.AlignCenter)
-	w.trackerLabel.SetTooltipText("Tracking pixels stripped from this conversation before rendering")
+	w.trackerLabel.SetTooltipText("Likely tracking resources removed before loading")
 	w.trackerLabel.SetVisible(false)
 	headerRow := gtk.NewBox(gtk.OrientationHorizontal, 6)
 	setMargins(headerRow, 12, 12, 8, 8)
@@ -5330,11 +5330,11 @@ func (w *window) cleanHTML(h string) (string, int) {
 		return clean, n
 	}
 	scope := "mbx-" + randNonce()[:12]
-	scoped := scopeCSS(css, "."+scope)
+	scoped, cssTrackers := scopeEmailCSS(css, "."+scope)
 	if scoped == "" {
 		return clean, n
 	}
-	return `<div class="` + scope + `"><style>` + scoped + `</style>` + clean + `</div>`, n
+	return `<div class="` + scope + `"><style>` + scoped + `</style>` + clean + `</div>`, n + cssTrackers
 }
 
 // setReaderCategory shows the thread's category pill in the reader header

@@ -111,8 +111,9 @@ white-cover approaches). JavaScript is enabled **only** for the shell script: a
 strict CSP (`script-src` pinned to the shell's nonce, `default-src 'none'`)
 plus the sanitizer (inserted innerHTML never executes scripts) mean no
 email-supplied script can run or reach the network. Remote images load by default, but tracking pixels are stripped before
-render (`cleanEmailHTML`: 1x1/tiny imgs, 1px-styled imgs, and known open-tracker
-URL patterns) and the count is surfaced as a "🛡 N trackers blocked" indicator.
+render (`cleanEmailHTML`/`scopeEmailCSS`: tiny or hidden images and backgrounds,
+hidden ancestors, and known open/read/pixel URL patterns across HTML and CSS) and
+the count is surfaced as a "🛡 N trackers blocked" indicator.
 A plain-text body (and the snippet fallback) is HTML-escaped into a `<pre>` with
 bare http(s) URLs auto-linkified (`linkifyText` — explicit-scheme match only, so
 no false positives or non-http schemes), so links in text-only mail (CI/cron/

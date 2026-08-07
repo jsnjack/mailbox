@@ -81,19 +81,47 @@ func extractStyleCSS(htmlStr string) string {
 // wrapper itself. Returns "" if the CSS can't be parsed or could break out of
 // the <style> element.
 func scopeCSS(cssText, scopeSel string) string {
+	out, _ := scopeEmailCSS(cssText, scopeSel)
+	return out
+}
+
+// scopeEmailCSS scopes email styles and removes remote resources from rules
+// that explicitly conceal them or use a known tracking endpoint.
+func scopeEmailCSS(cssText, scopeSel string) (string, int) {
 	ss, err := parser.Parse(cssText)
 	if err != nil {
 		logging.Trace("ui: scope css parse failed", "err", err, "bytes", len(cssText))
-		return ""
+		return "", 0
 	}
 	scopeRules(ss.Rules, scopeSel)
+	trackers := stripTrackerCSSRules(ss.Rules)
 	out := ss.String()
 	if strings.Contains(strings.ToLower(out), "</style") {
 		logging.Trace("ui: scope css rejected", "reason", "closes style tag")
-		return "" // never let serialized CSS terminate the <style> tag early
+		return "", trackers // never let serialized CSS terminate the <style> tag early
 	}
-	logging.Trace("ui: scope css", "scope", scopeSel, "in_bytes", len(cssText), "out_bytes", len(out))
-	return out
+	logging.Trace("ui: scope css", "scope", scopeSel, "in_bytes", len(cssText), "out_bytes", len(out), "trackers", trackers)
+	return out, trackers
+}
+
+func stripTrackerCSSRules(rules []*css.Rule) int {
+	removed := 0
+	for _, rule := range rules {
+		removed += stripTrackerCSSRules(rule.Rules)
+		concealed := false
+		for _, decl := range rule.Declarations {
+			if cssDeclarationConcealsResource(decl.Property, decl.Value) {
+				concealed = true
+				break
+			}
+		}
+		for _, decl := range rule.Declarations {
+			var n int
+			decl.Value, n = stripTrackerCSSURLs(decl.Value, concealed)
+			removed += n
+		}
+	}
+	return removed
 }
 
 // scopeRules rewrites each rule's selectors in place (recursing into @media /

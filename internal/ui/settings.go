@@ -345,7 +345,7 @@ func (w *window) openSettings() {
 	// Privacy: a global opt-out for loading external images.
 	imgRow := adw.NewSwitchRow()
 	imgRow.SetTitle("Load external images automatically")
-	imgRow.SetSubtitle("Tracking pixels are removed and images are cached for offline viewing. Turn this off for maximum privacy.")
+	imgRow.SetSubtitle("Known tracking pixels are removed and images are cached for offline viewing. Turn this off for maximum privacy.")
 	imgRow.SetActive(!w.blockImages)
 	imgRow.Connect("notify::active", func() {
 		load := imgRow.Active()

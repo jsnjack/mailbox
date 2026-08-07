@@ -94,6 +94,37 @@ func TestCleanEmailHTMLStripsEvasiveTrackers(t *testing.T) {
 	}
 }
 
+func TestCleanEmailHTMLStripsConcealedRemoteResources(t *testing.T) {
+	tests := []struct {
+		name string
+		html string
+	}{
+		{name: "one declared tiny dimension", html: `<img src="https://img.example.com/a.png" width="1">`},
+		{name: "hidden ancestor", html: `<div style="display:none"><img src="https://img.example.com/b.png" width="600" height="400"></div>`},
+		{name: "hidden background", html: `<div hidden style="background-image:url(https://img.example.com/c.png)"></div>`},
+		{name: "tracking background endpoint", html: `<div style="background:url(https://img.example.com/beacon.gif?id=42)"></div>`},
+		{name: "open event query", html: `<img src="https://img.example.com/image.png?event=open&id=42">`},
+		{name: "tracking srcset", html: `<img srcset="https://img.example.com/pixel.gif?id=42 1x">`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, blocked := cleanEmailHTML(tt.html)
+			if blocked != 1 || strings.Contains(out, "https://") {
+				t.Fatalf("blocked = %d, output = %s", blocked, out)
+			}
+		})
+	}
+}
+
+func TestCleanEmailHTMLKeepsVisibleRemoteArtwork(t *testing.T) {
+	in := `<img src="https://img.example.com/art/pixel-art.png?size=large" width="600">` +
+		`<div style="background:url(https://img.example.com/hero.png)">Hello</div>`
+	out, blocked := cleanEmailHTML(in)
+	if blocked != 0 || out != in {
+		t.Fatalf("visible artwork changed (blocked=%d): %s", blocked, out)
+	}
+}
+
 func TestCleanEmailHTMLCollapsesQuotes(t *testing.T) {
 	// A blockquote is wrapped in a <details> with a summary; its content survives.
 	in := `<p>My reply.</p><blockquote>On Mon, X wrote: original text</blockquote>`

@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"net/url"
 	"strconv"
 	"strings"
 	"unicode"
@@ -11,8 +12,8 @@ import (
 )
 
 // trackerSrcPatterns are URL substrings of well-known email open-tracking
-// endpoints. Conservative on purpose — the 1x1-pixel heuristic catches most
-// trackers; this only adds clear offenders that may declare a larger size.
+// endpoints. Structural checks catch hidden and tiny resources; this list adds
+// clear offenders that disguise themselves as visible content.
 var trackerSrcPatterns = []string{
 	"/wf/open",   // SendGrid
 	"__ptq.gif",  // HubSpot
@@ -20,14 +21,15 @@ var trackerSrcPatterns = []string{
 	"/track/open", "/trackopen", "/openpixel", "open-pixel", "/o/open",
 	"emltrk.com", // Litmus
 	"/decode_serialized_blob", "/imp.gif", "/oo.gif",
+	"/email/open", "/email/track", "/tracking/open", "/tracking/pixel",
+	"/email-pixel", "/email_pixel", "/read-receipt", "/read_receipt", "/readreceipt",
 }
 
 // cleanEmailHTML performs the two structural passes a rendered email needs, in a
 // single parse + serialize of (already-sanitized) HTML:
 //
-//   - strips likely tracking pixels — <img> elements that are 1x1/tiny or whose
-//     src matches a known tracker pattern — so images can load by default without
-//     leaking that the message was opened (real, visible images are kept); and
+//   - strips likely tracking resources — tiny or concealed images/backgrounds
+//     and URLs matching known open/read patterns — before they can be fetched; and
 //   - wraps each top-level <blockquote> (a quoted reply history) in a native
 //     <details> disclosure so long quote chains collapse behind a "Show quoted
 //     text" toggle.
@@ -53,6 +55,9 @@ func cleanEmailHTML(htmlStr string) (string, int) {
 				n.RemoveChild(c)
 				removed++
 				continue
+			}
+			if c.Type == html.ElementNode {
+				removed += stripTrackerResources(c)
 			}
 			isBlockquote := c.Type == html.ElementNode && c.Data == "blockquote"
 			if isBlockquote && !inQuote {
@@ -98,28 +103,169 @@ func cleanEmailHTML(htmlStr string) (string, int) {
 
 // isTrackerImg reports whether an <img> node looks like a tracking pixel.
 func isTrackerImg(n *html.Node) bool {
-	var src, width, height, style string
+	if resourceNodeConcealed(n) {
+		return true
+	}
+	var sources []string
 	for _, a := range n.Attr {
 		switch strings.ToLower(a.Key) {
 		case "src":
-			src = strings.ToLower(a.Val)
-		case "width":
-			width = a.Val
-		case "height":
-			height = a.Val
-		case "style":
-			style = strings.ToLower(a.Val)
+			sources = append(sources, a.Val)
+		case "srcset":
+			for _, candidate := range strings.Split(a.Val, ",") {
+				if fields := strings.Fields(candidate); len(fields) > 0 {
+					sources = append(sources, fields[0])
+				}
+			}
 		}
 	}
-	if tinyDim(width) && tinyDim(height) {
-		return true
-	}
-	if tinyDim(styleDim(style, "width")) || tinyDim(styleDim(style, "height")) {
-		return true
-	}
-	for _, p := range trackerSrcPatterns {
-		if strings.Contains(src, p) {
+	for _, src := range sources {
+		if isTrackerURL(src) {
 			return true
+		}
+	}
+	return false
+}
+
+func stripTrackerResources(n *html.Node) int {
+	concealed := resourceNodeConcealed(n)
+	removed := 0
+	attrs := n.Attr[:0]
+	for _, a := range n.Attr {
+		keep := true
+		switch strings.ToLower(a.Key) {
+		case "background":
+			if isRemoteHTTP(a.Val) && (concealed || isTrackerURL(a.Val)) {
+				keep = false
+				removed++
+			}
+		case "style":
+			var n int
+			a.Val, n = stripTrackerCSSURLs(a.Val, concealed)
+			removed += n
+		}
+		if keep {
+			attrs = append(attrs, a)
+		}
+	}
+	n.Attr = attrs
+	return removed
+}
+
+func stripTrackerCSSURLs(cssText string, blockAll bool) (string, int) {
+	removed := 0
+	out := cssRemoteURLRe.ReplaceAllStringFunc(cssText, func(match string) string {
+		parts := cssRemoteURLRe.FindStringSubmatch(match)
+		if len(parts) < 3 || (!blockAll && !isTrackerURL(parts[2])) {
+			return match
+		}
+		removed++
+		return "none"
+	})
+	return out, removed
+}
+
+func resourceNodeConcealed(n *html.Node) bool {
+	for cur := n; cur != nil && cur.Type != html.DocumentNode; cur = cur.Parent {
+		for _, a := range cur.Attr {
+			switch strings.ToLower(a.Key) {
+			case "hidden":
+				return true
+			case "width", "height":
+				if tinyDim(a.Val) {
+					return true
+				}
+			case "style":
+				if styleConcealsResource(a.Val) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func styleConcealsResource(style string) bool {
+	for _, decl := range strings.Split(style, ";") {
+		property, value, ok := strings.Cut(decl, ":")
+		if ok && cssDeclarationConcealsResource(property, value) {
+			return true
+		}
+	}
+	return false
+}
+
+func cssDeclarationConcealsResource(property, value string) bool {
+	property = strings.ToLower(strings.TrimSpace(property))
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch property {
+	case "display":
+		return value == "none"
+	case "visibility":
+		return value == "hidden" || value == "collapse"
+	case "content-visibility":
+		return value == "hidden"
+	case "opacity":
+		percent := strings.HasSuffix(value, "%")
+		n, err := strconv.ParseFloat(strings.TrimSuffix(value, "%"), 64)
+		if percent {
+			n /= 100
+		}
+		return err == nil && n <= 0.01
+	case "width", "height", "max-width", "max-height":
+		return tinyDim(value)
+	case "mso-hide":
+		return value == "all"
+	case "filter":
+		compact := strings.ReplaceAll(value, " ", "")
+		return strings.Contains(compact, "opacity(0)") || strings.Contains(compact, "opacity(0%)")
+	case "transform":
+		return strings.Contains(strings.ReplaceAll(value, " ", ""), "scale(0)")
+	}
+	return false
+}
+
+func isTrackerURL(raw string) bool {
+	lower := strings.ToLower(strings.TrimSpace(raw))
+	for _, pattern := range trackerSrcPatterns {
+		if strings.Contains(lower, pattern) {
+			return true
+		}
+	}
+	u, err := url.Parse(lower)
+	if err != nil {
+		return false
+	}
+	path := strings.TrimSuffix(u.Path, "/")
+	if i := strings.LastIndexByte(path, '/'); i >= 0 {
+		path = path[i+1:]
+	}
+	if i := strings.LastIndexByte(path, '.'); i > 0 {
+		path = path[:i]
+	}
+	name := strings.NewReplacer("-", "", "_", "").Replace(path)
+	switch name {
+	case "pixel", "beacon", "openpixel", "trackingpixel", "emailpixel", "readreceipt", "spypixel":
+		return true
+	case "open", "read", "track":
+		if u.RawQuery != "" {
+			return true
+		}
+	}
+	for key, values := range u.Query() {
+		key = strings.NewReplacer("-", "", "_", "").Replace(strings.ToLower(key))
+		if key == "openpixel" || key == "trackingpixel" || key == "readreceipt" {
+			return true
+		}
+		if key != "event" && key != "action" && key != "type" {
+			continue
+		}
+		for _, value := range values {
+			value = strings.NewReplacer("-", "", "_", "").Replace(strings.ToLower(value))
+			switch value {
+			case "open", "opened", "emailopen", "read", "viewed", "impression":
+				return true
+			}
 		}
 	}
 	return false
@@ -140,18 +286,6 @@ func tinyDim(v string) bool {
 	}
 	n, err := strconv.ParseFloat(v[:i], 64)
 	return err == nil && n <= 2
-}
-
-// styleDim extracts a CSS length declared for prop (e.g. "width") from an inline
-// style string, or "" if absent. Best-effort: enough to run tinyDim on it.
-func styleDim(style, prop string) string {
-	for _, decl := range strings.Split(style, ";") {
-		name, val, ok := strings.Cut(decl, ":")
-		if ok && strings.TrimSpace(name) == prop {
-			return strings.TrimSpace(val)
-		}
-	}
-	return ""
 }
 
 // findBody returns the <body> element of a parsed document.
