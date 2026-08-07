@@ -31,6 +31,17 @@ func TestAmbiguousSMTPDataError(t *testing.T) {
 	}
 }
 
+func TestSMTPAuthFailure(t *testing.T) {
+	for _, code := range []int{534, 535} {
+		if !smtpAuthFailure(&smtp.SMTPError{Code: code}) {
+			t.Fatalf("SMTP %d not classified as auth failure", code)
+		}
+	}
+	if smtpAuthFailure(&smtp.SMTPError{Code: 550}) {
+		t.Fatal("SMTP 550 classified as auth failure")
+	}
+}
+
 const testMsg = "From: Bob Builder <bob@example.com>\r\n" +
 	"To: alice@example.com\r\n" +
 	"Subject: Hello IMAP\r\n" +

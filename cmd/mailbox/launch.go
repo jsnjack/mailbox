@@ -476,8 +476,10 @@ func launchUI(mailto string) error {
 	deps.TestIMAPAccount = func(ctx context.Context, acct config.IMAPAccount, password string) error {
 		b := imapbackend.New(imapConfigOf(acct), 0, imapbackend.PasswordAuth(usernameOf(acct), password))
 		defer b.Close()
-		_, err := b.Profile(ctx) // connects, logs in, lists folders
-		return err
+		if _, err := b.Profile(ctx); err != nil { // connects, logs in, lists folders
+			return err
+		}
+		return b.TestSMTP(ctx)
 	}
 	deps.AddIMAPAccount = func(ctx context.Context, acct config.IMAPAccount, secret string) (int64, error) {
 		if secret == "" {

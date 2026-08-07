@@ -265,45 +265,13 @@ func stripHeader(raw []byte, name string) []byte {
 
 func (b *Backend) smtpSend(ctx context.Context, from string, to []string, msg []byte) error {
 	start := time.Now()
-	addr := net.JoinHostPort(b.cfg.SMTPHost, strconv.Itoa(b.cfg.SMTPPort))
-	tlsCfg := &tls.Config{ServerName: b.cfg.SMTPHost}
-	logging.Trace("imapbackend: smtp dial", "addr", addr, "security", string(b.cfg.SMTPSecurity), "dialTimeout", dialTimeout)
-	// Dial raw + count (below TLS), then build the SMTP client over the wrapped
-	// conn so SMTP traffic is included in the byte stats. The dialer bounds the
-	// connect with a timeout and honors ctx (like the IMAP dial), so a wrong or
-	// unreachable SMTP host fails fast instead of hanging a send on the OS TCP
-	// timeout.
-	dialer := httpclient.Dialer(dialTimeout)
-	raw, err := dialer.DialContext(ctx, "tcp", addr)
-	if err != nil {
-		return fmt.Errorf("smtp dial %s: %w", addr, err)
-	}
-	cc := &countingConn{Conn: raw, stats: b.stats}
-	var c *smtp.Client
-	switch b.cfg.SMTPSecurity {
-	case SecurityTLS:
-		c = smtp.NewClient(tls.Client(cc, tlsCfg))
-	case SecuritySTARTTLS:
-		c, err = smtp.NewClientStartTLS(cc, tlsCfg)
-	case SecurityNone:
-		c = smtp.NewClient(cc)
-	default:
-		_ = raw.Close()
-		return fmt.Errorf("imap: unknown smtp security %q", b.cfg.SMTPSecurity)
-	}
-	if err != nil {
-		_ = raw.Close()
-		return fmt.Errorf("smtp connect %s: %w", addr, err)
-	}
-	defer func() { _ = c.Close() }()
-	sc, err := b.cred.smtpSASL()
+	c, cleanup, err := b.smtpConnect(ctx)
 	if err != nil {
 		return err
 	}
-	if err := c.Auth(sc); err != nil {
-		logging.Trace("imapbackend: smtp auth failed", "addr", addr, "err", err)
-		return fmt.Errorf("smtp auth: %w", err)
-	}
+	defer cleanup()
+
+	addr := net.JoinHostPort(b.cfg.SMTPHost, strconv.Itoa(b.cfg.SMTPPort))
 	if err := c.Mail(from, &smtp.MailOptions{Size: int64(len(msg))}); err != nil {
 		return fmt.Errorf("smtp MAIL FROM: %w", err)
 	}
@@ -326,6 +294,112 @@ func (b *Backend) smtpSend(ctx context.Context, from string, to []string, msg []
 	}
 	logging.Trace("imapbackend: smtp sent", "addr", addr, "bytes", len(msg), "recipients", len(to), "dur", time.Since(start))
 	return nil
+}
+
+// TestSMTP verifies the configured SMTP transport and credentials without
+// submitting a message. The add-account flow calls it after the IMAP check so
+// “Test & Add” cannot accept an account that can receive but never send.
+func (b *Backend) TestSMTP(ctx context.Context) error {
+	c, cleanup, err := b.smtpConnect(ctx)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	if err := c.Quit(); err != nil {
+		return fmt.Errorf("smtp quit: %w", err)
+	}
+	return nil
+}
+
+// smtpConnect establishes, secures, and authenticates one bounded SMTP
+// session. Closing the caller context force-closes a half-open socket; the
+// operation timeout covers servers that accept TCP and then stop responding.
+func (b *Backend) smtpConnect(ctx context.Context) (*smtp.Client, func(), error) {
+	addr := net.JoinHostPort(b.cfg.SMTPHost, strconv.Itoa(b.cfg.SMTPPort))
+	tlsCfg := &tls.Config{ServerName: b.cfg.SMTPHost}
+	logging.Trace("imapbackend: smtp dial", "addr", addr, "security", string(b.cfg.SMTPSecurity), "dialTimeout", dialTimeout)
+	// Dial raw + count (below TLS), then build the SMTP client over the wrapped
+	// conn so SMTP traffic is included in the byte stats. The dialer bounds the
+	// connect with a timeout and honors ctx (like the IMAP dial), so a wrong or
+	// unreachable SMTP host fails fast instead of hanging a send on the OS TCP
+	// timeout.
+	opCtx, cancel := context.WithTimeout(ctx, loginTimeout)
+	dialer := httpclient.Dialer(dialTimeout)
+	raw, err := dialer.DialContext(opCtx, "tcp", addr)
+	if err != nil {
+		cancel()
+		return nil, nil, fmt.Errorf("smtp dial %s: %w", addr, err)
+	}
+	if deadline, ok := opCtx.Deadline(); ok {
+		_ = raw.SetDeadline(deadline)
+	}
+	stopWatch := context.AfterFunc(opCtx, func() { _ = raw.Close() })
+	cc := &countingConn{Conn: raw, stats: b.stats}
+	var c *smtp.Client
+	switch b.cfg.SMTPSecurity {
+	case SecurityTLS:
+		c = smtp.NewClient(tls.Client(cc, tlsCfg))
+	case SecuritySTARTTLS:
+		c, err = smtp.NewClientStartTLS(cc, tlsCfg)
+	case SecurityNone:
+		c = smtp.NewClient(cc)
+	default:
+		stopWatch()
+		cancel()
+		_ = raw.Close()
+		return nil, nil, fmt.Errorf("imap: unknown smtp security %q", b.cfg.SMTPSecurity)
+	}
+	if err != nil {
+		stopWatch()
+		cancel()
+		_ = raw.Close()
+		return nil, nil, fmt.Errorf("smtp connect %s: %w", addr, err)
+	}
+	loginCleanup := func() {
+		stopWatch()
+		cancel()
+		_ = c.Close()
+	}
+	sc, err := b.cred.smtpSASL()
+	if err != nil {
+		loginCleanup()
+		return nil, nil, err
+	}
+	if err := c.Auth(sc); err != nil {
+		logging.Trace("imapbackend: smtp auth failed", "addr", addr, "err", err)
+		loginCleanup()
+		if smtpAuthFailure(err) {
+			return nil, nil, fmt.Errorf("smtp auth: %w: %v", backend.ErrAuth, err)
+		}
+		return nil, nil, fmt.Errorf("smtp auth: %w", err)
+	}
+	// Login has its own short deadline. Once authenticated, give a legitimate
+	// large upload the same generous bound as other provider operations while
+	// still force-closing the socket on caller cancellation.
+	stopWatch()
+	cancel()
+	sessionCtx, cancelSession := context.WithTimeout(ctx, pooledOpTimeout)
+	if deadline, ok := sessionCtx.Deadline(); ok {
+		_ = raw.SetDeadline(deadline)
+	}
+	stopSession := context.AfterFunc(sessionCtx, func() { _ = raw.Close() })
+	cleanup := func() {
+		stopSession()
+		cancelSession()
+		_ = c.Close()
+	}
+	return c, cleanup, nil
+}
+
+func smtpAuthFailure(err error) bool {
+	var smtpErr *smtp.SMTPError
+	if errors.As(err, &smtpErr) && (smtpErr.Code == 534 || smtpErr.Code == 535) {
+		return true
+	}
+	low := strings.ToLower(err.Error())
+	return strings.Contains(low, "authentication failed") ||
+		strings.Contains(low, "authentication unsuccessful") ||
+		strings.Contains(low, "invalid credentials")
 }
 
 func ambiguousSMTPDataError(err error) error {

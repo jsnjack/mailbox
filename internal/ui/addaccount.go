@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/mail"
 	"strconv"
 	"strings"
 	"time"
@@ -21,8 +22,9 @@ import (
 // account's email and the provider preset to preselect.
 type addAccountPrefill struct {
 	email     string
-	presetID  string // config preset id to preselect ("" = leave default)
-	reconnect bool   // re-authenticating an existing account (vs. adding a new one)
+	presetID  string              // config preset id to preselect ("" = leave default)
+	reconnect bool                // re-authenticating an existing account (vs. adding a new one)
+	account   *config.IMAPAccount // exact saved connection settings, when available
 }
 
 // openAddAccount presents the add-account dialog: pick a provider, fill in
@@ -84,13 +86,20 @@ func (w *window) openAddAccount(prefill *addAccountPrefill) {
 	// --- advanced server settings (prefilled per provider) ---
 	advGroup := adw.NewPreferencesGroup()
 	advGroup.SetTitle("Advanced")
+	username := entryRow("Login username (blank uses email)")
 	imapHost := entryRow("IMAP server")
 	imapPort := entryRow("IMAP port")
+	imapSecurity := securityRow("IMAP security")
 	smtpHost := entryRow("SMTP server")
 	smtpPort := entryRow("SMTP port")
-	for _, r := range []*adw.EntryRow{imapHost, imapPort, smtpHost, smtpPort} {
-		advGroup.Add(r)
-	}
+	smtpSecurity := securityRow("SMTP security")
+	advGroup.Add(username)
+	advGroup.Add(imapHost)
+	advGroup.Add(imapPort)
+	advGroup.Add(imapSecurity)
+	advGroup.Add(smtpHost)
+	advGroup.Add(smtpPort)
+	advGroup.Add(smtpSecurity)
 
 	page.Add(idGroup)
 	page.Add(advGroup)
@@ -109,8 +118,10 @@ func (w *window) openAddAccount(prefill *addAccountPrefill) {
 		p := current()
 		imapHost.SetText(p.IMAPHost)
 		imapPort.SetText(itoa(p.IMAPPort))
+		imapSecurity.SetSelected(securityIndex(p.IMAPSecurity))
 		smtpHost.SetText(p.SMTPHost)
 		smtpPort.SetText(itoa(p.SMTPPort))
+		smtpSecurity.SetSelected(securityIndex(p.SMTPSecurity))
 		oauthToken, oauthEmail, oauthDone = "", "", false
 		isOAuth := p.Auth == config.AuthGoogle || p.Auth == config.AuthMicrosoft || p.Auth == config.AuthGmailREST
 		passwordRow.SetVisible(!isOAuth)
@@ -135,6 +146,21 @@ func (w *window) openAddAccount(prefill *addAccountPrefill) {
 	}
 	providerRow.Connect("notify::selected", applyPreset)
 	applyPreset()
+	// Reconnect must preserve custom hosts, ports, login username, and transport
+	// modes. Replacing them with the generic "Other" defaults can make a valid
+	// account impossible to reconnect.
+	if prefill != nil && prefill.account != nil {
+		a := *prefill.account
+		if strings.TrimSpace(a.Username) != "" && a.Username != a.Email {
+			username.SetText(a.Username)
+		}
+		imapHost.SetText(a.IMAPHost)
+		imapPort.SetText(itoa(a.IMAPPort))
+		imapSecurity.SetSelected(securityIndex(a.IMAPSecurity))
+		smtpHost.SetText(a.SMTPHost)
+		smtpPort.SetText(itoa(a.SMTPPort))
+		smtpSecurity.SetSelected(securityIndex(a.SMTPSecurity))
+	}
 
 	// --- footer: status + Test & Add ---
 	footer := gtk.NewBox(gtk.OrientationHorizontal, 8)
@@ -162,10 +188,14 @@ func (w *window) openAddAccount(prefill *addAccountPrefill) {
 		ip, _ := strconv.Atoi(strings.TrimSpace(imapPort.Text()))
 		sp, _ := strconv.Atoi(strings.TrimSpace(smtpPort.Text()))
 		email := strings.TrimSpace(emailRow.Text())
+		login := strings.TrimSpace(username.Text())
+		if login == "" {
+			login = email
+		}
 		return config.IMAPAccount{
-			Email: email, Username: email,
-			IMAPHost: strings.TrimSpace(imapHost.Text()), IMAPPort: ip, IMAPSecurity: p.IMAPSecurity,
-			SMTPHost: strings.TrimSpace(smtpHost.Text()), SMTPPort: sp, SMTPSecurity: p.SMTPSecurity,
+			Email: email, Username: login,
+			IMAPHost: strings.TrimSpace(imapHost.Text()), IMAPPort: ip, IMAPSecurity: securityValue(imapSecurity.Selected()),
+			SMTPHost: strings.TrimSpace(smtpHost.Text()), SMTPPort: sp, SMTPSecurity: securityValue(smtpSecurity.Selected()),
 			Auth: p.Auth,
 		}, p
 	}
@@ -205,12 +235,7 @@ func (w *window) openAddAccount(prefill *addAccountPrefill) {
 		}()
 	}
 
-	addBtn.ConnectClicked(func() {
-		acct, p := gather()
-		if acct.Email == "" {
-			status.SetText("Enter your email address.")
-			return
-		}
+	startAdd := func(acct config.IMAPAccount, p config.Preset) {
 		logging.Trace("ui: add account test&add clicked", "email", acct.Email, "auth", p.Auth)
 		setBusy(true)
 
@@ -277,6 +302,37 @@ func (w *window) openAddAccount(prefill *addAccountPrefill) {
 				finish(acct, pw)
 			})
 		}()
+	}
+
+	addBtn.ConnectClicked(func() {
+		acct, p := gather()
+		if acct.Email == "" {
+			status.SetText("Enter your email address.")
+			return
+		}
+		if err := validateAccountSettings(acct); err != nil {
+			status.SetText(err.Error())
+			return
+		}
+		if acct.IMAPSecurity == "none" || acct.SMTPSecurity == "none" {
+			confirm := adw.NewAlertDialog(
+				"Use an unencrypted connection?",
+				"Your password and email can be read or changed by anyone who can observe this network. Use this only for a trusted local test server.",
+			)
+			confirm.AddResponse("cancel", "Cancel")
+			confirm.AddResponse("continue", "Continue insecurely")
+			confirm.SetResponseAppearance("continue", adw.ResponseDestructive)
+			confirm.SetDefaultResponse("cancel")
+			confirm.SetCloseResponse("cancel")
+			confirm.ConnectResponse(func(response string) {
+				if response == "continue" {
+					startAdd(acct, p)
+				}
+			})
+			confirm.Present(dialog)
+			return
+		}
+		startAdd(acct, p)
 	})
 
 	dialog.Present(w.win)
@@ -314,11 +370,17 @@ func friendlyConnError(err error) string {
 // preserves the account's cached mail (the sync cursor is kept).
 func (w *window) reconnectAccount(a AccountInfo) {
 	logging.Trace("ui: reconnect account", "id", a.ID, "email", a.Email, "type", a.Type)
-	w.openAddAccount(&addAccountPrefill{
+	prefill := &addAccountPrefill{
 		email:     a.Email,
 		presetID:  presetForReconnect(a),
 		reconnect: true,
-	})
+	}
+	if a.Type == model.AccountIMAP {
+		if acct, ok, err := config.LoadIMAPAccount(a.Email); err == nil && ok {
+			prefill.account = &acct
+		}
+	}
+	w.openAddAccount(prefill)
 }
 
 // presetForReconnect picks the provider preset to preselect when reconnecting an
@@ -355,6 +417,55 @@ func entryRow(title string) *adw.EntryRow {
 	r := adw.NewEntryRow()
 	r.SetTitle(title)
 	return r
+}
+
+func securityRow(title string) *adw.ComboRow {
+	r := adw.NewComboRow()
+	r.SetTitle(title)
+	r.SetModel(gtk.NewStringList([]string{"TLS", "STARTTLS", "None (insecure)"}))
+	return r
+}
+
+func securityIndex(value string) uint {
+	switch strings.ToLower(value) {
+	case "starttls":
+		return 1
+	case "none":
+		return 2
+	default:
+		return 0
+	}
+}
+
+func securityValue(selected uint) string {
+	switch selected {
+	case 1:
+		return "starttls"
+	case 2:
+		return "none"
+	default:
+		return "tls"
+	}
+}
+
+func validateAccountSettings(a config.IMAPAccount) error {
+	parsed, err := mail.ParseAddress(a.Email)
+	if err != nil || !strings.EqualFold(parsed.Address, a.Email) {
+		return errors.New("Enter a valid email address.")
+	}
+	if a.Auth == config.AuthGmailREST {
+		return nil
+	}
+	if strings.TrimSpace(a.Username) == "" {
+		return errors.New("Enter a login username.")
+	}
+	if strings.TrimSpace(a.IMAPHost) == "" || a.IMAPPort < 1 || a.IMAPPort > 65535 {
+		return errors.New("Enter a valid IMAP server and port.")
+	}
+	if strings.TrimSpace(a.SMTPHost) == "" || a.SMTPPort < 1 || a.SMTPPort > 65535 {
+		return errors.New("Enter a valid SMTP server and port.")
+	}
+	return nil
 }
 
 func itoa(n int) string {
