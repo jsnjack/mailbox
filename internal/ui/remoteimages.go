@@ -33,10 +33,10 @@ var (
 // backed by the content-addressed cache. With network disabled it still serves
 // images cached during an earlier trusted view; uncached URLs are removed so
 // WebKit can never bypass the cache/client privacy policy.
-func (w *window) cacheRemoteImages(ctx context.Context, source string, allowNetwork bool) (string, int) {
+func (w *window) cacheRemoteImages(ctx context.Context, source string, allowNetwork bool) (string, int, int) {
 	doc, err := xhtml.Parse(strings.NewReader(source))
 	if err != nil {
-		return source, 0
+		return source, 0, 0
 	}
 	urls := collectRemoteImageURLs(doc, remoteImageFetchCap)
 	entries := make(map[string]remotecache.Entry, len(urls))
@@ -80,20 +80,21 @@ func (w *window) cacheRemoteImages(ctx context.Context, source string, allowNetw
 		wg.Wait()
 	}
 	changed := rewriteRemoteImageURLs(doc, entries)
+	missing := len(urls) - len(entries)
 	if !changed {
-		return source, len(entries)
+		return source, len(entries), missing
 	}
 	body := findBody(doc)
 	if body == nil {
-		return source, len(entries)
+		return source, len(entries), missing
 	}
 	var b strings.Builder
 	for child := body.FirstChild; child != nil; child = child.NextSibling {
 		if err := xhtml.Render(&b, child); err != nil {
-			return source, len(entries)
+			return source, len(entries), missing
 		}
 	}
-	return b.String(), len(entries)
+	return b.String(), len(entries), missing
 }
 
 func collectRemoteImageURLs(root *xhtml.Node, limit int) []string {
@@ -232,6 +233,13 @@ func rewriteCSSURLs(cssText string, entries map[string]remotecache.Entry, change
 func isRemoteHTTP(raw string) bool {
 	lower := strings.ToLower(strings.TrimSpace(raw))
 	return strings.HasPrefix(lower, "https://") || strings.HasPrefix(lower, "http://")
+}
+
+func imageNoun(n int) string {
+	if n == 1 {
+		return "image"
+	}
+	return "images"
 }
 
 // serveRemoteImage streams a previously validated cached image to WebKit.

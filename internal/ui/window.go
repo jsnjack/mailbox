@@ -304,6 +304,7 @@ type window struct {
 	// re-applies the translation instead of silently reverting to the original
 	// under a still-revealed "Showing translation" banner.
 	translationBanner *adw.Banner
+	remoteImageBanner *adw.Banner // explains blocked/expired images instead of showing unexplained broken glyphs
 	translateCancel   context.CancelFunc
 	translationCache  map[string]string
 	translationShown  bool
@@ -2746,6 +2747,13 @@ func (w *window) buildReader() *adw.NavigationPage {
 	w.translationBanner.SetButtonLabel("Show original")
 	w.translationBanner.SetRevealed(false)
 	w.translationBanner.ConnectButtonClicked(w.showOriginal)
+	w.remoteImageBanner = adw.NewBanner("")
+	w.remoteImageBanner.SetRevealed(false)
+	w.remoteImageBanner.ConnectButtonClicked(func() {
+		// When blocked, this is an explicit one-message load. When a prior fetch
+		// failed, the same action is a retry (cached successes remain free).
+		w.setImagesEnabled(true)
+	})
 
 	box := gtk.NewBox(gtk.OrientationVertical, 0)
 	box.Append(w.translationBanner)
@@ -2754,6 +2762,7 @@ func (w *window) buildReader() *adw.NavigationPage {
 	box.Append(w.buildInviteCard())
 	box.Append(w.attachBox)
 	box.Append(w.cautionLabel)
+	box.Append(w.remoteImageBanner)
 
 	box.Append(w.webview)
 
@@ -4158,7 +4167,7 @@ func (w *window) renderConversation(msgs []model.Message) {
 			b.WriteString(sec)
 		}
 		out := b.String()
-		out, cachedRemote := w.cacheRemoteImages(renderCtx, out, loadRemoteImages)
+		out, cachedRemote, missingRemote := w.cacheRemoteImages(renderCtx, out, loadRemoteImages)
 		if renderCtx.Err() != nil {
 			logging.Trace("ui: external image pass cancelled", "thread", threadID)
 			return
@@ -4174,7 +4183,7 @@ func (w *window) renderConversation(msgs []model.Message) {
 			"trackers", blocked, "auth", verdict.level, "fetch", fetchDur, "sanitize", time.Since(sanitizeStart))
 		logging.Trace("ui: render conversation ready", "thread", threadID, "msgs", len(msgs), "fetched", fetched,
 			"newSections", len(fresh), "trackers", blocked, "auth", verdict.level, "warnings", len(warnings),
-			"attachments", len(atts), "inlineImages", len(inlineImgs), "cachedRemoteImages", cachedRemote, "bytes", len(out), "html", logging.Body(out),
+			"attachments", len(atts), "inlineImages", len(inlineImgs), "cachedRemoteImages", cachedRemote, "missingRemoteImages", missingRemote, "bytes", len(out), "html", logging.Body(out),
 			"fetch", fetchDur, "sanitize", time.Since(sanitizeStart))
 		dispatch.Main(func() {
 			w.mergeSectionCache(fresh) // cache newly-rendered sections (main thread)
@@ -4187,6 +4196,17 @@ func (w *window) renderConversation(msgs []model.Message) {
 			if w.openThreadID != threadID {
 				logging.Trace("ui: render conversation discarded", "thread", threadID, "openThread", w.openThreadID)
 				return // user switched to another conversation while this rendered
+			}
+			if missingRemote == 0 {
+				w.remoteImageBanner.SetRevealed(false)
+			} else if loadRemoteImages {
+				w.remoteImageBanner.SetTitle(fmt.Sprintf("%d external %s unavailable", missingRemote, imageNoun(missingRemote)))
+				w.remoteImageBanner.SetButtonLabel("Retry")
+				w.remoteImageBanner.SetRevealed(true)
+			} else {
+				w.remoteImageBanner.SetTitle(fmt.Sprintf("%d external %s blocked for privacy", missingRemote, imageNoun(missingRemote)))
+				w.remoteImageBanner.SetButtonLabel("Show images")
+				w.remoteImageBanner.SetRevealed(true)
 			}
 			w.inlineByCID = inlineImgs // serveCID resolves cid: against this
 			w.lastFetchFailed = len(fetchFailed) > 0
@@ -7223,6 +7243,7 @@ a.mbrcpt:hover{text-decoration:underline}
 a.mbmore{color:#1a5fb4;text-decoration:none;white-space:nowrap}
 a.mbmore:hover{text-decoration:underline}
 img,video{max-width:100%!important;height:auto!important}
+img[hidden],video[hidden]{display:none!important}
 pre{font-family:monospace;white-space:pre-wrap}
 details.mbmsg>summary{cursor:pointer;list-style:none;color:#555;font-size:90%;border-top:1px solid #ddd;margin-top:18px;padding:8px 0 2px}
 details.mbmsg>summary::-webkit-details-marker{display:none}
@@ -7252,8 +7273,12 @@ details.mbmsg[open]>summary .mbprev{display:none}
 		`if(natural>avail+1&&natural>0){var s=avail/natural;wrap.style.width=natural+'px';wrap.style.transformOrigin='top left';wrap.style.transform='scale('+s+')';b.style.height=(wrap.offsetHeight*s)+'px';}else{b.style.height='';}}` +
 		`function requestFit(){if(fitFrame)cancelAnimationFrame(fitFrame);fitFrame=requestAnimationFrame(function(){fitFrame=0;fit();});}` +
 		`function setup(){var b=document.body;if(!b)return;wrap=document.createElement('div');wrap.className='mbwrap';b.appendChild(wrap);window.__mbFit=requestFit;window.addEventListener('resize',requestFit);` +
+		`function hideBroken(i){i.hidden=true;i.removeAttribute('width');i.removeAttribute('height');` +
+		`var p=i.parentElement,d=0;while(p&&p!==wrap&&d++<4){p.removeAttribute('height');p.style.removeProperty('height');p.style.removeProperty('min-height');` +
+		`if((p.textContent||'').trim()||p.querySelector('img:not([hidden]),video:not([hidden])'))break;p=p.parentElement;}requestFit();}` +
 		`window.__mbSet=function(h){wrap.innerHTML=h;window.scrollTo(0,0);fit();` +
-		`wrap.querySelectorAll('img').forEach(function(i){if(!i.complete){i.addEventListener('load',requestFit,{once:true});}});};` +
+		`wrap.querySelectorAll('img').forEach(function(i){if(!i.getAttribute('src')){hideBroken(i);return;}` +
+		`i.addEventListener('error',function(){hideBroken(i);},{once:true});if(!i.complete){i.addEventListener('load',requestFit,{once:true});}});};` +
 		// __mbGist fills a message's hidden AI-summary placeholder in place (no
 		// content swap, so the scroll position survives). The text rides in as a
 		// JS string and lands via textContent — nothing to inject. Placeholders
