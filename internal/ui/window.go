@@ -211,17 +211,20 @@ type window struct {
 	// another thread or backs out — so a hung body fetch can't pin a stale
 	// goroutine for the full fetch timeout. Main-thread only (set/cancelled
 	// in renderConversation and clearReader, which both run on the main thread).
-	renderCancel    context.CancelFunc
-	lastFetchFailed bool             // true if the last render had fetch failures (for retry menu item)
-	replyBtn        *adw.SplitButton // primary action (Reply all); dropdown has Reply/Forward
-	aiReplyBtn      *gtk.MenuButton  // AI reply: popover of suggestions + intents
-	archiveBtn      *gtk.Button
-	translateBtn    *gtk.Button
-	overflowBtn     *gtk.MenuButton   // secondary reader actions (native menu model)
-	starAction      *gio.SimpleAction // stateful: the open message's Starred toggle
-	unreadAction    *gio.SimpleAction // stateful: the thread-list "show unread only" filter
-	imagesEnabled   bool              // whether remote images are loaded in the reader
-	blockImages     bool              // global remote-image opt-out (Preferences)
+	renderCancel            context.CancelFunc
+	lastFetchFailed         bool             // true if the last render had fetch failures (for retry menu item)
+	replyBtn                *adw.SplitButton // primary action (Reply all); dropdown has Reply/Forward
+	aiReplyBtn              *gtk.MenuButton  // AI reply: popover of suggestions + intents
+	archiveBtn              *gtk.Button
+	translateBtn            *gtk.Button
+	overflowBtn             *gtk.MenuButton   // secondary reader actions (native menu model)
+	starAction              *gio.SimpleAction // stateful: the open message's Starred toggle
+	unreadAction            *gio.SimpleAction // stateful: the thread-list "show unread only" filter
+	imagesEnabled           bool              // whether remote images are loaded in the reader
+	blockImages             bool              // global remote-image opt-out (Preferences)
+	remoteImageBulkApproved bool              // user approved loading a conversation with more than the automatic threshold
+	remoteImageTotal        int               // unique remote URLs in the last completed render
+	remoteImageLoadAll      bool              // banner action approves a large set instead of retrying
 
 	// AI inbox categorization: per-thread category cache (thread id → category),
 	// computed in the background for the inbox. inboxCategories gates it.
@@ -2759,8 +2762,16 @@ func (w *window) buildReader() *adw.NavigationPage {
 	w.remoteImageBanner = adw.NewBanner("")
 	w.remoteImageBanner.SetRevealed(false)
 	w.remoteImageBanner.ConnectButtonClicked(func() {
-		// When blocked, this is an explicit one-message load. When a prior fetch
-		// failed, the same action is a retry (cached successes remain free).
+		if w.remoteImageLoadAll {
+			w.remoteImageBulkApproved = true
+			w.rerenderOpenThread()
+			return
+		}
+		// When blocked, this explicitly loads the conversation. Otherwise it
+		// retries failed origins; cached successes remain free.
+		if !w.imagesEnabled && w.remoteImageTotal > remoteImagePromptThreshold {
+			w.remoteImageBulkApproved = true
+		}
 		w.setImagesEnabled(true)
 	})
 
@@ -3605,6 +3616,10 @@ func (w *window) clearReader() {
 	w.openThreadID = ""
 	w.openThreadMsgs = nil
 	w.openMsg = model.Message{}
+	w.remoteImageBulkApproved = false
+	w.remoteImageTotal = 0
+	w.remoteImageLoadAll = false
+	w.remoteImageBanner.SetRevealed(false)
 	w.resetTranslation()
 	w.hideSummary()
 	w.showInviteCard(0, nil)
@@ -3746,6 +3761,11 @@ const threadHydrateTimeout = 15 * time.Second
 // messages have been read.
 func (w *window) showThreadMsgs(threadID string, msgs []model.Message) {
 	logging.Trace("ui: show thread", "thread", threadID, "n", len(msgs), "account", w.activeID)
+	if w.openThreadID != threadID {
+		w.remoteImageBulkApproved = false
+		w.remoteImageTotal = 0
+		w.remoteImageLoadAll = false
+	}
 	w.openThreadID = threadID
 	w.openThreadMsgs = msgs
 	w.openMsg = msgs[len(msgs)-1] // newest, for reply/forward/star/unread
@@ -4002,6 +4022,7 @@ func (w *window) renderConversation(msgs []model.Message) {
 		}
 	}
 	loadRemoteImages := w.imagesEnabled
+	remoteImageBulkApproved := w.remoteImageBulkApproved
 	logging.Trace("ui: render conversation", "thread", threadID, "msgs", len(msgs), "cachedSections", len(cached))
 	// Cancel a still-running previous render (rapid thread open, a background
 	// refresh, a re-render) so its in-flight body fetches abort immediately
@@ -4174,7 +4195,7 @@ func (w *window) renderConversation(msgs []model.Message) {
 			b.WriteString(sec)
 		}
 		out := b.String()
-		out, cachedRemote, missingRemote := w.cacheRemoteImages(renderCtx, out, loadRemoteImages)
+		out, remoteStats := w.cacheRemoteImages(renderCtx, out, loadRemoteImages, remoteImageBulkApproved)
 		if renderCtx.Err() != nil {
 			logging.Trace("ui: external image pass cancelled", "thread", threadID)
 			return
@@ -4190,7 +4211,10 @@ func (w *window) renderConversation(msgs []model.Message) {
 			"trackers", blocked, "auth", verdict.level, "fetch", fetchDur, "sanitize", time.Since(sanitizeStart))
 		logging.Trace("ui: render conversation ready", "thread", threadID, "msgs", len(msgs), "fetched", fetched,
 			"newSections", len(fresh), "trackers", blocked, "auth", verdict.level, "warnings", len(warnings),
-			"attachments", len(atts), "inlineImages", len(inlineImgs), "cachedRemoteImages", cachedRemote, "missingRemoteImages", missingRemote, "bytes", len(out), "html", logging.Body(out),
+			"attachments", len(atts), "inlineImages", len(inlineImgs), "remoteImages", remoteStats.Total,
+			"cachedRemoteImages", remoteStats.Cached, "unavailableRemoteImages", remoteStats.Unavailable,
+			"blockedRemoteImages", remoteStats.Blocked, "deferredRemoteImages", remoteStats.Deferred,
+			"bytes", len(out), "html", logging.Body(out),
 			"fetch", fetchDur, "sanitize", time.Since(sanitizeStart))
 		dispatch.Main(func() {
 			w.mergeSectionCache(fresh) // cache newly-rendered sections (main thread)
@@ -4204,15 +4228,14 @@ func (w *window) renderConversation(msgs []model.Message) {
 				logging.Trace("ui: render conversation discarded", "thread", threadID, "openThread", w.openThreadID)
 				return // user switched to another conversation while this rendered
 			}
-			if missingRemote == 0 {
+			title, button, loadAll := remoteImageBannerCopy(remoteStats)
+			w.remoteImageTotal = remoteStats.Total
+			w.remoteImageLoadAll = loadAll
+			if title == "" {
 				w.remoteImageBanner.SetRevealed(false)
-			} else if loadRemoteImages {
-				w.remoteImageBanner.SetTitle(fmt.Sprintf("%d external %s unavailable", missingRemote, imageNoun(missingRemote)))
-				w.remoteImageBanner.SetButtonLabel("Retry")
-				w.remoteImageBanner.SetRevealed(true)
 			} else {
-				w.remoteImageBanner.SetTitle(fmt.Sprintf("%d external %s blocked for privacy", missingRemote, imageNoun(missingRemote)))
-				w.remoteImageBanner.SetButtonLabel("Show images")
+				w.remoteImageBanner.SetTitle(title)
+				w.remoteImageBanner.SetButtonLabel(button)
 				w.remoteImageBanner.SetRevealed(true)
 			}
 			w.inlineByCID = inlineImgs // serveCID resolves cid: against this

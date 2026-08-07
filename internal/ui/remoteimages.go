@@ -22,9 +22,17 @@ import (
 )
 
 const (
-	remoteImageFetchCap = 40
-	remoteImageWorkers  = 6
+	remoteImagePromptThreshold = 20
+	remoteImageWorkers         = 6
 )
+
+type remoteImageStats struct {
+	Total       int
+	Cached      int
+	Unavailable int
+	Blocked     int
+	Deferred    int
+}
 
 var (
 	cssRemoteURLRe = regexp.MustCompile(`(?i)url\(\s*(['"]?)(https?://[^'")\s]+)['"]?\s*\)`)
@@ -36,22 +44,46 @@ var (
 // backed by the content-addressed cache. With network disabled it still serves
 // images cached during an earlier trusted view; uncached URLs are removed so
 // WebKit can never bypass the cache/client privacy policy.
-func (w *window) cacheRemoteImages(ctx context.Context, source string, allowNetwork bool) (string, int, int) {
+func (w *window) cacheRemoteImages(ctx context.Context, source string, allowNetwork, largeSetApproved bool) (string, remoteImageStats) {
 	doc, err := xhtml.Parse(strings.NewReader(source))
 	if err != nil {
-		return source, 0, 0
+		return source, remoteImageStats{}
 	}
-	urls := collectRemoteImageURLs(doc, remoteImageFetchCap)
+	urls := collectRemoteImageURLs(doc)
+	stats := remoteImageStats{Total: len(urls)}
 	entries := make(map[string]remotecache.Entry, len(urls))
-	if w.remoteImages != nil && len(urls) > 0 {
+	if w.remoteImages != nil {
+		for _, rawURL := range urls {
+			entry, ok, err := w.remoteImages.Get(ctx, rawURL, false)
+			if err == nil && ok {
+				entries[rawURL] = entry
+			}
+		}
+	}
+	var networkURLs []string
+	largeSetBlocked := len(urls) > remoteImagePromptThreshold && !largeSetApproved
+	for _, rawURL := range urls {
+		if _, ok := entries[rawURL]; ok {
+			continue
+		}
+		if !allowNetwork {
+			stats.Blocked++
+		} else if largeSetBlocked {
+			stats.Deferred++
+		} else {
+			networkURLs = append(networkURLs, rawURL)
+		}
+	}
+	cachedBefore := len(entries)
+	if w.remoteImages != nil && len(networkURLs) > 0 {
 		fetchCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		defer cancel()
 		jobs := make(chan string)
 		var wg sync.WaitGroup
 		var mu sync.Mutex
 		workers := remoteImageWorkers
-		if len(urls) < workers {
-			workers = len(urls)
+		if len(networkURLs) < workers {
+			workers = len(networkURLs)
 		}
 		for range workers {
 			wg.Add(1)
@@ -72,7 +104,7 @@ func (w *window) cacheRemoteImages(ctx context.Context, source string, allowNetw
 			}()
 		}
 	sendJobs:
-		for _, rawURL := range urls {
+		for _, rawURL := range networkURLs {
 			select {
 			case jobs <- rawURL:
 			case <-fetchCtx.Done():
@@ -82,30 +114,31 @@ func (w *window) cacheRemoteImages(ctx context.Context, source string, allowNetw
 		close(jobs)
 		wg.Wait()
 	}
+	stats.Cached = len(entries)
+	stats.Unavailable = len(networkURLs) - (len(entries) - cachedBefore)
 	changed := rewriteRemoteImageURLs(doc, entries)
-	missing := len(urls) - len(entries)
 	if !changed {
-		return source, len(entries), missing
+		return source, stats
 	}
 	body := findBody(doc)
 	if body == nil {
-		return source, len(entries), missing
+		return source, stats
 	}
 	var b strings.Builder
 	for child := body.FirstChild; child != nil; child = child.NextSibling {
 		if err := xhtml.Render(&b, child); err != nil {
-			return source, len(entries), missing
+			return source, stats
 		}
 	}
-	return b.String(), len(entries), missing
+	return b.String(), stats
 }
 
-func collectRemoteImageURLs(root *xhtml.Node, limit int) []string {
+func collectRemoteImageURLs(root *xhtml.Node) []string {
 	seen := map[string]bool{}
 	var out []string
 	add := func(raw string) {
 		raw = html.UnescapeString(strings.TrimSpace(raw))
-		if !isRemoteHTTP(raw) || seen[raw] || len(out) >= limit {
+		if !isRemoteHTTP(raw) || seen[raw] {
 			return
 		}
 		seen[raw] = true
@@ -294,6 +327,19 @@ func imageNoun(n int) string {
 		return "image"
 	}
 	return "images"
+}
+
+func remoteImageBannerCopy(stats remoteImageStats) (title, button string, loadAll bool) {
+	if stats.Blocked > 0 {
+		return fmt.Sprintf("%d external %s blocked for privacy", stats.Blocked, imageNoun(stats.Blocked)), "Show images", false
+	}
+	if stats.Deferred > 0 {
+		return fmt.Sprintf("This message contains %d external images", stats.Total), "Load images", true
+	}
+	if stats.Unavailable > 0 {
+		return fmt.Sprintf("%d external %s unavailable", stats.Unavailable, imageNoun(stats.Unavailable)), "Retry", false
+	}
+	return "", "", false
 }
 
 // serveRemoteImage streams a previously validated cached image to WebKit.

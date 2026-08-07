@@ -116,6 +116,9 @@ hidden ancestors, and known open/read/pixel URL patterns across HTML and CSS) an
 the count is surfaced as a "🛡 N trackers blocked" indicator. The cache prefetcher
 parses CSS declarations and fetches only image-bearing properties; remote
 `@import`, fonts, cursors, and other CSS resources are removed without a request.
+A conversation with more than 20 unique external image URLs makes no new image
+requests until its single "Load images" banner is confirmed; cached images still
+render, and approval loads the complete set rather than asking in batches.
 A plain-text body (and the snippet fallback) is HTML-escaped into a `<pre>` with
 bare http(s) URLs auto-linkified (`linkifyText` — explicit-scheme match only, so
 no false positives or non-http schemes), so links in text-only mail (CI/cron/
