@@ -130,6 +130,10 @@ func TestOutboxStatus(t *testing.T) {
 	if got != "Failed (attempt 2): timeout" {
 		t.Fatalf("failed status = %q", got)
 	}
+	got = outboxStatus(model.OutboxItem{State: "uncertain", LastError: "lost acknowledgement"})
+	if !strings.Contains(got, "Delivery unconfirmed") || !strings.Contains(got, "duplicate") {
+		t.Fatalf("outboxStatus uncertain = %q, want warning and duplicate risk", got)
+	}
 }
 
 func TestEnsurePrefixes(t *testing.T) {

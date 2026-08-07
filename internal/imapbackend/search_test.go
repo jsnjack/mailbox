@@ -31,11 +31,11 @@ func TestParseSearchQuery(t *testing.T) {
 		{query: "in:Work", wantLabel: "Work"},
 		{query: "from:bob@example.com", wantHdrs: 1},
 		{query: "subject:hello from:bob@x.com", wantHdrs: 2},
+		{query: "rfc822msgid:dedup@example.com", wantHdrs: 1},
 		{query: "quarterly report", wantText: 2},
 		{query: "in:Work budget", wantLabel: "Work", wantText: 1},
 		{query: "http://example.com/x", wantText: 1}, // colon but not an operator → free text
 		{query: "is:unread", wantErr: true},
-		{query: "rfc822msgid:<x@y>", wantErr: true},
 		{query: "newer_than:7d", wantErr: true},
 		{query: "in:trash in:spam", wantErr: true}, // conflicting scopes
 		{query: "in:", wantErr: true},

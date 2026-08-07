@@ -598,6 +598,18 @@ func IsConflict(err error) bool {
 	return errors.As(err, &gerr) && gerr.Code == 409
 }
 
+// IsAmbiguousSendError reports whether a failed non-idempotent Gmail send had
+// no HTTP response. The request may have been accepted before the connection
+// dropped, so the outbox must reconcile its Message-ID instead of blindly
+// retrying. A typed googleapi.Error is an explicit provider rejection.
+func IsAmbiguousSendError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var gerr *googleapi.Error
+	return !errors.As(err, &gerr)
+}
+
 // isRetryableResponse reports whether err is a retryable HTTP error RESPONSE:
 // the server received the request and returned a rate-limit or transient server
 // error. It never matches bare network failures, so it's safe for

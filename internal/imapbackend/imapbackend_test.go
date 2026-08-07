@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"strconv"
 	"strings"
@@ -15,9 +16,20 @@ import (
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapserver"
 	"github.com/emersion/go-imap/v2/imapserver/imapmemserver"
+	"github.com/emersion/go-smtp"
 	"github.com/jsnjack/mailbox/internal/backend"
 	"github.com/jsnjack/mailbox/internal/model"
 )
+
+func TestAmbiguousSMTPDataError(t *testing.T) {
+	if err := ambiguousSMTPDataError(io.ErrUnexpectedEOF); !errors.Is(err, backend.ErrDeliveryUnknown) {
+		t.Fatalf("network failure = %v, want ErrDeliveryUnknown", err)
+	}
+	rejected := &smtp.SMTPError{Code: 550, Message: "rejected"}
+	if err := ambiguousSMTPDataError(rejected); errors.Is(err, backend.ErrDeliveryUnknown) {
+		t.Fatalf("explicit SMTP rejection = %v, must not be ambiguous", err)
+	}
+}
 
 const testMsg = "From: Bob Builder <bob@example.com>\r\n" +
 	"To: alice@example.com\r\n" +

@@ -309,6 +309,9 @@ func (b *Backend) Send(ctx context.Context, raw []byte, threadID string) (string
 	id, err := b.c.Send(ctx, raw, threadID)
 	if err != nil {
 		logging.TraceContext(ctx, "gmailbackend: Send failed", "account", b.accountID, "threadID", threadID, "dur", time.Since(start), "err", err)
+		if gmailapi.IsAmbiguousSendError(err) {
+			return "", fmt.Errorf("%w: %v", backend.ErrDeliveryUnknown, err)
+		}
 		return "", err
 	}
 	logging.TraceContext(ctx, "gmailbackend: Send ok", "account", b.accountID, "id", id, "threadID", threadID, "dur", time.Since(start))

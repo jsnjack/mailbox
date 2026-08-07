@@ -2,6 +2,7 @@ package syncer
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -19,11 +20,16 @@ type countingBackend struct {
 	sends        atomic.Int32
 	draftDeletes atomic.Int32
 	searchHit    bool // when true, SearchIDs reports the message already exists
+	sendErr      error
+	searchErr    error
 }
 
 func (c *countingBackend) Send(_ context.Context, _ []byte, _ string) (string, error) {
 	c.sends.Add(1)
 	time.Sleep(20 * time.Millisecond)
+	if c.sendErr != nil {
+		return "", c.sendErr
+	}
 	return "sent-id", nil
 }
 
@@ -33,6 +39,9 @@ func (c *countingBackend) Profile(context.Context) (backend.Profile, error) {
 }
 func (c *countingBackend) Labels(context.Context) ([]model.Label, error) { return nil, nil }
 func (c *countingBackend) SearchIDs(context.Context, string, int) ([]string, error) {
+	if c.searchErr != nil {
+		return nil, c.searchErr
+	}
 	if c.searchHit {
 		return []string{"existing-id"}, nil
 	}
@@ -186,8 +195,12 @@ func TestSweepOutboxSkipsAlreadySent(t *testing.T) {
 		t.Fatalf("upsert account: %v", err)
 	}
 	rfc := []byte("Message-ID: <dedup-test@example.com>\r\nFrom: a@example.com\r\n\r\nhi")
-	if _, err := s.EnqueueOutbox(ctx, acct, "thread-1", "draft-1", rfc, 0); err != nil {
+	id, err := s.EnqueueOutbox(ctx, acct, "thread-1", "draft-1", rfc, 0)
+	if err != nil {
 		t.Fatalf("enqueue: %v", err)
+	}
+	if err := s.MarkOutboxUncertain(ctx, id, "lost acknowledgement"); err != nil {
+		t.Fatalf("mark uncertain: %v", err)
 	}
 
 	be := &countingBackend{searchHit: true} // provider already has this Message-ID
@@ -209,5 +222,50 @@ func TestSweepOutboxSkipsAlreadySent(t *testing.T) {
 	// came from — otherwise it lingers in Drafts duplicating the sent mail.
 	if got := be.draftDeletes.Load(); got != 1 {
 		t.Fatalf("DeleteDraft called %d times, want 1 (dedup must clean up the source draft)", got)
+	}
+}
+
+// A transport failure after a non-idempotent send may mean delivery succeeded.
+// It must be held for reconciliation and never automatically attempted again.
+func TestSweepOutboxHoldsUnconfirmedDelivery(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	acct, err := s.UpsertAccount(ctx, model.Account{Email: "a@example.com", Type: model.AccountIMAP})
+	if err != nil {
+		t.Fatalf("upsert account: %v", err)
+	}
+	rfc := []byte("Message-ID: <unknown@example.com>\r\nFrom: a@example.com\r\nTo: b@example.com\r\n\r\nhi")
+	if _, err := s.EnqueueOutbox(ctx, acct, "thread-1", "", rfc, 0); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	be := &countingBackend{sendErr: errors.Join(backend.ErrDeliveryUnknown, errors.New("connection reset"))}
+	e := &Engine{Store: s}
+	if n, err := e.SweepOutbox(ctx, be, acct); err != nil || n != 0 {
+		t.Fatalf("first sweep = %d, %v; want no confirmed send", n, err)
+	}
+	if got := be.sends.Load(); got != 1 {
+		t.Fatalf("Send called %d times, want 1", got)
+	}
+	pending, err := s.ListPendingOutbox(ctx, acct, time.Now().Unix())
+	if err != nil || len(pending) != 1 || pending[0].State != "uncertain" {
+		t.Fatalf("pending after ambiguous send = %+v, %v; want one uncertain item", pending, err)
+	}
+
+	be.sendErr = nil
+	if n, err := e.SweepOutbox(ctx, be, acct); err != nil || n != 0 {
+		t.Fatalf("reconciliation sweep = %d, %v; want held", n, err)
+	}
+	if got := be.sends.Load(); got != 1 {
+		t.Fatalf("Send called %d times after reconciliation miss, want still 1", got)
+	}
+	pending, _ = s.ListPendingOutbox(ctx, acct, time.Now().Unix())
+	if len(pending) != 1 || pending[0].State != "uncertain" {
+		t.Fatalf("pending after reconciliation miss = %+v, want uncertain", pending)
 	}
 }

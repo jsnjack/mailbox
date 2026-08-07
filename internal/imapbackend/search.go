@@ -25,13 +25,16 @@ var headerOperators = map[string]string{
 	"cc":      "Cc",
 	"bcc":     "Bcc",
 	"subject": "Subject",
+	// Provider-neutral outbox reconciliation: Gmail maps this to its native
+	// rfc822msgid: query; IMAP searches the RFC 5322 Message-ID header.
+	"rfc822msgid": "Message-ID",
 }
 
 // rejectedOperators are Gmail-style operators IMAP SEARCH has no safe mapping
 // for here. A query using one errors instead of silently matching the wrong
 // (or every) message.
 var rejectedOperators = map[string]bool{
-	"is": true, "has": true, "label": true, "rfc822msgid": true,
+	"is": true, "has": true, "label": true,
 	"after": true, "before": true, "older": true, "newer": true,
 	"older_than": true, "newer_than": true, "filename": true, "list": true,
 	"category": true, "deliveredto": true, "size": true, "larger": true, "smaller": true,

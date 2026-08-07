@@ -653,7 +653,7 @@ func (e *Engine) RetryOutbox(ctx context.Context, b backend.Backend, accountID, 
 	return err
 }
 
-// DiscardOutbox removes a queued/failed message without sending it. It reports
+// DiscardOutbox removes a queued, failed, or unconfirmed message. It reports
 // whether the message was actually cancelled — false means a sweep already
 // claimed or delivered it, so the caller must not present it as unsent.
 func (e *Engine) DiscardOutbox(ctx context.Context, accountID, id int64) (bool, error) {
@@ -811,8 +811,8 @@ func (e *Engine) DiscardDraft(ctx context.Context, b backend.Backend, accountID 
 	return nil
 }
 
-// SweepOutbox retries queued/failed messages for an account, returning how many
-// were sent. It is run periodically in the background.
+// SweepOutbox sends eligible queued/failed messages and reconciles unconfirmed
+// ones, returning how many new deliveries were confirmed. It runs periodically.
 func (e *Engine) SweepOutbox(ctx context.Context, b backend.Backend, accountID int64) (int, error) {
 	// Serialize sweeps per account: the lock spans the list→send→mark loop so a
 	// second sweep blocks until the first finishes, then re-lists and sees the
@@ -822,8 +822,8 @@ func (e *Engine) SweepOutbox(ctx context.Context, b backend.Backend, accountID i
 	defer mu.Unlock()
 
 	// Any 'sending' row seen here is a leftover claim from a crashed run (live
-	// claims only exist inside a sweep, and sweeps are serialized) — turn it
-	// back into a retryable failure before listing.
+	// claims only exist inside a sweep, and sweeps are serialized) — preserve it
+	// as unconfirmed before listing; blindly retrying could duplicate delivery.
 	if err := e.Store.FailInterruptedSends(ctx, accountID); err != nil {
 		return 0, err
 	}
@@ -832,7 +832,6 @@ func (e *Engine) SweepOutbox(ctx context.Context, b backend.Backend, accountID i
 		return 0, err
 	}
 	sent := 0
-	gmailAcct := e.isGmailAccount(ctx, accountID)
 	for _, it := range items {
 		// Claim the row before any provider I/O: from here an undo's
 		// DiscardOutbox reliably reports "too late", and a discard that already
@@ -843,35 +842,47 @@ func (e *Engine) SweepOutbox(ctx context.Context, b backend.Backend, accountID i
 			logging.TraceContext(ctx, "syncer: outbox item discarded before send; skipping", "id", it.ID)
 			continue
 		}
-		// Guard against resending a message a prior attempt already delivered: a
-		// send can succeed at the provider yet return a network error (the response
-		// was lost), which enqueues it here. Before resending, check whether the
-		// provider already has a message with this item's Message-ID and, if so,
-		// mark it sent instead of delivering a duplicate. Gmail-only: the check uses
-		// Gmail's rfc822msgid: search and the raw send preserves our Message-ID.
-		if gmailAcct {
-			if mid := messageIDOf(it.RFC822); mid != "" {
-				if ids, serr := b.SearchIDs(ctx, "rfc822msgid:"+mid, 1); serr == nil && len(ids) > 0 {
-					logging.TraceContext(ctx, "syncer: outbox already at provider; not resending", "id", it.ID, "msgid", mid)
-					if err := e.Store.MarkOutboxSent(ctx, it.ID); err != nil {
-						return sent, err
-					}
-					// The delivery this dedup detected never ran the success path
-					// below, so finish its bookkeeping here too: drop the source
-					// draft (else it lingers in Drafts duplicating the sent mail)
-					// and cache the sent message.
-					e.retireSentDraft(ctx, b, accountID, it)
-					e.storeSentMessage(ctx, b, accountID, ids[0])
-					e.publish(Change{Kind: SendStateChanged, AccountID: accountID})
-					continue
-				} else if serr != nil {
-					logging.TraceContext(ctx, "syncer: outbox dedup search failed; proceeding to send", "id", it.ID, "err", serr)
+		// An uncertain item may already have been delivered. Reconcile it by the
+		// immutable Message-ID, but never send it from a background sweep. IMAP maps
+		// this provider-neutral query to SEARCH HEADER Message-ID; Gmail uses its
+		// native rfc822msgid search. If the provider has not indexed a Sent copy (or
+		// never stores one), the item remains for an explicit user decision.
+		if it.State == "uncertain" {
+			mid := messageIDOf(it.RFC822)
+			if mid == "" {
+				if err := e.Store.KeepOutboxUncertain(ctx, it.ID, "Delivery unconfirmed; message has no Message-ID to verify"); err != nil {
+					return sent, err
 				}
+				continue
 			}
+			ids, searchErr := b.SearchIDs(ctx, "rfc822msgid:"+mid, 1)
+			if searchErr != nil || len(ids) == 0 {
+				note := "Delivery unconfirmed; check Sent before retrying"
+				if searchErr != nil {
+					note = "Delivery unconfirmed; Sent verification failed: " + searchErr.Error()
+				}
+				logging.TraceContext(ctx, "syncer: uncertain outbox remains held", "id", it.ID, "msgid", mid, "err", searchErr)
+				if err := e.Store.KeepOutboxUncertain(ctx, it.ID, note); err != nil {
+					return sent, err
+				}
+				continue
+			}
+			logging.TraceContext(ctx, "syncer: uncertain outbox found at provider", "id", it.ID, "msgid", mid)
+			if err := e.Store.MarkOutboxSent(ctx, it.ID); err != nil {
+				return sent, err
+			}
+			e.retireSentDraft(ctx, b, accountID, it)
+			e.storeSentMessage(ctx, b, accountID, ids[0])
+			e.publish(Change{Kind: SendStateChanged, AccountID: accountID})
+			continue
 		}
 		sentID, err := b.Send(ctx, it.RFC822, it.ThreadID)
 		if err != nil {
-			if mErr := e.Store.MarkOutboxFailed(ctx, it.ID, err.Error()); mErr != nil {
+			mark := e.Store.MarkOutboxFailed
+			if errors.Is(err, backend.ErrDeliveryUnknown) {
+				mark = e.Store.MarkOutboxUncertain
+			}
+			if mErr := mark(ctx, it.ID, err.Error()); mErr != nil {
 				return sent, mErr
 			}
 			slog.Default().Warn("outbox: retry failed", "id", it.ID, "attempt", it.Attempts+1, "err", err)
@@ -925,18 +936,6 @@ func (e *Engine) sweepMuFor(accountID int64) *sync.Mutex {
 		e.sweepMus[accountID] = mu
 	}
 	return mu
-}
-
-// isGmailAccount reports whether accountID is a Gmail account, so outbox dedup
-// can use Gmail's rfc822msgid: search (IMAP has no equivalent through the
-// provider-agnostic SearchIDs, so it opts out and keeps the prior behavior). A
-// lookup failure conservatively returns false (skip dedup, just send).
-func (e *Engine) isGmailAccount(ctx context.Context, accountID int64) bool {
-	acc, err := e.Store.GetAccountByID(ctx, accountID)
-	if err != nil {
-		return false
-	}
-	return acc.Type != model.AccountIMAP // "" (unset) is treated as Gmail
 }
 
 // messageIDOf extracts the Message-ID header (without angle brackets) from a raw

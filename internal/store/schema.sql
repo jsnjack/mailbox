@@ -110,7 +110,7 @@ CREATE TABLE IF NOT EXISTS outbox (
   account_id      INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
   thread_id       TEXT,
   rfc822          BLOB NOT NULL,
-  state           TEXT NOT NULL DEFAULT 'queued',  -- queued|sending|sent|failed
+  state           TEXT NOT NULL DEFAULT 'queued',  -- queued|sending|failed|uncertain
   attempts        INTEGER NOT NULL DEFAULT 0,
   last_error      TEXT,
   draft_id        TEXT,                            -- source draft to delete after a successful send

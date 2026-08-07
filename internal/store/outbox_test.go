@@ -116,8 +116,8 @@ func TestOutboxClaimVsDiscard(t *testing.T) {
 		t.Fatalf("claim of discarded row = %v, %v; want not-claimed", ok, err)
 	}
 
-	// A leftover 'sending' row (crash mid-send) becomes a retryable failure
-	// with the attempt counted.
+	// A leftover 'sending' row (crash mid-send) becomes uncertain with the
+	// attempt counted. It remains reconcilable but must not be blindly resent.
 	if err := s.FailInterruptedSends(ctx, acc); err != nil {
 		t.Fatalf("fail interrupted: %v", err)
 	}
@@ -125,8 +125,11 @@ func TestOutboxClaimVsDiscard(t *testing.T) {
 	if len(sendable) != 1 || sendable[0].ID != id {
 		t.Fatalf("after recovery sendable = %+v, want the interrupted row", sendable)
 	}
-	if sendable[0].Attempts != 1 || sendable[0].State != "failed" {
-		t.Fatalf("recovered row = state %q attempts %d, want failed/1", sendable[0].State, sendable[0].Attempts)
+	if sendable[0].Attempts != 1 || sendable[0].State != "uncertain" {
+		t.Fatalf("recovered row = state %q attempts %d, want uncertain/1", sendable[0].State, sendable[0].Attempts)
+	}
+	if n, err := s.CountUncertainOutbox(ctx, acc, nowT); err != nil || n != 1 {
+		t.Fatalf("CountUncertainOutbox = %d (err %v), want 1", n, err)
 	}
 }
 

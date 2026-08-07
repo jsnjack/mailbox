@@ -31,6 +31,12 @@ var ErrAuth = errors.New("authentication failed; reconnect required")
 // not skipped past). See FetchMetadata.
 var ErrNotFound = errors.New("message not found")
 
+// ErrDeliveryUnknown means a non-idempotent send may have reached the provider,
+// but the client lost the final acknowledgement. The outbox must not retry such
+// a message automatically: it first reconciles by Message-ID, then leaves the
+// decision to the user if delivery cannot be proven.
+var ErrDeliveryUnknown = errors.New("delivery status is unknown")
+
 // Profile identifies the connected account and seeds incremental sync.
 type Profile struct {
 	Email  string

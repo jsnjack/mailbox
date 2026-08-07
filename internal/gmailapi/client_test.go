@@ -70,6 +70,27 @@ func TestIsRetryableResponse(t *testing.T) {
 	}
 }
 
+func TestIsAmbiguousSendError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"explicit HTTP rejection", &googleapi.Error{Code: 503}, false},
+		{"wrapped HTTP rejection", fmt.Errorf("send: %w", &googleapi.Error{Code: 400}), false},
+		{"connection lost", io.ErrUnexpectedEOF, true},
+		{"context cancelled without response", context.Canceled, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsAmbiguousSendError(tc.err); got != tc.want {
+				t.Fatalf("IsAmbiguousSendError = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRetryAfter(t *testing.T) {
 	withHeader := func(v string) *googleapi.Error {
 		return &googleapi.Error{Code: 429, Header: http.Header{"Retry-After": []string{v}}}

@@ -17,15 +17,15 @@ import (
 	"github.com/jsnjack/mailbox/internal/model"
 )
 
-// refreshOutbox reveals the banner when any account has messages waiting to
-// send (queued or failed), and hides it otherwise. A send stuck on a non-active
-// account must be just as visible as one on the active account. The counts are
-// gathered off the main thread.
+// refreshOutbox reveals the banner when any account has queued, failed, or
+// unconfirmed messages. A send on a non-active account must be just as visible
+// as one on the active account. The counts are gathered off the main thread.
 func (w *window) refreshOutbox() {
 	accounts := append([]AccountInfo(nil), w.deps.Accounts...)
 	go func() {
 		ctx := context.Background()
 		total := 0
+		uncertain := 0
 		for _, a := range accounts {
 			n, err := w.deps.Store.CountPendingOutbox(ctx, a.ID, time.Now().Unix())
 			if err != nil {
@@ -33,8 +33,14 @@ func (w *window) refreshOutbox() {
 				continue
 			}
 			total += n
+			u, err := w.deps.Store.CountUncertainOutbox(ctx, a.ID, time.Now().Unix())
+			if err != nil {
+				slog.Warn("ui: count unconfirmed outbox", "account", a.ID, "err", err)
+				continue
+			}
+			uncertain += u
 		}
-		logging.Trace("ui: refresh outbox", "accounts", len(accounts), "pending", total)
+		logging.Trace("ui: refresh outbox", "accounts", len(accounts), "pending", total, "unconfirmed", uncertain)
 		dispatch.Main(func() {
 			if total == 0 {
 				w.outboxBanner.SetRevealed(false)
@@ -44,13 +50,17 @@ func (w *window) refreshOutbox() {
 			if total != 1 {
 				noun = "messages"
 			}
-			w.outboxBanner.SetTitle(fmt.Sprintf("%d %s waiting to send", total, noun))
+			if uncertain > 0 {
+				w.outboxBanner.SetTitle(fmt.Sprintf("%d %s need outbox attention", total, noun))
+			} else {
+				w.outboxBanner.SetTitle(fmt.Sprintf("%d %s waiting to send", total, noun))
+			}
 			w.outboxBanner.SetRevealed(true)
 		})
 	}()
 }
 
-// openOutbox shows a dialog listing every account's queued/failed sends, with
+// openOutbox shows every account's queued, failed, and unconfirmed sends, with
 // per-item retry/discard and a "Send now" action that sweeps all outboxes. The
 // account set is captured at open, so the actions keep targeting the accounts
 // the rows were listed for even if the active account changes while it's open.
@@ -136,7 +146,7 @@ func (w *window) openOutbox() {
 	dialog.Present(w.win)
 }
 
-// outboxRow renders one queued/failed message with retry and discard actions,
+// outboxRow renders one pending message with retry and discard actions,
 // bound to the account it was listed for (acct — not whatever account is active
 // when the button is clicked). showAccount adds the account email, so multi-
 // account users can tell whose outbox an item sits in. rebuild refreshes the
@@ -176,6 +186,8 @@ func (w *window) outboxRow(acct AccountInfo, it model.OutboxItem, showAccount bo
 	status.AddCSSClass("caption")
 	if it.State == "failed" {
 		status.AddCSSClass("error")
+	} else if it.State == "uncertain" {
+		status.AddCSSClass("warning")
 	} else {
 		status.AddCSSClass("dim-label")
 	}
@@ -189,11 +201,15 @@ func (w *window) outboxRow(acct AccountInfo, it model.OutboxItem, showAccount bo
 	acctID := acct.ID // the account these rows were listed for
 	if w.deps.RetryOutbox != nil {
 		retry := gtk.NewButtonFromIconName("view-refresh-symbolic")
-		retry.SetTooltipText("Retry now")
-		a11yLabel(retry, "Retry now")
+		retryLabel := "Retry now"
+		if it.State == "uncertain" {
+			retryLabel = "Retry anyway (may send a duplicate)"
+		}
+		retry.SetTooltipText(retryLabel)
+		a11yLabel(retry, retryLabel)
 		retry.SetVAlign(gtk.AlignCenter)
 		retry.AddCSSClass("flat")
-		retry.ConnectClicked(func() {
+		retryNow := func() {
 			logging.Trace("ui: outbox retry item", "account", acctID, "id", id)
 			go func() {
 				err := w.deps.RetryOutbox(context.Background(), acctID, id)
@@ -207,6 +223,27 @@ func (w *window) outboxRow(acct AccountInfo, it model.OutboxItem, showAccount bo
 					w.refreshOutbox()
 				})
 			}()
+		}
+		retry.ConnectClicked(func() {
+			if it.State != "uncertain" {
+				retryNow()
+				return
+			}
+			confirm := adw.NewAlertDialog(
+				"Retry unconfirmed delivery?",
+				"Mailbox could not tell whether the provider accepted this message. Check your Sent folder first. Retrying may send the recipient a duplicate.",
+			)
+			confirm.AddResponse("cancel", "Cancel")
+			confirm.AddResponse("retry", "Retry anyway")
+			confirm.SetResponseAppearance("retry", adw.ResponseDestructive)
+			confirm.SetDefaultResponse("cancel")
+			confirm.SetCloseResponse("cancel")
+			confirm.ConnectResponse(func(response string) {
+				if response == "retry" {
+					retryNow()
+				}
+			})
+			confirm.Present(w.win)
 		})
 		row.Append(retry)
 	}
@@ -249,6 +286,12 @@ func outboxHeaders(raw []byte) (to, subject string) {
 
 // outboxStatus describes an item's send state for display.
 func outboxStatus(it model.OutboxItem) string {
+	if it.State == "uncertain" {
+		if it.LastError != "" {
+			return "Delivery unconfirmed: " + it.LastError + ". Check Sent before retrying; retry may send a duplicate."
+		}
+		return "Delivery unconfirmed. Check Sent before retrying; retry may send a duplicate."
+	}
 	if it.State == "failed" {
 		if it.LastError != "" {
 			return fmt.Sprintf("Failed (attempt %d): %s", it.Attempts, it.LastError)

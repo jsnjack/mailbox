@@ -18,6 +18,7 @@ import (
 	"github.com/emersion/go-imap/v2/imapclient"
 	gomail "github.com/emersion/go-message/mail"
 	"github.com/emersion/go-smtp"
+	"github.com/jsnjack/mailbox/internal/backend"
 	"github.com/jsnjack/mailbox/internal/httpclient"
 	"github.com/jsnjack/mailbox/internal/logging"
 	"github.com/jsnjack/mailbox/internal/model"
@@ -303,12 +304,38 @@ func (b *Backend) smtpSend(ctx context.Context, from string, to []string, msg []
 		logging.Trace("imapbackend: smtp auth failed", "addr", addr, "err", err)
 		return fmt.Errorf("smtp auth: %w", err)
 	}
-	if err := c.SendMail(from, to, bytes.NewReader(msg)); err != nil {
-		logging.Trace("imapbackend: smtp sendmail failed", "addr", addr, "dur", time.Since(start), "err", err)
-		return fmt.Errorf("smtp send: %w", err)
+	if err := c.Mail(from, &smtp.MailOptions{Size: int64(len(msg))}); err != nil {
+		return fmt.Errorf("smtp MAIL FROM: %w", err)
+	}
+	for _, recipient := range to {
+		if err := c.Rcpt(recipient, nil); err != nil {
+			return fmt.Errorf("smtp RCPT TO %s: %w", recipient, err)
+		}
+	}
+	data, err := c.Data()
+	if err != nil {
+		return fmt.Errorf("smtp DATA: %w", err)
+	}
+	if _, err := io.Copy(data, bytes.NewReader(msg)); err != nil {
+		logging.Trace("imapbackend: smtp data write unconfirmed", "addr", addr, "dur", time.Since(start), "err", err)
+		return ambiguousSMTPDataError(err)
+	}
+	if err := data.Close(); err != nil {
+		logging.Trace("imapbackend: smtp data completion failed", "addr", addr, "dur", time.Since(start), "err", err)
+		return ambiguousSMTPDataError(err)
 	}
 	logging.Trace("imapbackend: smtp sent", "addr", addr, "bytes", len(msg), "recipients", len(to), "dur", time.Since(start))
 	return nil
+}
+
+func ambiguousSMTPDataError(err error) error {
+	var responseErr *smtp.SMTPError
+	if errors.As(err, &responseErr) {
+		// A final 4xx/5xx response explicitly says the server rejected DATA; a
+		// later retry cannot duplicate an accepted delivery.
+		return fmt.Errorf("smtp DATA rejected: %w", err)
+	}
+	return fmt.Errorf("%w: SMTP DATA acknowledgement was lost: %v", backend.ErrDeliveryUnknown, err)
 }
 
 // appendToSent files a sent message in the Sent folder (best-effort).
