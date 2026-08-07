@@ -67,7 +67,7 @@ func SaveViewState(s ViewState) error {
 	if err != nil {
 		return fmt.Errorf("marshal view state: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "view.json"), data, 0o600); err != nil {
+	if err := WriteFileAtomic(filepath.Join(dir, "view.json"), data, 0o600); err != nil {
 		logging.Trace("config: save view state failed", "err", err)
 		return fmt.Errorf("write view state: %w", err)
 	}

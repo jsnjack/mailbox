@@ -105,7 +105,7 @@ func writeIMAPAccounts(all map[string]IMAPAccount) error {
 	if err != nil {
 		return fmt.Errorf("marshal imap accounts: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "imap-accounts.json"), data, 0o600); err != nil {
+	if err := WriteFileAtomic(filepath.Join(dir, "imap-accounts.json"), data, 0o600); err != nil {
 		logging.Trace("config: write imap accounts failed", "err", err)
 		return fmt.Errorf("write imap accounts: %w", err)
 	}

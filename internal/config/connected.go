@@ -78,7 +78,7 @@ func SaveConnectedTime(email string, t time.Time) error {
 	if err != nil {
 		return fmt.Errorf("marshal connected times: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "connected.json"), data, 0o600); err != nil {
+	if err := WriteFileAtomic(filepath.Join(dir, "connected.json"), data, 0o600); err != nil {
 		logging.Trace("config: save connected time failed", "email", email, "err", err)
 		return fmt.Errorf("write connected times: %w", err)
 	}

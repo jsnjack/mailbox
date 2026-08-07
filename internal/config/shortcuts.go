@@ -56,7 +56,7 @@ func SaveShortcuts(m map[string]string) error {
 	if err != nil {
 		return fmt.Errorf("marshal shortcuts: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "shortcuts.json"), data, 0o600); err != nil {
+	if err := WriteFileAtomic(filepath.Join(dir, "shortcuts.json"), data, 0o600); err != nil {
 		return fmt.Errorf("write shortcuts: %w", err)
 	}
 	logging.Trace("config: save shortcuts", "n", len(m))

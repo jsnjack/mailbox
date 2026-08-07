@@ -76,7 +76,7 @@ func SaveAccountName(email, name string) error {
 	if err != nil {
 		return fmt.Errorf("marshal account names: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "accounts.json"), data, 0o600); err != nil {
+	if err := WriteFileAtomic(filepath.Join(dir, "accounts.json"), data, 0o600); err != nil {
 		logging.Trace("config: save account name failed", "email", email, "err", err)
 		return fmt.Errorf("write account names: %w", err)
 	}

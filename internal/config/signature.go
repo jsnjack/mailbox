@@ -62,7 +62,7 @@ func SaveSignature(sig string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}
-	if err := os.WriteFile(path, []byte(sig), 0o600); err != nil {
+	if err := WriteFileAtomic(path, []byte(sig), 0o600); err != nil {
 		logging.Trace("config: save signature failed", "path", path, "err", err)
 		return fmt.Errorf("write signature: %w", err)
 	}
@@ -136,7 +136,7 @@ func SaveAccountSignature(email, sig string) error {
 	if err != nil {
 		return fmt.Errorf("marshal signatures: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "signatures.json"), data, 0o600); err != nil {
+	if err := WriteFileAtomic(filepath.Join(dir, "signatures.json"), data, 0o600); err != nil {
 		logging.Trace("config: save account signature failed", "email", email, "err", err)
 		return fmt.Errorf("write signatures: %w", err)
 	}

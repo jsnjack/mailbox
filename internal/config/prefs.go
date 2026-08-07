@@ -105,7 +105,7 @@ func SavePrefs(p Prefs) error {
 	if err != nil {
 		return fmt.Errorf("marshal prefs: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "prefs.json"), data, 0o600); err != nil {
+	if err := WriteFileAtomic(filepath.Join(dir, "prefs.json"), data, 0o600); err != nil {
 		logging.Trace("config: save prefs failed", "err", err)
 		return fmt.Errorf("write prefs: %w", err)
 	}

@@ -1,6 +1,7 @@
 package ai
 
 import (
+	"bytes"
 	"fmt"
 	"net"
 	"net/url"
@@ -9,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	appconfig "github.com/jsnjack/mailbox/internal/config"
 	"github.com/jsnjack/mailbox/internal/logging"
 )
 
@@ -165,17 +167,12 @@ func SaveConfig(path string, cfg Config) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}
-	f, err := os.Create(path)
-	if err != nil {
-		return fmt.Errorf("create config: %w", err)
-	}
-	if err := toml.NewEncoder(f).Encode(fileConfig{AI: cfg}); err != nil {
-		_ = f.Close()
+	var encoded bytes.Buffer
+	if err := toml.NewEncoder(&encoded).Encode(fileConfig{AI: cfg}); err != nil {
 		return fmt.Errorf("encode config: %w", err)
 	}
-	// Close error matters on a written file — it can surface a failed flush.
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("close config: %w", err)
+	if err := appconfig.WriteFileAtomic(path, encoded.Bytes(), 0o600); err != nil {
+		return fmt.Errorf("write config: %w", err)
 	}
 	return nil
 }

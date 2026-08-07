@@ -63,7 +63,7 @@ func SaveWindowState(s WindowState) error {
 	if err != nil {
 		return fmt.Errorf("marshal window state: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "window.json"), data, 0o600); err != nil {
+	if err := WriteFileAtomic(filepath.Join(dir, "window.json"), data, 0o600); err != nil {
 		logging.Trace("config: save window state failed", "err", err)
 		return fmt.Errorf("write window state: %w", err)
 	}
