@@ -22,6 +22,12 @@ import (
 type folderState struct {
 	UIDValidity uint32 `json:"uidvalidity"`
 	ModSeq      uint64 `json:"modseq,omitempty"`
+	// Servers without CONDSTORE expose no flag-change watermark. Compact UID
+	// sets for \Seen and \Flagged let a periodic flags-only FETCH detect changes
+	// made by another client without re-fetching envelopes.
+	SeenUIDs       string `json:"seen,omitempty"`
+	FlaggedUIDs    string `json:"flagged,omitempty"`
+	FlagsCheckedAt int64  `json:"flags_checked_at,omitempty"`
 	// UIDNext is the folder's UIDNEXT at the last snapshot; with it, a cheap
 	// STATUS can prove a folder unchanged (see statusUnchanged) and skip the
 	// per-tick SELECT + full UID SEARCH. 0 in cursors written by older builds
@@ -29,6 +35,11 @@ type folderState struct {
 	UIDNext imap.UID `json:"uidnext,omitempty"`
 	UIDs    string   `json:"uids"` // imap.UIDSet.String() form, e.g. "1:5,7"
 }
+
+// Non-CONDSTORE servers require an O(messages) flags FETCH to discover remote
+// read/star changes. Five minutes keeps other clients' actions reasonably fresh
+// while avoiding that cost on every one-minute idle poll.
+const nonCondstoreFlagScanInterval = 5 * time.Minute
 
 // cursor is the opaque sync watermark serialized into accounts.sync_cursor.
 type cursor struct {
@@ -100,7 +111,7 @@ func (b *Backend) folders(c *conn) ([]string, error) {
 // snapshot captures a folder's current state (UIDVALIDITY, modseq, full UID set).
 // It forces a fresh SELECT (bypassing the conn's cache) so a UIDVALIDITY change
 // is observed every sync pass, then refreshes the cache.
-func (b *Backend) snapshot(c *conn, folder string) (folderState, []imap.UID, error) {
+func (b *Backend) snapshot(c *conn, folder string, scanFlags bool) (folderState, []imap.UID, error) {
 	// reselect forces a fresh SELECT so a UIDVALIDITY change is observed every
 	// pass; CONDSTORE is requested only when the server advertises it.
 	sel, err := c.reselect(folder, true)
@@ -115,9 +126,57 @@ func (b *Backend) snapshot(c *conn, folder string) (folderState, []imap.UID, err
 	}
 	uids := sd.AllUIDs()
 	sort.Slice(uids, func(i, j int) bool { return uids[i] < uids[j] })
+	st := folderState{UIDValidity: sel.UIDValidity, ModSeq: sel.HighestModSeq, UIDNext: sel.UIDNext, UIDs: encodeUIDs(uids)}
+	if scanFlags && sel.HighestModSeq == 0 {
+		seen, flagged, err := fetchFlagSnapshot(c.cl, uids)
+		if err != nil {
+			return folderState{}, nil, fmt.Errorf("imap fetch flags %q: %w", folder, err)
+		}
+		st.SeenUIDs = encodeUIDs(seen)
+		st.FlaggedUIDs = encodeUIDs(flagged)
+		st.FlagsCheckedAt = time.Now().Unix()
+	}
 	logging.Trace("imapbackend: snapshot",
 		"folder", folder, "uidvalidity", sel.UIDValidity, "modseq", sel.HighestModSeq, "uidnext", sel.UIDNext, "count", len(uids), "dur", time.Since(start))
-	return folderState{UIDValidity: sel.UIDValidity, ModSeq: sel.HighestModSeq, UIDNext: sel.UIDNext, UIDs: encodeUIDs(uids)}, uids, nil
+	return st, uids, nil
+}
+
+func fetchFlagSnapshot(cl *imapclient.Client, uids []imap.UID) (seen, flagged []imap.UID, err error) {
+	if len(uids) == 0 {
+		return nil, nil, nil
+	}
+	start := time.Now()
+	bufs, err := cl.Fetch(uidSetOf(uids), &imap.FetchOptions{UID: true, Flags: true}).Collect()
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, buf := range bufs {
+		for _, flag := range buf.Flags {
+			switch flag {
+			case imap.FlagSeen:
+				seen = append(seen, buf.UID)
+			case imap.FlagFlagged:
+				flagged = append(flagged, buf.UID)
+			}
+		}
+	}
+	sort.Slice(seen, func(i, j int) bool { return seen[i] < seen[j] })
+	sort.Slice(flagged, func(i, j int) bool { return flagged[i] < flagged[j] })
+	logging.Trace("imapbackend: flags snapshot", "messages", len(uids), "seen", len(seen), "flagged", len(flagged), "dur", time.Since(start))
+	return seen, flagged, nil
+}
+
+func flagsDue(old folderState, now time.Time) bool {
+	if old.FlagsCheckedAt == 0 {
+		return true
+	}
+	checked := time.Unix(old.FlagsCheckedAt, 0)
+	// A large forward clock jump in a stored cursor must not suppress scans
+	// indefinitely after the clock is corrected.
+	if checked.After(now.Add(nonCondstoreFlagScanInterval)) {
+		return true
+	}
+	return now.Sub(checked) >= nonCondstoreFlagScanInterval
 }
 
 // statusUnchanged reports whether a cheap STATUS proves folder f identical to
@@ -126,8 +185,8 @@ func (b *Backend) snapshot(c *conn, folder string) (folderState, []imap.UID, err
 // client-side — O(mailbox) per folder per tick even when nothing changed).
 // Unchanged means: same UIDVALIDITY, same UIDNEXT (no arrivals), same message
 // count (no arrivals ⇒ same count rules out expunges), and on a CONDSTORE
-// server the same HIGHESTMODSEQ (no flag changes; a non-CONDSTORE server can't
-// surface flag changes on the snapshot path either, so nothing is lost there).
+// server the same HIGHESTMODSEQ (no flag changes). A non-CONDSTORE folder is
+// only considered unchanged until its periodic flags scan is due.
 // Any doubt — STATUS failure, missing fields, a cursor without UIDNext, or a
 // CONDSTORE server before the modseq watermark is seeded — returns false and
 // the caller takes the full snapshot.
@@ -135,9 +194,9 @@ func (b *Backend) statusUnchanged(c *conn, folder string, old folderState) bool 
 	if old.UIDNext == 0 || old.UIDValidity == 0 {
 		return false
 	}
-	condstore := c.cl.Caps().Has(imap.CapCondStore)
-	if condstore && old.ModSeq == 0 {
-		return false // take the snapshot so the modseq watermark gets seeded
+	condstore := c.cl.Caps().Has(imap.CapCondStore) && old.ModSeq != 0
+	if !condstore && flagsDue(old, time.Now()) {
+		return false
 	}
 	opts := &imap.StatusOptions{NumMessages: true, UIDNext: true, UIDValidity: true, HighestModSeq: condstore}
 	start := time.Now()
@@ -169,8 +228,11 @@ func (b *Backend) changedSince(cl *imapclient.Client, modseq uint64, curUIDs []i
 	start := time.Now()
 	bufs, err := cl.Fetch(set, &imap.FetchOptions{UID: true, ChangedSince: modseq}).Collect()
 	if err != nil {
-		logging.Trace("imapbackend: changedsince rejected (no deltas)", "modseq", modseq, "dur", time.Since(start), "err", err)
-		return nil, nil // a server that rejects CHANGEDSINCE just yields no deltas
+		// Some servers advertise CONDSTORE but reject CHANGEDSINCE. Refreshing all
+		// current metadata is more expensive, but advancing HIGHESTMODSEQ while
+		// silently dropping the delta would make the remote flag change permanent.
+		logging.Trace("imapbackend: changedsince rejected (full refresh fallback)", "modseq", modseq, "messages", len(curUIDs), "dur", time.Since(start), "err", err)
+		return curUIDs, nil
 	}
 	out := make([]imap.UID, 0, len(bufs))
 	for _, m := range bufs {
@@ -190,7 +252,7 @@ func (b *Backend) buildProfileCursor(c *conn) (string, error) {
 	logging.Trace("imapbackend: build profile cursor", "account", b.cfg.Email, "folders", len(folders))
 	cur := cursor{Folders: make(map[string]folderState, len(folders))}
 	for _, f := range folders {
-		st, _, err := b.snapshot(c, f)
+		st, _, err := b.snapshot(c, f, true)
 		if err != nil {
 			return "", err
 		}
@@ -235,8 +297,9 @@ func (b *Backend) SeedCursor(ctx context.Context, backfilledIDs []string) (strin
 
 // computeChanges diffs every synced folder against the cursor and returns the
 // upserted/deleted message ids plus the next cursor. New = current\stored,
-// vanished = stored\current; a UIDVALIDITY change replaces the whole folder; flag
-// changes (CONDSTORE) are folded into upserts. Caller holds mu.
+// vanished = stored\current; a UIDVALIDITY change replaces the whole folder;
+// flag changes use CONDSTORE or the periodic compact fallback and are folded
+// into upserts. Caller holds mu.
 func (b *Backend) computeChanges(c *conn, prev cursor) (upserts, deletes []string, next cursor, err error) {
 	folders, err := b.folders(c)
 	if err != nil {
@@ -259,12 +322,17 @@ func (b *Backend) computeChanges(c *conn, prev cursor) (upserts, deletes []strin
 			next.Folders[f] = old
 			continue
 		}
-		st, curUIDs, serr := b.snapshot(c, f)
+		old := prev.Folders[f]
+		condstore := c.cl.Caps().Has(imap.CapCondStore) && old.ModSeq != 0
+		scanFlags := !condstore && flagsDue(old, time.Now())
+		st, curUIDs, serr := b.snapshot(c, f, scanFlags)
 		if serr != nil {
 			return nil, nil, cursor{}, serr
 		}
+		if !condstore && !scanFlags {
+			st.SeenUIDs, st.FlaggedUIDs, st.FlagsCheckedAt = old.SeenUIDs, old.FlaggedUIDs, old.FlagsCheckedAt
+		}
 		next.Folders[f] = st
-		old := prev.Folders[f]
 
 		if old.UIDValidity != 0 && old.UIDValidity != st.UIDValidity {
 			// Folder reset: the old UIDs are meaningless now. Drop them and re-add all.
@@ -297,10 +365,23 @@ func (b *Backend) computeChanges(c *conn, prev cursor) (upserts, deletes []strin
 				vanishedN++
 			}
 		}
-		// Flag changes since the stored modseq (re-fetch to update read/star).
-		changed, cerr := b.changedSince(c.cl, old.ModSeq, curUIDs)
-		if cerr != nil {
-			return nil, nil, cursor{}, cerr
+		// Flag changes use CHANGEDSINCE when available; otherwise compare the
+		// periodic compact flag snapshot. A legacy/seed cursor has no baseline, so
+		// its first scan establishes one without redundantly upserting everything.
+		var changed []imap.UID
+		if condstore {
+			changed, err = b.changedSince(c.cl, old.ModSeq, curUIDs)
+			if err != nil {
+				return nil, nil, cursor{}, err
+			}
+		} else if scanFlags && old.FlagsCheckedAt != 0 {
+			oldSeen, oldFlagged := uidSet(decodeUIDs(old.SeenUIDs)), uidSet(decodeUIDs(old.FlaggedUIDs))
+			newSeen, newFlagged := uidSet(decodeUIDs(st.SeenUIDs)), uidSet(decodeUIDs(st.FlaggedUIDs))
+			for _, u := range curUIDs {
+				if oldSeen[u] != newSeen[u] || oldFlagged[u] != newFlagged[u] {
+					changed = append(changed, u)
+				}
+			}
 		}
 		flagN := 0
 		for _, u := range changed {
@@ -312,20 +393,21 @@ func (b *Backend) computeChanges(c *conn, prev cursor) (upserts, deletes []strin
 		logging.Trace("imapbackend: folder diff",
 			"folder", f, "uidvalidity", st.UIDValidity, "stored", len(oldUIDs), "current", len(curUIDs),
 			"new", newN, "vanished", vanishedN, "flag_changed", flagN,
-			"path", condStorePath(old.ModSeq))
+			"path", flagChangePath(condstore, scanFlags))
 	}
 	logging.Trace("imapbackend: compute changes done", "account", b.cfg.Email, "upserts", len(upserts), "deletes", len(deletes))
 	return upserts, deletes, next, nil
 }
 
-// condStorePath names which flag-change detection branch a folder diff used, for
-// tracing: CONDSTORE CHANGEDSINCE when a stored modseq is present, else the
-// full-diff fallback.
-func condStorePath(modseq uint64) string {
-	if modseq == 0 {
-		return "full-diff"
+// flagChangePath names which flag-change detection branch a folder diff used.
+func flagChangePath(condstore, scanned bool) string {
+	if condstore {
+		return "condstore-changedsince"
 	}
-	return "condstore-changedsince"
+	if scanned {
+		return "flags-snapshot"
+	}
+	return "flags-deferred"
 }
 
 func uidSet(uids []imap.UID) map[imap.UID]bool {

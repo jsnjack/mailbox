@@ -250,6 +250,10 @@ func TestIMAPIncremental(t *testing.T) {
 	if prof.Cursor == "" {
 		t.Fatal("Profile cursor is empty; want a seeded cursor")
 	}
+	baselineIDs, err := b.SearchIDs(ctx, "", 0)
+	if err != nil || len(baselineIDs) != 1 {
+		t.Fatalf("baseline SearchIDs = %v, %v", baselineIDs, err)
+	}
 
 	// No changes yet. The steady-state cursor must round-trip byte-identically
 	// (whether via the STATUS pre-check copying the old state or a fresh
@@ -264,6 +268,28 @@ func TestIMAPIncremental(t *testing.T) {
 	}
 	if cur1 != prof.Cursor {
 		t.Fatalf("steady-state cursor changed:\n was %s\n now %s", prof.Cursor, cur1)
+	}
+
+	// A non-CONDSTORE server has no modseq to reveal remote read/star changes.
+	// Force the compact flag watermark due, change \Seen as another client would,
+	// and verify the existing UID is surfaced as an upsert.
+	if err := b.ApplyLabels(ctx, baselineIDs, nil, []string{model.LabelUnread}); err != nil {
+		t.Fatalf("mark read on server: %v", err)
+	}
+	staleFlags := decodeCursor(cur1)
+	inboxState := staleFlags.Folders["INBOX"]
+	inboxState.FlagsCheckedAt = time.Now().Add(-nonCondstoreFlagScanInterval).Unix()
+	staleFlags.Folders["INBOX"] = inboxState
+	up, del, cur1, err = b.Changes(ctx, staleFlags.encode())
+	if err != nil {
+		t.Fatalf("Changes (remote flags): %v", err)
+	}
+	if len(up) != 1 || up[0] != baselineIDs[0] || len(del) != 0 {
+		t.Fatalf("remote flag change: ups=%v dels=%v", up, del)
+	}
+	updated, err := b.FetchMetadata(ctx, baselineIDs[0])
+	if err != nil || updated.IsUnread {
+		t.Fatalf("remote read state not visible: unread=%v err=%v", updated.IsUnread, err)
 	}
 
 	// A new message appears → one upsert, no deletes.
@@ -304,6 +330,22 @@ func TestIMAPIncremental(t *testing.T) {
 	}
 	if len(del) != len(oldUIDs) || len(up) != len(present) {
 		t.Fatalf("uidvalidity reset: ups=%d dels=%d, want %d up / %d del", len(up), len(del), len(present), len(oldUIDs))
+	}
+}
+
+func TestFlagsDue(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	if !flagsDue(folderState{}, now) {
+		t.Fatal("missing flag baseline should be due")
+	}
+	if flagsDue(folderState{FlagsCheckedAt: now.Add(-time.Minute).Unix()}, now) {
+		t.Fatal("fresh flag baseline reported due")
+	}
+	if !flagsDue(folderState{FlagsCheckedAt: now.Add(-nonCondstoreFlagScanInterval).Unix()}, now) {
+		t.Fatal("stale flag baseline not due")
+	}
+	if !flagsDue(folderState{FlagsCheckedAt: now.Add(2 * nonCondstoreFlagScanInterval).Unix()}, now) {
+		t.Fatal("far-future flag baseline should be treated as due")
 	}
 }
 
@@ -380,10 +422,14 @@ func TestCursorAndUIDCodec(t *testing.T) {
 		}
 	}
 	c := cursor{Folders: map[string]folderState{
-		"INBOX": {UIDValidity: 42, ModSeq: 1000, UIDNext: 101, UIDs: encodeUIDs(uids)},
+		"INBOX": {
+			UIDValidity: 42, ModSeq: 1000, UIDNext: 101, UIDs: encodeUIDs(uids),
+			SeenUIDs: "1:3", FlaggedUIDs: "5", FlagsCheckedAt: 1_700_000_000,
+		},
 	}}
 	rt := decodeCursor(c.encode())
-	if rt.Folders["INBOX"].UIDValidity != 42 || rt.Folders["INBOX"].ModSeq != 1000 || rt.Folders["INBOX"].UIDNext != 101 {
+	if rt.Folders["INBOX"].UIDValidity != 42 || rt.Folders["INBOX"].ModSeq != 1000 || rt.Folders["INBOX"].UIDNext != 101 ||
+		rt.Folders["INBOX"].SeenUIDs != "1:3" || rt.Folders["INBOX"].FlaggedUIDs != "5" || rt.Folders["INBOX"].FlagsCheckedAt != 1_700_000_000 {
 		t.Fatalf("cursor round-trip lost fields: %+v", rt.Folders["INBOX"])
 	}
 	if decodeCursor("").Folders == nil {
