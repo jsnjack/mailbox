@@ -124,24 +124,26 @@ type window struct {
 	unreadOnly        bool
 	// multi-select triage: a selection mode with per-row checkboxes and a bulk
 	// action bar.
-	selectBtn         *gtk.ToggleButton
-	selectMode        bool
-	selected          map[string]bool // selected thread ids
-	selectionBar      *gtk.Box
-	selectionLabel    *gtk.Label
-	readOnlyBanner    *adw.Banner    // revealed when no Gmail client (live features off)
-	outboxBanner      *adw.Banner    // revealed when sends are queued/failed
-	emptyFolderBanner *adw.Banner    // revealed in Trash/Spam to empty them permanently
-	authBanner        *adw.Banner    // revealed when an account's sign-in expired/was revoked
-	authExpiredID     int64          // the account the auth banner's Reconnect targets (0 = none/unknown)
-	authReported      map[int64]bool // accounts whose expiry already got an activity-log row (AuthExpired repeats every failed sync pass)
-	searchEntry       *gtk.SearchEntry
-	suppressSearch    bool   // guards SetText from firing a search during label switch
-	serverSearch      bool   // current search is a Gmail server-side search, not local FTS
-	serverQuery       string // the active server-search query (guards the debounced change signal)
-	threadByID        map[string]model.ThreadSummary
-	threadIDs         []string          // displayed thread ids, in order (for incremental diffing)
-	rowSig            map[string]string // last-rendered signature per row, to detect in-place changes
+	selectBtn          *gtk.ToggleButton
+	selectMode         bool
+	selected           map[string]bool // selected thread ids
+	selectionBar       *gtk.Box
+	selectionLabel     *gtk.Label
+	readOnlyBanner     *adw.Banner    // revealed when no Gmail client (live features off)
+	outboxBanner       *adw.Banner    // revealed when sends are queued/failed
+	emptyFolderBanner  *adw.Banner    // revealed in Trash/Spam to empty them permanently
+	authBanner         *adw.Banner    // revealed when an account's sign-in expired/was revoked
+	authExpiredID      int64          // the account the auth banner's Reconnect targets (0 = none/unknown)
+	authReported       map[int64]bool // accounts whose expiry already got an activity-log row (AuthExpired repeats every failed sync pass)
+	searchEntry        *gtk.SearchEntry
+	searchAllBtn       *gtk.Button // explicit provider search, available even when local FTS has hits
+	suppressSearch     bool        // guards SetText from firing a search during label switch
+	serverSearch       bool        // current search is a Gmail server-side search, not local FTS
+	serverQuery        string      // the active server-search query (guards the debounced change signal)
+	serverSearchCancel context.CancelFunc
+	threadByID         map[string]model.ThreadSummary
+	threadIDs          []string          // displayed thread ids, in order (for incremental diffing)
+	rowSig             map[string]string // last-rendered signature per row, to detect in-place changes
 
 	// coalesce refreshes triggered by bursts of sync change events.
 	refreshPending       bool
@@ -1313,7 +1315,7 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 
 	w.searchEntry = gtk.NewSearchEntry()
 	w.searchEntry.SetPlaceholderText("Search")
-	setMargins(w.searchEntry, 6, 6, 6, 6)
+	w.searchEntry.SetHExpand(true)
 	w.searchEntry.ConnectSearchChanged(w.onSearchChanged)
 	// Esc in the search entry (stop-search) clears it, returning the list to the
 	// current label (the cleared text fires search-changed → refreshList("")).
@@ -1324,6 +1326,16 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 		logging.Trace("ui: search cleared via Esc")
 		w.searchEntry.SetText("")
 	})
+	w.searchAllBtn = gtk.NewButtonFromIconName("edit-find-symbolic")
+	w.searchAllBtn.SetTooltipText("Search all mail on the provider")
+	a11yLabel(w.searchAllBtn, "Search all mail on the provider")
+	w.searchAllBtn.AddCSSClass("flat")
+	w.searchAllBtn.SetVisible(false)
+	w.searchAllBtn.ConnectClicked(w.onSearchAllMail)
+	searchBar := gtk.NewBox(gtk.OrientationHorizontal, 4)
+	setMargins(searchBar, 6, 6, 6, 6)
+	searchBar.Append(w.searchEntry)
+	searchBar.Append(w.searchAllBtn)
 
 	w.outboxBanner = adw.NewBanner("")
 	w.outboxBanner.SetButtonLabel("Outbox")
@@ -1358,7 +1370,7 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 	content.Append(w.authBanner)
 	content.Append(w.outboxBanner)
 	content.Append(w.emptyFolderBanner)
-	content.Append(w.searchEntry)
+	content.Append(searchBar)
 	content.Append(w.selectionBar)
 	content.Append(w.threadStack)
 
@@ -1822,12 +1834,16 @@ func (w *window) bulkApply(verb string, add, remove []string) {
 	}()
 }
 
-// onSearchAllMail runs a Gmail server-side search for the current query, caches
-// the matches, and shows them — finding mail beyond the local cache.
+// onSearchAllMail runs a provider-side search for the current query, caches the
+// matches, and shows them — finding mail beyond the local cache.
 func (w *window) onSearchAllMail() {
-	logging.Trace("ui: search all mail", "query", strings.TrimSpace(w.searchEntry.Text()), "account", w.activeID)
+	q := strings.TrimSpace(w.searchEntry.Text())
+	if q == "" {
+		return
+	}
+	logging.Trace("ui: search all mail", "query", q, "account", w.activeID)
 	w.serverSearch = true // stay in server-search mode across refreshes
-	w.runServerSearch(strings.TrimSpace(w.searchEntry.Text()))
+	w.runServerSearch(q)
 }
 
 // runServerSearch executes the Gmail server-side search for q and shows the
@@ -1843,44 +1859,57 @@ func (w *window) runServerSearch(q string) {
 	w.emptyPage.SetIconName("edit-find-symbolic")
 	w.emptyPage.SetTitle("Searching all mail…")
 	w.emptyPage.SetDescription("")
+	w.searchAllBtn.SetSensitive(false)
+	if w.serverSearchCancel != nil {
+		w.serverSearchCancel()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	w.serverSearchCancel = cancel
 	acctID := w.activeID
 	w.refreshGen++
 	gen := w.refreshGen
 	go func() {
-		ctx := context.Background()
-		sums, err := w.serverSearchThreads(ctx, acctID, q)
+		sums, truncated, err := w.serverSearchThreads(ctx, acctID, q)
 		dispatch.Main(func() {
 			if gen != w.refreshGen || !w.serverSearch ||
 				strings.TrimSpace(w.searchEntry.Text()) != q || w.activeID != acctID {
 				logging.Trace("ui: server search discarded", "query", q, "gen", gen, "cur", w.refreshGen, "serverSearch", w.serverSearch, "account", acctID)
 				return // mode/query/account changed while searching
 			}
+			w.searchAllBtn.SetSensitive(true)
 			if err != nil {
 				slog.Warn("ui: search all mail", "err", err)
-				w.toast("Couldn't search all mail")
-				w.showThreads(nil)
+				w.toast("Couldn't search all mail — showing cached results")
+				w.serverSearch, w.serverQuery = false, ""
+				w.refreshList(q)
 				return
 			}
 			logging.Trace("ui: server search results", "query", q, "n", len(sums), "account", acctID)
 			w.showThreads(sums)
 			if len(sums) == 0 {
 				w.toast("No messages found")
+			} else if truncated {
+				w.toast(fmt.Sprintf("Showing the first %d matches — refine your search for more", serverSearchCap))
 			}
 		})
 	}()
 }
 
-// serverSearchThreads runs the Gmail server-side search and groups the matched
+// serverSearchThreads runs the provider-side search and groups the matched
 // message ids into thread summaries, newest-first. The id→thread mapping and the
 // summaries are each fetched in one batched query rather than per matched id.
-func (w *window) serverSearchThreads(ctx context.Context, acctID int64, q string) ([]model.ThreadSummary, error) {
-	ids, err := w.deps.SearchServer(ctx, acctID, q, 50)
+func (w *window) serverSearchThreads(ctx context.Context, acctID int64, q string) ([]model.ThreadSummary, bool, error) {
+	ids, err := w.deps.SearchServer(ctx, acctID, q, serverSearchCap+1)
 	if err != nil {
-		return nil, err
+		return nil, false, err
+	}
+	truncated := len(ids) > serverSearchCap
+	if truncated {
+		ids = ids[:serverSearchCap]
 	}
 	idToThread, err := w.deps.Store.ThreadIDsForMessages(ctx, acctID, ids)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	seen := make(map[string]bool, len(ids))
 	tids := make([]string, 0, len(ids))
@@ -1894,26 +1923,33 @@ func (w *window) serverSearchThreads(ctx context.Context, acctID int64, q string
 	}
 	sums, err := w.deps.Store.GetThreadSummaries(ctx, acctID, tids)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	sort.SliceStable(sums, func(i, j int) bool {
 		return sums[i].Latest.InternalDate.After(sums[j].Latest.InternalDate)
 	})
-	return sums, nil
+	return sums, truncated, nil
 }
 
 func (w *window) onSearchChanged() {
 	if w.suppressSearch {
 		return
 	}
-	logging.Trace("ui: search changed", "query", w.searchEntry.Text(), "serverQuery", w.serverQuery)
+	q := strings.TrimSpace(w.searchEntry.Text())
+	logging.Trace("ui: search changed", "query", q, "serverQuery", w.serverQuery)
+	w.searchAllBtn.SetVisible(q != "" && w.deps.SearchServer != nil)
 	// The search-changed signal is debounced, so a programmatic SetText (e.g.
 	// "Find emails from sender") arrives here after suppressSearch was cleared.
 	// Only a genuinely different query exits server-search mode back to local.
-	if strings.TrimSpace(w.searchEntry.Text()) != w.serverQuery {
+	if q != w.serverQuery {
+		w.searchAllBtn.SetSensitive(true)
+		if w.serverSearchCancel != nil {
+			w.serverSearchCancel()
+			w.serverSearchCancel = nil
+		}
 		w.serverSearch = false
 	}
-	w.refreshList(w.searchEntry.Text())
+	w.refreshList(q)
 }
 
 // refreshList populates the thread list from either the current label (blank
@@ -1937,6 +1973,10 @@ func (w *window) refreshListThen(query string, done func()) {
 func (w *window) loadThreadsFor(query string) {
 	trimmed := strings.TrimSpace(query)
 	if trimmed == "" {
+		if w.serverSearchCancel != nil {
+			w.serverSearchCancel()
+			w.serverSearchCancel = nil
+		}
 		w.serverSearch, w.serverQuery = false, "" // no query → not server-searching
 		label, acct := w.current, w.activeID
 		logging.Trace("ui: load threads (label)", "label", label, "account", acct, "unreadOnly", w.unreadOnly)
@@ -2155,9 +2195,14 @@ func (w *window) showThreads(sums []model.ThreadSummary) {
 			q := strings.TrimSpace(w.searchEntry.Text())
 			w.emptyPage.SetIconName("edit-find-symbolic")
 			w.emptyPage.SetTitle("No matches")
-			w.emptyPage.SetDescription(fmt.Sprintf("No cached messages match %q.", q))
-			// Offer to look beyond the local cache.
-			if w.deps.SearchServer != nil {
+			if w.serverSearch {
+				w.emptyPage.SetDescription(fmt.Sprintf("No messages in this account match %q.", q))
+			} else {
+				w.emptyPage.SetDescription(fmt.Sprintf("No cached messages match %q.", q))
+			}
+			// Keep the empty-state action as a larger, discoverable counterpart to
+			// the search-bar button when only the local cache has been searched.
+			if w.deps.SearchServer != nil && !w.serverSearch {
 				btn := gtk.NewButtonWithLabel("Search all mail")
 				btn.AddCSSClass("pill")
 				btn.AddCSSClass("suggested-action")
@@ -3489,6 +3534,11 @@ func (w *window) restoreSidebarSelection() {
 // virtualizes row widgets, so this only bounds metadata held in memory; a truly
 // windowed model (paging on scroll) is a further optimization.
 const threadListCap = 5000
+
+// serverSearchCap bounds metadata fetched into the cache by one interactive
+// provider search. Request one extra id to detect truncation and tell the user
+// instead of silently presenting a partial 50-message result as complete.
+const serverSearchCap = 500
 
 // signatureForActive returns the signature composes should append for the active
 // account: the global default when only one account is connected (per-account
