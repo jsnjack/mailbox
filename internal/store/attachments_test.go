@@ -63,5 +63,29 @@ func TestAttachmentsRoundTrip(t *testing.T) {
 	}
 	if got, _ := s.ListAttachments(ctx, rowID); len(got) != 1 {
 		t.Fatalf("after replace got %d, want 1", len(got))
+	} else if got[0].SHA256 != "deadbeef" || got[0].DiskPath != "/cache/de/deadbeef.pdf" {
+		t.Fatalf("replacement lost cached download: %+v", got[0])
+	}
+	changedIdentity := atts[0]
+	changedIdentity.Filename = "different.pdf"
+	if err := s.ReplaceAttachments(ctx, rowID, []model.Attachment{changedIdentity}); err != nil {
+		t.Fatalf("replace changed identity: %v", err)
+	}
+	if got, _ := s.ListAttachments(ctx, rowID); len(got) != 1 || got[0].DiskPath != "" || got[0].SHA256 != "" {
+		t.Fatalf("changed attachment identity reused cached bytes: %+v", got)
+	}
+	if err := s.ReplaceAttachments(ctx, rowID, atts[:1]); err != nil {
+		t.Fatalf("restore attachment metadata: %v", err)
+	}
+	msg, err := s.GetMessage(ctx, acc, "m1")
+	if err != nil || !msg.HasAttachments {
+		t.Fatalf("downloadable attachment marker = %v, %v", msg.HasAttachments, err)
+	}
+	if err := s.ReplaceAttachments(ctx, rowID, atts[2:]); err != nil {
+		t.Fatalf("replace with inline-only attachment: %v", err)
+	}
+	msg, err = s.GetMessage(ctx, acc, "m1")
+	if err != nil || msg.HasAttachments {
+		t.Fatalf("inline-only attachment marker = %v, %v", msg.HasAttachments, err)
 	}
 }

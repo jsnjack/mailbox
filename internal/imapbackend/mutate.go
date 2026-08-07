@@ -446,7 +446,7 @@ func attachmentBytes(raw []byte, idx int) ([]byte, error) {
 		if err != nil {
 			break
 		}
-		if _, ok := part.Header.(*gomail.AttachmentHeader); ok {
+		if _, _, _, ok := attachmentPartMeta(part.Header); ok {
 			n++
 			if n == idx {
 				return io.ReadAll(part.Body)

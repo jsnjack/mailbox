@@ -133,11 +133,76 @@ func TestIMAPBackendReadPath(t *testing.T) {
 	if len(atts) != 0 {
 		t.Errorf("expected no attachments, got %d", len(atts))
 	}
+	if !strings.Contains(body.RawHeaders, "From: Bob Builder <bob@example.com>") ||
+		!strings.Contains(body.RawHeaders, "Message-ID: <m1@example.com>") {
+		t.Errorf("raw headers were not preserved: %q", body.RawHeaders)
+	}
 
 	// Byte stats are counted across the IMAP traffic above.
 	in, out := b.Transferred()
 	if in == 0 || out == 0 {
 		t.Errorf("byte stats not counted: in=%d out=%d", in, out)
+	}
+}
+
+func TestBodyStructureHasAttachments(t *testing.T) {
+	textPart := &imap.BodyStructureSinglePart{Type: "text", Subtype: "plain"}
+	attachment := &imap.BodyStructureSinglePart{
+		Type: "application", Subtype: "pdf",
+		Extended: &imap.BodyStructureSinglePartExt{Disposition: &imap.BodyStructureDisposition{
+			Value: "attachment", Params: map[string]string{"filename": "report.pdf"},
+		}},
+	}
+	if bodyStructureHasAttachments(textPart) {
+		t.Fatal("plain text body reported an attachment")
+	}
+	if !bodyStructureHasAttachments(&imap.BodyStructureMultiPart{
+		Subtype: "mixed", Children: []imap.BodyStructure{textPart, attachment},
+	}) {
+		t.Fatal("multipart attachment was not detected")
+	}
+	if !bodyStructureHasAttachments(&imap.BodyStructureSinglePart{
+		Type: "application", Subtype: "octet-stream", Params: map[string]string{"name": "data.bin"},
+	}) {
+		t.Fatal("named MIME part was not detected as an attachment")
+	}
+	if bodyStructureHasAttachments(nil) {
+		t.Fatal("nil body structure reported an attachment")
+	}
+}
+
+func TestRawHeaderBlock(t *testing.T) {
+	raw := []byte("From: sender@example.com\r\nAuthentication-Results: mx; dkim=pass\r\n\r\nbody")
+	got := rawHeaderBlock(raw)
+	if strings.Contains(got, "body") || !strings.Contains(got, "Authentication-Results: mx; dkim=pass") {
+		t.Fatalf("rawHeaderBlock = %q", got)
+	}
+	if got := rawHeaderBlock([]byte("malformed without separator")); got != "" {
+		t.Fatalf("malformed rawHeaderBlock = %q", got)
+	}
+}
+
+func TestParseBodyPreservesInlineCID(t *testing.T) {
+	raw := []byte("From: sender@example.com\r\n" +
+		"Content-Type: multipart/related; boundary=mb\r\n\r\n" +
+		"--mb\r\nContent-Type: text/html\r\n\r\n<p>Hello<img src=\"cid:logo\"></p>\r\n" +
+		"--mb\r\nContent-Type: image/png; name=\"logo.png\"\r\n" +
+		"Content-Disposition: inline; filename=\"logo.png\"\r\n" +
+		"Content-ID: <logo>\r\nContent-Transfer-Encoding: base64\r\n\r\ncG5n\r\n" +
+		"--mb--\r\n")
+	body, atts, err := parseBody(raw)
+	if err != nil {
+		t.Fatalf("parseBody: %v", err)
+	}
+	if !strings.Contains(body.HTML, "cid:logo") || len(atts) != 1 {
+		t.Fatalf("body=%q attachments=%+v", body.HTML, atts)
+	}
+	if atts[0].ContentID != "logo" || atts[0].Filename != "logo.png" || atts[0].GmailAttID != "1" {
+		t.Fatalf("inline attachment = %+v", atts[0])
+	}
+	data, err := attachmentBytes(raw, 1)
+	if err != nil || string(data) != "png" {
+		t.Fatalf("attachmentBytes = %q, %v", data, err)
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"sort"
 	"strconv"
@@ -629,7 +630,8 @@ func (b *Backend) FetchMetadata(ctx context.Context, id string) (model.Message, 
 		start := time.Now()
 		bufs, err := c.cl.Fetch(imap.UIDSetNum(uid), &imap.FetchOptions{
 			Envelope: true, Flags: true, InternalDate: true, RFC822Size: true, UID: true,
-			BodySection: []*imap.FetchItemBodySection{refSection},
+			BodyStructure: &imap.FetchItemBodyStructure{Extended: true},
+			BodySection:   []*imap.FetchItemBodySection{refSection},
 		}).Collect()
 		if err != nil {
 			logging.Trace("imapbackend: fetch metadata failed", "id", id, "dur", time.Since(start), "err", err)
@@ -743,7 +745,8 @@ func (b *Backend) fetchMetaChunk(c *conn, mailbox string, uidv uint32, uids []im
 	start := time.Now()
 	bufs, err := c.cl.Fetch(set, &imap.FetchOptions{
 		Envelope: true, Flags: true, InternalDate: true, RFC822Size: true, UID: true,
-		BodySection: []*imap.FetchItemBodySection{refSection},
+		BodyStructure: &imap.FetchItemBodyStructure{Extended: true},
+		BodySection:   []*imap.FetchItemBodySection{refSection},
 	}).Collect()
 	if err != nil {
 		logging.Trace("imapbackend: fetch metadata batch chunk failed", "mailbox", mailbox, "n", len(uids), "dur", time.Since(start), "err", err)
@@ -878,6 +881,7 @@ func (b *Backend) toMessage(mailbox string, uidv uint32, buf *imapclient.FetchMe
 	}
 	m.IsUnread = !seen
 	m.IsStarred = flagged
+	m.HasAttachments = bodyStructureHasAttachments(buf.BodyStructure)
 
 	m.Labels = []string{b.labelFor(mailbox)}
 	if m.IsUnread {
@@ -889,16 +893,44 @@ func (b *Backend) toMessage(mailbox string, uidv uint32, buf *imapclient.FetchMe
 	return m
 }
 
+func bodyStructureHasAttachments(bs imap.BodyStructure) bool {
+	if bs == nil {
+		return false
+	}
+	found := false
+	bs.Walk(func(_ []int, part imap.BodyStructure) bool {
+		if found {
+			return false
+		}
+		if disp := part.Disposition(); disp != nil {
+			if strings.EqualFold(disp.Value, "attachment") {
+				found = true
+				return false
+			}
+			if strings.EqualFold(disp.Value, "inline") {
+				return true
+			}
+		}
+		if single, ok := part.(*imap.BodyStructureSinglePart); ok && single.Filename() != "" {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
 // parseBody extracts text/html bodies and attachment metadata from a raw RFC 5322
 // message using go-message. On a parse failure it falls back to treating the whole
 // payload as plain text, so a malformed message still renders something.
 func parseBody(raw []byte) (model.MessageBody, []model.Attachment, error) {
+	body := model.MessageBody{RawHeaders: rawHeaderBlock(raw)}
 	mr, err := gomail.CreateReader(bytes.NewReader(raw))
 	if err != nil {
-		return model.MessageBody{Text: string(raw)}, nil, nil
+		body.Text = string(raw)
+		return body, nil, nil
 	}
 	var (
-		body model.MessageBody
 		atts []model.Attachment
 	)
 	for {
@@ -912,25 +944,73 @@ func parseBody(raw []byte) (model.MessageBody, []model.Attachment, error) {
 		switch h := part.Header.(type) {
 		case *gomail.InlineHeader:
 			ct, _, _ := h.ContentType()
-			data, _ := io.ReadAll(part.Body)
-			if strings.EqualFold(ct, "text/html") {
-				body.HTML = string(data)
-			} else if body.Text == "" {
-				body.Text = string(data)
+			if strings.HasPrefix(strings.ToLower(ct), "text/") {
+				data, _ := io.ReadAll(part.Body)
+				if strings.EqualFold(ct, "text/html") {
+					body.HTML = string(data)
+				} else if body.Text == "" {
+					body.Text = string(data)
+				}
+			} else if filename, mimeType, cid, ok := attachmentPartMeta(part.Header); ok {
+				n, _ := io.Copy(io.Discard, part.Body)
+				atts = append(atts, model.Attachment{
+					GmailAttID: strconv.Itoa(len(atts) + 1), Filename: filename,
+					MimeType: mimeType, SizeBytes: n, ContentID: cid,
+				})
 			}
 		case *gomail.AttachmentHeader:
-			filename, _ := h.Filename()
-			ct, _, _ := h.ContentType()
+			filename, ct, cid, _ := attachmentPartMeta(h)
 			n, _ := io.Copy(io.Discard, part.Body)
 			// IMAP has no per-attachment id; use the ordinal so FetchAttachment can
 			// re-derive the part from a re-fetched body.
 			atts = append(atts, model.Attachment{
 				GmailAttID: strconv.Itoa(len(atts) + 1),
-				Filename:   filename, MimeType: ct, SizeBytes: n,
+				Filename:   filename, MimeType: ct, SizeBytes: n, ContentID: cid,
 			})
 		}
 	}
 	return body, atts, nil
+}
+
+// attachmentPartMeta recognizes both ordinary attachments and inline binary
+// CID resources. go-message classifies Content-Disposition:inline as an
+// InlineHeader even for images; retaining it here is what lets IMAP HTML render
+// embedded logos and photos through the same cid: cache as Gmail.
+func attachmentPartMeta(h gomail.PartHeader) (filename, mimeType, contentID string, ok bool) {
+	mimeType, typeParams, _ := mime.ParseMediaType(h.Get("Content-Type"))
+	disposition, dispParams, _ := mime.ParseMediaType(h.Get("Content-Disposition"))
+	filename = dispParams["filename"]
+	if filename == "" {
+		filename = typeParams["name"]
+	}
+	contentID = strings.TrimSpace(strings.Trim(h.Get("Content-ID"), "<>"))
+	ok = strings.EqualFold(disposition, "attachment") || filename != "" ||
+		(contentID != "" && !strings.HasPrefix(strings.ToLower(mimeType), "text/"))
+	return filename, mimeType, contentID, ok
+}
+
+const maxStoredHeaderBytes = 512 << 10
+
+// rawHeaderBlock keeps the RFC 5322 header section for View Headers and sender
+// authentication checks. Cap pathological input so a hostile message cannot
+// duplicate many megabytes of headers in the cache.
+func rawHeaderBlock(raw []byte) string {
+	end := bytes.Index(raw, []byte("\r\n\r\n"))
+	if end < 0 {
+		end = bytes.Index(raw, []byte("\n\n"))
+	}
+	if end < 0 {
+		return ""
+	}
+	headers := raw[:end]
+	if len(headers) <= maxStoredHeaderBytes {
+		return string(headers)
+	}
+	cut := maxStoredHeaderBytes
+	if i := bytes.LastIndexByte(headers[:cut], '\n'); i > 0 {
+		cut = i
+	}
+	return string(headers[:cut]) + "\nX-Mailbox-Headers-Truncated: true"
 }
 
 // msgID encodes a stable provider id for an IMAP message: its mailbox,

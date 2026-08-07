@@ -5181,8 +5181,7 @@ func (w *window) viewMessageHeaders(m model.Message) {
 		if headers == "" && w.deps.FetchBody != nil {
 			// A body cached before header capture has no stored headers — one
 			// refetch picks them up (the same self-heal the inline-image path
-			// uses). IMAP never stores headers, so its bounded refetch still
-			// ends at the toast below.
+			// uses).
 			logging.Trace("ui: view headers refetch", "id", m.GmailID)
 			fetchCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 			if err := w.deps.FetchBody(fetchCtx, m.AccountID, m.GmailID); err != nil {
@@ -5198,8 +5197,8 @@ func (w *window) viewMessageHeaders(m model.Message) {
 				return // the user moved on — don't pop a dialog over another thread
 			}
 			if headers == "" {
-				// IMAP bodies don't store raw headers (only Gmail captures
-				// Authentication-Results), and a fetch may have failed offline.
+				// The bounded fetch may have failed offline, or a malformed provider
+				// response may not contain a usable header block.
 				logging.Trace("ui: view headers empty", "id", m.GmailID)
 				w.toast("No headers are available for this message")
 				return
