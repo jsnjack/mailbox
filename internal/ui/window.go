@@ -2475,8 +2475,7 @@ func (w *window) onDecidePolicy(decision webkit.PolicyDecisioner, dtype webkit.P
 		return true
 	}
 	if allowedExternalLink(uri) {
-		logging.Trace("ui: open external link", "uri", uri)
-		openExternal(uri)
+		w.openReaderLink(uri, "click")
 	} else {
 		slog.Debug("ui: blocked navigation to unsupported scheme", "uri", uri)
 	}
@@ -2521,11 +2520,22 @@ func (w *window) openNewWindowTarget(uri string) {
 		return // our own rendered content, nothing external to show
 	}
 	if allowedExternalLink(uri) {
-		logging.Trace("ui: open in new window", "uri", uri)
-		openExternal(uri)
+		w.openReaderLink(uri, "new-window")
 	} else {
 		slog.Debug("ui: blocked new-window target with unsupported scheme", "uri", uri)
 	}
+}
+
+// openReaderLink applies network-free click-tracking protection before handing
+// a message link to the user's default browser. Other openExternal callers
+// (attachments and unsubscribe actions) deliberately bypass this: their query
+// parameters may be required by the provider rather than being email content.
+func (w *window) openReaderLink(uri, source string) {
+	target, stats := cleanExternalLink(uri)
+	logging.Trace("ui: open external link", "source", source,
+		"from_host", hostOfURL(uri), "to_host", hostOfURL(target),
+		"unwrapped", stats.Unwrapped, "stripped_params", stats.StrippedParams)
+	openExternal(target)
 }
 
 func allowedExternalLink(raw string) bool {

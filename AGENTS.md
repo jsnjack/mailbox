@@ -123,6 +123,12 @@ A plain-text body (and the snippet fallback) is HTML-escaped into a `<pre>` with
 bare http(s) URLs auto-linkified (`linkifyText` — explicit-scheme match only, so
 no false positives or non-http schemes), so links in text-only mail (CI/cron/
 monitoring notifications) are clickable and open externally like any other link.
+Before a reader link is handed to the browser, `cleanExternalLink` silently strips
+well-known non-functional campaign parameters and bypasses an obvious redirect
+wrapper only when it carries one unambiguous absolute HTTP(S) destination. The
+pass is local-only (it never resolves a redirect), unwraps at most three levels,
+and leaves opaque, ambiguous, same-site application, and non-HTTP links alone;
+left-click and the WebKit **Open Link in New Window** action share this path.
 A sender-authentication badge shows Gmail's SPF/DKIM/DMARC verdict
 (`ToBody` captures `Authentication-Results` into `raw_headers`; `parseAuthResults`
 → green verified / amber partial / red possible-spoof), plus deterministic
