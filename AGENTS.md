@@ -132,8 +132,12 @@ Inline `cid:` attachments work the same way (`inlineImageIndex` reads the
 attachment rows, `serveCID` downloads on request), as does the calendar invite
 behind a conversation (`detectInviteLater`). Both handlers share a six-slot
 fetch semaphore, since our downloads bypass WebKit's own connection limits.
-A failed download raises the "N external images unavailable" banner as it
-happens (`noteRemoteImageUnavailable`). The image collector
+An image that can't be fetched is answered with a transparent pixel rather than
+an error, so the reader never draws a broken-image glyph; the failure is traced
+and nothing is said in the UI, because an expired campaign URL is not something
+the reader can act on. The banner is therefore only ever an offer to load images
+that were deliberately withheld ("Show images" behind the privacy opt-out,
+"Load images" for an image-heavy message). The image collector
 parses CSS declarations and names only image-bearing properties; remote
 `@import`, fonts, cursors, and other CSS resources are removed without a request.
 A conversation with more than 20 unique external image URLs makes no new image

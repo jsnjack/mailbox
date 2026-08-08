@@ -34,11 +34,9 @@ const (
 var imageFetchSlots = make(chan struct{}, remoteImageWorkers)
 
 type remoteImageStats struct {
-	Total       int
-	Cached      int
-	Unavailable int
-	Blocked     int
-	Deferred    int
+	Total    int
+	Blocked  int
+	Deferred int
 }
 
 var (
@@ -80,19 +78,13 @@ func (w *window) resolveRemoteImages(source string, allowNetwork, largeSetApprov
 		key, err := remotecache.Key(rawURL)
 		if err != nil {
 			// Not addressable (no host, credentials in the URL, wrong scheme):
-			// it could never have been fetched, so report it as unavailable
-			// rather than naming a resource the handler would reject.
+			// it could never be fetched, so drop the reference rather than name
+			// a resource the handler would only reject.
 			logging.Trace("ui: external image not addressable", "err", err)
-			stats.Unavailable++
 			continue
 		}
 		entries[rawURL] = remotecache.Entry{Key: key}
 		pending[key] = rawURL
-		if w.remoteImages != nil {
-			if _, ok := w.remoteImages.Open(key); ok {
-				stats.Cached++ // already on disk: served without a request
-			}
-		}
 	}
 	changed := rewriteRemoteImageURLs(doc, entries)
 	if !changed {
@@ -314,9 +306,6 @@ func remoteImageBannerCopy(stats remoteImageStats) (title, button string, loadAl
 	if stats.Deferred > 0 {
 		return fmt.Sprintf("This message contains %d external images", stats.Total), "Load images", true
 	}
-	if stats.Unavailable > 0 {
-		return fmt.Sprintf("%d external %s unavailable", stats.Unavailable, imageNoun(stats.Unavailable)), "Retry", false
-	}
 	return "", "", false
 }
 
@@ -352,7 +341,6 @@ func (w *window) serveRemoteImage(req *webkit.URISchemeRequest) {
 		finishBlankImage(req)
 		return
 	}
-	gen := w.renderGen
 	logging.Trace("ui: external image fetch on demand", "key", key)
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), remoteImageFetchTimeout)
@@ -367,9 +355,10 @@ func (w *window) serveRemoteImage(req *webkit.URISchemeRequest) {
 		entry, ok, err := w.remoteImages.Get(ctx, rawURL, true)
 		dispatch.Main(func() {
 			if err != nil || !ok {
-				logging.Trace("ui: external image unavailable", "key", key, "err", err)
+				// Nothing to tell the user: the image renders as nothing, and
+				// an expired campaign URL is not something they can act on.
+				logging.Trace("ui: external image unavailable", "key", key, "url", rawURL, "err", err)
 				finishBlankImage(req)
-				w.noteRemoteImageUnavailable(gen)
 				return
 			}
 			w.finishImageRequest(req, entry.Path, entry.MIME)
@@ -414,18 +403,6 @@ func (w *window) finishImageRequest(req *webkit.URISchemeRequest, path, mime str
 		size = fi.Size()
 	}
 	req.Finish(stream, size, mime)
-}
-
-// noteRemoteImageUnavailable folds a failed on-demand download into the banner,
-// so "N external images unavailable" appears as failures happen rather than
-// after a blocking prefetch. Stale renders are ignored: their images belong to a
-// conversation that is no longer on screen. Main thread only.
-func (w *window) noteRemoteImageUnavailable(gen uint64) {
-	if gen != w.renderGen {
-		return
-	}
-	w.remoteStats.Unavailable++
-	w.applyRemoteImageBanner(w.remoteStats)
 }
 
 // applyRemoteImageBanner reveals (or hides) the remote-image banner for stats.

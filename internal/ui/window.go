@@ -308,7 +308,7 @@ type window struct {
 	blockImages             bool              // global remote-image opt-out (Preferences)
 	remoteImageBulkApproved bool              // user approved loading a conversation with more than the automatic threshold
 	remoteImageTotal        int               // unique remote URLs in the last completed render
-	remoteImageLoadAll      bool              // banner action approves a large set instead of retrying
+	remoteImageLoadAll      bool              // banner action approves a large set rather than lifting the privacy opt-out
 
 	// AI inbox categorization: per-thread category cache (thread id → category),
 	// computed in the background for the inbox. inboxCategories gates it.
@@ -348,11 +348,8 @@ type window struct {
 	// resource, not a multi-MB base64 blob inflating the HTML.
 	inlineByCID map[string]inlineImage
 	// remoteImageURLs maps the open conversation's mbcache: keys back to the URL
-	// serveRemoteImage downloads on a cache miss, and remoteStats is what the
-	// remote-image banner currently says (its Unavailable count grows as those
-	// downloads fail). Main thread only.
+	// serveRemoteImage downloads on a cache miss. Main thread only.
 	remoteImageURLs map[string]string
-	remoteStats     remoteImageStats
 	// AI health: aiFailedAt is when the last AI request failed; aiFailing drives
 	// the status-bar warning. Used to back off auto-categorization when the LLM is
 	// unreachable so it doesn't retry on every inbox refresh.
@@ -3193,8 +3190,8 @@ func (w *window) buildReader() *adw.NavigationPage {
 			w.rerenderOpenThread()
 			return
 		}
-		// When blocked, this explicitly loads the conversation. Otherwise it
-		// retries failed origins; cached successes remain free.
+		// The banner only appears when images were withheld, so its action is
+		// always "load them now".
 		if !w.imagesEnabled && w.remoteImageTotal > remoteImagePromptThreshold {
 			w.remoteImageBulkApproved = true
 		}
@@ -4651,7 +4648,6 @@ func (w *window) renderConversation(msgs []model.Message) {
 		logging.Trace("ui: render conversation ready", "thread", threadID, "msgs", len(msgs), "fetched", fetched,
 			"newSections", len(fresh), "trackers", blocked, "auth", verdict.level, "warnings", len(warnings),
 			"attachments", len(atts), "inlineImages", len(inlineImgs), "remoteImages", remoteStats.Total,
-			"cachedRemoteImages", remoteStats.Cached, "unavailableRemoteImages", remoteStats.Unavailable,
 			"blockedRemoteImages", remoteStats.Blocked, "deferredRemoteImages", remoteStats.Deferred,
 			"bytes", len(out), "html", logging.Body(out),
 			"fetch", fetchDur, "sanitize", time.Since(sanitizeStart))
@@ -4674,7 +4670,6 @@ func (w *window) renderConversation(msgs []model.Message) {
 				logging.Trace("ui: render conversation discarded", "thread", threadID, "openThread", w.openThreadID)
 				return // user switched to another conversation while this rendered
 			}
-			w.remoteStats = remoteStats // grows as on-demand fetches fail
 			w.applyRemoteImageBanner(remoteStats)
 			// Both maps must be in place before the swap: WebKit requests the
 			// page's images as soon as it has the markup, and the handlers

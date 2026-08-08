@@ -33,7 +33,7 @@ func TestResolveRemoteImagesNamesCacheKeysWithoutFetching(t *testing.T) {
 	if requests.Load() != 0 {
 		t.Fatalf("resolving made %d requests; the fetch belongs to the scheme handler", requests.Load())
 	}
-	if stats.Total != 1 || stats.Cached != 0 || stats.Unavailable != 0 || stats.Blocked != 0 || stats.Deferred != 0 {
+	if stats.Total != 1 || stats.Blocked != 0 || stats.Deferred != 0 {
 		t.Fatalf("stats = %+v", stats)
 	}
 	if strings.Contains(got, srv.URL) || strings.Count(got, "mbcache:") != 2 {
@@ -53,8 +53,8 @@ func TestResolveRemoteImagesNamesCacheKeysWithoutFetching(t *testing.T) {
 		t.Fatalf("document names a different key than the handler fetches: %s", got)
 	}
 
-	// Fetch it the way serveRemoteImage would, then resolve again: the same key
-	// must now be on disk, so the next open serves it without a request.
+	// Fetch it the way serveRemoteImage would: it must land under exactly the
+	// key the document named, or the image would never resolve.
 	entry, ok, err := w.remoteImages.Get(context.Background(), imageURL, true)
 	if err != nil || !ok {
 		t.Fatalf("fetch: ok=%v err=%v", ok, err)
@@ -62,8 +62,8 @@ func TestResolveRemoteImagesNamesCacheKeysWithoutFetching(t *testing.T) {
 	if entry.Key != namedKey {
 		t.Fatalf("fetched key %q, document named %q", entry.Key, namedKey)
 	}
-	if _, stats, _ = w.resolveRemoteImages(source, true, false); stats.Cached != 1 {
-		t.Fatalf("cached image not recognised: %+v", stats)
+	if _, ok := w.remoteImages.Open(namedKey); !ok {
+		t.Fatal("named key does not resolve after the fetch")
 	}
 }
 
@@ -112,7 +112,7 @@ func TestResolveRemoteImagesRemovesBlockedURLs(t *testing.T) {
 	source := `<img src="https://tracking.example/pixel.png"><div style="background:url(https://tracking.example/bg.png)">x</div>`
 
 	got, stats, pending := w.resolveRemoteImages(source, false, false)
-	if stats.Cached != 0 || stats.Blocked != 2 || len(pending) != 0 {
+	if stats.Blocked != 2 || len(pending) != 0 {
 		t.Fatalf("stats=%+v pending=%v", stats, pending)
 	}
 	if strings.Contains(got, "http") || strings.Contains(got, "src=") || strings.Contains(got, "mbcache:") {
@@ -133,7 +133,7 @@ func TestResolveRemoteImagesRequiresApprovalForLargeSets(t *testing.T) {
 	}
 
 	got, stats, pending = w.resolveRemoteImages(source.String(), true, true)
-	if stats.Deferred != 0 || stats.Unavailable != 0 || len(pending) != stats.Total || strings.Count(got, "mbcache:") != stats.Total {
+	if stats.Deferred != 0 || len(pending) != stats.Total || strings.Count(got, "mbcache:") != stats.Total {
 		t.Fatalf("approved pass stats=%+v pending=%d: %s", stats, len(pending), got)
 	}
 }
@@ -147,7 +147,6 @@ func TestRemoteImageBannerCopy(t *testing.T) {
 		loadAll bool
 	}{
 		{name: "blocked", stats: remoteImageStats{Blocked: 2}, title: "2 external images blocked for privacy", button: "Show images"},
-		{name: "unavailable", stats: remoteImageStats{Unavailable: 1}, title: "1 external image unavailable", button: "Retry"},
 		{name: "large set", stats: remoteImageStats{Total: 21, Deferred: 21}, title: "This message contains 21 external images", button: "Load images", loadAll: true},
 		{name: "none", stats: remoteImageStats{}},
 	}
