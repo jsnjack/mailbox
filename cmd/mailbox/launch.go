@@ -570,14 +570,14 @@ func launchUI(mailto string) error {
 		}
 		return nil
 	}
-	deps.OAuthConnect = func(ctx context.Context, kind config.AuthKind) (string, string, error) {
+	deps.OAuthConnect = func(ctx context.Context, kind config.AuthKind, browserFallback func(string)) (string, string, error) {
 		switch kind {
 		case config.AuthGmailREST:
 			cc, err := auth.LoadClientConfig(credentialsPath())
 			if err != nil {
 				return "", "", err
 			}
-			tok, err := auth.Login(ctx, cc) // Gmail REST scopes
+			tok, err := auth.LoginWithBrowserFallback(ctx, cc, browserFallback) // Gmail REST scopes
 			if err != nil {
 				return "", "", err
 			}
@@ -587,7 +587,7 @@ func launchUI(mailto string) error {
 			if err != nil {
 				return "", "", err
 			}
-			tok, err := auth.LoginGoogleMail(ctx, cc)
+			tok, err := auth.LoginGoogleMailWithBrowserFallback(ctx, cc, browserFallback)
 			if err != nil {
 				return "", "", err
 			}
@@ -597,7 +597,7 @@ func launchUI(mailto string) error {
 			if id == "" {
 				return "", "", fmt.Errorf("set MAILBOX_MS_CLIENT_ID to connect Outlook")
 			}
-			tok, err := auth.LoginMicrosoft(ctx, id)
+			tok, err := auth.LoginMicrosoftWithBrowserFallback(ctx, id, browserFallback)
 			if err != nil {
 				return "", "", err
 			}

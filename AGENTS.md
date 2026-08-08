@@ -35,11 +35,11 @@ internal/
   config/            XDG paths + config.toml load/save
   dispatch/          THE main-thread bridge: Main(fn) → glib.IdleAdd
   store/             SQLite layer (schema, FTS5, queries) — modernc.org/sqlite
-  auth/              OAuth2 installed-app loopback + keyring-backed token source (auto-refresh, rotated-token write-back, IsAuthError detects a revoked/expired refresh token). The refresh POST runs on a dedicated 30s-timeout HTTP client (refreshContext): oauth2.Transport calls Token() before the request context exists and ReuseTokenSource serializes all callers behind one mutex, so an unbounded refresh on a half-open connection would wedge every request for the account.
+  auth/              OAuth2 installed-app loopback + keyring-backed token source (auto-refresh, rotated-token write-back, IsAuthError detects a revoked/expired refresh token). A failed `xdg-open` reports the consent URL back to the add-account dialog for copying while the loopback server keeps waiting. The refresh POST runs on a dedicated 30s-timeout HTTP client (refreshContext): oauth2.Transport calls Token() before the request context exists and ReuseTokenSource serializes all callers behind one mutex, so an unbounded refresh on a half-open connection would wedge every request for the account.
   backend/           the provider-agnostic Backend interface the engine drives (domain-typed: model.Message/Label, opaque sync cursor) + BuildMIME (RFC 5322). No protocol specifics — Gmail today, IMAP planned.
   gmailapi/          wrapper over google.golang.org/api/gmail/v1 (semaphore, per-attempt quota budget, backoff honoring Retry-After; network errors retried for idempotent calls but not sends)
   gmailbackend/      implements backend.Backend over gmailapi.Client (owns the Gmail↔domain conversions + the history-walk → upsert/delete id set)
-  imapbackend/       implements backend.Backend over IMAP (emersion/go-imap v2): connect/LOGIN, LIST folders→labels (special-use mapped), multi-folder backfill (skips \All/\Flagged/\Important virtuals), FETCH envelope/flags + body (go-message), and incremental sync. Message id = "imap:<uidvalidity>:<uid>:<mailbox>". Incremental (`Changes`) diffs a per-folder UID-set cursor (JSON in sync_cursor): new = current\stored, vanished = stored\current, UIDVALIDITY change re-syncs the folder; CONDSTORE `CHANGEDSINCE` adds flag-change detection when the server supports it (QRESYNC isn't exposed in go-imap beta.8, so deletions use the UID-set diff). Profile seeds the initial cursor. Mutations (flags/moves), delete, SMTP send + Sent APPEND, drafts, attachments, threading (References root), and XOAUTH2 (Gmail-mail/Outlook) are implemented. A small connection pool (`poolSize`, `withConn`) serves the engine's fan-out concurrently — each pooled op is bounded by a watchdog that force-closes the connection on ctx cancel or `pooledOpTimeout` (a socket deadline can't do it: go-imap re-arms the read deadline around every response and parks between responses with none, so a half-open connection would otherwise block until TCP gives up), and `acquire` waits for a slot ctx-aware; `Watch` (optional `backend.Watcher`) holds a dedicated IDLE connection on INBOX and nudges the per-account sync loop's `wake` channel for near-real-time updates (falls back to the 60s poll when the server lacks IDLE). Connection setup uses a dial timeout + a login deadline (cleared afterward so pooled/IDLE reads aren't affected) so a wrong/unreachable host fails fast; a login credential rejection is classified (`AUTHENTICATIONFAILED` code + text fallback) and wrapped with `backend.ErrAuth` so the launcher surfaces the reconnect banner instead of retrying forever.
+  imapbackend/       implements backend.Backend over IMAP (emersion/go-imap v2): connect/LOGIN, LIST folders→labels (special-use mapped), multi-folder backfill (skips \All/\Flagged/\Important virtuals), FETCH envelope/flags + body (go-message), and incremental sync. Message id = "imap:<uidvalidity>:<uid>:<mailbox>". Incremental (`Changes`) diffs a per-folder UID-set cursor (JSON in sync_cursor): new = current\stored, vanished = stored\current, UIDVALIDITY change re-syncs the folder; CONDSTORE `CHANGEDSINCE` adds flag-change detection when the server supports it (QRESYNC isn't exposed in go-imap beta.8, so deletions use the UID-set diff). Profile seeds the initial cursor. Mutations map every selectable user folder to a real IMAP MOVE destination; Gmail-style multi-label toggles stay hidden for IMAP. Provider search implements `SearchPager`: the first page searches once, fetches dates for global newest ordering, and retains an opaque bounded session cursor for later pages. Delete, SMTP send + Sent APPEND, drafts, attachments, threading (References root), and XOAUTH2 (Gmail-mail/Outlook) are implemented. A small connection pool (`poolSize`, `withConn`) serves the engine's fan-out concurrently — each pooled op is bounded by a watchdog that force-closes the connection on ctx cancel or `pooledOpTimeout` (a socket deadline can't do it: go-imap re-arms the read deadline around every response and parks between responses with none, so a half-open connection would otherwise block until TCP gives up), and `acquire` waits for a slot ctx-aware; `Watch` (optional `backend.Watcher`) holds a dedicated IDLE connection on INBOX and nudges the per-account sync loop's `wake` channel for near-real-time updates (falls back to the 60s poll when the server lacks IDLE). Connection setup uses a dial timeout + a login deadline (cleared afterward so pooled/IDLE reads aren't affected) so a wrong/unreachable host fails fast; a login credential rejection is classified (`AUTHENTICATIONFAILED` code + text fallback) and wrapped with `backend.ErrAuth` so the launcher surfaces the reconnect banner instead of retrying forever.
   sync/              per-account sync workers (backfill ↔ incremental) + notify.Hub; the engine takes a backend.Backend, never a concrete client
   snooze/            snooze mirroring: local snoozes rows + their provider label mirror ("Snoozed" + hidden "Snoozed/<wake time>" stamps), the wake sweeper, and the post-sync reconciler that makes snoozes hold and wake across machines
   ai/                provider abstraction (OpenAI-compatible + Anthropic), streaming; a failover provider chains the configured models in priority order — each chain entry may carry its own provider/endpoint/key ([[ai.chain]]), so a VPN-only proxy falls back to a local model. It switches on request failure or a stream error before any content, and a circuit breaker skips a failed entry for ~60s (probing after; ignored when every entry is cooling) with a 5s dial timeout so a blackholed endpoint can't stall every request. Classification runs at temperature 0 with tolerant reply parsing — MatchCategory.
@@ -84,7 +84,9 @@ from one batched `store.UnreadCountByLabelForAccounts` query (`refreshAccountUnr
 / `applyAccountUnread`), refreshed on any sidebar reload and whenever a non-active
 account syncs. `loadLabels` only rebuilds the sidebar widgets when its structure or
 the inbox badge actually changed (`sidebarSignature`), so an idle 60s sync touches
-nothing.
+nothing. UI memory caches use `uiCacheKey{accountID,id}` for rendered sections,
+translations, categories, gists, analyses, and summaries; provider message and
+thread ids are never treated as globally unique.
 
 Colour follows GNOME's HIG (monochrome symbolic icons, one accent reserved for
 state): a small application stylesheet (`internal/ui/theme.go`, registered on
@@ -172,7 +174,7 @@ mirror queue, deletes an emptied wake-time label (`DeleteLabelIfUnused`, via
 `Engine.MirrorOp` so it can't overtake the modify), and publishes `SnoozeWoke`
 (list refresh + "Reminder" notification). Mirror labels are hidden from the
 sidebar and label pickers (`model.IsSnoozeLabel`); an account whose backend
-lacks `backend.LabelManager` (IMAP) keeps local-only snoozes. **Calendar invites**: an `.ics` attachment
+lacks `backend.LabelManager` (IMAP) keeps explicitly device-only snoozes and cancels one when a message newer than its snooze snapshot enters the thread. **Calendar invites**: an `.ics` attachment
 (parsed by the dependency-free `internal/ics`) renders an event card above the
 conversation with Accept/Maybe/Decline that email the iTIP REPLY to the
 organizer via the normal outbox path; CANCEL shows a note. **Unsubscribe**:
@@ -188,8 +190,8 @@ the whole folder (`DeletePermanently`/`EmptyLabel` → `messages.batchDelete`), 
 optimistic `ModifyLabels` + Gmail mirror; opening an unread message marks it read;
 Ctrl +/-/0 zoom the message view (`WebView.SetZoomLevel`, persisted);
 a 60s background incremental sync (each pass under a `syncPassTimeout` backstop; consecutive failures back off exponentially to `syncBackoffCap` instead of re-running a heavy resync every tick) updates label counts through `dispatch`→`Hub`,
-and new inbox mail (arriving after launch) raises a desktop notification via
-`gio.Notification`. The background sync self-heals an expired history watermark
+and new inbox mail (arriving after launch) raises an immediate desktop notification via
+`gio.Notification`. Notifications are account-qualified and deduplicated for the session, require a real SENT label before suppressing own-address mail, and ignore body-hydration events. A persisted AI gist is used when already available but AI never delays delivery. The background sync self-heals an expired history watermark
 (an account offline past Gmail's history window) by re-backfilling and resetting
 the watermark (`engine.Resync` on `ErrHistoryExpired`); a revoked/expired refresh
 token (`auth.IsAuthError`) instead publishes `AuthExpired`, which reveals a
@@ -239,8 +241,7 @@ new message — both prompted by `askAIIntent`, which also offers an on-demand "
 instruction — "shorter", "more formal" — and `Assistant.Refine` rewrites the
 selection, or with none the same own-writing region grammar-check uses:
 everything above the quote, so a reply refines only the new text; the span is
-mark-anchored and replaced in place), and a Save-draft button
-(`users.drafts.create`). Send runs pre-send guards (`preSendWarning`: empty
+mark-anchored and replaced in place), a Save-draft button, and a visible Discard-draft action while editing. A draft is bound to its account: From locks after the first successful local save, and both the store and outbox reject a cross-account draft id. Send runs pre-send guards (`preSendWarning`: empty
 subject, "attachment" mentioned but none attached → confirm), and closing an
 unsent message offers Save-as-draft alongside Discard. A configurable signature
 is appended to every composed body below the cursor area and above any quote
@@ -325,7 +326,7 @@ each message's ⋯ acts on that message, and clicking a sender name opens the
 canonical sender surface (`showSenderActions`: copy address, find emails, and
 trust images — the link underlines on hover so it reads as
 clickable). A search entry runs instant local FTS5 search (`store.SearchPage`,
-sanitized into a quoted prefix MATCH) whose hits are grouped into threads;
+sanitized into a quoted prefix MATCH) whose hits are grouped into threads; a Relevant/Newest selector defaults to the FTS/provider relevance order;
 clearing it returns to the current label. Conversation lists load in bounded
 100-item pages as the user approaches the bottom: label and All Mail views use
 stable `(internal_date,rowid)` keyset cursors, local FTS advances by raw-hit
@@ -363,13 +364,12 @@ heavy churn the old account's threads would otherwise linger for seconds) and
 traces the click→content latency ("switch account content visible"). The AI-draft dialog offers on-demand quick replies
 (`SmartReplies`, behind a "Suggest quick replies" button).
 Compose supports attachments (the file picker accepts multiple files and shows
-them as wrapping, width-bounded chips; `BuildMIME` emits
-multipart/mixed with base64 parts). Sending uses Undo Send: the compose closes
+them as wrapping, width-bounded chips; decoded payloads are capped at 18 MiB total before reading, and `BuildMIME` emits multipart/mixed with streaming line-wrapped base64 encoding). Sending uses Undo Send: the compose closes
 and the message is held ~5s behind an "Undo" toast (`deferSend`) before it goes
 out; a failed send is queued to the `outbox` table and retried by a background
 sweeper (`SweepOutbox`, ~45s); pending/failed sends are surfaced by an
 `adw.Banner` over the thread list and an Outbox dialog (per-item retry/discard
-plus "send now"). A bottom status bar shows what the app is doing — the current
+plus "send now"); its queries run off the GTK thread and actions disable while showing progress. A bottom status bar shows what the app is doing — the current
 operation with a spinner/progress bar (left) and live cumulative metrics (right:
 bytes transferred, Gmail API requests + quota units, AI requests + AI bytes
 (`Assistant.Requests`/`Transferred` — counted in the Assistant so they survive a
@@ -402,8 +402,8 @@ live settings swap — additionally logs its own row
 popover's Session section names the current model (`Assistant.ModelStatus`,
 marked "(fallback)" when a non-primary chain entry served last).
 Every AI op
-is bracketed into it via `aiActivity` (including the background categorizer and
-the notification gist); label mutations, outbox sweeps that delivered,
+is bracketed into it via `aiActivity` (including the background categorizer);
+label mutations, outbox sweeps that delivered,
 retention prunes, and woken snoozes log as instant completed rows via
 `activity.Hub.Report`. Background layers report
 transient activity to a headless `activity.Hub` (`deps.Activity`) that the bar

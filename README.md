@@ -37,8 +37,9 @@ keyring.
 - Thread summaries, drafted replies, translation, and proofreading are a
   click away.
 - A sent message can be undone for a few seconds; failed sends are queued and
-  retried until they go out.
-- New-mail notifications carry a one-line gist of the message.
+  retried up to five times, then remain in the outbox for manual retry.
+- New-mail notifications appear immediately with the message snippet and use a
+  cached one-line AI gist when one is already available.
 
 **Accounts**
 

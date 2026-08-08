@@ -65,7 +65,13 @@ func randomState() (string, error) {
 // exchanges it (with PKCE) for a token. AccessTypeOffline + consent prompt
 // guarantee a refresh token.
 func Login(ctx context.Context, cc ClientConfig) (*oauth2.Token, error) {
-	return loginWithConfig(ctx, oauthConfig(cc, ""),
+	return LoginWithBrowserFallback(ctx, cc, nil)
+}
+
+// LoginWithBrowserFallback is Login with a callback that receives the consent
+// URL when the system browser cannot be launched.
+func LoginWithBrowserFallback(ctx context.Context, cc ClientConfig, fallback func(string)) (*oauth2.Token, error) {
+	return loginWithConfig(ctx, oauthConfig(cc, ""), fallback,
 		oauth2.AccessTypeOffline, oauth2.SetAuthURLParam("prompt", "consent"))
 }
 
@@ -73,7 +79,7 @@ func Login(ctx context.Context, cc ClientConfig) (*oauth2.Token, error) {
 // oauth2.Config (Google REST/IMAP, Microsoft). The RedirectURL is filled in with
 // the chosen loopback port. authOpts are extra AuthCodeURL options (offline
 // access, consent prompt).
-func loginWithConfig(ctx context.Context, conf *oauth2.Config, authOpts ...oauth2.AuthCodeOption) (*oauth2.Token, error) {
+func loginWithConfig(ctx context.Context, conf *oauth2.Config, fallback func(string), authOpts ...oauth2.AuthCodeOption) (*oauth2.Token, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, fmt.Errorf("listen on loopback: %w", err)
@@ -152,10 +158,16 @@ func loginWithConfig(ctx context.Context, conf *oauth2.Config, authOpts ...oauth
 		_ = srv.Shutdown(shutdownCtx)
 	}()
 
-	if err := openBrowser(authURL); err != nil {
-		// Not fatal — the user can open the URL manually.
-		slog.Default().Warn("could not open browser automatically; open this URL to sign in", "url", authURL)
-	}
+	go func() {
+		if err := openBrowser(authURL); err != nil {
+			// Not fatal — the loopback server keeps waiting while the user opens
+			// the URL manually.
+			slog.Default().Warn("could not open browser automatically; open this URL to sign in", "url", authURL)
+			if fallback != nil {
+				fallback(authURL)
+			}
+		}
+	}()
 
 	select {
 	case <-ctx.Done():
@@ -177,7 +189,7 @@ func loginWithConfig(ctx context.Context, conf *oauth2.Config, authOpts ...oauth
 
 // openBrowser launches the system browser at url via xdg-open.
 func openBrowser(url string) error {
-	if err := exec.Command("xdg-open", url).Start(); err != nil {
+	if err := exec.Command("xdg-open", url).Run(); err != nil {
 		return fmt.Errorf("open browser: %w", err)
 	}
 	return nil

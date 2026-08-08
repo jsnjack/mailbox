@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/diamondburned/gotk4-adwaita/pkg/adw"
+	"github.com/diamondburned/gotk4/pkg/gdk/v4"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 	"github.com/jsnjack/mailbox/internal/backend"
 	"github.com/jsnjack/mailbox/internal/config"
@@ -169,9 +170,23 @@ func (w *window) openAddAccount(prefill *addAccountPrefill) {
 	status.SetXAlign(0)
 	status.SetHExpand(true)
 	status.SetWrap(true)
+	status.SetSelectable(true)
+	copyURLBtn := gtk.NewButtonWithLabel("Copy sign-in URL")
+	copyURLBtn.SetVisible(false)
+	var oauthURL string
+	copyURLBtn.ConnectClicked(func() {
+		if oauthURL == "" {
+			return
+		}
+		if display := gdk.DisplayGetDefault(); display != nil {
+			display.Clipboard().SetText(oauthURL)
+			w.toast("Sign-in URL copied")
+		}
+	})
 	addBtn := gtk.NewButtonWithLabel("Test & Add")
 	addBtn.AddCSSClass("suggested-action")
 	footer.Append(status)
+	footer.Append(copyURLBtn)
 	footer.Append(addBtn)
 	footerGroup := adw.NewPreferencesGroup()
 	footerGroup.Add(footer)
@@ -251,9 +266,20 @@ func (w *window) openAddAccount(prefill *addAccountPrefill) {
 				return
 			}
 			status.SetText("Opening your browser to sign in…")
+			oauthURL = ""
+			copyURLBtn.SetVisible(false)
 			logging.Trace("ui: add account oauth begin", "auth", p.Auth, "email", acct.Email)
 			go func() {
-				email, tok, err := w.deps.OAuthConnect(dialogCtx, p.Auth)
+				email, tok, err := w.deps.OAuthConnect(dialogCtx, p.Auth, func(url string) {
+					dispatch.Main(func() {
+						if dialogCtx.Err() != nil {
+							return
+						}
+						oauthURL = url
+						status.SetText("The browser could not be opened. Copy this sign-in URL and open it in a browser.")
+						copyURLBtn.SetVisible(true)
+					})
+				})
 				dispatch.Main(func() {
 					if dialogCtx.Err() != nil {
 						return

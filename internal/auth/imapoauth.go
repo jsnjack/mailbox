@@ -54,15 +54,27 @@ func microsoftConfig(clientID string) *oauth2.Config {
 // scope) and returns a token whose refresh token the caller stores under
 // IMAPKeyringService.
 func LoginGoogleMail(ctx context.Context, cc ClientConfig) (*oauth2.Token, error) {
+	return LoginGoogleMailWithBrowserFallback(ctx, cc, nil)
+}
+
+// LoginGoogleMailWithBrowserFallback is LoginGoogleMail with a callback for a
+// consent URL that could not be opened automatically.
+func LoginGoogleMailWithBrowserFallback(ctx context.Context, cc ClientConfig, fallback func(string)) (*oauth2.Token, error) {
 	logging.TraceContext(ctx, "auth: login google-mail (IMAP XOAUTH2)")
-	return loginWithConfig(ctx, googleMailConfig(cc),
+	return loginWithConfig(ctx, googleMailConfig(cc), fallback,
 		oauth2.AccessTypeOffline, oauth2.SetAuthURLParam("prompt", "consent"))
 }
 
 // LoginMicrosoft runs the loopback OAuth flow for Outlook/Office 365.
 func LoginMicrosoft(ctx context.Context, clientID string) (*oauth2.Token, error) {
+	return LoginMicrosoftWithBrowserFallback(ctx, clientID, nil)
+}
+
+// LoginMicrosoftWithBrowserFallback is LoginMicrosoft with a callback for a
+// consent URL that could not be opened automatically.
+func LoginMicrosoftWithBrowserFallback(ctx context.Context, clientID string, fallback func(string)) (*oauth2.Token, error) {
 	logging.TraceContext(ctx, "auth: login microsoft (IMAP XOAUTH2)")
-	return loginWithConfig(ctx, microsoftConfig(clientID))
+	return loginWithConfig(ctx, microsoftConfig(clientID), fallback)
 }
 
 // OAuthTokenSourceFor returns an auto-refreshing token source for an IMAP-OAuth

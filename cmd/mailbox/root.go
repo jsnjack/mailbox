@@ -45,7 +45,7 @@ func credentialsPath() string { return flagCredentials }
 // launches the GTK application.
 var rootCmd = &cobra.Command{
 	Use:           "mailbox",
-	Short:         "A native, fast Gmail client",
+	Short:         "A native, fast email client",
 	Version:       Version,
 	SilenceUsage:  true,
 	SilenceErrors: true,
