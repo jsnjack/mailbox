@@ -90,6 +90,20 @@ func TestBuildMIMEWithAttachment(t *testing.T) {
 	}
 }
 
+func TestBuildMIMERejectsOversizedAttachments(t *testing.T) {
+	_, err := BuildMIME(model.OutgoingMessage{
+		From: "me@example.com",
+		To:   "you@example.com",
+		Attachments: []model.OutgoingAttachment{{
+			Filename: "large.bin",
+			Data:     make([]byte, MaxOutgoingAttachmentBytes+1),
+		}},
+	})
+	if err == nil {
+		t.Fatal("BuildMIME accepted attachments over the size limit")
+	}
+}
+
 // An iTIP RSVP goes out with the calendar payload as an inline
 // text/calendar; method=REPLY body part inside multipart/alternative — the
 // only shape Exchange/Google auto-process — alongside the .ics attachment.

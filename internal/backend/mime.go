@@ -18,6 +18,11 @@ import (
 	"github.com/jsnjack/mailbox/internal/model"
 )
 
+// MaxOutgoingAttachmentBytes bounds the total decoded attachment payload kept
+// in a compose draft. Base64 expands this to roughly 24 MiB on the wire, leaving
+// room for message bodies and MIME headers under common provider limits.
+const MaxOutgoingAttachmentBytes int64 = 18 << 20
+
 // BuildMIME renders an OutgoingMessage as an RFC 5322 message (UTF-8). A
 // plain-text-only message goes out text/plain; one with an HTMLBody or a
 // Calendar payload goes out multipart/alternative (text first, HTML preferred
@@ -30,6 +35,13 @@ func BuildMIME(m model.OutgoingMessage) ([]byte, error) {
 		"from", m.From, "to", m.To, "cc", m.Cc, "bcc", m.Bcc,
 		"subject", m.Subject, "attachments", len(m.Attachments),
 		"threaded", m.InReplyTo != "" || m.References != "", "threadID", m.ThreadID)
+	var attachmentBytes int64
+	for _, a := range m.Attachments {
+		attachmentBytes += int64(len(a.Data))
+		if attachmentBytes > MaxOutgoingAttachmentBytes {
+			return nil, fmt.Errorf("attachments exceed %d MiB limit", MaxOutgoingAttachmentBytes>>20)
+		}
+	}
 	var b bytes.Buffer
 	// Header values must not carry their own line breaks. Strip any CR/LF from
 	// the value so input sourced from an untrusted place — a crafted mailto:
@@ -258,18 +270,48 @@ func foldValue(v string, startCol int) string {
 
 // writeWrappedBase64 writes data as base64 wrapped at 76 columns (RFC 2045).
 func writeWrappedBase64(w io.Writer, data []byte) error {
-	const cols = 76
-	enc := base64.StdEncoding.EncodeToString(data)
-	for i := 0; i < len(enc); i += cols {
-		end := i + cols
-		if end > len(enc) {
-			end = len(enc)
+	lw := &base64LineWriter{w: w}
+	enc := base64.NewEncoder(base64.StdEncoding, lw)
+	if _, err := enc.Write(data); err != nil {
+		return err
+	}
+	if err := enc.Close(); err != nil {
+		return err
+	}
+	return lw.finish()
+}
+
+type base64LineWriter struct {
+	w   io.Writer
+	col int
+}
+
+func (w *base64LineWriter) Write(p []byte) (int, error) {
+	written := 0
+	for len(p) > 0 {
+		n := min(76-w.col, len(p))
+		if _, err := w.w.Write(p[:n]); err != nil {
+			return written, err
 		}
-		if _, err := io.WriteString(w, enc[i:end]+"\r\n"); err != nil {
-			return err
+		written += n
+		w.col += n
+		p = p[n:]
+		if w.col == 76 {
+			if _, err := io.WriteString(w.w, "\r\n"); err != nil {
+				return written, err
+			}
+			w.col = 0
 		}
 	}
-	return nil
+	return written, nil
+}
+
+func (w *base64LineWriter) finish() error {
+	if w.col == 0 {
+		return nil
+	}
+	_, err := io.WriteString(w.w, "\r\n")
+	return err
 }
 
 // encodeAddressList re-renders a comma-separated address list with each display

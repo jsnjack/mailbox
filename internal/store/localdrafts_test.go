@@ -88,3 +88,28 @@ func TestLocalDraftRevisionDoesNotLoseNewerAutosave(t *testing.T) {
 		t.Fatalf("synthetic draft after delete = %v", err)
 	}
 }
+
+func TestSaveLocalDraftRejectsAnotherAccount(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	first := seedAccount(t, s)
+	second, err := s.UpsertAccount(ctx, model.Account{Email: "other@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	localID, err := s.SaveLocalDraft(ctx, first, model.OutgoingMessage{From: "me@example.com", Body: "first"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.SaveLocalDraft(ctx, second, model.OutgoingMessage{LocalDraftID: localID, From: "other@example.com", Body: "second"})
+	if !errors.Is(err, ErrDraftAccountMismatch) {
+		t.Fatalf("cross-account save error = %v, want ErrDraftAccountMismatch", err)
+	}
+	d, err := s.LocalDraft(ctx, localID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.AccountID != first || d.Message.Body != "first" {
+		t.Fatalf("draft changed after rejected save: %+v", d)
+	}
+}

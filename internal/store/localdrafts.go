@@ -22,6 +22,10 @@ const (
 	localDraftSnippetRunes = 180
 )
 
+// ErrDraftAccountMismatch means a draft id was used with an account other than
+// the one that owns it.
+var ErrDraftAccountMismatch = errors.New("draft belongs to another account")
+
 // IsLocalDraftID reports whether id names the synthetic message backing an
 // offline-editable local draft.
 func IsLocalDraftID(id string) bool { return strings.HasPrefix(id, LocalDraftPrefix) }
@@ -48,7 +52,7 @@ func (s *Store) SaveLocalDraft(ctx context.Context, accountID int64, msg model.O
 	}
 	now := time.Now()
 	err = s.withTx(ctx, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, `
+		res, err := tx.ExecContext(ctx, `
 			INSERT INTO local_drafts (
 				local_id, account_id, source_message_id, provider_draft_id,
 				payload, state, revision, attempts, last_error, updated_at)
@@ -60,8 +64,16 @@ func (s *Store) SaveLocalDraft(ctx context.Context, accountID int64, msg model.O
 				attempts=0, last_error='', updated_at=excluded.updated_at
 			WHERE local_drafts.account_id = excluded.account_id`,
 			localID, accountID, msg.SourceMessageID, msg.DraftID, payload,
-			LocalDraftQueued, now.Unix(), LocalDraftQueued); err != nil {
+			LocalDraftQueued, now.Unix(), LocalDraftQueued)
+		if err != nil {
 			return fmt.Errorf("save local draft: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("save local draft: affected rows: %w", err)
+		}
+		if n == 0 {
+			return fmt.Errorf("save local draft %q: %w", localID, ErrDraftAccountMismatch)
 		}
 
 		synthetic := model.Message{

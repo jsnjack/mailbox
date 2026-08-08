@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+	"io"
 	"log/slog"
 	"mime"
 	"net/mail"
@@ -25,6 +26,7 @@ import (
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 	"github.com/diamondburned/gotk4/pkg/pango"
 	"github.com/jsnjack/mailbox/internal/ai"
+	"github.com/jsnjack/mailbox/internal/backend"
 	"github.com/jsnjack/mailbox/internal/config"
 	"github.com/jsnjack/mailbox/internal/dispatch"
 	"github.com/jsnjack/mailbox/internal/logging"
@@ -195,6 +197,8 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 	aiCtx, cancelAI := context.WithCancel(context.Background())
 
 	var attachments []model.OutgoingAttachment
+	var attachmentMu sync.Mutex
+	var attachmentBytes int64
 	var attachIDs []int // parallel to attachments; ids stay stable across removals
 	attachSeq := 0
 	// Assigned after gather/save state exists. Attachment callbacks are built
@@ -260,6 +264,9 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 				return
 			}
 			logging.Trace("ui: compose attachment removed", "name", attachments[i].Filename, "left", len(attachments)-1)
+			attachmentMu.Lock()
+			attachmentBytes -= int64(len(attachments[i].Data))
+			attachmentMu.Unlock()
 			attachments = append(attachments[:i], attachments[i+1:]...)
 			attachIDs = append(attachIDs[:i], attachIDs[i+1:]...)
 			attachRow.Remove(chip)
@@ -279,10 +286,54 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 			return
 		}
 		go func() {
-			data, err := os.ReadFile(path)
+			info, err := os.Stat(path)
 			if err != nil {
+				slog.Warn("ui: stat attachment", "path", path, "err", err)
+				dispatch.Main(func() {
+					status.SetText("Could not attach " + filepath.Base(path) + ": " + err.Error())
+					status.SetVisible(true)
+				})
+				return
+			}
+			if !info.Mode().IsRegular() {
+				dispatch.Main(func() {
+					status.SetText("Could not attach " + filepath.Base(path) + ": not a regular file")
+					status.SetVisible(true)
+				})
+				return
+			}
+			attachmentMu.Lock()
+			if info.Size() > backend.MaxOutgoingAttachmentBytes || attachmentBytes+info.Size() > backend.MaxOutgoingAttachmentBytes {
+				attachmentMu.Unlock()
+				dispatch.Main(func() {
+					status.SetText(fmt.Sprintf("Attachments are limited to %d MiB total", backend.MaxOutgoingAttachmentBytes>>20))
+					status.SetVisible(true)
+				})
+				return
+			}
+			attachmentBytes += info.Size()
+			attachmentMu.Unlock()
+			file, err := os.Open(path)
+			var data []byte
+			if err == nil {
+				data, err = io.ReadAll(io.LimitReader(file, info.Size()+1))
+				if closeErr := file.Close(); err == nil {
+					err = closeErr
+				}
+				if err == nil && int64(len(data)) != info.Size() {
+					err = fmt.Errorf("file changed while it was being attached")
+				}
+			}
+			if err != nil {
+				attachmentMu.Lock()
+				attachmentBytes -= info.Size()
+				attachmentMu.Unlock()
 				slog.Warn("ui: read attachment", "path", path, "err", err)
 				logging.Trace("ui: compose attachment read failed", "path", path, "err", err)
+				dispatch.Main(func() {
+					status.SetText("Could not attach " + filepath.Base(path) + ": " + err.Error())
+					status.SetVisible(true)
+				})
 				return
 			}
 			name := filepath.Base(path)
@@ -300,6 +351,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 
 	// Carry over any attachments from init (e.g. a reopened/undone message).
 	for _, a := range init.Attachments {
+		attachmentBytes += int64(len(a.Data))
 		addAttachment(a)
 	}
 
@@ -420,6 +472,16 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 		draftBtn = gtk.NewButtonWithLabel("Save draft")
 		hb.PackStart(draftBtn)
 	}
+	var discardDraftBtn *gtk.Button
+	discardTarget := init.LocalDraftID
+	if discardTarget == "" && (init.SourceMessageID != "" || init.DraftID != "") {
+		discardTarget = init.ThreadID
+	}
+	if discardTarget != "" && w.deps.DeleteDraft != nil {
+		discardDraftBtn = gtk.NewButtonWithLabel("Discard draft")
+		discardDraftBtn.AddCSSClass("destructive-action")
+		hb.PackEnd(discardDraftBtn)
+	}
 
 	attachBtn := gtk.NewButtonFromIconName("mail-attachment-symbolic")
 	attachBtn.SetTooltipText("Attach a file")
@@ -510,6 +572,47 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 		autosaveMu.Unlock()
 	}
 
+	if discardDraftBtn != nil {
+		discardDraftBtn.ConnectClicked(func() {
+			confirm := adw.NewAlertDialog("Discard draft?", "This removes the draft from this device and your mail provider. This cannot be undone.")
+			confirm.AddResponse("cancel", "Cancel")
+			confirm.AddResponse("discard", "Discard")
+			confirm.SetResponseAppearance("discard", adw.ResponseDestructive)
+			confirm.SetDefaultResponse("cancel")
+			confirm.SetCloseResponse("cancel")
+			confirm.ConnectResponse(func(response string) {
+				if response != "discard" {
+					return
+				}
+				discardDraftBtn.SetSensitive(false)
+				status.SetText("Discarding draft…")
+				status.SetVisible(true)
+				acctID := selectedAccount().ID
+				go func() {
+					err := w.deps.DeleteDraft(context.Background(), acctID, discardTarget)
+					dispatch.Main(func() {
+						if err != nil {
+							discardDraftBtn.SetSensitive(true)
+							status.SetText("Could not discard draft: " + err.Error())
+							return
+						}
+						finished = true
+						draftStateMu.Lock()
+						closed = true
+						draftStateMu.Unlock()
+						stopAutosave()
+						cancelAI()
+						w.toast("Draft discarded")
+						w.refreshList(w.searchEntry.Text())
+						w.loadLabels()
+						win.Close()
+					})
+				}()
+			})
+			confirm.Present(win)
+		})
+	}
+
 	// saveSnapshot serializes saves from this window. A second edit can be
 	// captured while the first DB write is finishing, but it reuses the stable id
 	// and updates the saved fingerprint only for its own exact snapshot.
@@ -534,6 +637,16 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 				isClosed := closed
 				draftStateMu.Unlock()
 				if !isClosed {
+					if err == nil && accountDD != nil {
+						for i, a := range accounts {
+							if a.ID == accountID {
+								accountDD.SetSelected(uint(i))
+								break
+							}
+						}
+						accountDD.SetSensitive(false)
+						accountDD.SetTooltipText("From is fixed after the draft is saved")
+					}
 					status.SetVisible(true)
 					if err != nil {
 						status.SetText("Could not save draft locally: " + err.Error())

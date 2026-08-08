@@ -542,7 +542,7 @@ func (e *Engine) FetchBody(ctx context.Context, b backend.Backend, accountID int
 	if err := e.Store.ReplaceAttachments(ctx, m.RowID, atts); err != nil {
 		slog.Default().Warn("store attachments", "id", gmailID, "err", err)
 	}
-	e.publish(Change{Kind: MessageUpserted, AccountID: accountID, GmailID: gmailID})
+	e.publish(Change{Kind: MessageBodyFetched, AccountID: accountID, GmailID: gmailID, ThreadID: m.ThreadID})
 	return nil
 }
 
@@ -676,8 +676,15 @@ func (e *Engine) EnqueueSend(ctx context.Context, accountID int64, msg model.Out
 	// autosave after this compose snapshot was gathered. Carry the freshest id
 	// into the outbox so delivery can retire the provider draft too.
 	if msg.LocalDraftID != "" {
-		if d, derr := e.Store.LocalDraft(ctx, msg.LocalDraftID); derr == nil && d.ProviderDraftID != "" {
-			msg.DraftID = d.ProviderDraftID
+		if d, derr := e.Store.LocalDraft(ctx, msg.LocalDraftID); derr == nil {
+			if d.AccountID != accountID {
+				return 0, fmt.Errorf("enqueue local draft %q for account %d: %w", msg.LocalDraftID, accountID, store.ErrDraftAccountMismatch)
+			}
+			if d.ProviderDraftID != "" {
+				msg.DraftID = d.ProviderDraftID
+			}
+		} else if !errors.Is(derr, store.ErrNotFound) {
+			return 0, fmt.Errorf("load local draft before enqueue: %w", derr)
 		}
 	}
 	id, err := e.Store.EnqueueOutboxFromDraft(ctx, accountID, msg.ThreadID, msg.DraftID, msg.LocalDraftID, raw, notBefore)
