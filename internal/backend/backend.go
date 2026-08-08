@@ -81,6 +81,20 @@ type ThreadMetadataFetcher interface {
 	FetchThreadMetadata(ctx context.Context, threadID string) ([]model.Message, error)
 }
 
+// SearchPage is one provider-search page. Next is an opaque provider cursor;
+// an empty value means the result set is exhausted.
+type SearchPage struct {
+	IDs  []string
+	Next string
+}
+
+// SearchPager is an optional Backend capability for providers that expose a
+// stable server-side search cursor. The engine prefers it for incremental
+// search results and falls back to offset paging over SearchIDs otherwise.
+type SearchPager interface {
+	SearchIDsPage(ctx context.Context, query, pageToken string, limit int) (SearchPage, error)
+}
+
 // LabelManager is an optional Backend capability: a provider that can create
 // and delete labels implements it. The snooze mirror requires it — accounts
 // whose backend lacks it keep local-only snoozes (hidden on this machine, but

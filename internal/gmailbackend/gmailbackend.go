@@ -29,6 +29,7 @@ func New(c *gmailapi.Client, accountID int64) *Backend {
 var (
 	_ backend.Backend               = (*Backend)(nil)
 	_ backend.LabelManager          = (*Backend)(nil)
+	_ backend.SearchPager           = (*Backend)(nil)
 	_ backend.ThreadMetadataFetcher = (*Backend)(nil)
 )
 
@@ -74,6 +75,19 @@ func (b *Backend) SearchIDs(ctx context.Context, query string, max int) ([]strin
 	}
 	logging.TraceContext(ctx, "gmailbackend: SearchIDs ok", "account", b.accountID, "query", query, "count", len(ids), "dur", time.Since(start))
 	return ids, nil
+}
+
+// SearchIDsPage returns one page using Gmail's opaque messages.list cursor.
+func (b *Backend) SearchIDsPage(ctx context.Context, query, pageToken string, limit int) (backend.SearchPage, error) {
+	start := time.Now()
+	logging.TraceContext(ctx, "gmailbackend: SearchIDsPage", "account", b.accountID, "query", query, "limit", limit)
+	ids, next, err := b.c.ListMessageIDsPage(ctx, query, pageToken, limit)
+	if err != nil {
+		logging.TraceContext(ctx, "gmailbackend: SearchIDsPage failed", "account", b.accountID, "query", query, "dur", time.Since(start), "err", err)
+		return backend.SearchPage{}, err
+	}
+	logging.TraceContext(ctx, "gmailbackend: SearchIDsPage ok", "account", b.accountID, "query", query, "count", len(ids), "more", next != "", "dur", time.Since(start))
+	return backend.SearchPage{IDs: ids, Next: next}, nil
 }
 
 // FetchMetadata fetches a message's headers/flags and converts to the domain model.

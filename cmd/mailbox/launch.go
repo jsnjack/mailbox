@@ -746,6 +746,20 @@ func launchUI(mailto string) error {
 		}
 		return ids, err
 	}
+	deps.SearchPage = func(ctx context.Context, accountID int64, query, pageToken string, limit int) (ui.ServerSearchPage, error) {
+		c, err := clientFor(accountID)
+		if err != nil {
+			return ui.ServerSearchPage{}, err
+		}
+		done := act.Begin("search", emailOf(accountID), "Searching all mail")
+		page, err := engine.SearchServerPage(ctx, c, accountID, query, pageToken, limit)
+		if err != nil {
+			done(doneNote(err))
+		} else {
+			done(activity.Plural(len(page.IDs), "result", "results"))
+		}
+		return ui.ServerSearchPage{IDs: page.IDs, Next: page.Next}, err
+	}
 	deps.HydrateThread = func(ctx context.Context, accountID int64, threadID string) (int, error) {
 		c, err := clientFor(accountID)
 		if err != nil {

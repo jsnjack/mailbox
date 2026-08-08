@@ -226,43 +226,56 @@ func (c *Client) ListMessageIDs(ctx context.Context, query string, max int) ([]s
 	pageToken := ""
 	page := 0
 	for {
-		var resp *gmail.ListMessagesResponse
-		err := c.do(ctx, costMessageList, func() error {
-			call := c.srv.Users.Messages.List("me").Context(ctx)
-			if query != "" {
-				call = call.Q(query)
-			}
-			if pageToken != "" {
-				call = call.PageToken(pageToken)
-			}
-			pageSize := int64(500)
-			if max > 0 {
-				if remaining := int64(max - len(ids)); remaining < pageSize {
-					pageSize = remaining
-				}
-			}
-			r, e := call.MaxResults(pageSize).Do()
-			resp = r
-			return e
-		})
+		pageSize := 500
+		if max > 0 && max-len(ids) < pageSize {
+			pageSize = max - len(ids)
+		}
+		pageIDs, next, err := c.ListMessageIDsPage(ctx, query, pageToken, pageSize)
 		if err != nil {
-			return nil, fmt.Errorf("list messages: %w", err)
+			return nil, err
 		}
-		for _, m := range resp.Messages {
-			ids = append(ids, m.Id)
-		}
+		ids = append(ids, pageIDs...)
 		page++
-		logging.TraceContext(ctx, "gmailapi: messages.list page", "query", query, "page", page, "page_count", len(resp.Messages), "total", len(ids), "more", resp.NextPageToken != "")
-		if resp.NextPageToken == "" || (max > 0 && len(ids) >= max) {
+		logging.TraceContext(ctx, "gmailapi: messages.list page", "query", query, "page", page, "page_count", len(pageIDs), "total", len(ids), "more", next != "")
+		if next == "" || (max > 0 && len(ids) >= max) {
 			break
 		}
-		pageToken = resp.NextPageToken
+		pageToken = next
 	}
 	if max > 0 && len(ids) > max {
 		ids = ids[:max]
 	}
 	logging.TraceContext(ctx, "gmailapi: messages.list done", "query", query, "count", len(ids), "pages", page)
 	return ids, nil
+}
+
+// ListMessageIDsPage returns one Gmail messages.list page. pageToken is opaque
+// and the returned next token is empty when Gmail has no more matches.
+func (c *Client) ListMessageIDsPage(ctx context.Context, query, pageToken string, limit int) ([]string, string, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 500
+	}
+	var resp *gmail.ListMessagesResponse
+	err := c.do(ctx, costMessageList, func() error {
+		call := c.srv.Users.Messages.List("me").Context(ctx).MaxResults(int64(limit))
+		if query != "" {
+			call = call.Q(query)
+		}
+		if pageToken != "" {
+			call = call.PageToken(pageToken)
+		}
+		r, e := call.Do()
+		resp = r
+		return e
+	})
+	if err != nil {
+		return nil, "", fmt.Errorf("list messages: %w", err)
+	}
+	ids := make([]string, 0, len(resp.Messages))
+	for _, m := range resp.Messages {
+		ids = append(ids, m.Id)
+	}
+	return ids, resp.NextPageToken, nil
 }
 
 // Bcc only ever appears on the user's own copies (sent mail, drafts) — Gmail

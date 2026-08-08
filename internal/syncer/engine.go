@@ -11,6 +11,7 @@ import (
 	"net/mail"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -294,15 +295,89 @@ func (e *Engine) SearchServer(ctx context.Context, b backend.Backend, accountID 
 	if err != nil {
 		return nil, fmt.Errorf("search list ids: %w", err)
 	}
+	missing, err := e.cacheSearchMetadata(ctx, b, accountID, ids)
+	if err != nil {
+		return nil, err
+	}
+	logging.TraceContext(ctx, "syncer: SearchServer done", "account", accountID, "query", query, "hits", len(ids), "cached", len(ids)-missing, "fetched_misses", missing)
+	return ids, nil
+}
+
+// SearchServerPage returns and caches one provider-search page. Providers with
+// cursor pagination keep their cursor opaque; older providers get a compatible
+// offset token over their existing SearchIDs implementation.
+func (e *Engine) SearchServerPage(ctx context.Context, b backend.Backend, accountID int64, query, pageToken string, limit int) (backend.SearchPage, error) {
+	if limit <= 0 {
+		return backend.SearchPage{}, fmt.Errorf("search page limit must be positive")
+	}
+	var (
+		page backend.SearchPage
+		err  error
+	)
+	if pager, ok := b.(backend.SearchPager); ok {
+		page, err = pager.SearchIDsPage(ctx, query, pageToken, limit)
+	} else {
+		page, err = searchIDsOffsetPage(ctx, b, query, pageToken, limit)
+	}
+	if err != nil {
+		return backend.SearchPage{}, fmt.Errorf("search list ids: %w", err)
+	}
+	if len(page.IDs) > limit {
+		return backend.SearchPage{}, fmt.Errorf("search provider returned %d ids for page limit %d", len(page.IDs), limit)
+	}
+	missing, err := e.cacheSearchMetadata(ctx, b, accountID, page.IDs)
+	if err != nil {
+		return backend.SearchPage{}, err
+	}
+	logging.TraceContext(ctx, "syncer: SearchServerPage done", "account", accountID, "query", query, "hits", len(page.IDs), "cached", len(page.IDs)-missing, "fetched_misses", missing, "more", page.Next != "")
+	return page, nil
+}
+
+func searchIDsOffsetPage(ctx context.Context, b backend.Backend, query, pageToken string, limit int) (backend.SearchPage, error) {
+	offset := 0
+	if pageToken != "" {
+		const prefix = "offset:"
+		if !strings.HasPrefix(pageToken, prefix) {
+			return backend.SearchPage{}, fmt.Errorf("invalid search page token")
+		}
+		var err error
+		offset, err = strconv.Atoi(strings.TrimPrefix(pageToken, prefix))
+		if err != nil || offset < 0 {
+			return backend.SearchPage{}, fmt.Errorf("invalid search page token")
+		}
+	}
+	maxInt := int(^uint(0) >> 1)
+	if offset > maxInt-limit-1 {
+		return backend.SearchPage{}, fmt.Errorf("search page token is too large")
+	}
+	ids, err := b.SearchIDs(ctx, query, offset+limit+1)
+	if err != nil {
+		return backend.SearchPage{}, err
+	}
+	if offset >= len(ids) {
+		return backend.SearchPage{}, nil
+	}
+	end := offset + limit
+	if end > len(ids) {
+		end = len(ids)
+	}
+	page := backend.SearchPage{IDs: append([]string(nil), ids[offset:end]...)}
+	if end < len(ids) {
+		page.Next = fmt.Sprintf("offset:%d", end)
+	}
+	return page, nil
+}
+
+func (e *Engine) cacheSearchMetadata(ctx context.Context, b backend.Backend, accountID int64, ids []string) (int, error) {
 	if len(ids) == 0 {
-		return ids, nil
+		return 0, nil
 	}
 	// Existence check in one IN-query instead of a GetMessage per hit, then fetch
 	// only the misses — concurrently, and batched for a backend that supports it
 	// (IMAP) — rather than a serial FetchMetadata per uncached id.
 	existing, err := e.Store.ExistingMessageIDs(ctx, accountID, ids)
 	if err != nil {
-		return nil, fmt.Errorf("search existence check: %w", err)
+		return 0, fmt.Errorf("search existence check: %w", err)
 	}
 	missing := make([]string, 0, len(ids))
 	for _, id := range ids {
@@ -314,13 +389,12 @@ func (e *Engine) SearchServer(ctx context.Context, b backend.Backend, accountID 
 		fetched, _, _ := e.fetchMetadataConcurrent(ctx, b, missing)
 		if len(fetched) > 0 {
 			if err := e.Store.UpsertMessages(ctx, fetched); err != nil {
-				return nil, fmt.Errorf("search upsert: %w", err)
+				return 0, fmt.Errorf("search upsert: %w", err)
 			}
 			e.publish(Change{Kind: MessageUpserted, AccountID: accountID})
 		}
 	}
-	logging.TraceContext(ctx, "syncer: SearchServer done", "account", accountID, "query", query, "hits", len(ids), "cached", len(ids)-len(missing), "fetched_misses", len(missing))
-	return ids, nil
+	return len(missing), nil
 }
 
 // HydrateThread caches every provider-side member of a conversation once. A

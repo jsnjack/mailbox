@@ -88,6 +88,16 @@ type SyncNow func(ctx context.Context, accountID int64) error
 // returns the matching message ids.
 type ServerSearcher func(ctx context.Context, accountID int64, query string, max int) ([]string, error)
 
+// ServerSearchPage is one incrementally loaded provider-search page. Next is
+// opaque to the UI and empty when there are no more matches.
+type ServerSearchPage struct {
+	IDs  []string
+	Next string
+}
+
+// ServerPageSearcher runs one provider-side search page and caches its matches.
+type ServerPageSearcher func(ctx context.Context, accountID int64, query, pageToken string, limit int) (ServerSearchPage, error)
+
 // ThreadHydrator caches provider-side conversation members omitted by a capped
 // initial backfill. It returns how many messages were newly cached.
 type ThreadHydrator func(ctx context.Context, accountID int64, threadID string) (int, error)
@@ -155,6 +165,7 @@ type Deps struct {
 	OpenAttach    AttachmentOpener
 	Sync          SyncNow
 	SearchServer  ServerSearcher
+	SearchPage    ServerPageSearcher
 	HydrateThread ThreadHydrator
 	MarkAllRead   LabelReader
 	SweepOutbox   OutboxSweeper
