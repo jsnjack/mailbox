@@ -74,12 +74,12 @@ func TestMergeSearchThreadSummariesOrder(t *testing.T) {
 // rows are stale.
 func TestCoalesceThreadLoadDefersRefreshInsteadOfDroppingIt(t *testing.T) {
 	key := threadPageKey{mode: threadPageLabel, accountID: 1, label: "INBOX"}
-	w := &window{threadPage: threadPageState{loading: true}, pageRequest: key}
+	w := &window{threadLoad: threadLoad{key: key, cancel: func() {}}}
 
 	if !w.coalesceThreadLoad(key) {
 		t.Fatal("identical in-flight query was not coalesced")
 	}
-	if !w.pageReloadPending {
+	if !w.threadLoad.reload {
 		t.Fatal("refresh was dropped; want a re-run pending once the query lands")
 	}
 }
@@ -90,22 +90,20 @@ func TestCoalesceThreadLoadOnlyMatchesTheSameInFlightQuery(t *testing.T) {
 		name string
 		w    *window
 	}{
-		{"nothing in flight", &window{pageRequest: key}},
-		{"another label in flight", &window{
-			threadPage:  threadPageState{loading: true},
-			pageRequest: threadPageKey{mode: threadPageLabel, accountID: 1, label: "SENT"},
-		}},
-		{"another account in flight", &window{
-			threadPage:  threadPageState{loading: true},
-			pageRequest: threadPageKey{mode: threadPageLabel, accountID: 2, label: "INBOX"},
-		}},
+		{"nothing in flight", &window{threadLoad: threadLoad{key: key}}},
+		{"another label in flight", &window{threadLoad: threadLoad{
+			key: threadPageKey{mode: threadPageLabel, accountID: 1, label: "SENT"}, cancel: func() {},
+		}}},
+		{"another account in flight", &window{threadLoad: threadLoad{
+			key: threadPageKey{mode: threadPageLabel, accountID: 2, label: "INBOX"}, cancel: func() {},
+		}}},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
 			if tt.w.coalesceThreadLoad(key) {
 				t.Fatal("coalesced into a query that isn't this one")
 			}
-			if tt.w.pageReloadPending {
+			if tt.w.threadLoad.reload {
 				t.Fatal("pending re-run set for a load that starts normally")
 			}
 		})

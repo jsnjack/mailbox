@@ -66,6 +66,8 @@ type threadPageKey struct {
 	newest    bool
 }
 
+// threadPageState is the conversation page the list currently shows: the query
+// it answers, its rows, and what a continuation would need to ask for next.
 type threadPageState struct {
 	key          threadPageKey
 	sums         []model.ThreadSummary
@@ -74,9 +76,26 @@ type threadPageState struct {
 	serverToken  string
 	serverIDs    []string
 	hasMore      bool
-	loading      bool
-	loadingMore  bool
-	failed       bool
+}
+
+// threadLoad is the one list query in flight; the zero value means the list is
+// idle. Holding the running query in a single value is what makes its rules
+// legible: exactly one runs at a time, startThreadLoad cancels whatever it
+// replaces, and a refresh for the query already running sets reload rather than
+// starting a second one or cancelling the first (see coalesceThreadLoad).
+type threadLoad struct {
+	key    threadPageKey
+	gen    uint64             // stamp; a result whose gen is no longer current is dropped
+	more   bool               // continuation of the loaded page rather than a refresh of it
+	cancel context.CancelFunc // non-nil exactly while the query is running
+	reload bool               // a refresh arrived mid-flight: re-run once this lands
+}
+
+// threadLoadFailure is the last query that failed, which is what the in-place
+// Retry footer offers to re-issue. Nil once anything succeeds.
+type threadLoadFailure struct {
+	more  bool
+	retry func()
 }
 
 type threadPageResult struct {
@@ -178,13 +197,12 @@ type window struct {
 	pageLabel    *gtk.Label
 	pageRetry    *gtk.Button
 	threadPage   threadPageState
-	pageRequest  threadPageKey
-	pageRetryFn  func()
-	// pageReloadPending records a refresh that arrived while the identical query
-	// was already in flight: that query's answer predates it, so the load is
-	// re-run when it lands instead of being dropped (see coalesceThreadLoad).
-	pageReloadPending bool
-	readerStack       *gtk.Stack // "message" vs "empty" placeholder
+	threadLoad   threadLoad
+	threadFailed *threadLoadFailure
+	// loadGen stamps each list query so a slow result cannot overwrite a newer
+	// account/folder/query (last request wins).
+	loadGen     uint64
+	readerStack *gtk.Stack // "message" vs "empty" placeholder
 	// readerReady flips when the shell page reports __mbSet is installed;
 	// content set before that is parked in pendingReaderHTML (latest wins) and
 	// flushed by the shell-ready handler in buildReader.
@@ -211,7 +229,6 @@ type window struct {
 	suppressSearch    bool          // guards SetText from firing a search during label switch
 	serverSearch      bool          // current search is a provider-side search, not local FTS
 	serverQuery       string        // the active server-search query (guards the debounced change signal)
-	threadLoadCancel  context.CancelFunc
 	threadByID        map[string]model.ThreadSummary
 	threadIDs         []string          // displayed thread ids, in order (for incremental diffing)
 	rowSig            map[string]string // last-rendered signature per row, to detect in-place changes
@@ -220,9 +237,6 @@ type window struct {
 	refreshPending       bool
 	refreshListPending   bool
 	refreshThreadPending bool // re-render the open conversation on the next refresh
-	// refreshGen increments on every list query; an async query whose result
-	// arrives after a newer one was issued is discarded (last request wins).
-	refreshGen uint64
 	// labelsGen is the same last-request-wins guard for loadLabels, whose store
 	// queries run off the main thread.
 	labelsGen uint64
@@ -1407,8 +1421,8 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 	w.pageRetry.AddCSSClass("flat")
 	w.pageRetry.SetVisible(false)
 	w.pageRetry.ConnectClicked(func() {
-		if retry := w.pageRetryFn; retry != nil {
-			retry()
+		if f := w.threadFailed; f != nil && f.retry != nil {
+			f.retry()
 		}
 	})
 	w.pageStatus = gtk.NewBox(gtk.OrientationHorizontal, 8)
@@ -2168,12 +2182,12 @@ func (w *window) loadThreadsFor(query string) {
 // query here would be worse still: nothing would then repopulate the list, and
 // the abandoned query surfaces as "Couldn't load messages".
 func (w *window) coalesceThreadLoad(key threadPageKey) bool {
-	if !w.threadPage.loading || w.pageRequest != key {
+	if w.threadLoad.cancel == nil || w.threadLoad.key != key {
 		return false
 	}
 	logging.Trace("ui: load threads coalesced into in-flight query",
 		"mode", key.mode, "account", key.accountID, "label", key.label, "query", key.query)
-	w.pageReloadPending = true
+	w.threadLoad.reload = true
 	return true
 }
 
@@ -2181,19 +2195,16 @@ func (w *window) coalesceThreadLoad(key threadPageKey) bool {
 // thread. It commits page state only after success, so a failed continuation
 // keeps every already-visible conversation and offers an in-place retry.
 func (w *window) startThreadLoad(key threadPageKey, loadingMore bool, retry func(), query func(context.Context) (threadPageResult, error), onError func(error)) {
-	if w.threadLoadCancel != nil {
-		w.threadLoadCancel()
+	if w.threadLoad.cancel != nil {
+		w.threadLoad.cancel()
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	w.threadLoadCancel = cancel
-	w.refreshGen++
-	gen := w.refreshGen
-	w.pageReloadPending = false // this query is the re-run any coalesced refresh wanted
-	w.pageRequest = key
-	w.threadPage.loading = true
-	w.threadPage.loadingMore = loadingMore
-	w.threadPage.failed = false
-	w.pageRetryFn = nil
+	w.loadGen++
+	gen := w.loadGen
+	// Replacing the value wholesale also drops any coalesced reload: this query
+	// is the re-run that refresh was waiting for.
+	w.threadLoad = threadLoad{key: key, gen: gen, more: loadingMore, cancel: cancel}
+	w.threadFailed = nil
 	w.updateThreadPageStatus()
 	go func() {
 		defer cancel()
@@ -2202,34 +2213,35 @@ func (w *window) startThreadLoad(key threadPageKey, loadingMore bool, retry func
 		slog.Debug("ui: loadThreads", "n", len(result.sums), "dur", time.Since(start))
 		logging.Trace("ui: load threads result", "n", len(result.sums), "more", result.hasMore, "dur", time.Since(start), "err", err)
 		dispatch.Main(func() {
-			if gen != w.refreshGen {
-				logging.Trace("ui: load threads discarded", "gen", gen, "cur", w.refreshGen, "n", len(result.sums))
+			if gen != w.threadLoad.gen {
+				logging.Trace("ui: load threads discarded", "gen", gen, "cur", w.threadLoad.gen, "n", len(result.sums))
 				return // superseded by a newer refresh
 			}
-			w.pageRequest = threadPageKey{}
-			w.threadLoadCancel = nil
+			reload := w.threadLoad.reload
+			w.threadLoad = threadLoad{} // nothing running any more
 			if errors.Is(err, context.Canceled) {
 				// Abandoned, not broken: whoever cancelled owns what comes next.
 				// Keep the loaded conversations on screen rather than replacing
 				// them with a failure the user can't act on.
 				logging.Trace("ui: load threads cancelled", "gen", gen)
-				w.threadPage.loading, w.threadPage.loadingMore = false, false
 				w.updateThreadPageStatus()
-				w.runPendingThreadReload()
+				if reload {
+					w.rerunCoalescedLoad()
+				}
 				return
 			}
 			if err != nil {
 				slog.Error("ui: load threads", "err", err)
-				w.threadPage.loading = false
-				w.threadPage.failed = true
-				w.pageRetryFn = retry
+				w.threadFailed = &threadLoadFailure{more: loadingMore, retry: retry}
 				w.updateThreadPageStatus()
 				if onError != nil {
 					onError(err)
 				} else if !loadingMore {
 					w.toast("Couldn't load messages")
 				}
-				w.runPendingThreadReload()
+				if reload {
+					w.rerunCoalescedLoad()
+				}
 				return
 			}
 			w.threadPage = threadPageState{
@@ -2237,28 +2249,30 @@ func (w *window) startThreadLoad(key threadPageKey, loadingMore bool, retry func
 				searchOffset: result.searchOffset, serverToken: result.serverToken,
 				serverIDs: result.serverIDs, hasMore: result.hasMore,
 			}
-			w.pageRetryFn = nil
 			w.updateThreadPageStatus()
 			w.searchAllBtn.SetSensitive(true)
-			w.showThreads(result.sums) // holds afterPopulate while a re-run is pending
-			if w.runPendingThreadReload() {
-				return // the re-run repopulates; paging resumes from its result
+			if reload {
+				// These rows predate the refresh that coalesced into this query,
+				// so afterPopulate — advanceSelection past an archived
+				// conversation — waits for the re-run's real ones.
+				held := w.afterPopulate
+				w.afterPopulate = nil
+				w.showThreads(result.sums)
+				w.afterPopulate = held
+				w.rerunCoalescedLoad()
+				return
 			}
+			w.showThreads(result.sums)
 			dispatch.Main(w.maybeLoadNextThreadPage)
 		})
 	}()
 }
 
-// runPendingThreadReload re-runs the load a refresh asked for while this one was
-// in flight (see coalesceThreadLoad), reporting whether it started one.
-func (w *window) runPendingThreadReload() bool {
-	if !w.pageReloadPending {
-		return false
-	}
-	w.pageReloadPending = false
+// rerunCoalescedLoad re-issues the refresh that coalesceThreadLoad folded into
+// the query that just finished.
+func (w *window) rerunCoalescedLoad() {
 	logging.Trace("ui: re-running coalesced thread load")
 	w.loadThreadsFor(w.searchEntry.Text())
-	return true
 }
 
 // searchThreadPage loads one bounded slice of FTS message hits and groups it
@@ -2288,23 +2302,23 @@ func (w *window) updateThreadPageStatus() {
 		return
 	}
 	switch {
-	case w.threadPage.loading:
+	case w.threadLoad.cancel != nil:
 		w.pageSpinner.SetVisible(true)
 		w.pageRetry.SetVisible(false)
-		if w.threadPage.loadingMore {
+		if w.threadLoad.more {
 			w.pageLabel.SetText("Loading more messages…")
 		} else {
 			w.pageLabel.SetText("Loading messages…")
 		}
 		w.pageStatus.SetVisible(true)
-	case w.threadPage.failed:
+	case w.threadFailed != nil:
 		w.pageSpinner.SetVisible(false)
-		if w.threadPage.loadingMore {
+		if w.threadFailed.more {
 			w.pageLabel.SetText("Couldn't load more messages")
 		} else {
 			w.pageLabel.SetText("Couldn't load messages")
 		}
-		w.pageRetry.SetVisible(w.pageRetryFn != nil)
+		w.pageRetry.SetVisible(w.threadFailed.retry != nil)
 		w.pageStatus.SetVisible(true)
 	default:
 		w.pageSpinner.SetVisible(false)
@@ -2314,7 +2328,7 @@ func (w *window) updateThreadPageStatus() {
 }
 
 func (w *window) maybeLoadNextThreadPage() {
-	if w.threadScroll == nil || w.threadPage.loading || w.threadPage.failed || !w.threadPage.hasMore {
+	if w.threadScroll == nil || w.threadLoad.cancel != nil || w.threadFailed != nil || !w.threadPage.hasMore {
 		return
 	}
 	adj := w.threadScroll.VAdjustment()
@@ -2325,7 +2339,7 @@ func (w *window) maybeLoadNextThreadPage() {
 
 func (w *window) loadNextThreadPage() {
 	state := w.threadPage
-	if state.loading || state.failed || !state.hasMore {
+	if w.threadLoad.cancel != nil || w.threadFailed != nil || !state.hasMore {
 		return
 	}
 	key := state.key
@@ -2603,10 +2617,7 @@ func (w *window) showThreads(sums []model.ThreadSummary) {
 	if !w.selectMode {
 		w.reselectOpenThread()
 	}
-	// A populate whose query was superseded mid-flight lists rows from before the
-	// change that triggered the refresh, so afterPopulate — advanceSelection past
-	// an archived conversation — waits for the re-run that follows it.
-	if fn := w.afterPopulate; fn != nil && !w.pageReloadPending {
+	if fn := w.afterPopulate; fn != nil {
 		w.afterPopulate = nil
 		fn()
 	}
@@ -4016,8 +4027,7 @@ func (w *window) setActiveAccount(a AccountInfo) {
 	w.threadIDs = nil
 	w.rowSig = map[string]string{}
 	w.threadPage = threadPageState{}
-	w.pageRequest = threadPageKey{}
-	w.pageRetryFn = nil
+	w.threadFailed = nil
 	w.updateThreadPageStatus()
 	w.loadLabels()
 	w.selectLabel(model.LabelInbox)
