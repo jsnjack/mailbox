@@ -107,6 +107,20 @@ type threadPageResult struct {
 	hasMore      bool
 }
 
+// threadCategory is everything the UI knows about one conversation's AI tag:
+// the tag, the message it was computed for (so a new reply re-categorizes the
+// thread — a "Needs reply" thread that gets a discount reply becomes
+// "Discount"), whether the user picked it by hand (a manual pick outranks the
+// automatic "Replied" tag), and whether the last attempt errored. A failure is
+// distinct from a settled "no category": it stays an AI retry candidate and
+// renders a subtle "failed" tag instead of silently looking uncategorized.
+type threadCategory struct {
+	tag            string
+	categorizedMsg string
+	manual         bool
+	failed         bool
+}
+
 // uiCacheKey keeps provider-scoped identifiers isolated between accounts.
 // Gmail and IMAP ids are unique only within their owning account.
 type uiCacheKey struct {
@@ -324,22 +338,11 @@ type window struct {
 	remoteImageTotal        int               // unique remote URLs in the last completed render
 	remoteImageLoadAll      bool              // banner action approves a large set rather than lifting the privacy opt-out
 
-	// AI inbox categorization: per-thread category cache (thread id → category),
-	// computed in the background for the inbox. inboxCategories gates it.
-	// categorizedMsg records the latest message id each thread's category was
-	// computed for, so a thread is re-categorized when a new message arrives (e.g.
-	// a "Needs reply" thread that gets a discount reply becomes "Discount").
-	categories     map[uiCacheKey]string
-	categorizedMsg map[uiCacheKey]string
-	// manualCat marks threads whose category the user picked by hand (thread id →
-	// true). A manual pick outranks the automatic "Replied" tag in the list.
-	manualCat map[uiCacheKey]bool
-	// categoryFailed marks threads whose last AI classification attempt errored
-	// (persisted via store.SetMessageCategoryFailed), distinct from a settled
-	// "no category": these threads stay AI retry candidates (never get a
-	// categorizedMsg entry) and render a subtle "failed" tag instead of
-	// silently looking uncategorized.
-	categoryFailed map[uiCacheKey]bool
+	// AI inbox categorization, keyed by thread. The four facts about a thread's
+	// tag are always read and written together, so they live in one value: a
+	// half-updated tag (a manual pick without its pin, a retry that keeps its
+	// old failure) is the bug this shape prevents. inboxCategories gates it.
+	threadCats map[uiCacheKey]threadCategory
 	// inlineRefetched guards the one-time re-fetch of a message whose body
 	// references inline (cid:) images that older extraction didn't capture.
 	inlineRefetched map[uiCacheKey]bool
@@ -425,10 +428,7 @@ func newWindow(app *adw.Application, deps Deps) *window {
 		readerZoom:       1.0,
 		selected:         map[string]bool{},
 		authReported:     map[int64]bool{},
-		categories:       map[uiCacheKey]string{},
-		categorizedMsg:   map[uiCacheKey]string{},
-		manualCat:        map[uiCacheKey]bool{},
-		categoryFailed:   map[uiCacheKey]bool{},
+		threadCats:       map[uiCacheKey]threadCategory{},
 		inlineRefetched:  map[uiCacheKey]bool{},
 		gistRequested:    map[uiCacheKey]bool{},
 		appliedGists:     map[uiCacheKey]string{},
@@ -1355,8 +1355,8 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 		// Keep the signature cache in step with what is actually on screen, so a
 		// scroll-recycled row never looks "unchanged" to the next diff.
 		w.rowSig[id] = w.renderSig(id)
-		key := w.activeCacheKey(id)
-		row := threadRow(w.threadByID[id], outgoing, w.categories[key], w.manualCat[key], w.categoryFailed[key])
+		cat := w.threadCats[w.activeCacheKey(id)]
+		row := threadRow(w.threadByID[id], outgoing, cat.tag, cat.manual, cat.failed)
 		// Right-click a row for quick actions (archive/star/read/trash) without
 		// opening it. A fresh row+gesture is created each bind, so the captured id
 		// always matches what's shown.
@@ -1585,17 +1585,13 @@ func (w *window) setThreadCategory(threadID, cat string) {
 	acctID := w.activeID
 	key := cacheKey(acctID, threadID)
 	logging.Trace("ui: set thread category", "thread", threadID, "id", msgID, "category", cat, "account", acctID)
-	delete(w.categoryFailed, key) // a manual decision resolves any pending "failed" state
-	if cat == "" {
-		// "None" clears the manual override entirely, reverting to the default
-		// (which, for a thread you replied to last, is the "Replied" tag).
-		delete(w.categories, key)
-		delete(w.manualCat, key)
-	} else {
-		w.categories[key] = cat
-		w.manualCat[key] = true // a hand-picked category outranks "Replied"
+	// A manual decision resolves any pending "failed" state, and pins the thread
+	// (categorizedMsg) so categorizeInbox leaves the choice alone. "None" clears
+	// the override entirely, reverting to the default — which, for a thread you
+	// replied to last, is the "Replied" tag.
+	w.threadCats[key] = threadCategory{
+		tag: cat, categorizedMsg: msgID, manual: cat != "", // a hand-picked category outranks "Replied"
 	}
-	w.categorizedMsg[key] = msgID // pin so categorizeInbox leaves the manual choice alone
 	w.refreshList(w.searchEntry.Text())
 	go func() {
 		var err error
@@ -1622,10 +1618,7 @@ func (w *window) recategorizeThread(threadID string) {
 	msgID := t.Latest.GmailID
 	logging.Trace("ui: recategorize thread", "thread", threadID, "id", msgID, "account", w.activeID)
 	key := w.activeCacheKey(threadID)
-	delete(w.categories, key)
-	delete(w.categorizedMsg, key)
-	delete(w.manualCat, key) // re-running AI drops any manual override
-	delete(w.categoryFailed, key)
+	delete(w.threadCats, key) // re-running AI drops the tag and any manual override
 	acctID := w.activeID
 	go func() {
 		if err := w.deps.Store.ClearMessageCategory(context.Background(), acctID, msgID); err != nil {
@@ -1697,10 +1690,7 @@ func (w *window) onRecategorize() {
 			if w.activeID != acctID {
 				return // account switched while clearing
 			}
-			clearAccountCache(w.categories, acctID)
-			clearAccountCache(w.categorizedMsg, acctID)
-			clearAccountCache(w.manualCat, acctID)
-			clearAccountCache(w.categoryFailed, acctID)
+			clearAccountCache(w.threadCats, acctID)
 			// Drop the stale tags; the worker's AIUpdated events reveal the new
 			// ones as they are classified.
 			w.refreshList(w.searchEntry.Text())
@@ -2711,9 +2701,9 @@ func (w *window) renderSig(id string) string {
 			sel = "s"
 		}
 	}
-	key := w.activeCacheKey(id)
+	cat := w.threadCats[w.activeCacheKey(id)]
 	return fmt.Sprintf("%s\x1f%d\x1f%d\x1f%s\x1f%t\x1f%t\x1f%s\x1f%s\x1f%d\x1f%t\x1f%t\x1f%t\x1f%d\x1f%s",
-		sel, t.UnreadCount, t.Count, w.categories[key], w.manualCat[key], w.categoryFailed[key], who, m.Subject,
+		sel, t.UnreadCount, t.Count, cat.tag, cat.manual, cat.failed, who, m.Subject,
 		m.InternalDate.Unix(), m.HasAttachments, m.IsStarred, t.RepliedByMe, t.SnoozedUntil, m.Snippet)
 }
 
@@ -2746,7 +2736,7 @@ func (w *window) categorizeInbox() {
 	// and marshal back through dispatch.
 	var cands []categoryCand
 	for id, t := range w.threadByID {
-		if w.categorizedMsg[w.activeCacheKey(id)] == t.Latest.GmailID {
+		if w.threadCats[w.activeCacheKey(id)].categorizedMsg == t.Latest.GmailID {
 			continue
 		}
 		cands = append(cands, categoryCand{threadID: id, msgID: t.Latest.GmailID})
@@ -2788,19 +2778,22 @@ func (w *window) categorizeInbox() {
 			changed := false
 			for _, c := range cands {
 				key := cacheKey(acctID, c.threadID)
-				if cat, ok := cached[c.msgID]; ok {
-					if w.categories[key] != cat || w.categorizedMsg[key] != c.msgID || w.categoryFailed[key] {
+				switch cat, ok := cached[c.msgID]; {
+				case ok:
+					// A stored tag settles the thread: it is no longer failed, and
+					// a manual pick recorded by the store stays a manual pick.
+					next := threadCategory{
+						tag: cat, categorizedMsg: c.msgID,
+						manual: manual[c.msgID] || w.threadCats[key].manual,
+					}
+					if w.threadCats[key] != next {
+						w.threadCats[key] = next
 						changed = true
 					}
-					w.categories[key] = cat
-					w.categorizedMsg[key] = c.msgID
-					delete(w.categoryFailed, key)
-					if manual[c.msgID] && !w.manualCat[key] {
-						w.manualCat[key] = true
-						changed = true
-					}
-				} else if failedIDs[c.msgID] && !w.categoryFailed[key] {
-					w.categoryFailed[key] = true
+				case failedIDs[c.msgID] && !w.threadCats[key].failed:
+					cur := w.threadCats[key]
+					cur.failed = true
+					w.threadCats[key] = cur
 					changed = true
 				}
 			}
@@ -4409,9 +4402,10 @@ func (w *window) renderConversation(msgs []model.Message) {
 	// stale or beside the point — otherwise the reader header could keep
 	// showing e.g. "Needs reply" after the list row already moved on.
 	threadKey := w.activeCacheKey(w.openThreadID)
-	category := w.categories[threadKey]
+	cat := w.threadCats[threadKey]
+	category := cat.tag
 	outgoing := w.current == model.LabelSent || w.current == model.LabelDraft
-	if t, ok := w.threadByID[w.openThreadID]; ok && !outgoing && !w.manualCat[threadKey] {
+	if t, ok := w.threadByID[w.openThreadID]; ok && !outgoing && !cat.manual {
 		switch {
 		case t.RepliedByMe:
 			category = "Replied"
@@ -4419,7 +4413,7 @@ func (w *window) renderConversation(msgs []model.Message) {
 			category = "Snoozed"
 		}
 	}
-	w.setReaderCategory(category, w.categoryFailed[threadKey])
+	w.setReaderCategory(category, cat.failed)
 	// Show a loading placeholder immediately when bodies need fetching (not all
 	// cached), so the user sees their click registered instead of staring at the
 	// previous message for up to the fetch timeout. When all bodies are cached

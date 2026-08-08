@@ -250,7 +250,7 @@ func (w *window) showRowMenu(row gtk.Widgetter, threadID string, x, y float64) {
 		// When this thread carries a category the user set by hand, offer a
 		// one-click way to drop it (reverting to the AI / "Replied" tag) rather
 		// than burying it under Categorize as → None.
-		if w.manualCat[w.activeCacheKey(threadID)] {
+		if w.threadCats[w.activeCacheKey(threadID)].manual {
 			item(box, "Clear category", func() { w.setThreadCategory(threadID, "") })
 		}
 	}
