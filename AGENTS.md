@@ -324,21 +324,30 @@ Unsubscribe, Print…, remote-images — never message- or sender-scoped items),
 each message's ⋯ acts on that message, and clicking a sender name opens the
 canonical sender surface (`showSenderActions`: copy address, find emails, and
 trust images — the link underlines on hover so it reads as
-clickable). A search entry runs instant local
-FTS5 search
-(`store.Search`, sanitized into a quoted prefix MATCH) whose hits are grouped
-into threads; clearing it returns to the current label. Every list populate (a
-label switch, a search, the 60s sync refresh) runs its store query off the main
-thread via `loadThreads`, guarded by a `refreshGen` counter so a slow query
-can't overwrite fresher results (last request wins); search hits are turned into
-thread summaries with one batched `store.GetThreadSummaries` (and server-search
-ids mapped via `store.ThreadIDsForMessages`) rather than a query per hit. When a search has no
-local matches, "Search all mail" runs a Gmail server-side search
-(`SearchServer` → `ListMessageIDs` with `q=`), caching matches beyond the local
-cache; a reader action "Find emails from sender" runs the same server search
-with a `from:` query. Server-search results persist a `serverSearch`/`serverQuery`
-mode so the debounced search-changed signal and 60s background refreshes don't
-clobber them with an empty local FTS pass. A selection-mode toggle
+clickable). A search entry runs instant local FTS5 search (`store.SearchPage`,
+sanitized into a quoted prefix MATCH) whose hits are grouped into threads;
+clearing it returns to the current label. Conversation lists load in bounded
+100-item pages as the user approaches the bottom: label and All Mail views use
+stable `(internal_date,rowid)` keyset cursors, local FTS advances by raw-hit
+offset (several hits may belong to one conversation), and provider search keeps
+the provider's continuation token opaque (`SearchPager` → Gmail's
+`nextPageToken`; backends without it get a bounded compatibility cursor).
+Every page query runs off the GTK thread and is guarded by `refreshGen` so a slow
+result cannot overwrite a newer account/folder/query (last request wins); an
+in-flight query is also context-cancelled when superseded. Appending a normal
+date-ordered page splices only the new `gtk.StringList` tail, preserving realized
+rows, selection, scroll position, and date headers. A failed continuation leaves
+the loaded rows intact and reveals a small Retry footer. Live sync refreshes
+re-query the depth the user already reached rather than collapsing the list back
+to its first page; a server-search refresh rehydrates only its already-loaded
+ids and does not restart the provider cursor. Search hits become summaries with
+one batched `store.GetThreadSummaries` read (server ids first map through
+`store.ThreadIDsForMessages`) rather than a query per hit. When a search has no
+local matches, "Search all mail" starts the paged provider search and caches only
+each requested page; a reader action "Find emails from sender" uses the same path
+with a `from:` query. Server-search results persist a
+`serverSearch`/`serverQuery` mode so the debounced search-changed signal and 60s
+background refreshes don't clobber them with local FTS results. A selection-mode toggle
 turns rows into checkboxes with a bulk-action bar (Archive / Trash / Mark read),
 applying the change to every selected conversation in one batched `ModifyLabels`
 call (`bulkApply`). Label changes from the bulk bar and the right-click row menu
