@@ -45,6 +45,47 @@ import (
 	"github.com/microcosm-cc/bluemonday"
 )
 
+const threadPageSize = 100
+
+type threadPageMode uint8
+
+const (
+	threadPageLabel threadPageMode = iota + 1
+	threadPageAll
+	threadPageSnoozed
+	threadPageLocalSearch
+	threadPageServerSearch
+)
+
+type threadPageKey struct {
+	mode      threadPageMode
+	accountID int64
+	label     string
+	query     string
+}
+
+type threadPageState struct {
+	key          threadPageKey
+	sums         []model.ThreadSummary
+	cursor       *store.ThreadPageCursor
+	searchOffset int
+	serverToken  string
+	serverIDs    []string
+	hasMore      bool
+	loading      bool
+	loadingMore  bool
+	failed       bool
+}
+
+type threadPageResult struct {
+	sums         []model.ThreadSummary
+	cursor       *store.ThreadPageCursor
+	searchOffset int
+	serverToken  string
+	serverIDs    []string
+	hasMore      bool
+}
+
 // window owns the widget tree and the currently displayed selection.
 type window struct {
 	app  *adw.Application
@@ -109,12 +150,20 @@ type window struct {
 
 	// virtualized list grouped by conversation: a StringList of thread ids drives
 	// a ListView; the factory builds visible rows from threadByID.
-	threadModel *gtk.StringList
-	threadSel   *gtk.SingleSelection
-	threadView  *gtk.ListView
-	threadStack *gtk.Stack      // "list" vs "empty" placeholder
-	emptyPage   *adw.StatusPage // the "empty" placeholder (text set per context)
-	readerStack *gtk.Stack      // "message" vs "empty" placeholder
+	threadModel  *gtk.StringList
+	threadSel    *gtk.SingleSelection
+	threadView   *gtk.ListView
+	threadScroll *gtk.ScrolledWindow
+	threadStack  *gtk.Stack      // "list" vs "empty" placeholder
+	emptyPage    *adw.StatusPage // the "empty" placeholder (text set per context)
+	pageStatus   *gtk.Box
+	pageSpinner  *adw.Spinner
+	pageLabel    *gtk.Label
+	pageRetry    *gtk.Button
+	threadPage   threadPageState
+	pageRequest  threadPageKey
+	pageRetryFn  func()
+	readerStack  *gtk.Stack // "message" vs "empty" placeholder
 	// readerReady flips when the shell page reports __mbSet is installed;
 	// content set before that is parked in pendingReaderHTML (latest wins) and
 	// flushed by the shell-ready handler in buildReader.
@@ -124,26 +173,26 @@ type window struct {
 	unreadOnly        bool
 	// multi-select triage: a selection mode with per-row checkboxes and a bulk
 	// action bar.
-	selectBtn          *gtk.ToggleButton
-	selectMode         bool
-	selected           map[string]bool // selected thread ids
-	selectionBar       *gtk.Box
-	selectionLabel     *gtk.Label
-	readOnlyBanner     *adw.Banner    // revealed when no Gmail client (live features off)
-	outboxBanner       *adw.Banner    // revealed when sends are queued/failed
-	emptyFolderBanner  *adw.Banner    // revealed in Trash/Spam to empty them permanently
-	authBanner         *adw.Banner    // revealed when an account's sign-in expired/was revoked
-	authExpiredID      int64          // the account the auth banner's Reconnect targets (0 = none/unknown)
-	authReported       map[int64]bool // accounts whose expiry already got an activity-log row (AuthExpired repeats every failed sync pass)
-	searchEntry        *gtk.SearchEntry
-	searchAllBtn       *gtk.Button // explicit provider search, available even when local FTS has hits
-	suppressSearch     bool        // guards SetText from firing a search during label switch
-	serverSearch       bool        // current search is a Gmail server-side search, not local FTS
-	serverQuery        string      // the active server-search query (guards the debounced change signal)
-	serverSearchCancel context.CancelFunc
-	threadByID         map[string]model.ThreadSummary
-	threadIDs          []string          // displayed thread ids, in order (for incremental diffing)
-	rowSig             map[string]string // last-rendered signature per row, to detect in-place changes
+	selectBtn         *gtk.ToggleButton
+	selectMode        bool
+	selected          map[string]bool // selected thread ids
+	selectionBar      *gtk.Box
+	selectionLabel    *gtk.Label
+	readOnlyBanner    *adw.Banner    // revealed when no Gmail client (live features off)
+	outboxBanner      *adw.Banner    // revealed when sends are queued/failed
+	emptyFolderBanner *adw.Banner    // revealed in Trash/Spam to empty them permanently
+	authBanner        *adw.Banner    // revealed when an account's sign-in expired/was revoked
+	authExpiredID     int64          // the account the auth banner's Reconnect targets (0 = none/unknown)
+	authReported      map[int64]bool // accounts whose expiry already got an activity-log row (AuthExpired repeats every failed sync pass)
+	searchEntry       *gtk.SearchEntry
+	searchAllBtn      *gtk.Button // explicit provider search, available even when local FTS has hits
+	suppressSearch    bool        // guards SetText from firing a search during label switch
+	serverSearch      bool        // current search is a provider-side search, not local FTS
+	serverQuery       string      // the active server-search query (guards the debounced change signal)
+	threadLoadCancel  context.CancelFunc
+	threadByID        map[string]model.ThreadSummary
+	threadIDs         []string          // displayed thread ids, in order (for incremental diffing)
+	rowSig            map[string]string // last-rendered signature per row, to detect in-place changes
 
 	// coalesce refreshes triggered by bursts of sync change events.
 	refreshPending       bool
@@ -1295,10 +1344,11 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 	w.threadView.SetVExpand(true)
 	w.threadView.SetHExpand(true)
 
-	scroller := gtk.NewScrolledWindow()
-	scroller.SetVExpand(true)
-	scroller.SetHExpand(true)
-	scroller.SetChild(w.threadView)
+	w.threadScroll = gtk.NewScrolledWindow()
+	w.threadScroll.SetVExpand(true)
+	w.threadScroll.SetHExpand(true)
+	w.threadScroll.SetChild(w.threadView)
+	w.threadScroll.VAdjustment().ConnectValueChanged(w.maybeLoadNextThreadPage)
 
 	w.emptyPage = adw.NewStatusPage()
 	w.emptyPage.SetIconName("mail-unread-symbolic")
@@ -1307,9 +1357,29 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 
 	w.threadStack = gtk.NewStack()
 	w.threadStack.SetVExpand(true)
-	w.threadStack.AddNamed(scroller, "list")
+	w.threadStack.AddNamed(w.threadScroll, "list")
 	w.threadStack.AddNamed(w.emptyPage, "empty")
 	w.threadStack.SetVisibleChildName("list")
+
+	w.pageSpinner = adw.NewSpinner()
+	w.pageSpinner.SetVisible(false)
+	w.pageLabel = gtk.NewLabel("")
+	w.pageLabel.AddCSSClass("dim-label")
+	w.pageRetry = gtk.NewButtonWithLabel("Retry")
+	w.pageRetry.AddCSSClass("flat")
+	w.pageRetry.SetVisible(false)
+	w.pageRetry.ConnectClicked(func() {
+		if retry := w.pageRetryFn; retry != nil {
+			retry()
+		}
+	})
+	w.pageStatus = gtk.NewBox(gtk.OrientationHorizontal, 8)
+	w.pageStatus.SetHAlign(gtk.AlignCenter)
+	setMargins(w.pageStatus, 6, 6, 6, 6)
+	w.pageStatus.Append(w.pageSpinner)
+	w.pageStatus.Append(w.pageLabel)
+	w.pageStatus.Append(w.pageRetry)
+	w.pageStatus.SetVisible(false)
 
 	w.searchEntry = gtk.NewSearchEntry()
 	w.searchEntry.SetPlaceholderText("Search")
@@ -1371,6 +1441,7 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 	content.Append(searchBar)
 	content.Append(w.selectionBar)
 	content.Append(w.threadStack)
+	content.Append(w.pageStatus)
 
 	hb := adw.NewHeaderBar()
 	hb.SetShowTitle(false) // "Messages" is redundant — the pane is self-evident
@@ -1836,7 +1907,7 @@ func (w *window) bulkApply(verb string, add, remove []string) {
 // matches, and shows them — finding mail beyond the local cache.
 func (w *window) onSearchAllMail() {
 	q := strings.TrimSpace(w.searchEntry.Text())
-	if q == "" {
+	if q == "" || !w.canSearchServer() {
 		return
 	}
 	logging.Trace("ui: search all mail", "query", q, "account", w.activeID)
@@ -1844,11 +1915,16 @@ func (w *window) onSearchAllMail() {
 	w.runServerSearch(q)
 }
 
-// runServerSearch executes the Gmail server-side search for q and shows the
-// results. refreshList calls this (instead of local FTS) while serverSearch is on.
+func (w *window) canSearchServer() bool {
+	return w.deps.SearchPage != nil || w.deps.SearchServer != nil
+}
+
+// runServerSearch starts a fresh provider-side search. Further pages are loaded
+// only as the list approaches its bottom; a live sync refreshes the summaries
+// already present without restarting the provider query.
 func (w *window) runServerSearch(q string) {
-	if q == "" || w.deps.SearchServer == nil {
-		logging.Trace("ui: run server search skipped", "query", q, "hasSearch", w.deps.SearchServer != nil)
+	if q == "" || !w.canSearchServer() {
+		logging.Trace("ui: run server search skipped", "query", q, "hasSearch", w.canSearchServer())
 		return
 	}
 	logging.Trace("ui: run server search", "query", q, "account", w.activeID)
@@ -1858,60 +1934,47 @@ func (w *window) runServerSearch(q string) {
 	w.emptyPage.SetTitle("Searching all mail…")
 	w.emptyPage.SetDescription("")
 	w.searchAllBtn.SetSensitive(false)
-	if w.serverSearchCancel != nil {
-		w.serverSearchCancel()
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	w.serverSearchCancel = cancel
 	acctID := w.activeID
-	w.refreshGen++
-	gen := w.refreshGen
-	go func() {
-		sums, truncated, err := w.serverSearchThreads(ctx, acctID, q)
-		dispatch.Main(func() {
-			if gen != w.refreshGen || !w.serverSearch ||
-				strings.TrimSpace(w.searchEntry.Text()) != q || w.activeID != acctID {
-				logging.Trace("ui: server search discarded", "query", q, "gen", gen, "cur", w.refreshGen, "serverSearch", w.serverSearch, "account", acctID)
-				return // mode/query/account changed while searching
-			}
-			w.searchAllBtn.SetSensitive(true)
-			if err != nil {
-				slog.Warn("ui: search all mail", "err", err)
-				w.toast("Couldn't search all mail — showing cached results")
-				w.serverSearch, w.serverQuery = false, ""
-				w.refreshList(q)
-				return
-			}
-			logging.Trace("ui: server search results", "query", q, "n", len(sums), "account", acctID)
-			w.showThreads(sums)
-			if len(sums) == 0 {
-				w.toast("No messages found")
-			} else if truncated {
-				w.toast(fmt.Sprintf("Showing the first %d matches — refine your search for more", serverSearchCap))
-			}
-		})
-	}()
+	key := threadPageKey{mode: threadPageServerSearch, accountID: acctID, query: q}
+	w.startThreadLoad(key, false, func() { w.runServerSearch(q) }, func(ctx context.Context) (threadPageResult, error) {
+		ids, next, err := w.fetchServerSearchPage(ctx, acctID, q, "")
+		if err != nil {
+			return threadPageResult{}, err
+		}
+		sums, err := w.serverSearchSummaries(ctx, acctID, ids)
+		return threadPageResult{sums: sums, serverToken: next, serverIDs: ids, hasMore: next != ""}, err
+	}, func(err error) {
+		w.searchAllBtn.SetSensitive(true)
+		slog.Warn("ui: search all mail", "err", err)
+		w.toast("Couldn't search all mail — showing cached results")
+		w.serverSearch, w.serverQuery = false, ""
+		w.refreshList(q)
+	})
 }
 
-// serverSearchThreads runs the provider-side search and groups the matched
-// message ids into thread summaries, newest-first. The id→thread mapping and the
-// summaries are each fetched in one batched query rather than per matched id.
-func (w *window) serverSearchThreads(ctx context.Context, acctID int64, q string) ([]model.ThreadSummary, bool, error) {
-	ids, err := w.deps.SearchServer(ctx, acctID, q, serverSearchCap+1)
-	if err != nil {
-		return nil, false, err
+func (w *window) fetchServerSearchPage(ctx context.Context, acctID int64, q, token string) ([]string, string, error) {
+	if w.deps.SearchPage != nil {
+		page, err := w.deps.SearchPage(ctx, acctID, q, token, threadPageSize)
+		return page.IDs, page.Next, err
 	}
-	truncated := len(ids) > serverSearchCap
-	if truncated {
-		ids = ids[:serverSearchCap]
+	if token != "" || w.deps.SearchServer == nil {
+		return nil, "", nil
 	}
+	ids, err := w.deps.SearchServer(ctx, acctID, q, threadPageSize)
+	return ids, "", err
+}
+
+// serverSearchSummaries maps provider message ids to conversations with two
+// batched store reads. Sorting by newest message preserves the list's existing
+// search behavior while the provider cursor remains independent and opaque.
+func (w *window) serverSearchSummaries(ctx context.Context, acctID int64, ids []string) ([]model.ThreadSummary, error) {
 	idToThread, err := w.deps.Store.ThreadIDsForMessages(ctx, acctID, ids)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	seen := make(map[string]bool, len(ids))
 	tids := make([]string, 0, len(ids))
-	for _, id := range ids { // preserve the server's relevance order
+	for _, id := range ids { // de-duplicate provider hits before one batched summary read
 		t, ok := idToThread[id]
 		if !ok || seen[t] {
 			continue
@@ -1921,12 +1984,18 @@ func (w *window) serverSearchThreads(ctx context.Context, acctID int64, q string
 	}
 	sums, err := w.deps.Store.GetThreadSummaries(ctx, acctID, tids)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	sort.SliceStable(sums, func(i, j int) bool {
+		if sums[i].Latest.InternalDate.Equal(sums[j].Latest.InternalDate) {
+			if sums[i].Latest.RowID == sums[j].Latest.RowID {
+				return sums[i].ThreadID < sums[j].ThreadID
+			}
+			return sums[i].Latest.RowID > sums[j].Latest.RowID
+		}
 		return sums[i].Latest.InternalDate.After(sums[j].Latest.InternalDate)
 	})
-	return sums, truncated, nil
+	return sums, nil
 }
 
 func (w *window) onSearchChanged() {
@@ -1935,15 +2004,15 @@ func (w *window) onSearchChanged() {
 	}
 	q := strings.TrimSpace(w.searchEntry.Text())
 	logging.Trace("ui: search changed", "query", q, "serverQuery", w.serverQuery)
-	w.searchAllBtn.SetVisible(q != "" && w.deps.SearchServer != nil)
+	w.searchAllBtn.SetVisible(q != "" && w.canSearchServer())
 	// The search-changed signal is debounced, so a programmatic SetText (e.g.
 	// "Find emails from sender") arrives here after suppressSearch was cleared.
 	// Only a genuinely different query exits server-search mode back to local.
 	if q != w.serverQuery {
 		w.searchAllBtn.SetSensitive(true)
-		if w.serverSearchCancel != nil {
-			w.serverSearchCancel()
-			w.serverSearchCancel = nil
+		if w.threadLoadCancel != nil {
+			w.threadLoadCancel()
+			w.threadLoadCancel = nil
 		}
 		w.serverSearch = false
 	}
@@ -1971,82 +2040,280 @@ func (w *window) refreshListThen(query string, done func()) {
 func (w *window) loadThreadsFor(query string) {
 	trimmed := strings.TrimSpace(query)
 	if trimmed == "" {
-		if w.serverSearchCancel != nil {
-			w.serverSearchCancel()
-			w.serverSearchCancel = nil
+		if w.threadLoadCancel != nil {
+			w.threadLoadCancel()
+			w.threadLoadCancel = nil
 		}
 		w.serverSearch, w.serverQuery = false, "" // no query → not server-searching
 		label, acct := w.current, w.activeID
+		mode := threadPageLabel
+		switch label {
+		case allMailID:
+			mode = threadPageAll
+		case snoozedID:
+			mode = threadPageSnoozed
+		}
+		key := threadPageKey{mode: mode, accountID: acct, label: label}
+		if w.threadPage.loading && w.pageRequest == key {
+			return
+		}
+		target := threadPageSize
+		if w.threadPage.key == key && len(w.threadPage.sums) > target {
+			target = len(w.threadPage.sums)
+		}
 		logging.Trace("ui: load threads (label)", "label", label, "account", acct, "unreadOnly", w.unreadOnly)
-		w.loadThreads(func(ctx context.Context) ([]model.ThreadSummary, error) {
-			if label == allMailID {
-				return w.deps.Store.ListAllThreads(ctx, acct, threadListCap, 0)
+		w.startThreadLoad(key, false, func() { w.loadThreadsFor(query) }, func(ctx context.Context) (threadPageResult, error) {
+			switch mode {
+			case threadPageAll:
+				page, err := w.deps.Store.ListAllThreadsPage(ctx, acct, target, nil)
+				return threadPageResult{sums: page.Threads, cursor: page.Next, hasMore: page.Next != nil}, err
+			case threadPageSnoozed:
+				sums, err := w.snoozedSummaries(ctx, acct)
+				return threadPageResult{sums: sums}, err
+			default:
+				page, err := w.deps.Store.ListThreadsByLabelPage(ctx, acct, label, target, nil)
+				return threadPageResult{sums: page.Threads, cursor: page.Next, hasMore: page.Next != nil}, err
 			}
-			if label == snoozedID {
-				return w.snoozedSummaries(ctx, acct)
-			}
-			return w.deps.Store.ListThreadsByLabel(ctx, acct, label, threadListCap, 0)
-		})
+		}, nil)
 		return
 	}
 
 	// A server-side search stays a server search across refreshes (e.g. a
-	// background sync) instead of reverting to local FTS of the same query.
-	if w.serverSearch && w.deps.SearchServer != nil {
+	// background sync) without restarting its provider cursor.
+	if w.serverSearch && w.canSearchServer() {
 		logging.Trace("ui: load threads (server search)", "query", trimmed, "account", w.activeID)
-		w.runServerSearch(trimmed)
+		key := threadPageKey{mode: threadPageServerSearch, accountID: w.activeID, query: trimmed}
+		if w.threadPage.loading && w.pageRequest == key {
+			return
+		}
+		if w.threadPage.key != key {
+			w.runServerSearch(trimmed)
+			return
+		}
+		state := w.threadPage
+		w.startThreadLoad(key, false, func() { w.loadThreadsFor(query) }, func(ctx context.Context) (threadPageResult, error) {
+			sums, err := w.serverSearchSummaries(ctx, key.accountID, state.serverIDs)
+			return threadPageResult{
+				sums: sums, serverToken: state.serverToken, serverIDs: state.serverIDs,
+				hasMore: state.hasMore,
+			}, err
+		}, nil)
 		return
 	}
 
 	acct := w.activeID
+	key := threadPageKey{mode: threadPageLocalSearch, accountID: acct, query: trimmed}
+	if w.threadPage.loading && w.pageRequest == key {
+		return
+	}
+	target := threadPageSize
+	if w.threadPage.key == key && w.threadPage.searchOffset > target {
+		target = w.threadPage.searchOffset
+	}
 	logging.Trace("ui: load threads (local search)", "query", query, "account", acct)
-	w.loadThreads(func(ctx context.Context) ([]model.ThreadSummary, error) {
-		return w.searchThreads(ctx, acct, query)
-	})
+	w.startThreadLoad(key, false, func() { w.loadThreadsFor(query) }, func(ctx context.Context) (threadPageResult, error) {
+		sums, consumed, more, err := w.searchThreadPage(ctx, acct, query, target, 0)
+		return threadPageResult{sums: sums, searchOffset: consumed, hasMore: more}, err
+	}, nil)
 }
 
-// loadThreads runs query off the main thread and renders the result, discarding
-// it when a newer refresh has since been issued (last request wins) so a slow
-// query can't overwrite fresher results.
-func (w *window) loadThreads(query func(context.Context) ([]model.ThreadSummary, error)) {
+// startThreadLoad runs one initial, refresh, or continuation query off the GTK
+// thread. It commits page state only after success, so a failed continuation
+// keeps every already-visible conversation and offers an in-place retry.
+func (w *window) startThreadLoad(key threadPageKey, loadingMore bool, retry func(), query func(context.Context) (threadPageResult, error), onError func(error)) {
+	if w.threadLoadCancel != nil {
+		w.threadLoadCancel()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	w.threadLoadCancel = cancel
 	w.refreshGen++
 	gen := w.refreshGen
+	w.pageRequest = key
+	w.threadPage.loading = true
+	w.threadPage.loadingMore = loadingMore
+	w.threadPage.failed = false
+	w.pageRetryFn = nil
+	w.updateThreadPageStatus()
 	go func() {
+		defer cancel()
 		start := time.Now()
-		sums, err := query(context.Background())
-		slog.Debug("ui: loadThreads", "n", len(sums), "dur", time.Since(start))
-		logging.Trace("ui: load threads result", "n", len(sums), "dur", time.Since(start), "err", err)
+		result, err := query(ctx)
+		slog.Debug("ui: loadThreads", "n", len(result.sums), "dur", time.Since(start))
+		logging.Trace("ui: load threads result", "n", len(result.sums), "more", result.hasMore, "dur", time.Since(start), "err", err)
 		dispatch.Main(func() {
 			if gen != w.refreshGen {
-				logging.Trace("ui: load threads discarded", "gen", gen, "cur", w.refreshGen, "n", len(sums))
+				logging.Trace("ui: load threads discarded", "gen", gen, "cur", w.refreshGen, "n", len(result.sums))
 				return // superseded by a newer refresh
 			}
+			w.pageRequest = threadPageKey{}
+			w.threadLoadCancel = nil
 			if err != nil {
 				slog.Error("ui: load threads", "err", err)
-				w.toast("Couldn't load messages")
+				w.threadPage.loading = false
+				w.threadPage.failed = true
+				w.pageRetryFn = retry
+				w.updateThreadPageStatus()
+				if onError != nil {
+					onError(err)
+				} else if !loadingMore {
+					w.toast("Couldn't load messages")
+				}
 				return
 			}
-			w.showThreads(sums)
+			w.threadPage = threadPageState{
+				key: key, sums: result.sums, cursor: result.cursor,
+				searchOffset: result.searchOffset, serverToken: result.serverToken,
+				serverIDs: result.serverIDs, hasMore: result.hasMore,
+			}
+			w.pageRetryFn = nil
+			w.updateThreadPageStatus()
+			w.searchAllBtn.SetSensitive(true)
+			w.showThreads(result.sums)
+			dispatch.Main(w.maybeLoadNextThreadPage)
 		})
 	}()
 }
 
-// searchThreads runs a local FTS search and groups the hits into thread
-// summaries (newest-first, like the folder views), fetching all summaries in one
-// batched query rather than one per hit thread.
-func (w *window) searchThreads(ctx context.Context, acct int64, query string) ([]model.ThreadSummary, error) {
-	msgs, err := w.deps.Store.Search(ctx, acct, query, threadListCap)
+// searchThreadPage loads one bounded slice of FTS message hits and groups it
+// into thread summaries. consumed is the number of raw hits advanced: multiple
+// matching messages can belong to one visible conversation.
+func (w *window) searchThreadPage(ctx context.Context, acct int64, query string, limit, offset int) ([]model.ThreadSummary, int, bool, error) {
+	msgs, err := w.deps.Store.SearchPage(ctx, acct, query, limit+1, offset)
 	if err != nil {
-		return nil, err
+		return nil, 0, false, err
+	}
+	more := len(msgs) > limit
+	if more {
+		msgs = msgs[:limit]
 	}
 	sums, err := w.deps.Store.GetThreadSummaries(ctx, acct, uniqueThreadIDs(msgs))
 	if err != nil {
-		return nil, err
+		return nil, 0, false, err
 	}
 	sort.SliceStable(sums, func(i, j int) bool {
+		if sums[i].Latest.InternalDate.Equal(sums[j].Latest.InternalDate) {
+			if sums[i].Latest.RowID == sums[j].Latest.RowID {
+				return sums[i].ThreadID < sums[j].ThreadID
+			}
+			return sums[i].Latest.RowID > sums[j].Latest.RowID
+		}
 		return sums[i].Latest.InternalDate.After(sums[j].Latest.InternalDate)
 	})
-	return sums, nil
+	return sums, len(msgs), more, nil
+}
+
+func (w *window) updateThreadPageStatus() {
+	if w.pageStatus == nil {
+		return
+	}
+	switch {
+	case w.threadPage.loading:
+		w.pageSpinner.SetVisible(true)
+		w.pageRetry.SetVisible(false)
+		if w.threadPage.loadingMore {
+			w.pageLabel.SetText("Loading more messages…")
+		} else {
+			w.pageLabel.SetText("Loading messages…")
+		}
+		w.pageStatus.SetVisible(true)
+	case w.threadPage.failed:
+		w.pageSpinner.SetVisible(false)
+		if w.threadPage.loadingMore {
+			w.pageLabel.SetText("Couldn't load more messages")
+		} else {
+			w.pageLabel.SetText("Couldn't load messages")
+		}
+		w.pageRetry.SetVisible(w.pageRetryFn != nil)
+		w.pageStatus.SetVisible(true)
+	default:
+		w.pageSpinner.SetVisible(false)
+		w.pageRetry.SetVisible(false)
+		w.pageStatus.SetVisible(false)
+	}
+}
+
+func (w *window) maybeLoadNextThreadPage() {
+	if w.threadScroll == nil || w.threadPage.loading || w.threadPage.failed || !w.threadPage.hasMore {
+		return
+	}
+	adj := w.threadScroll.VAdjustment()
+	if adj.Upper()-adj.Value()-adj.PageSize() <= 600 {
+		w.loadNextThreadPage()
+	}
+}
+
+func (w *window) loadNextThreadPage() {
+	state := w.threadPage
+	if state.loading || state.failed || !state.hasMore {
+		return
+	}
+	key := state.key
+	logging.Trace("ui: load next thread page", "mode", key.mode, "account", key.accountID, "loaded", len(state.sums))
+	w.startThreadLoad(key, true, w.loadNextThreadPage, func(ctx context.Context) (threadPageResult, error) {
+		switch key.mode {
+		case threadPageAll:
+			page, err := w.deps.Store.ListAllThreadsPage(ctx, key.accountID, threadPageSize, state.cursor)
+			return threadPageResult{sums: mergeThreadSummaries(state.sums, page.Threads), cursor: page.Next, hasMore: page.Next != nil}, err
+		case threadPageLabel:
+			page, err := w.deps.Store.ListThreadsByLabelPage(ctx, key.accountID, key.label, threadPageSize, state.cursor)
+			return threadPageResult{sums: mergeThreadSummaries(state.sums, page.Threads), cursor: page.Next, hasMore: page.Next != nil}, err
+		case threadPageLocalSearch:
+			sums, consumed, more, err := w.searchThreadPage(ctx, key.accountID, key.query, threadPageSize, state.searchOffset)
+			return threadPageResult{
+				sums:         mergeThreadSummaries(state.sums, sums),
+				searchOffset: state.searchOffset + consumed, hasMore: more,
+			}, err
+		case threadPageServerSearch:
+			ids, next, err := w.fetchServerSearchPage(ctx, key.accountID, key.query, state.serverToken)
+			if err != nil {
+				return threadPageResult{}, err
+			}
+			allIDs := appendUniqueStrings(state.serverIDs, ids)
+			sums, err := w.serverSearchSummaries(ctx, key.accountID, allIDs)
+			return threadPageResult{
+				sums: sums, serverToken: next, serverIDs: allIDs, hasMore: next != "",
+			}, err
+		default:
+			return threadPageResult{sums: state.sums}, nil
+		}
+	}, nil)
+}
+
+func mergeThreadSummaries(existing, added []model.ThreadSummary) []model.ThreadSummary {
+	byID := make(map[string]model.ThreadSummary, len(existing)+len(added))
+	for _, sum := range existing {
+		byID[sum.ThreadID] = sum
+	}
+	for _, sum := range added {
+		byID[sum.ThreadID] = sum
+	}
+	out := make([]model.ThreadSummary, 0, len(byID))
+	for _, sum := range byID {
+		out = append(out, sum)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Latest.InternalDate.Equal(out[j].Latest.InternalDate) {
+			if out[i].Latest.RowID == out[j].Latest.RowID {
+				return out[i].ThreadID < out[j].ThreadID
+			}
+			return out[i].Latest.RowID > out[j].Latest.RowID
+		}
+		return out[i].Latest.InternalDate.After(out[j].Latest.InternalDate)
+	})
+	return out
+}
+
+func appendUniqueStrings(existing, added []string) []string {
+	seen := make(map[string]bool, len(existing)+len(added))
+	out := make([]string, 0, len(existing)+len(added))
+	for _, id := range append(append([]string(nil), existing...), added...) {
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	return out
 }
 
 // uniqueThreadIDs returns the thread ids of msgs, de-duplicated, in first-seen
@@ -2200,7 +2467,7 @@ func (w *window) showThreads(sums []model.ThreadSummary) {
 			}
 			// Keep the empty-state action as a larger, discoverable counterpart to
 			// the search-bar button when only the local cache has been searched.
-			if w.deps.SearchServer != nil && !w.serverSearch {
+			if w.canSearchServer() && !w.serverSearch {
 				btn := gtk.NewButtonWithLabel("Search all mail")
 				btn.AddCSSClass("pill")
 				btn.AddCSSClass("suggested-action")
@@ -2270,6 +2537,28 @@ func (w *window) diffThreadModel(oldIDs, newIDs []string) {
 		} else {
 			logging.Trace("ui: diff threads rebind", "n", len(newIDs), "rebound", rebound)
 		}
+		return
+	}
+
+	// Paging normally extends a date-ordered folder without disturbing its
+	// existing prefix. Append only the new tail so GTK keeps the current scroll
+	// anchor and realized row widgets instead of replacing the entire model.
+	if len(newIDs) > len(oldIDs) && slices.Equal(oldIDs, newIDs[:len(oldIDs)]) {
+		rebound := 0
+		for i, id := range oldIDs {
+			sig := w.renderSig(id)
+			if w.rowSig[id] != sig {
+				w.rowSig[id] = sig
+				w.threadModel.Splice(uint(i), 1, []string{id})
+				rebound++
+			}
+		}
+		tail := newIDs[len(oldIDs):]
+		w.threadModel.Splice(uint(len(oldIDs)), 0, tail)
+		for _, id := range tail {
+			w.rowSig[id] = w.renderSig(id)
+		}
+		logging.Trace("ui: diff threads append", "old", len(oldIDs), "added", len(tail), "rebound", rebound)
 		return
 	}
 
@@ -3568,16 +3857,6 @@ func (w *window) restoreSidebarSelection() {
 	}
 }
 
-// threadListCap bounds how many messages a label loads at once. The ListView
-// virtualizes row widgets, so this only bounds metadata held in memory; a truly
-// windowed model (paging on scroll) is a further optimization.
-const threadListCap = 5000
-
-// serverSearchCap bounds metadata fetched into the cache by one interactive
-// provider search. Request one extra id to detect truncation and tell the user
-// instead of silently presenting a partial 50-message result as complete.
-const serverSearchCap = 500
-
 // signatureForActive returns the signature composes should append for the active
 // account: the global default when only one account is connected (per-account
 // overrides only matter with several), otherwise the active account's signature
@@ -3610,6 +3889,12 @@ func (w *window) setActiveAccount(a AccountInfo) {
 	// switch. An empty list is honest immediate feedback; rows follow.
 	w.threadByID = map[string]model.ThreadSummary{}
 	w.threadModel.Splice(0, w.threadModel.NItems(), nil)
+	w.threadIDs = nil
+	w.rowSig = map[string]string{}
+	w.threadPage = threadPageState{}
+	w.pageRequest = threadPageKey{}
+	w.pageRetryFn = nil
+	w.updateThreadPageStatus()
 	w.loadLabels()
 	w.selectLabel(model.LabelInbox)
 	w.refreshOutbox()
@@ -5205,7 +5490,7 @@ func (w *window) searchFrom(addr string) {
 	w.suppressSearch = true
 	w.searchEntry.SetText(q)
 	w.suppressSearch = false
-	if w.deps.SearchServer != nil {
+	if w.canSearchServer() {
 		w.onSearchAllMail()
 	} else {
 		w.refreshList(q)
@@ -5420,7 +5705,7 @@ func (w *window) showSenderActions(gmailID string) {
 	logging.Trace("ui: sender actions", "id", gmailID, "addr", addr)
 
 	w.addressActionsDialog(addr, func(item func(label string, fn func())) {
-		if w.deps.SearchServer != nil {
+		if w.canSearchServer() {
 			item("Find emails from "+displayFrom(m), func() { w.searchFrom(addr) })
 		}
 	})
@@ -5444,7 +5729,7 @@ func (w *window) showRecipientActions(token string) {
 		if who == "" {
 			who = addr
 		}
-		if w.deps.SearchServer != nil {
+		if w.canSearchServer() {
 			item("Find emails from "+who, func() { w.searchFrom(addr) })
 		}
 		if w.deps.Send != nil {
