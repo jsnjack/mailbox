@@ -127,8 +127,8 @@ func (b *Backend) ApplyLabels(ctx context.Context, ids []string, add, remove []s
 	})
 }
 
-// moveDest resolves the destination folder for a label change (trash/spam/inbox/
-// archive), reading the folder maps under the guard. "" means no move.
+// moveDest resolves the destination folder for a label change, reading the
+// folder maps under the guard. "" means no move.
 func (b *Backend) moveDest(add, remove []string) string {
 	b.folderMu.Lock()
 	defer b.folderMu.Unlock()
@@ -143,7 +143,20 @@ func (b *Backend) moveDest(add, remove []string) string {
 		}
 		return "INBOX"
 	case has(remove, model.LabelInbox):
+		// A user-folder add takes precedence over the generic archive implied by
+		// removing INBOX (the UI represents "Move to folder" as both changes).
+		for _, id := range add {
+			if d := b.labelToFolder[id]; d != "" {
+				return d
+			}
+		}
 		return b.archiveFolder // archive; "" = no Archive folder → leave in place
+	default:
+		for _, id := range add {
+			if d := b.labelToFolder[id]; d != "" {
+				return d
+			}
+		}
 	}
 	return ""
 }

@@ -107,26 +107,32 @@ type Backend struct {
 
 	folderMu      sync.Mutex        // guards the folder caches below
 	folderToLabel map[string]string // mailbox name → label id (special-use mapped)
-	labelToFolder map[string]string // system label id → mailbox name (for moves)
+	labelToFolder map[string]string // label id → mailbox name (for moves)
 	archiveFolder string            // the \Archive mailbox, if any (for archive)
 	labels        []model.Label     // cached LIST → domain labels
 	synced        []string          // mailboxes to sync, derived once from LIST
 	foldersLoaded bool              // LIST done
+
+	searchMu       sync.Mutex
+	searchSeq      atomic.Uint64
+	searchSessions map[string]imapSearchSession
 }
 
 // Compile-time assertion: the engine's metadata fan-out uses the batch path when
 // a backend implements this.
 var _ backend.BatchMetadataFetcher = (*Backend)(nil)
+var _ backend.SearchPager = (*Backend)(nil)
 
 // New builds an IMAP backend. cred authenticates both the IMAP and SMTP
 // connections (PasswordAuth or OAuthAuth).
 func New(cfg Config, accountID int64, cred Credential) *Backend {
 	return &Backend{
 		cfg: cfg, accountID: accountID, cred: cred,
-		sem:           make(chan struct{}, poolSize),
-		idle:          make(chan *conn, poolSize),
-		stats:         &Stats{},
-		folderToLabel: map[string]string{},
+		sem:            make(chan struct{}, poolSize),
+		idle:           make(chan *conn, poolSize),
+		stats:          &Stats{},
+		folderToLabel:  map[string]string{},
+		searchSessions: map[string]imapSearchSession{},
 	}
 }
 
@@ -508,8 +514,10 @@ func (b *Backend) ensureFolders(c *conn) error {
 		ltype := model.LabelUser
 		if isSystemLabel(id) {
 			ltype = model.LabelSystem
-			labelToFolder[id] = d.Mailbox
 		}
+		// Every selectable folder is a move destination. User-folder ids are
+		// their mailbox names, while special-use folders use system label ids.
+		labelToFolder[id] = d.Mailbox
 		labels = append(labels, model.Label{
 			AccountID: b.accountID, GmailID: id, Name: displayName(d.Mailbox, d.Delim), Type: ltype,
 		})

@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/emersion/go-imap/v2"
+	"github.com/jsnjack/mailbox/internal/model"
 )
 
 // Ids for the same mailbox under different UIDVALIDITY epochs must land in
@@ -29,5 +30,57 @@ func TestGroupByFolderSeparatesEpochs(t *testing.T) {
 	}
 	if got := groups[folderKey{"Work", 7}]; len(got) != 1 || got[0] != imap.UID(3) {
 		t.Errorf("Work epoch 7: %v, want [3]", got)
+	}
+}
+
+func TestMoveDest(t *testing.T) {
+	b := &Backend{
+		labelToFolder: map[string]string{
+			model.LabelInbox: "INBOX",
+			model.LabelTrash: "Trash",
+			"Projects":       "Projects",
+		},
+		archiveFolder: "Archive",
+	}
+	tests := []struct {
+		name        string
+		add, remove []string
+		want        string
+	}{
+		{name: "user folder beats archive", add: []string{"Projects"}, remove: []string{model.LabelInbox}, want: "Projects"},
+		{name: "user folder from trash", add: []string{"Projects"}, remove: []string{model.LabelTrash}, want: "Projects"},
+		{name: "archive", remove: []string{model.LabelInbox}, want: "Archive"},
+		{name: "trash", add: []string{model.LabelTrash}, remove: []string{model.LabelInbox}, want: "Trash"},
+		{name: "flags only", add: []string{model.LabelStarred}, want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := b.moveDest(tt.add, tt.remove); got != tt.want {
+				t.Fatalf("moveDest(%v, %v) = %q, want %q", tt.add, tt.remove, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNextSearchPageUsesOpaqueSession(t *testing.T) {
+	b := &Backend{searchSessions: map[string]imapSearchSession{
+		"token": {query: "invoice", ids: []string{"a", "b", "c"}, offset: 1},
+	}}
+	page, err := b.nextSearchPage("invoice", "token", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.IDs) != 1 || page.IDs[0] != "b" || page.Next != "token" {
+		t.Fatalf("first continuation = %+v", page)
+	}
+	page, err = b.nextSearchPage("invoice", "token", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.IDs) != 1 || page.IDs[0] != "c" || page.Next != "" {
+		t.Fatalf("last continuation = %+v", page)
+	}
+	if _, err := b.nextSearchPage("invoice", "token", 1); err == nil {
+		t.Fatal("exhausted token remained valid")
 	}
 }
