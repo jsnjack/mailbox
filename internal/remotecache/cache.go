@@ -74,6 +74,19 @@ func (c *Cache) Get(ctx context.Context, rawURL string, allowNetwork bool) (Entr
 	return entry, true, nil
 }
 
+// Key returns the cache key a URL will resolve to, without touching the network
+// or the disk. The key is derived from the normalized URL, so a document can
+// name a cached image before the cache holds it and let the fetch happen when
+// the image is actually requested. An unusable URL is an error, and the caller
+// should drop the reference rather than name it.
+func Key(rawURL string) (string, error) {
+	normalized, err := normalizeURL(rawURL)
+	if err != nil {
+		return "", err
+	}
+	return urlKey(normalized), nil
+}
+
 // Open resolves a content key without network access.
 func (c *Cache) Open(key string) (Entry, bool) {
 	if len(key) != sha256.Size*2 {

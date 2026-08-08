@@ -342,10 +342,17 @@ type window struct {
 	// would otherwise replace the revealed card with the hidden placeholder —
 	// the card would blink. Entries drop once a render's store query has them.
 	appliedGists map[uiCacheKey]string
-	// inlineByCID maps the open thread's inline-image Content-IDs to their cached
-	// files, served by the cid: URI-scheme handler (so a big inline image loads as
-	// a streamed resource, not a multi-MB base64 blob inflating the HTML).
+	// inlineByCID maps the open thread's inline-image Content-IDs to the
+	// attachment behind each one, served (and downloaded on first request) by the
+	// cid: URI-scheme handler — so a big inline image loads as a streamed
+	// resource, not a multi-MB base64 blob inflating the HTML.
 	inlineByCID map[string]inlineImage
+	// remoteImageURLs maps the open conversation's mbcache: keys back to the URL
+	// serveRemoteImage downloads on a cache miss, and remoteStats is what the
+	// remote-image banner currently says (its Unavailable count grows as those
+	// downloads fail). Main thread only.
+	remoteImageURLs map[string]string
+	remoteStats     remoteImageStats
 	// AI health: aiFailedAt is when the last AI request failed; aiFailing drives
 	// the status-bar warning. Used to back off auto-categorization when the LLM is
 	// unreachable so it doesn't retry on every inbox refresh.
@@ -2893,6 +2900,20 @@ func (w *window) openNewWindowTarget(uri string) {
 			slog.Debug("ui: open in new window: unknown cid", "cid", cid)
 			return
 		}
+		if img.path == "" {
+			// The image is displayed but its download hasn't finished (or the
+			// user asked before it started) — fetch it, then hand over the file.
+			logging.Trace("ui: open inline image externally, fetching first", "cid", cid)
+			go func() {
+				path, err := w.fetchInlineImage(img)
+				if err != nil {
+					slog.Warn("ui: open inline image externally", "cid", cid, "err", err)
+					return
+				}
+				dispatch.Main(func() { openExternal(path) })
+			}()
+			return
+		}
 		logging.Trace("ui: open inline image externally", "cid", cid, "path", img.path)
 		openExternal(img.path)
 		return
@@ -4610,18 +4631,21 @@ func (w *window) renderConversation(msgs []model.Message) {
 			b.WriteString(sec)
 		}
 		out := b.String()
-		out, remoteStats := w.cacheRemoteImages(renderCtx, out, loadRemoteImages, remoteImageBulkApproved)
+		// Naming the images costs no network (see resolveRemoteImages), so the
+		// conversation is swapped in as soon as its text is ready and every image
+		// — external and inline alike — arrives afterwards through its scheme
+		// handler.
+		out, remoteStats, pendingImages := w.resolveRemoteImages(out, loadRemoteImages, remoteImageBulkApproved)
 		if renderCtx.Err() != nil {
 			logging.Trace("ui: external image pass cancelled", "thread", threadID)
 			return
 		}
 		verdict := parseAuthResults(latestAuth)
 		warnings := phishingWarnings(latest, latestHTML)
-		// Gather attachment rows + download inline images here (off the main
-		// thread); the main thread only builds widgets and loads the page.
+		// Local reads only: attachment rows and the inline-image index. The
+		// downloads behind them happen on demand.
 		atts := w.threadAttachments(ctx, msgs)
-		inlineImgs := w.prepareInlineImages(ctx, msgs)
-		invite, inviteAcct := w.detectInvite(ctx, atts)
+		inlineImgs := w.inlineImageIndex(ctx, msgs)
 		slog.Debug("ui: renderConversation", "msgs", len(msgs), "fetched", fetched,
 			"trackers", blocked, "auth", verdict.level, "fetch", fetchDur, "sanitize", time.Since(sanitizeStart))
 		logging.Trace("ui: render conversation ready", "thread", threadID, "msgs", len(msgs), "fetched", fetched,
@@ -4650,17 +4674,13 @@ func (w *window) renderConversation(msgs []model.Message) {
 				logging.Trace("ui: render conversation discarded", "thread", threadID, "openThread", w.openThreadID)
 				return // user switched to another conversation while this rendered
 			}
-			title, button, loadAll := remoteImageBannerCopy(remoteStats)
-			w.remoteImageTotal = remoteStats.Total
-			w.remoteImageLoadAll = loadAll
-			if title == "" {
-				w.remoteImageBanner.SetRevealed(false)
-			} else {
-				w.remoteImageBanner.SetTitle(title)
-				w.remoteImageBanner.SetButtonLabel(button)
-				w.remoteImageBanner.SetRevealed(true)
-			}
-			w.inlineByCID = inlineImgs // serveCID resolves cid: against this
+			w.remoteStats = remoteStats // grows as on-demand fetches fail
+			w.applyRemoteImageBanner(remoteStats)
+			// Both maps must be in place before the swap: WebKit requests the
+			// page's images as soon as it has the markup, and the handlers
+			// resolve them through these.
+			w.remoteImageURLs = pendingImages // serveRemoteImage fetches against this
+			w.inlineByCID = inlineImgs        // serveCID resolves cid: against this
 			w.lastFetchFailed = len(fetchFailed) > 0
 			w.setTrackerCount(blocked)
 			w.setAuthBadge(verdict)
@@ -4684,11 +4704,12 @@ func (w *window) renderConversation(msgs []model.Message) {
 				}
 			}
 			w.showThreadAttachments(atts)
-			w.showInviteCard(inviteAcct, invite)
+			w.showInviteCard(0, nil) // revealed by detectInviteLater if there is one
 			if w.lastFetchFailed {
 				w.toast("Couldn't load some message bodies — offline?")
 			}
 			w.generateGists(threadID, gistTodo)
+			w.detectInviteLater(threadID, rgen, atts)
 		})
 	}()
 }
@@ -5074,17 +5095,24 @@ func (w *window) needsInlineRefetch(ctx context.Context, m model.Message, body m
 
 // inlineImage is a cached inline-image file plus its MIME type, served by the
 // cid: URI-scheme handler.
+// inlineImage locates one inline (cid:) attachment of the open conversation.
+// path is filled in once the attachment has been downloaded, so a second request
+// (and "Open Image in New Window") is served straight off disk.
 type inlineImage struct {
-	path string
-	mime string
+	accountID int64
+	gmailID   string
+	attID     int64
+	mime      string
+	path      string
 }
 
-// prepareInlineImages downloads the thread's inline (cid:) attachments and
-// returns a Content-ID → file map for serveCID. Embedding these in the HTML as
-// base64 (a 15 MB image → ~20 MB page) made WebKit's parse the dominant cost of
-// opening a thread; serving them as resources keeps the HTML small. Runs off the
-// main thread (it may download).
-func (w *window) prepareInlineImages(ctx context.Context, msgs []model.Message) map[string]inlineImage {
+// inlineImageIndex maps the thread's inline (cid:) Content-IDs to the attachment
+// each one names, reading only the local attachment rows. The download happens
+// in serveCID when WebKit asks for the image, so a big inline image delays
+// nothing but itself. Embedding these in the HTML as base64 (a 15 MB image →
+// ~20 MB page) made WebKit's parse the dominant cost of opening a thread;
+// serving them as resources keeps the HTML small.
+func (w *window) inlineImageIndex(ctx context.Context, msgs []model.Message) map[string]inlineImage {
 	if w.deps.OpenAttach == nil {
 		return nil
 	}
@@ -5101,44 +5129,72 @@ func (w *window) prepareInlineImages(ctx context.Context, msgs []model.Message) 
 			if _, done := out[a.ContentID]; done {
 				continue
 			}
-			path, err := w.deps.OpenAttach(ctx, m.AccountID, m.GmailID, a.ID)
-			if err != nil {
-				slog.Warn("ui: inline image fetch", "cid", a.ContentID, "err", err)
-				continue
-			}
 			mime := a.MimeType
 			if mime == "" {
 				mime = "application/octet-stream"
 			}
-			out[a.ContentID] = inlineImage{path: path, mime: mime}
+			out[a.ContentID] = inlineImage{accountID: m.AccountID, gmailID: m.GmailID, attID: a.ID, mime: mime}
 		}
 	}
 	return out
 }
 
-// serveCID answers a cid: image request from the reader by streaming the matching
-// inline attachment off disk (resolved against the open thread, populated by
-// prepareInlineImages). Main-thread WebKit callback.
+// attachmentFetchTimeout bounds one on-demand attachment download (an inline
+// image the reader asked for, or a calendar invite being read).
+const attachmentFetchTimeout = 60 * time.Second
+
+// serveCID answers a cid: image request from the reader with the matching inline
+// attachment, downloading it first when the cache doesn't have it yet and
+// finishing the request when it lands (WebKit permits a deferred answer). The
+// handler itself must not block: it runs on the main thread.
 func (w *window) serveCID(req *webkit.URISchemeRequest) {
 	cid := strings.TrimPrefix(req.URI(), "cid:")
 	if dec, err := url.PathUnescape(cid); err == nil {
 		cid = dec
 	}
-	img, ok := w.inlineByCID[strings.Trim(cid, "<>")]
+	cid = strings.Trim(cid, "<>")
+	img, ok := w.inlineByCID[cid]
 	if !ok {
-		req.FinishError(fmt.Errorf("inline image %q not found", cid))
+		logging.Trace("ui: inline image not in the open conversation", "cid", cid)
+		finishBlankImage(req)
 		return
 	}
-	stream, err := gio.NewFileForPath(img.path).Read(context.Background())
-	if err != nil {
-		req.FinishError(err)
+	if img.path != "" {
+		w.finishImageRequest(req, img.path, img.mime)
 		return
 	}
-	var size int64 = -1
-	if fi, e := os.Stat(img.path); e == nil {
-		size = fi.Size()
+	logging.Trace("ui: inline image fetch on demand", "cid", cid, "id", img.gmailID)
+	go func() {
+		path, err := w.fetchInlineImage(img)
+		dispatch.Main(func() {
+			if err != nil {
+				slog.Warn("ui: inline image fetch", "cid", cid, "err", err)
+				finishBlankImage(req)
+				return
+			}
+			// Remember the file so a re-render (or opening the image
+			// externally) is served without another download.
+			if cur, ok := w.inlineByCID[cid]; ok && cur.attID == img.attID {
+				cur.path = path
+				w.inlineByCID[cid] = cur
+			}
+			w.finishImageRequest(req, path, img.mime)
+		})
+	}()
+}
+
+// fetchInlineImage downloads one inline attachment to the local cache and
+// returns its path. Safe off the main thread.
+func (w *window) fetchInlineImage(img inlineImage) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), attachmentFetchTimeout)
+	defer cancel()
+	select {
+	case imageFetchSlots <- struct{}{}:
+		defer func() { <-imageFetchSlots }()
+	case <-ctx.Done():
+		return "", ctx.Err()
 	}
-	req.Finish(stream, size, img.mime)
+	return w.deps.OpenAttach(ctx, img.accountID, img.gmailID, img.attID)
 }
 
 // urlPattern matches an explicit http/https URL. Deliberately narrow (a scheme is

@@ -121,8 +121,20 @@ plus the sanitizer (inserted innerHTML never executes scripts) mean no
 email-supplied script can run or reach the network. Remote images load by default, but tracking pixels are stripped before
 render (`cleanEmailHTML`/`scopeEmailCSS`: tiny or hidden images and backgrounds,
 hidden ancestors, and known open/read/pixel URL patterns across HTML and CSS) and
-the count is surfaced as a "🛡 N trackers blocked" indicator. The cache prefetcher
-parses CSS declarations and fetches only image-bearing properties; remote
+the count is surfaced as a "🛡 N trackers blocked" indicator. No image is
+downloaded before the conversation is on screen: `resolveRemoteImages` rewrites
+each reference to `mbcache:<key>` without a request (the key is
+`remotecache.Key`, a hash of the normalized URL, so a document can name an image
+the cache does not hold yet), and `serveRemoteImage` downloads it when WebKit
+asks, finishing the scheme request when it lands — images fill in as they arrive
+the way a browser loads a page, and a slow or dead image host delays only itself.
+Inline `cid:` attachments work the same way (`inlineImageIndex` reads the
+attachment rows, `serveCID` downloads on request), as does the calendar invite
+behind a conversation (`detectInviteLater`). Both handlers share a six-slot
+fetch semaphore, since our downloads bypass WebKit's own connection limits.
+A failed download raises the "N external images unavailable" banner as it
+happens (`noteRemoteImageUnavailable`). The image collector
+parses CSS declarations and names only image-bearing properties; remote
 `@import`, fonts, cursors, and other CSS resources are removed without a request.
 A conversation with more than 20 unique external image URLs makes no new image
 requests until its single "Load images" banner is confirmed; cached images still

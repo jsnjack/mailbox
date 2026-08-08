@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
+	"github.com/jsnjack/mailbox/internal/dispatch"
 	"github.com/jsnjack/mailbox/internal/ics"
 	"github.com/jsnjack/mailbox/internal/logging"
 	"github.com/jsnjack/mailbox/internal/model"
@@ -30,6 +31,38 @@ func isCalendarAttachment(a model.Attachment) bool {
 	mt := strings.ToLower(a.MimeType)
 	return strings.HasPrefix(mt, "text/calendar") || strings.HasPrefix(mt, "application/ics") ||
 		strings.HasSuffix(strings.ToLower(a.Filename), ".ics")
+}
+
+// detectInviteLater reads the conversation's calendar attachment once the
+// conversation itself is on screen, then reveals the invite card. The .ics has
+// to be downloaded when the cache doesn't hold it, and waiting for that before
+// the swap put a network round trip in front of every invite email. A
+// conversation without a calendar attachment does no work at all. Main thread.
+func (w *window) detectInviteLater(threadID string, gen uint64, atts []threadAttachment) {
+	hasInvite := false
+	for _, ta := range atts {
+		if isCalendarAttachment(ta.att) {
+			hasInvite = true
+			break
+		}
+	}
+	if !hasInvite {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), attachmentFetchTimeout)
+		defer cancel()
+		ev, acct := w.detectInvite(ctx, atts)
+		if ev == nil {
+			return
+		}
+		dispatch.Main(func() {
+			if w.openThreadID != threadID || gen != w.renderGen {
+				return // another conversation (or a newer render) owns the reader
+			}
+			w.showInviteCard(acct, ev)
+		})
+	}()
 }
 
 // detectInvite finds and parses a calendar invite among the thread's

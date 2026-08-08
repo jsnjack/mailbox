@@ -8,7 +8,6 @@ import (
 	"os"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
 
 	xhtml "golang.org/x/net/html"
@@ -17,6 +16,8 @@ import (
 	"github.com/aymerick/douceur/parser"
 	"github.com/diamondburned/gotk4-webkitgtk/pkg/webkit/v6"
 	"github.com/diamondburned/gotk4/pkg/gio/v2"
+	"github.com/diamondburned/gotk4/pkg/glib/v2"
+	"github.com/jsnjack/mailbox/internal/dispatch"
 	"github.com/jsnjack/mailbox/internal/logging"
 	"github.com/jsnjack/mailbox/internal/remotecache"
 )
@@ -25,6 +26,12 @@ const (
 	remoteImagePromptThreshold = 20
 	remoteImageWorkers         = 6
 )
+
+// imageFetchSlots caps how many images (external or inline) download at once.
+// WebKit asks for every image in the page at once and our fetches bypass its
+// own connection limits, so an image-heavy newsletter would otherwise open a
+// connection per image.
+var imageFetchSlots = make(chan struct{}, remoteImageWorkers)
 
 type remoteImageStats struct {
 	Total       int
@@ -40,97 +47,68 @@ var (
 	srcsetRemoteRe = regexp.MustCompile(`(?i)https?://[^\s,]+`)
 )
 
-// cacheRemoteImages replaces every external image reference with a custom URI
-// backed by the content-addressed cache. With network disabled it still serves
-// images cached during an earlier trusted view; uncached URLs are removed so
-// WebKit can never bypass the cache/client privacy policy.
-func (w *window) cacheRemoteImages(ctx context.Context, source string, allowNetwork, largeSetApproved bool) (string, remoteImageStats) {
+// resolveRemoteImages replaces every external image reference with a custom URI
+// backed by the content-addressed cache, without touching the network: the key
+// is derived from the URL, so the document can name an image the cache does not
+// hold yet and serveRemoteImage downloads it when WebKit asks. That keeps the
+// download off the render's critical path — the conversation is readable as soon
+// as its text is sanitized, and images fill in as they arrive, the way a browser
+// loads a page. References that must not be requested at all (the privacy
+// opt-out, or an image-heavy message whose one-time prompt is unconfirmed) lose
+// their attribute here, so nothing can reach the network behind that decision.
+// It returns the rewritten HTML, what the banner has to say, and the key → URL
+// map the scheme handler fetches against.
+func (w *window) resolveRemoteImages(source string, allowNetwork, largeSetApproved bool) (string, remoteImageStats, map[string]string) {
 	doc, err := xhtml.Parse(strings.NewReader(source))
 	if err != nil {
-		return source, remoteImageStats{}
+		return source, remoteImageStats{}, nil
 	}
 	urls := collectRemoteImageURLs(doc)
 	stats := remoteImageStats{Total: len(urls)}
 	entries := make(map[string]remotecache.Entry, len(urls))
-	if w.remoteImages != nil {
-		for _, rawURL := range urls {
-			entry, ok, err := w.remoteImages.Get(ctx, rawURL, false)
-			if err == nil && ok {
-				entries[rawURL] = entry
-			}
-		}
-	}
-	var networkURLs []string
+	pending := make(map[string]string, len(urls))
 	largeSetBlocked := len(urls) > remoteImagePromptThreshold && !largeSetApproved
 	for _, rawURL := range urls {
-		if _, ok := entries[rawURL]; ok {
+		switch {
+		case !allowNetwork:
+			stats.Blocked++
+			continue
+		case largeSetBlocked:
+			stats.Deferred++
 			continue
 		}
-		if !allowNetwork {
-			stats.Blocked++
-		} else if largeSetBlocked {
-			stats.Deferred++
-		} else {
-			networkURLs = append(networkURLs, rawURL)
+		key, err := remotecache.Key(rawURL)
+		if err != nil {
+			// Not addressable (no host, credentials in the URL, wrong scheme):
+			// it could never have been fetched, so report it as unavailable
+			// rather than naming a resource the handler would reject.
+			logging.Trace("ui: external image not addressable", "err", err)
+			stats.Unavailable++
+			continue
 		}
-	}
-	cachedBefore := len(entries)
-	if w.remoteImages != nil && len(networkURLs) > 0 {
-		fetchCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		defer cancel()
-		jobs := make(chan string)
-		var wg sync.WaitGroup
-		var mu sync.Mutex
-		workers := remoteImageWorkers
-		if len(networkURLs) < workers {
-			workers = len(networkURLs)
-		}
-		for range workers {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				for rawURL := range jobs {
-					entry, ok, err := w.remoteImages.Get(fetchCtx, rawURL, allowNetwork)
-					if err != nil {
-						logging.TraceContext(fetchCtx, "ui: external image unavailable", "err_type", fmt.Sprintf("%T", err))
-						continue
-					}
-					if ok {
-						mu.Lock()
-						entries[rawURL] = entry
-						mu.Unlock()
-					}
-				}
-			}()
-		}
-	sendJobs:
-		for _, rawURL := range networkURLs {
-			select {
-			case jobs <- rawURL:
-			case <-fetchCtx.Done():
-				break sendJobs
+		entries[rawURL] = remotecache.Entry{Key: key}
+		pending[key] = rawURL
+		if w.remoteImages != nil {
+			if _, ok := w.remoteImages.Open(key); ok {
+				stats.Cached++ // already on disk: served without a request
 			}
 		}
-		close(jobs)
-		wg.Wait()
 	}
-	stats.Cached = len(entries)
-	stats.Unavailable = len(networkURLs) - (len(entries) - cachedBefore)
 	changed := rewriteRemoteImageURLs(doc, entries)
 	if !changed {
-		return source, stats
+		return source, stats, pending
 	}
 	body := findBody(doc)
 	if body == nil {
-		return source, stats
+		return source, stats, pending
 	}
 	var b strings.Builder
 	for child := body.FirstChild; child != nil; child = child.NextSibling {
 		if err := xhtml.Render(&b, child); err != nil {
-			return source, stats
+			return source, stats, pending
 		}
 	}
-	return b.String(), stats
+	return b.String(), stats, pending
 }
 
 func collectRemoteImageURLs(root *xhtml.Node) []string {
@@ -342,10 +320,19 @@ func remoteImageBannerCopy(stats remoteImageStats) (title, button string, loadAl
 	return "", "", false
 }
 
-// serveRemoteImage streams a previously validated cached image to WebKit.
+// remoteImageFetchTimeout bounds one on-demand image download. The cache's HTTP
+// client has its own per-request timeout; this also covers a server that dribbles
+// bytes forever, so a hung image can never hold a request object open.
+const remoteImageFetchTimeout = 20 * time.Second
+
+// serveRemoteImage answers a mbcache: request: from disk when the image is
+// already cached, otherwise by downloading it and finishing the request when it
+// lands. WebKit allows a scheme request to be completed later, which is what
+// keeps image loading off the render path — the handler must never block, since
+// it runs on the main thread.
 func (w *window) serveRemoteImage(req *webkit.URISchemeRequest) {
 	if w.remoteImages == nil {
-		req.FinishError(fmt.Errorf("external image cache unavailable"))
+		finishBlankImage(req)
 		return
 	}
 	key := strings.TrimPrefix(req.URI(), "mbcache:")
@@ -353,20 +340,105 @@ func (w *window) serveRemoteImage(req *webkit.URISchemeRequest) {
 	if i := strings.IndexAny(key, "?#/"); i >= 0 {
 		key = key[:i]
 	}
-	entry, ok := w.remoteImages.Open(key)
-	if !ok {
-		req.FinishError(fmt.Errorf("cached external image not found"))
+	if entry, ok := w.remoteImages.Open(key); ok {
+		w.finishImageRequest(req, entry.Path, entry.MIME)
 		return
 	}
-	stream, err := gio.NewFileForPath(entry.Path).Read(context.Background())
+	rawURL, ok := w.remoteImageURLs[key]
+	if !ok {
+		// Not part of the open conversation (a stale request from a page being
+		// replaced, or a key we never named): nothing to fetch.
+		logging.Trace("ui: external image not in the open conversation", "key", key)
+		finishBlankImage(req)
+		return
+	}
+	gen := w.renderGen
+	logging.Trace("ui: external image fetch on demand", "key", key)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), remoteImageFetchTimeout)
+		defer cancel()
+		select {
+		case imageFetchSlots <- struct{}{}:
+			defer func() { <-imageFetchSlots }()
+		case <-ctx.Done():
+			dispatch.Main(func() { req.FinishError(ctx.Err()) })
+			return
+		}
+		entry, ok, err := w.remoteImages.Get(ctx, rawURL, true)
+		dispatch.Main(func() {
+			if err != nil || !ok {
+				logging.Trace("ui: external image unavailable", "key", key, "err", err)
+				finishBlankImage(req)
+				w.noteRemoteImageUnavailable(gen)
+				return
+			}
+			w.finishImageRequest(req, entry.Path, entry.MIME)
+		})
+	}()
+}
+
+// blankPixel is a 1×1 fully transparent PNG. An image reference that can't be
+// satisfied is answered with this rather than an error: failing the request
+// makes WebKit draw its broken-image glyph, and a dead campaign URL in a
+// year-old newsletter is not something the reader should render as damage. The
+// element keeps whatever box its width/height give it and shows nothing.
+var blankPixel = []byte{
+	0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a,
+	0x00, 0x00, 0x00, 0x0d, 'I', 'H', 'D', 'R',
+	0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00,
+	0x1f, 0x15, 0xc4, 0x89,
+	0x00, 0x00, 0x00, 0x0a, 'I', 'D', 'A', 'T',
+	0x78, 0x9c, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01,
+	0x0d, 0x0a, 0x2d, 0xb4,
+	0x00, 0x00, 0x00, 0x00, 'I', 'E', 'N', 'D', 0xae, 0x42, 0x60, 0x82,
+}
+
+// finishBlankImage answers a scheme request with the transparent pixel.
+// Main thread only.
+func finishBlankImage(req *webkit.URISchemeRequest) {
+	stream := gio.NewMemoryInputStreamFromBytes(glib.NewBytes(blankPixel))
+	req.Finish(stream, int64(len(blankPixel)), "image/png")
+}
+
+// finishImageRequest streams a local file back to WebKit as the answer to a
+// custom-scheme request. Main thread only.
+func (w *window) finishImageRequest(req *webkit.URISchemeRequest, path, mime string) {
+	stream, err := gio.NewFileForPath(path).Read(context.Background())
 	if err != nil {
-		slog.Warn("ui: open cached external image", "key", key, "err", err)
-		req.FinishError(err)
+		slog.Warn("ui: open cached image", "path", path, "err", err)
+		finishBlankImage(req)
 		return
 	}
 	var size int64 = -1
-	if fi, err := os.Stat(entry.Path); err == nil {
+	if fi, err := os.Stat(path); err == nil {
 		size = fi.Size()
 	}
-	req.Finish(stream, size, entry.MIME)
+	req.Finish(stream, size, mime)
+}
+
+// noteRemoteImageUnavailable folds a failed on-demand download into the banner,
+// so "N external images unavailable" appears as failures happen rather than
+// after a blocking prefetch. Stale renders are ignored: their images belong to a
+// conversation that is no longer on screen. Main thread only.
+func (w *window) noteRemoteImageUnavailable(gen uint64) {
+	if gen != w.renderGen {
+		return
+	}
+	w.remoteStats.Unavailable++
+	w.applyRemoteImageBanner(w.remoteStats)
+}
+
+// applyRemoteImageBanner reveals (or hides) the remote-image banner for stats.
+// Main thread only.
+func (w *window) applyRemoteImageBanner(stats remoteImageStats) {
+	title, button, loadAll := remoteImageBannerCopy(stats)
+	w.remoteImageTotal = stats.Total
+	w.remoteImageLoadAll = loadAll
+	if title == "" {
+		w.remoteImageBanner.SetRevealed(false)
+		return
+	}
+	w.remoteImageBanner.SetTitle(title)
+	w.remoteImageBanner.SetButtonLabel(button)
+	w.remoteImageBanner.SetRevealed(true)
 }
