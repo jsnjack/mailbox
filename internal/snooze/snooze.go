@@ -156,11 +156,12 @@ func (m *Manager) Snooze(ctx context.Context, accountID int64, threadID string, 
 	}
 	note := ""
 	if err := m.mirrorSnooze(ctx, accountID, threadID, t); err != nil {
-		// The local snooze holds either way. An account that can't mirror
-		// (IMAP, read-only) is local-only by design — no note; a transient
-		// mirror failure self-heals on a later Reconcile and says so.
+		// The local snooze holds either way. A transient mirror failure self-heals
+		// on a later Reconcile; a provider without labels stays device-only.
 		logging.TraceContext(ctx, "snooze: mirror deferred", "account", accountID, "thread", threadID, "err", err)
-		if !errors.Is(err, errNoMirror) {
+		if errors.Is(err, errNoMirror) {
+			note = "on this device"
+		} else {
 			note = "local only — will sync: " + err.Error()
 		}
 	} else if err := m.St.MarkSnoozeMirrored(ctx, accountID, threadID); err != nil {
@@ -353,7 +354,18 @@ func (m *Manager) Reconcile(ctx context.Context, accountID int64) (bool, error) 
 			// this must outrank the back-in-inbox rule, which on a MIRRORED
 			// row means the user unsnoozed elsewhere.
 			if lm == nil {
-				continue // local-only account, nothing to push
+				latest, err := m.St.ThreadLatestMessageRowID(ctx, accountID, tid)
+				if err != nil {
+					return changed, err
+				}
+				if latest > row.LatestMessageRowID {
+					logging.TraceContext(ctx, "snooze: reconcile cancel (new local-only reply)", "account", accountID, "thread", tid)
+					if err := m.St.UnsnoozeThread(ctx, accountID, tid); err != nil {
+						return changed, err
+					}
+					changed = true
+				}
+				continue
 			}
 			logging.TraceContext(ctx, "snooze: reconcile push", "account", accountID, "thread", tid, "until", row.Until)
 			if err := m.mirrorSnooze(ctx, accountID, tid, time.Unix(row.Until, 0)); err != nil {

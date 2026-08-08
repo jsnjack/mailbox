@@ -255,6 +255,36 @@ func TestReconcilePushesLocalSnooze(t *testing.T) {
 	}
 }
 
+func TestReconcileCancelsLocalOnlySnoozeOnNewReply(t *testing.T) {
+	m, _, s, acct, _ := testManager(t)
+	m.BackendFor = func(int64) backend.Backend { return nil }
+	ctx := context.Background()
+	if err := s.UpsertMessages(ctx, []model.Message{{
+		AccountID: acct, GmailID: "first", ThreadID: "thread",
+		InternalDate: time.Unix(100, 0), Labels: []string{model.LabelInbox},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SnoozeThread(ctx, acct, "thread", time.Now().Add(time.Hour).Unix()); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := m.Reconcile(ctx, acct); err != nil || changed {
+		t.Fatalf("reconcile before reply = %v, %v; want unchanged", changed, err)
+	}
+	if err := s.UpsertMessages(ctx, []model.Message{{
+		AccountID: acct, GmailID: "reply", ThreadID: "thread",
+		InternalDate: time.Unix(200, 0), Labels: []string{model.LabelInbox},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := m.Reconcile(ctx, acct); err != nil || !changed {
+		t.Fatalf("reconcile after reply = %v, %v; want changed", changed, err)
+	}
+	if n, err := s.SnoozedCount(ctx, acct); err != nil || n != 0 {
+		t.Fatalf("snoozed count = %d, %v; want 0", n, err)
+	}
+}
+
 // WakeDue returns a due thread to the inbox everywhere: row marked notified,
 // mirror restores INBOX and strips the labels, the stamp label is cleaned up,
 // and SnoozeWoke is published.

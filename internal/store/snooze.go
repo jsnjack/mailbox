@@ -15,9 +15,11 @@ import (
 func (s *Store) SnoozeThread(ctx context.Context, accountID int64, threadID string, until int64) error {
 	logging.TraceContext(ctx, "store: snooze thread", "account", accountID, "thread", threadID, "until", until)
 	if _, err := s.writer.ExecContext(ctx, `
-		INSERT INTO snoozes (account_id, thread_id, until) VALUES (?,?,?)
-		ON CONFLICT(account_id, thread_id) DO UPDATE SET until = excluded.until, notified = 0`,
-		accountID, threadID, until); err != nil {
+		INSERT INTO snoozes (account_id, thread_id, until, latest_message_rowid)
+		VALUES (?,?,?,COALESCE((SELECT MAX(rowid) FROM messages WHERE account_id = ? AND thread_id = ?), 0))
+		ON CONFLICT(account_id, thread_id) DO UPDATE SET
+			until = excluded.until, notified = 0, latest_message_rowid = excluded.latest_message_rowid`,
+		accountID, threadID, until, accountID, threadID); err != nil {
 		return fmt.Errorf("snooze thread: %w", err)
 	}
 	return nil
@@ -111,16 +113,17 @@ func (s *Store) SnoozedCount(ctx context.Context, accountID int64) (int, error) 
 // SnoozeState is one snoozes row with its bookkeeping flags — the shape the
 // label reconciler works over (see internal/snooze).
 type SnoozeState struct {
-	ThreadID string
-	Until    int64
-	Notified bool
-	Mirrored bool
+	ThreadID           string
+	Until              int64
+	Notified           bool
+	Mirrored           bool
+	LatestMessageRowID int64
 }
 
 // ListSnoozes returns every snooze row for an account, pending and woken alike.
 func (s *Store) ListSnoozes(ctx context.Context, accountID int64) ([]SnoozeState, error) {
 	rows, err := s.reader.QueryContext(ctx,
-		`SELECT thread_id, until, notified, mirrored FROM snoozes WHERE account_id = ?`, accountID)
+		`SELECT thread_id, until, notified, mirrored, latest_message_rowid FROM snoozes WHERE account_id = ?`, accountID)
 	if err != nil {
 		return nil, fmt.Errorf("list snoozes: %w", err)
 	}
@@ -128,13 +131,24 @@ func (s *Store) ListSnoozes(ctx context.Context, accountID int64) ([]SnoozeState
 	var out []SnoozeState
 	for rows.Next() {
 		var st SnoozeState
-		if err := rows.Scan(&st.ThreadID, &st.Until, &st.Notified, &st.Mirrored); err != nil {
+		if err := rows.Scan(&st.ThreadID, &st.Until, &st.Notified, &st.Mirrored, &st.LatestMessageRowID); err != nil {
 			return nil, fmt.Errorf("scan snooze state: %w", err)
 		}
 		out = append(out, st)
 	}
 	logging.TraceContext(ctx, "store: list snoozes", "account", accountID, "count", len(out))
 	return out, rows.Err()
+}
+
+// ThreadLatestMessageRowID returns the newest cached message row in a thread.
+func (s *Store) ThreadLatestMessageRowID(ctx context.Context, accountID int64, threadID string) (int64, error) {
+	var latest int64
+	if err := s.reader.QueryRowContext(ctx,
+		`SELECT COALESCE(MAX(rowid), 0) FROM messages WHERE account_id = ? AND thread_id = ?`,
+		accountID, threadID).Scan(&latest); err != nil {
+		return 0, fmt.Errorf("latest thread message row: %w", err)
+	}
+	return latest, nil
 }
 
 // MarkSnoozeMirrored records that a snooze's label state has been handed to

@@ -250,6 +250,7 @@ CREATE TABLE IF NOT EXISTS snoozes (
   until           INTEGER NOT NULL,  -- unix seconds
   notified        INTEGER NOT NULL DEFAULT 0,
   mirrored        INTEGER NOT NULL DEFAULT 0,
+  latest_message_rowid INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (account_id, thread_id)
 );
 

@@ -122,6 +122,11 @@ func migrate(db *sql.DB) error {
 		// row as "push it out" even though its thread still has INBOX — the
 		// same INBOX that, on a mirrored row, means "unsnoozed elsewhere".
 		`ALTER TABLE snoozes ADD COLUMN mirrored INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE snoozes ADD COLUMN latest_message_rowid INTEGER NOT NULL DEFAULT 0`,
+		`UPDATE snoozes SET latest_message_rowid = COALESCE((
+			SELECT MAX(m.rowid) FROM messages m
+			WHERE m.account_id = snoozes.account_id AND m.thread_id = snoozes.thread_id
+		), 0) WHERE latest_message_rowid = 0`,
 		// Bcc capture (only ever present on the user's own sent/draft copies):
 		// shown in the reader and preserved when a draft is re-edited.
 		"ALTER TABLE messages ADD COLUMN bcc_addrs TEXT NOT NULL DEFAULT ''",
