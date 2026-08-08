@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -179,7 +180,11 @@ type window struct {
 	threadPage   threadPageState
 	pageRequest  threadPageKey
 	pageRetryFn  func()
-	readerStack  *gtk.Stack // "message" vs "empty" placeholder
+	// pageReloadPending records a refresh that arrived while the identical query
+	// was already in flight: that query's answer predates it, so the load is
+	// re-run when it lands instead of being dropped (see coalesceThreadLoad).
+	pageReloadPending bool
+	readerStack       *gtk.Stack // "message" vs "empty" placeholder
 	// readerReady flips when the shell page reports __mbSet is installed;
 	// content set before that is parked in pendingReaderHTML (latest wins) and
 	// flushed by the shell-ready handler in buildReader.
@@ -281,7 +286,16 @@ type window struct {
 	// another thread or backs out — so a hung body fetch can't pin a stale
 	// goroutine for the full fetch timeout. Main-thread only (set/cancelled
 	// in renderConversation and clearReader, which both run on the main thread).
-	renderCancel            context.CancelFunc
+	renderCancel context.CancelFunc
+	// renderFetching holds the message ids the in-flight render owns the body
+	// fetches for, and renderGen stamps that render so a finished-but-superseded
+	// one can't clear a newer render's set. Every body fetch published as
+	// MessageBodyFetched comes from a render (the engine's HTML backfill stores
+	// quietly), so an event for one of these ids is this render's own echo — the
+	// render reads the body itself and must not be restarted by it. Main-thread
+	// only.
+	renderFetching          map[uiCacheKey]bool
+	renderGen               uint64
 	lastFetchFailed         bool             // true if the last render had fetch failures (for retry menu item)
 	replyBtn                *adw.SplitButton // primary action (Reply all); dropdown has Reply/Forward
 	aiReplyBtn              *gtk.MenuButton  // AI reply: popover of suggestions + intents
@@ -2036,12 +2050,12 @@ func (w *window) onSearchChanged() {
 	// Only a genuinely different query exits server-search mode back to local.
 	if q != w.serverQuery {
 		w.searchAllBtn.SetSensitive(true)
-		if w.threadLoadCancel != nil {
-			w.threadLoadCancel()
-			w.threadLoadCancel = nil
-		}
 		w.serverSearch = false
 	}
+	// Cancelling the in-flight load here would be a guess about what the refresh
+	// below decides to do: startThreadLoad cancels the previous query when it
+	// actually starts a replacement, and when the refresh coalesces into that
+	// same query instead, killing it would abandon the list mid-load.
 	w.refreshList(q)
 }
 
@@ -2066,10 +2080,6 @@ func (w *window) refreshListThen(query string, done func()) {
 func (w *window) loadThreadsFor(query string) {
 	trimmed := strings.TrimSpace(query)
 	if trimmed == "" {
-		if w.threadLoadCancel != nil {
-			w.threadLoadCancel()
-			w.threadLoadCancel = nil
-		}
 		w.serverSearch, w.serverQuery = false, "" // no query → not server-searching
 		label, acct := w.current, w.activeID
 		mode := threadPageLabel
@@ -2080,7 +2090,7 @@ func (w *window) loadThreadsFor(query string) {
 			mode = threadPageSnoozed
 		}
 		key := threadPageKey{mode: mode, accountID: acct, label: label}
-		if w.threadPage.loading && w.pageRequest == key {
+		if w.coalesceThreadLoad(key) {
 			return
 		}
 		target := threadPageSize
@@ -2109,7 +2119,7 @@ func (w *window) loadThreadsFor(query string) {
 	if w.serverSearch && w.canSearchServer() {
 		logging.Trace("ui: load threads (server search)", "query", trimmed, "account", w.activeID)
 		key := threadPageKey{mode: threadPageServerSearch, accountID: w.activeID, query: trimmed, newest: w.searchSort.Selected() == 1}
-		if w.threadPage.loading && w.pageRequest == key {
+		if w.coalesceThreadLoad(key) {
 			return
 		}
 		if w.threadPage.key != key {
@@ -2129,7 +2139,7 @@ func (w *window) loadThreadsFor(query string) {
 
 	acct := w.activeID
 	key := threadPageKey{mode: threadPageLocalSearch, accountID: acct, query: trimmed, newest: w.searchSort.Selected() == 1}
-	if w.threadPage.loading && w.pageRequest == key {
+	if w.coalesceThreadLoad(key) {
 		return
 	}
 	target := threadPageSize
@@ -2143,6 +2153,26 @@ func (w *window) loadThreadsFor(query string) {
 	}, nil)
 }
 
+// coalesceThreadLoad folds a refresh into the identical query already in flight,
+// reporting whether the caller should stand down. The in-flight result can't
+// simply be accepted as this refresh's answer: it was queried before whatever
+// asked for the refresh happened (an archive's optimistic label change, a sync
+// that just stored mail), so it lists the conversation the user just archived
+// and would run afterPopulate — advanceSelection — against that stale model.
+// Instead the load is re-run once the in-flight one lands, which keeps exactly
+// one query in flight without ever dropping a refresh. Cancelling the in-flight
+// query here would be worse still: nothing would then repopulate the list, and
+// the abandoned query surfaces as "Couldn't load messages".
+func (w *window) coalesceThreadLoad(key threadPageKey) bool {
+	if !w.threadPage.loading || w.pageRequest != key {
+		return false
+	}
+	logging.Trace("ui: load threads coalesced into in-flight query",
+		"mode", key.mode, "account", key.accountID, "label", key.label, "query", key.query)
+	w.pageReloadPending = true
+	return true
+}
+
 // startThreadLoad runs one initial, refresh, or continuation query off the GTK
 // thread. It commits page state only after success, so a failed continuation
 // keeps every already-visible conversation and offers an in-place retry.
@@ -2154,6 +2184,7 @@ func (w *window) startThreadLoad(key threadPageKey, loadingMore bool, retry func
 	w.threadLoadCancel = cancel
 	w.refreshGen++
 	gen := w.refreshGen
+	w.pageReloadPending = false // this query is the re-run any coalesced refresh wanted
 	w.pageRequest = key
 	w.threadPage.loading = true
 	w.threadPage.loadingMore = loadingMore
@@ -2173,6 +2204,16 @@ func (w *window) startThreadLoad(key threadPageKey, loadingMore bool, retry func
 			}
 			w.pageRequest = threadPageKey{}
 			w.threadLoadCancel = nil
+			if errors.Is(err, context.Canceled) {
+				// Abandoned, not broken: whoever cancelled owns what comes next.
+				// Keep the loaded conversations on screen rather than replacing
+				// them with a failure the user can't act on.
+				logging.Trace("ui: load threads cancelled", "gen", gen)
+				w.threadPage.loading, w.threadPage.loadingMore = false, false
+				w.updateThreadPageStatus()
+				w.runPendingThreadReload()
+				return
+			}
 			if err != nil {
 				slog.Error("ui: load threads", "err", err)
 				w.threadPage.loading = false
@@ -2184,6 +2225,7 @@ func (w *window) startThreadLoad(key threadPageKey, loadingMore bool, retry func
 				} else if !loadingMore {
 					w.toast("Couldn't load messages")
 				}
+				w.runPendingThreadReload()
 				return
 			}
 			w.threadPage = threadPageState{
@@ -2194,10 +2236,25 @@ func (w *window) startThreadLoad(key threadPageKey, loadingMore bool, retry func
 			w.pageRetryFn = nil
 			w.updateThreadPageStatus()
 			w.searchAllBtn.SetSensitive(true)
-			w.showThreads(result.sums)
+			w.showThreads(result.sums) // holds afterPopulate while a re-run is pending
+			if w.runPendingThreadReload() {
+				return // the re-run repopulates; paging resumes from its result
+			}
 			dispatch.Main(w.maybeLoadNextThreadPage)
 		})
 	}()
+}
+
+// runPendingThreadReload re-runs the load a refresh asked for while this one was
+// in flight (see coalesceThreadLoad), reporting whether it started one.
+func (w *window) runPendingThreadReload() bool {
+	if !w.pageReloadPending {
+		return false
+	}
+	w.pageReloadPending = false
+	logging.Trace("ui: re-running coalesced thread load")
+	w.loadThreadsFor(w.searchEntry.Text())
+	return true
 }
 
 // searchThreadPage loads one bounded slice of FTS message hits and groups it
@@ -2542,7 +2599,10 @@ func (w *window) showThreads(sums []model.ThreadSummary) {
 	if !w.selectMode {
 		w.reselectOpenThread()
 	}
-	if fn := w.afterPopulate; fn != nil {
+	// A populate whose query was superseded mid-flight lists rows from before the
+	// change that triggered the refresh, so afterPopulate — advanceSelection past
+	// an archived conversation — waits for the re-run that follows it.
+	if fn := w.afterPopulate; fn != nil && !w.pageReloadPending {
 		w.afterPopulate = nil
 		fn()
 	}
@@ -3954,6 +4014,7 @@ func (w *window) clearReader() {
 		w.renderCancel()
 		w.renderCancel = nil
 	}
+	w.renderFetching = nil // the cancelled render owns no fetch any more
 	w.openThreadID = ""
 	w.openThreadMsgs = nil
 	w.openMsg = model.Message{}
@@ -4374,6 +4435,18 @@ func (w *window) renderConversation(msgs []model.Message) {
 	}
 	renderCtx, cancelRender := context.WithCancel(context.Background())
 	w.renderCancel = cancelRender
+	// Claim this render's body fetches, so their MessageBodyFetched events don't
+	// come back as a "the open thread changed" refresh: that refresh re-enters
+	// renderConversation, whose cancel above kills the sibling fetches still in
+	// flight. One completed fetch would then abort the rest, turning a single
+	// parallel pass over the thread into one network round trip per message —
+	// the reader sitting on its loading placeholder the whole time.
+	w.renderGen++
+	rgen := w.renderGen
+	w.renderFetching = make(map[uiCacheKey]bool, len(msgs))
+	for _, m := range msgs {
+		w.renderFetching[cacheKey(m.AccountID, m.GmailID)] = true
+	}
 	go func() {
 		defer cancelRender()
 		start := time.Now()
@@ -4559,6 +4632,13 @@ func (w *window) renderConversation(msgs []model.Message) {
 			"bytes", len(out), "html", logging.Body(out),
 			"fetch", fetchDur, "sanitize", time.Since(sanitizeStart))
 		dispatch.Main(func() {
+			// This render no longer owns any body fetch: a later one (an inline
+			// re-fetch finishing, a straggler past the deadline) is a genuine
+			// change again and must re-render. A superseded render leaves the
+			// newer one's claim alone.
+			if rgen == w.renderGen {
+				w.renderFetching = nil
+			}
 			w.mergeSectionCache(latest.AccountID, fresh) // cache newly-rendered sections (main thread)
 			// Merge the goroutine-local inline-refetch marks back into the main-thread
 			// map (even for a discarded render — the re-fetch already happened, so it
@@ -6832,6 +6912,13 @@ func (w *window) onChange(c syncer.Change) {
 	switch c.Kind {
 	case syncer.MessageUpserted, syncer.MessageBodyFetched, syncer.MessageDeleted:
 		w.invalidateSection(c.AccountID, c.GmailID) // a re-synced message must re-render
+		if w.ownBodyFetch(c) {
+			// The render that asked for this body reads it directly, and the row
+			// it belongs to is unchanged (bodies aren't listed). Acting on the
+			// echo would cancel that render and reload the list for nothing.
+			logging.Trace("ui: own body fetch echo ignored", "id", c.GmailID, "thread", c.ThreadID)
+			return
+		}
 		if c.AccountID == w.activeID {
 			// A change to the open conversation (a reply you sent, or a synced
 			// message) re-renders it so the new message shows without re-opening.
@@ -6917,6 +7004,13 @@ func (w *window) onChange(c syncer.Change) {
 		return
 	}
 	w.queueNewMailCheck(c.AccountID, c.GmailID)
+}
+
+// ownBodyFetch reports whether c is the echo of a body fetch the in-flight
+// conversation render started itself (see renderFetching). Main thread only.
+func (w *window) ownBodyFetch(c syncer.Change) bool {
+	return c.Kind == syncer.MessageBodyFetched && c.GmailID != "" &&
+		w.renderFetching[cacheKey(c.AccountID, c.GmailID)]
 }
 
 // notifyCandidate is one upserted message queued for the new-mail

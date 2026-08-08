@@ -101,7 +101,13 @@ Gmail conversation first hydrates its complete server-side message membership
 once (persisted in `thread_hydrations`, so a capped backfill cannot leave older
 messages and their attachments invisible), then lazily fetches + sanitizes +
 renders its bodies (WebKit; remote images load through a hardened local cache,
-with a global privacy opt-out). The reader sanitizes with an email-tuned bluemonday policy
+with a global privacy opt-out). A render fetches the thread's missing bodies
+concurrently and claims them (`renderFetching`), so the `MessageBodyFetched`
+events it causes are recognised as its own echo: acting on them would re-enter
+`renderConversation`, whose cancel of the previous render would abort the
+sibling fetches still in flight and turn one parallel pass into a round trip per
+message. A body fetched by anything else, or after the render finished, still
+re-renders the open conversation. The reader sanitizes with an email-tuned bluemonday policy
 (`emailPolicy`, keeps inline styles + tables so HTML mail isn't broken). The
 WebView loads **one persistent shell page** (`readerShellHTML`: styles, CSP, and
 a fit-to-width script that scales over-wide email to the pane) and every
@@ -335,7 +341,14 @@ the provider's continuation token opaque (`SearchPager` → Gmail's
 `nextPageToken`; backends without it get a bounded compatibility cursor).
 Every page query runs off the GTK thread and is guarded by `refreshGen` so a slow
 result cannot overwrite a newer account/folder/query (last request wins); an
-in-flight query is also context-cancelled when superseded. Appending a normal
+in-flight query is context-cancelled only by the replacement that supersedes it
+(`startThreadLoad`), and a cancelled result is discarded rather than reported as
+a failure. A refresh arriving while the identical query is already running is
+neither dropped nor allowed to cancel it (`coalesceThreadLoad`): its answer
+predates the change that asked for it — an archive's optimistic label edit would
+still be listed — so the load is re-run when the in-flight one lands, and
+`afterPopulate` (advancing the selection past an archived conversation) waits for
+that re-run. Appending a normal
 date-ordered page splices only the new `gtk.StringList` tail, preserving realized
 rows, selection, scroll position, and date headers. A failed continuation leaves
 the loaded rows intact and reveals a small Retry footer. Live sync refreshes

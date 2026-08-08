@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/jsnjack/mailbox/internal/model"
+	"github.com/jsnjack/mailbox/internal/syncer"
 )
 
 func TestRelativeDate(t *testing.T) {
@@ -379,5 +380,37 @@ func TestReplyAllRecipientNames(t *testing.T) {
 	to, cc = replyAllRecipients(self, "me@self.com")
 	if to != "me@self.com" || cc != "" {
 		t.Fatalf("note-to-self: to=%q cc=%q", to, cc)
+	}
+}
+
+// A body fetch the open conversation's render started itself must not be
+// treated as a change to that conversation: reacting to it re-enters
+// renderConversation, which cancels the render — and the sibling fetches it
+// still has in flight — that asked for the body in the first place.
+func TestOwnBodyFetchIgnoresOnlyTheRunningRenderFetches(t *testing.T) {
+	w := &window{renderFetching: map[uiCacheKey]bool{{accountID: 1, id: "m1"}: true}}
+	cases := []struct {
+		name string
+		c    syncer.Change
+		want bool
+	}{
+		{"this render's fetch", syncer.Change{Kind: syncer.MessageBodyFetched, AccountID: 1, GmailID: "m1"}, true},
+		{"another message's fetch", syncer.Change{Kind: syncer.MessageBodyFetched, AccountID: 1, GmailID: "m2"}, false},
+		{"equal id on another account", syncer.Change{Kind: syncer.MessageBodyFetched, AccountID: 2, GmailID: "m1"}, false},
+		{"a synced message, not a body", syncer.Change{Kind: syncer.MessageUpserted, AccountID: 1, GmailID: "m1"}, false},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := w.ownBodyFetch(tt.c); got != tt.want {
+				t.Fatalf("ownBodyFetch = %v, want %v", got, tt.want)
+			}
+		})
+	}
+
+	// Once the render has finished it owns no fetch: a later one (an inline
+	// re-fetch landing, a straggler past the deadline) is a real change again.
+	done := &window{}
+	if done.ownBodyFetch(syncer.Change{Kind: syncer.MessageBodyFetched, AccountID: 1, GmailID: "m1"}) {
+		t.Fatal("a body fetched after the render finished was ignored")
 	}
 }
