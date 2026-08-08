@@ -524,11 +524,18 @@ func (s *Store) ListByLabel(ctx context.Context, accountID int64, labelID string
 // raw user query is turned into a safe FTS5 expression (each whitespace token is
 // quoted and made a prefix match), so arbitrary input cannot break the syntax.
 func (s *Store) Search(ctx context.Context, accountID int64, query string, limit int) ([]model.Message, error) {
+	return s.SearchPage(ctx, accountID, query, limit, 0)
+}
+
+// SearchPage is Search with a bounded result offset. FTS relevance is not a
+// durable keyset (and one conversation can contribute several matching
+// messages), so callers de-duplicate thread ids while appending pages.
+func (s *Store) SearchPage(ctx context.Context, accountID int64, query string, limit, offset int) ([]model.Message, error) {
 	start := time.Now()
 	filter := parseSearch(query)
 	match := ftsQuery(filter.freeText)
 	preds, predArgs := filter.buildFilterPredicates()
-	logging.TraceContext(ctx, "store: search", "account", accountID, "query", query, "match", match, "operators", len(preds), "limit", limit)
+	logging.TraceContext(ctx, "store: search", "account", accountID, "query", query, "match", match, "operators", len(preds), "limit", limit, "offset", offset)
 
 	// Nothing to match on (blank, or only unmatchable free text like "*"): return
 	// no results rather than every message.
@@ -552,8 +559,8 @@ func (s *Store) Search(ctx context.Context, accountID int64, query string, limit
 		sqlText = `SELECT ` + msgCols + `
 			FROM messages_fts JOIN messages m ON m.rowid = messages_fts.rowid
 			WHERE messages_fts MATCH ? AND m.account_id = ?` + predSQL + `
-			ORDER BY rank
-			LIMIT ?`
+			ORDER BY rank, m.internal_date DESC, m.rowid DESC
+			LIMIT ? OFFSET ?`
 	} else {
 		// Operators only (e.g. "from:alice has:attachment"): query messages
 		// directly, newest first, since there is no FTS rank to order by.
@@ -563,9 +570,9 @@ func (s *Store) Search(ctx context.Context, accountID int64, query string, limit
 			FROM messages m
 			WHERE m.account_id = ?` + predSQL + `
 			ORDER BY m.internal_date DESC, m.rowid DESC
-			LIMIT ?`
+			LIMIT ? OFFSET ?`
 	}
-	args = append(args, limit)
+	args = append(args, limit, offset)
 
 	rows, err := s.reader.QueryContext(ctx, sqlText, args...)
 	if err != nil {

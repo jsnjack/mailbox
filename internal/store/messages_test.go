@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -248,6 +249,41 @@ func TestUpsertMessageAndListByLabel(t *testing.T) {
 	}
 	if !got[1].IsUnread {
 		t.Fatal("m1 should be unread")
+	}
+}
+
+func TestSearchPageUsesStableOffsetOrder(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	acc := seedAccount(t, s)
+	for i, id := range []string{"a", "b", "c", "d", "e"} {
+		if _, err := s.UpsertMessage(ctx, model.Message{
+			AccountID: acc, GmailID: id, ThreadID: id, InternalDate: time.Unix(int64(i+1), 0),
+			FromAddr: "alice@example.com", Subject: id,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, err := s.SearchPage(ctx, acc, "from:alice@example.com", 2, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.SearchPage(ctx, acc, "from:alice@example.com", 2, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	third, err := s.SearchPage(ctx, acc, "from:alice@example.com", 2, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, page := range [][]model.Message{first, second, third} {
+		for _, m := range page {
+			got = append(got, m.GmailID)
+		}
+	}
+	if !slices.Equal(got, []string{"e", "d", "c", "b", "a"}) {
+		t.Fatalf("paged search order = %v", got)
 	}
 }
 

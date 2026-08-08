@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -56,6 +57,79 @@ func TestListThreadsByLabel(t *testing.T) {
 	}
 	if sum.Latest.GmailID != "a2" || sum.Count != 2 {
 		t.Fatalf("GetThreadSummary wrong: %+v", sum)
+	}
+}
+
+func TestListThreadsByLabelPageUsesStableCursor(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	acc := seedAccount(t, s)
+	for _, m := range []model.Message{
+		{AccountID: acc, GmailID: "a", ThreadID: "A", InternalDate: time.Unix(500, 0), Labels: []string{"INBOX"}},
+		{AccountID: acc, GmailID: "b", ThreadID: "B", InternalDate: time.Unix(400, 0), Labels: []string{"INBOX"}},
+		{AccountID: acc, GmailID: "c", ThreadID: "C", InternalDate: time.Unix(300, 0), Labels: []string{"INBOX"}},
+		{AccountID: acc, GmailID: "d", ThreadID: "D", InternalDate: time.Unix(200, 0), Labels: []string{"INBOX"}},
+		{AccountID: acc, GmailID: "e", ThreadID: "E", Labels: []string{"INBOX"}},
+	} {
+		if _, err := s.UpsertMessage(ctx, m); err != nil {
+			t.Fatalf("seed %s: %v", m.GmailID, err)
+		}
+	}
+
+	first, err := s.ListThreadsByLabelPage(ctx, acc, "INBOX", 2, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := threadSummaryIDs(first.Threads); !slices.Equal(got, []string{"A", "B"}) || first.Next == nil {
+		t.Fatalf("first page = %v next=%v", got, first.Next)
+	}
+	// A new row ahead of the cursor must not shift the second page or duplicate
+	// a row already delivered.
+	if _, err := s.UpsertMessage(ctx, model.Message{AccountID: acc, GmailID: "new", ThreadID: "NEW", InternalDate: time.Unix(600, 0), Labels: []string{"INBOX"}}); err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.ListThreadsByLabelPage(ctx, acc, "INBOX", 2, first.Next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := threadSummaryIDs(second.Threads); !slices.Equal(got, []string{"C", "D"}) || second.Next == nil {
+		t.Fatalf("second page = %v next=%v", got, second.Next)
+	}
+	last, err := s.ListThreadsByLabelPage(ctx, acc, "INBOX", 2, second.Next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := threadSummaryIDs(last.Threads); !slices.Equal(got, []string{"E"}) || last.Next != nil {
+		t.Fatalf("last page = %v next=%v", got, last.Next)
+	}
+}
+
+func TestListThreadsByLabelPageBreaksDateTiesByRowID(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	acc := seedAccount(t, s)
+	for _, id := range []string{"A", "B", "C"} {
+		if _, err := s.UpsertMessage(ctx, model.Message{AccountID: acc, GmailID: id, ThreadID: id, InternalDate: time.Unix(100, 0), Labels: []string{"INBOX"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, err := s.ListThreadsByLabelPage(ctx, acc, "INBOX", 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.ListThreadsByLabelPage(ctx, acc, "INBOX", 1, first.Next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	third, err := s.ListThreadsByLabelPage(ctx, acc, "INBOX", 1, second.Next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := append(append(threadSummaryIDs(first.Threads), threadSummaryIDs(second.Threads)...), threadSummaryIDs(third.Threads)...); !slices.Equal(got, []string{"C", "B", "A"}) {
+		t.Fatalf("tie pages = %v", got)
+	}
+	if third.Next != nil {
+		t.Fatalf("final next = %v", third.Next)
 	}
 }
 
@@ -201,6 +275,44 @@ func TestListAllThreads(t *testing.T) {
 	if threads[1].Latest.GmailID != "a2" || threads[1].Count != 2 {
 		t.Fatalf("thread A summary wrong: %+v", threads[1])
 	}
+}
+
+func TestListAllThreadsPageExcludesSpamAndTrash(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	acc := seedAccount(t, s)
+	for _, m := range []model.Message{
+		{AccountID: acc, GmailID: "a", ThreadID: "A", InternalDate: time.Unix(400, 0), Labels: []string{"INBOX"}},
+		{AccountID: acc, GmailID: "b", ThreadID: "B", InternalDate: time.Unix(300, 0), Labels: []string{"SENT"}},
+		{AccountID: acc, GmailID: "t", ThreadID: "T", InternalDate: time.Unix(500, 0), Labels: []string{"TRASH"}},
+		{AccountID: acc, GmailID: "s", ThreadID: "S", InternalDate: time.Unix(600, 0), Labels: []string{"SPAM"}},
+	} {
+		if _, err := s.UpsertMessage(ctx, m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, err := s.ListAllThreadsPage(ctx, acc, 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.ListAllThreadsPage(ctx, acc, 1, first.Next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := append(threadSummaryIDs(first.Threads), threadSummaryIDs(second.Threads)...); !slices.Equal(got, []string{"A", "B"}) {
+		t.Fatalf("all-mail pages = %v", got)
+	}
+	if second.Next != nil {
+		t.Fatalf("final next = %v", second.Next)
+	}
+}
+
+func threadSummaryIDs(sums []model.ThreadSummary) []string {
+	ids := make([]string, len(sums))
+	for i, sum := range sums {
+		ids[i] = sum.ThreadID
+	}
+	return ids
 }
 
 func TestRepliedByMe(t *testing.T) {

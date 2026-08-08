@@ -11,6 +11,177 @@ import (
 	"github.com/jsnjack/mailbox/internal/model"
 )
 
+// ThreadPageCursor is an opaque keyset position in a newest-first thread list.
+// InternalDate is Unix seconds, with -1 representing a missing date; RowID is
+// the deterministic tiebreak. Callers should only pass a cursor back to the
+// same account/view query that produced it.
+type ThreadPageCursor struct {
+	InternalDate int64
+	RowID        int64
+}
+
+// ThreadPage is one bounded slice of thread summaries. Next is nil when the
+// store has no older row for this view.
+type ThreadPage struct {
+	Threads []model.ThreadSummary
+	Next    *ThreadPageCursor
+}
+
+func threadCursor(m model.Message) ThreadPageCursor {
+	date := int64(-1)
+	if !m.InternalDate.IsZero() {
+		date = m.InternalDate.Unix()
+	}
+	return ThreadPageCursor{InternalDate: date, RowID: m.RowID}
+}
+
+func finishThreadPage(latest []model.Message, limit int) ([]model.Message, *ThreadPageCursor) {
+	if limit <= 0 || len(latest) <= limit {
+		return latest, nil
+	}
+	latest = latest[:limit]
+	next := threadCursor(latest[len(latest)-1])
+	return latest, &next
+}
+
+// ListThreadsByLabelPage returns a stable, newest-first keyset page. Unlike the
+// legacy LIMIT/OFFSET query, new mail inserted ahead of the cursor cannot shift
+// older rows between page requests.
+func (s *Store) ListThreadsByLabelPage(ctx context.Context, accountID int64, labelID string, limit int, after *ThreadPageCursor) (ThreadPage, error) {
+	if limit <= 0 {
+		return ThreadPage{}, nil
+	}
+	start := time.Now()
+	logging.TraceContext(ctx, "store: list threads by label page", "account", accountID, "label", labelID, "limit", limit, "has_cursor", after != nil)
+	snoozeFilter := ""
+	if labelID == model.LabelInbox {
+		snoozeFilter = ` AND NOT EXISTS (
+			SELECT 1 FROM snoozes sn
+			WHERE sn.account_id = m.account_id AND sn.thread_id = m.thread_id AND sn.until > unixepoch())`
+	}
+	draftFilter := ""
+	if labelID == model.LabelDraft {
+		draftFilter = ` AND NOT EXISTS (
+			SELECT 1 FROM local_drafts ld
+			WHERE ld.account_id = m.account_id AND ld.state <> 'deleting'
+			AND m.gmail_id <> ld.local_id
+			AND (m.gmail_id = ld.source_message_id OR m.gmail_id = ld.provider_message_id))`
+	}
+	cursorFilter := ""
+	args := []any{accountID, labelID, accountID, labelID}
+	if after != nil {
+		cursorFilter = ` AND (COALESCE(m.internal_date, -1) < ?
+			OR (COALESCE(m.internal_date, -1) = ? AND m.rowid < ?))`
+		args = append(args, after.InternalDate, after.InternalDate, after.RowID)
+	}
+	args = append(args, limit+1)
+	rows, err := s.reader.QueryContext(ctx, `
+		SELECT `+msgCols+`
+		FROM messages m
+		JOIN message_labels ml ON ml.account_id = ? AND ml.message_rowid = m.rowid AND ml.label_id = ?
+		WHERE m.account_id = ? AND m.rowid = (
+			SELECT m2.rowid
+			FROM messages m2
+			JOIN message_labels ml2 ON ml2.message_rowid = m2.rowid AND ml2.label_id = ?
+			WHERE m2.account_id = m.account_id AND m2.thread_id = m.thread_id
+			ORDER BY m2.internal_date DESC, m2.rowid DESC
+			LIMIT 1
+		)`+snoozeFilter+draftFilter+cursorFilter+`
+		ORDER BY COALESCE(m.internal_date, -1) DESC, m.rowid DESC
+		LIMIT ?`, args...)
+	if err != nil {
+		return ThreadPage{}, fmt.Errorf("list thread page: %w", err)
+	}
+	latest, err := scanMessagesAndClose(rows)
+	if err != nil {
+		return ThreadPage{}, err
+	}
+	latest, next := finishThreadPage(latest, limit)
+	ids := make([]string, len(latest))
+	for i, m := range latest {
+		ids[i] = m.ThreadID
+	}
+	counts, err := s.threadCountsForIDsWithLabel(ctx, accountID, labelID, ids)
+	if err != nil {
+		return ThreadPage{}, err
+	}
+	out := make([]model.ThreadSummary, 0, len(latest))
+	for _, m := range latest {
+		c := counts[m.ThreadID]
+		out = append(out, model.ThreadSummary{ThreadID: m.ThreadID, Latest: m, Count: c.total, UnreadCount: c.unread})
+	}
+	if err := s.markRepliedByMe(ctx, accountID, out); err != nil {
+		return ThreadPage{}, err
+	}
+	if err := s.markWokeFromSnooze(ctx, accountID, out); err != nil {
+		return ThreadPage{}, err
+	}
+	logging.TraceContext(ctx, "store: list threads by label page done", "account", accountID, "label", labelID, "count", len(out), "more", next != nil, "dur", time.Since(start))
+	return ThreadPage{Threads: out, Next: next}, nil
+}
+
+// ListAllThreadsPage is the keyset-paged form of ListAllThreads.
+func (s *Store) ListAllThreadsPage(ctx context.Context, accountID int64, limit int, after *ThreadPageCursor) (ThreadPage, error) {
+	if limit <= 0 {
+		return ThreadPage{}, nil
+	}
+	start := time.Now()
+	logging.TraceContext(ctx, "store: list all threads page", "account", accountID, "limit", limit, "has_cursor", after != nil)
+	cursorFilter := ""
+	args := []any{accountID, model.LabelSpam, model.LabelTrash}
+	if after != nil {
+		cursorFilter = ` AND (COALESCE(m.internal_date, -1) < ?
+			OR (COALESCE(m.internal_date, -1) = ? AND m.rowid < ?))`
+		args = append(args, after.InternalDate, after.InternalDate, after.RowID)
+	}
+	args = append(args, limit+1)
+	rows, err := s.reader.QueryContext(ctx, `
+		SELECT `+msgCols+`
+		FROM messages m
+		WHERE m.account_id = ? AND m.rowid = (
+			SELECT m2.rowid
+			FROM messages m2
+			WHERE m2.account_id = m.account_id AND m2.thread_id = m.thread_id
+			ORDER BY m2.internal_date DESC, m2.rowid DESC
+			LIMIT 1
+		)
+		AND NOT EXISTS (
+			SELECT 1 FROM message_labels mx
+			WHERE mx.message_rowid = m.rowid AND mx.label_id IN (?, ?)
+		)`+cursorFilter+`
+		ORDER BY COALESCE(m.internal_date, -1) DESC, m.rowid DESC
+		LIMIT ?`, args...)
+	if err != nil {
+		return ThreadPage{}, fmt.Errorf("list all thread page: %w", err)
+	}
+	latest, err := scanMessagesAndClose(rows)
+	if err != nil {
+		return ThreadPage{}, err
+	}
+	latest, next := finishThreadPage(latest, limit)
+	ids := make([]string, len(latest))
+	for i, m := range latest {
+		ids[i] = m.ThreadID
+	}
+	counts, err := s.threadCountsForIDs(ctx, accountID, ids)
+	if err != nil {
+		return ThreadPage{}, err
+	}
+	out := make([]model.ThreadSummary, 0, len(latest))
+	for _, m := range latest {
+		c := counts[m.ThreadID]
+		out = append(out, model.ThreadSummary{ThreadID: m.ThreadID, Latest: m, Count: c.total, UnreadCount: c.unread})
+	}
+	if err := s.markRepliedByMe(ctx, accountID, out); err != nil {
+		return ThreadPage{}, err
+	}
+	if err := s.markWokeFromSnooze(ctx, accountID, out); err != nil {
+		return ThreadPage{}, err
+	}
+	logging.TraceContext(ctx, "store: list all threads page done", "account", accountID, "count", len(out), "more", next != nil, "dur", time.Since(start))
+	return ThreadPage{Threads: out, Next: next}, nil
+}
+
 // ListThreadsByLabel returns one summary per thread that has a message carrying
 // labelID, newest first. The summary's Latest is the newest labeled message; the
 // counts cover the labeled messages in that thread.
