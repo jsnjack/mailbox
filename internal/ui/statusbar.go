@@ -15,6 +15,7 @@ import (
 	"github.com/jsnjack/mailbox/internal/ai"
 	"github.com/jsnjack/mailbox/internal/dispatch"
 	"github.com/jsnjack/mailbox/internal/logging"
+	"github.com/jsnjack/mailbox/internal/model"
 )
 
 // statusLogCap bounds how many recent operations the log popover keeps.
@@ -170,14 +171,13 @@ func (w *window) aiActivityFor(email, label string) func(note string) {
 	}
 }
 
-// emailByID resolves an account id to its email ("" when unknown).
-func (w *window) emailByID(id int64) string {
+func (w *window) isIMAPAccount(id int64) bool {
 	for _, a := range w.deps.Accounts {
 		if a.ID == id {
-			return a.Email
+			return a.Type == model.AccountIMAP
 		}
 	}
-	return ""
+	return false
 }
 
 // accountTag maps an activity event's account email to its short display form:

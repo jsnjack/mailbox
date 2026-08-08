@@ -47,7 +47,7 @@ type AccountInfo struct {
 }
 
 // All operations are account-routed: the caller passes the account id so the
-// dependency can dispatch to that account's Gmail client.
+// dependency can dispatch to that account's provider backend.
 
 // BodyFetcher lazily downloads and caches a message body when it is opened.
 type BodyFetcher func(ctx context.Context, accountID int64, gmailID string) error
@@ -219,7 +219,7 @@ type Deps struct {
 	// its id so the UI can add it to the switcher (no restart needed). Re-adding an
 	// existing account (same email) reconnects it in place, preserving its cache.
 	AddIMAPAccount func(ctx context.Context, acct config.IMAPAccount, secret string) (accountID int64, err error)
-	OAuthConnect   func(ctx context.Context, kind config.AuthKind) (email, refreshToken string, err error)
+	OAuthConnect   func(ctx context.Context, kind config.AuthKind, browserFallback func(string)) (email, refreshToken string, err error)
 	// RemoveAccount stops the account's sync, deletes its cached data, and clears
 	// its stored secret + per-account config. Nil when account management is off.
 	RemoveAccount func(ctx context.Context, accountID int64) error

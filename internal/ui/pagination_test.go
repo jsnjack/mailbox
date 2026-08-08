@@ -38,3 +38,32 @@ func TestAppendUniqueStringsPreservesFirstSeenOrder(t *testing.T) {
 		t.Fatalf("ids = %v", got)
 	}
 }
+
+func TestMergeSearchThreadSummariesOrder(t *testing.T) {
+	existing := []model.ThreadSummary{
+		{ThreadID: "relevant", Latest: model.Message{InternalDate: time.Unix(100, 0)}},
+	}
+	added := []model.ThreadSummary{
+		{ThreadID: "newer", Latest: model.Message{InternalDate: time.Unix(200, 0)}},
+	}
+	tests := []struct {
+		name   string
+		newest bool
+		want   []string
+	}{
+		{name: "relevance", want: []string{"relevant", "newer"}},
+		{name: "newest", newest: true, want: []string{"newer", "relevant"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := mergeSearchThreadSummaries(existing, added, tt.newest)
+			ids := make([]string, len(got))
+			for i := range got {
+				ids[i] = got[i].ThreadID
+			}
+			if !reflect.DeepEqual(ids, tt.want) {
+				t.Fatalf("ids = %v, want %v", ids, tt.want)
+			}
+		})
+	}
+}

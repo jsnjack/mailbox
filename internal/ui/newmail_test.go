@@ -85,3 +85,46 @@ func TestCheckNewMailSelfSentUnread(t *testing.T) {
 		t.Fatalf("label delta = add %v remove %v, want remove UNREAD only", c.add, c.remove)
 	}
 }
+
+func TestNewMailDisposition(t *testing.T) {
+	started := time.Unix(100, 0)
+	base := model.Message{GmailID: "m", IsUnread: true, InternalDate: time.Unix(200, 0), Labels: []string{model.LabelInbox}}
+	tests := []struct {
+		name                  string
+		msg                   model.Message
+		own, marked           bool
+		wantNotify, wantClear bool
+	}{
+		{name: "incoming", msg: base, wantNotify: true},
+		{name: "forged own from", msg: base, own: true, wantNotify: true},
+		{name: "sent loop", msg: withMessageLabels(base, model.LabelInbox, model.LabelSent), own: true, wantClear: true},
+		{name: "sent explicitly unread", msg: withMessageLabels(base, model.LabelInbox, model.LabelSent), own: true, marked: true},
+		{name: "old", msg: func() model.Message { m := base; m.InternalDate = started; return m }()},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			notify, clear := newMailDisposition(tt.msg, started, tt.own, tt.marked)
+			if notify != tt.wantNotify || clear != tt.wantClear {
+				t.Fatalf("disposition = notify %t clear %t, want notify %t clear %t", notify, clear, tt.wantNotify, tt.wantClear)
+			}
+		})
+	}
+}
+
+func TestClaimNotificationIsAccountScoped(t *testing.T) {
+	w := &window{}
+	if !w.claimNotification(cacheKey(1, "same")) {
+		t.Fatal("first notification was not claimed")
+	}
+	if w.claimNotification(cacheKey(1, "same")) {
+		t.Fatal("duplicate notification was claimed")
+	}
+	if !w.claimNotification(cacheKey(2, "same")) {
+		t.Fatal("same provider id in another account was suppressed")
+	}
+}
+
+func withMessageLabels(m model.Message, labels ...string) model.Message {
+	m.Labels = labels
+	return m
+}

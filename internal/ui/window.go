@@ -62,6 +62,7 @@ type threadPageKey struct {
 	accountID int64
 	label     string
 	query     string
+	newest    bool
 }
 
 type threadPageState struct {
@@ -84,6 +85,21 @@ type threadPageResult struct {
 	serverToken  string
 	serverIDs    []string
 	hasMore      bool
+}
+
+// uiCacheKey keeps provider-scoped identifiers isolated between accounts.
+// Gmail and IMAP ids are unique only within their owning account.
+type uiCacheKey struct {
+	accountID int64
+	id        string
+}
+
+func cacheKey(accountID int64, id string) uiCacheKey {
+	return uiCacheKey{accountID: accountID, id: id}
+}
+
+func (w *window) activeCacheKey(id string) uiCacheKey {
+	return cacheKey(w.activeID, id)
 }
 
 // window owns the widget tree and the currently displayed selection.
@@ -130,11 +146,11 @@ type window struct {
 	labelBox     *gtk.ListBox
 	newBtn       *gtk.Button // "New message" — gated on having a connected account
 	refreshBtn   *gtk.Button
-	syncSpinner  *adw.Spinner             // shown in place of refreshBtn during a manual sync
-	sidebar      []sidebarItem            // one entry per row in labelBox (incl. headings)
-	sidebarSig   string                   // signature of the rendered sidebar, to skip no-op rebuilds
-	sectionCache map[string]cachedSection // rendered message sections, reused across thread re-opens
-	remoteImages *remotecache.Cache       // allowed external images, persisted for offline rendering
+	syncSpinner  *adw.Spinner                 // shown in place of refreshBtn during a manual sync
+	sidebar      []sidebarItem                // one entry per row in labelBox (incl. headings)
+	sidebarSig   string                       // signature of the rendered sidebar, to skip no-op rebuilds
+	sectionCache map[uiCacheKey]cachedSection // rendered message sections, reused across thread re-opens
+	remoteImages *remotecache.Cache           // allowed external images, persisted for offline rendering
 	current      string
 	activeID     int64 // the account currently shown
 	activeEmail  string
@@ -178,17 +194,18 @@ type window struct {
 	selected          map[string]bool // selected thread ids
 	selectionBar      *gtk.Box
 	selectionLabel    *gtk.Label
-	readOnlyBanner    *adw.Banner    // revealed when no Gmail client (live features off)
+	readOnlyBanner    *adw.Banner    // revealed when no provider backend (live features off)
 	outboxBanner      *adw.Banner    // revealed when sends are queued/failed
 	emptyFolderBanner *adw.Banner    // revealed in Trash/Spam to empty them permanently
 	authBanner        *adw.Banner    // revealed when an account's sign-in expired/was revoked
 	authExpiredID     int64          // the account the auth banner's Reconnect targets (0 = none/unknown)
 	authReported      map[int64]bool // accounts whose expiry already got an activity-log row (AuthExpired repeats every failed sync pass)
 	searchEntry       *gtk.SearchEntry
-	searchAllBtn      *gtk.Button // explicit provider search, available even when local FTS has hits
-	suppressSearch    bool        // guards SetText from firing a search during label switch
-	serverSearch      bool        // current search is a provider-side search, not local FTS
-	serverQuery       string      // the active server-search query (guards the debounced change signal)
+	searchSort        *gtk.DropDown // Relevant (provider/FTS rank) or Newest
+	searchAllBtn      *gtk.Button   // explicit provider search, available even when local FTS has hits
+	suppressSearch    bool          // guards SetText from firing a search during label switch
+	serverSearch      bool          // current search is a provider-side search, not local FTS
+	serverQuery       string        // the active server-search query (guards the debounced change signal)
 	threadLoadCancel  context.CancelFunc
 	threadByID        map[string]model.ThreadSummary
 	threadIDs         []string          // displayed thread ids, in order (for incremental diffing)
@@ -209,6 +226,10 @@ type window struct {
 	// one background pass, instead of one main-thread GetMessage per event.
 	notifyQueue     []notifyCandidate
 	notifyScheduled bool
+	// notified remembers desktop notifications already delivered this session.
+	// Metadata refreshes and repeated provider events must not pop the same mail
+	// again; the account-qualified key also keeps equal provider ids isolated.
+	notified map[uiCacheKey]bool
 	// userUnread records messages the user explicitly marked unread (reader
 	// toggle, row menu, or undoing a mark-read), keyed account/gmailID. The
 	// self-sent auto-clear in checkNewMail must never fight an explicit mark
@@ -280,34 +301,33 @@ type window struct {
 	// categorizedMsg records the latest message id each thread's category was
 	// computed for, so a thread is re-categorized when a new message arrives (e.g.
 	// a "Needs reply" thread that gets a discount reply becomes "Discount").
-	categories     map[string]string
-	categorizedMsg map[string]string
+	categories     map[uiCacheKey]string
+	categorizedMsg map[uiCacheKey]string
 	// manualCat marks threads whose category the user picked by hand (thread id →
 	// true). A manual pick outranks the automatic "Replied" tag in the list.
-	manualCat map[string]bool
+	manualCat map[uiCacheKey]bool
 	// categoryFailed marks threads whose last AI classification attempt errored
 	// (persisted via store.SetMessageCategoryFailed), distinct from a settled
 	// "no category": these threads stay AI retry candidates (never get a
 	// categorizedMsg entry) and render a subtle "failed" tag instead of
 	// silently looking uncategorized.
-	categoryFailed map[string]bool
+	categoryFailed map[uiCacheKey]bool
 	// inlineRefetched guards the one-time re-fetch of a message whose body
 	// references inline (cid:) images that older extraction didn't capture.
-	inlineRefetched map[string]bool
+	inlineRefetched map[uiCacheKey]bool
 	// gistRequested guards per-message gist generation (the one-line AI summary
 	// card): a message is scheduled at most once per session — a failure clears
 	// its mark so a later open retries, a success is persisted and never re-runs.
-	// Both the reader path and the new-mail notification path mark it BEFORE
-	// starting, so they never generate the same message twice concurrently
-	// (two runs yield two slightly different sentences — a visible text change).
-	gistRequested map[string]bool
+	// The reader marks it before starting so overlapping renders never generate
+	// the same message twice concurrently.
+	gistRequested map[uiCacheKey]bool
 	// appliedGists holds gists already revealed in the live reader, re-asserted
 	// after every conversation swap: a re-render in flight when a gist persists
 	// (the mark-read refresh 1.5s after opening an unread thread) queried the
 	// store and snapshotted the section cache before the persist, so its swap
 	// would otherwise replace the revealed card with the hidden placeholder —
 	// the card would blink. Entries drop once a render's store query has them.
-	appliedGists map[string]string
+	appliedGists map[uiCacheKey]string
 	// inlineByCID maps the open thread's inline-image Content-IDs to their cached
 	// files, served by the cid: URI-scheme handler (so a big inline image loads as
 	// a streamed resource, not a multi-MB base64 blob inflating the HTML).
@@ -344,7 +364,7 @@ type window struct {
 	cardIcon        *gtk.Image // card icon (set per action: summary vs analysis)
 	cardTitle       *gtk.Label // card title (set per action)
 	summaryCancel   context.CancelFunc
-	summaryCache    map[string]string
+	summaryCache    map[uiCacheKey]string
 
 	// in-place translation: a banner offers reverting to the original; the cancel
 	// func aborts an in-flight translation when the user reverts or switches mail;
@@ -356,7 +376,7 @@ type window struct {
 	translationBanner *adw.Banner
 	remoteImageBanner *adw.Banner // explains blocked/expired images instead of showing unexplained broken glyphs
 	translateCancel   context.CancelFunc
-	translationCache  map[string]string
+	translationCache  map[uiCacheKey]string
 	translationShown  bool
 }
 
@@ -367,19 +387,20 @@ func newWindow(app *adw.Application, deps Deps) *window {
 		current:          model.LabelInbox,
 		startTime:        time.Now(),
 		sanitizer:        emailPolicy(),
-		translationCache: map[string]string{},
-		summaryCache:     map[string]string{},
+		translationCache: map[uiCacheKey]string{},
+		summaryCache:     map[uiCacheKey]string{},
 		accountBadges:    map[int64]*gtk.Label{},
 		readerZoom:       1.0,
 		selected:         map[string]bool{},
 		authReported:     map[int64]bool{},
-		categories:       map[string]string{},
-		categorizedMsg:   map[string]string{},
-		manualCat:        map[string]bool{},
-		categoryFailed:   map[string]bool{},
-		inlineRefetched:  map[string]bool{},
-		gistRequested:    map[string]bool{},
-		appliedGists:     map[string]string{},
+		categories:       map[uiCacheKey]string{},
+		categorizedMsg:   map[uiCacheKey]string{},
+		manualCat:        map[uiCacheKey]bool{},
+		categoryFailed:   map[uiCacheKey]bool{},
+		inlineRefetched:  map[uiCacheKey]bool{},
+		gistRequested:    map[uiCacheKey]bool{},
+		appliedGists:     map[uiCacheKey]string{},
+		notified:         map[uiCacheKey]bool{},
 		userUnread:       map[string]bool{},
 	}
 	w.accountNames, _ = config.LoadAccountNames()
@@ -527,7 +548,7 @@ func (w *window) showAbout() {
 	if v := w.deps.Version; v != "" {
 		about.SetVersion(v)
 	}
-	about.SetComments("A native, fast Gmail client for Linux/GNOME.")
+	about.SetComments("A native, fast email client for Linux/GNOME.")
 	about.SetWebsite("https://github.com/jsnjack/mailbox")
 	about.SetIssueURL("https://github.com/jsnjack/mailbox/issues")
 	about.SetLicenseType(gtk.LicenseMITX11)
@@ -830,8 +851,6 @@ func (w *window) goBack() {
 	w.innerSplit.SetShowContent(false)
 }
 
-// showConnectHelp explains how to enable live features when the app is running
-// read-only (no Gmail client could be built).
 // onReconnect re-authenticates the account whose sign-in expired by reopening the
 // add-account dialog prefilled for it (same email → cache preserved). When the
 // expired account can't be identified it falls back to the plain Add account
@@ -1304,7 +1323,8 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 		// Keep the signature cache in step with what is actually on screen, so a
 		// scroll-recycled row never looks "unchanged" to the next diff.
 		w.rowSig[id] = w.renderSig(id)
-		row := threadRow(w.threadByID[id], outgoing, w.categories[id], w.manualCat[id], w.categoryFailed[id])
+		key := w.activeCacheKey(id)
+		row := threadRow(w.threadByID[id], outgoing, w.categories[key], w.manualCat[key], w.categoryFailed[key])
 		// Right-click a row for quick actions (archive/star/read/trash) without
 		// opening it. A fresh row+gesture is created each bind, so the captured id
 		// always matches what's shown.
@@ -1394,6 +1414,14 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 		logging.Trace("ui: search cleared via Esc")
 		w.searchEntry.SetText("")
 	})
+	w.searchSort = gtk.NewDropDownFromStrings([]string{"Relevant", "Newest"})
+	w.searchSort.SetTooltipText("Search result order")
+	w.searchSort.SetVisible(false)
+	w.searchSort.Connect("notify::selected", func() {
+		if strings.TrimSpace(w.searchEntry.Text()) != "" {
+			w.loadThreadsFor(w.searchEntry.Text())
+		}
+	})
 	w.searchAllBtn = gtk.NewButtonFromIconName("edit-find-symbolic")
 	w.searchAllBtn.SetTooltipText("Search all mail on the provider")
 	a11yLabel(w.searchAllBtn, "Search all mail on the provider")
@@ -1403,6 +1431,7 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 	searchBar := gtk.NewBox(gtk.OrientationHorizontal, 4)
 	setMargins(searchBar, 6, 6, 6, 6)
 	searchBar.Append(w.searchEntry)
+	searchBar.Append(w.searchSort)
 	searchBar.Append(w.searchAllBtn)
 
 	w.outboxBanner = adw.NewBanner("")
@@ -1410,10 +1439,10 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 	w.outboxBanner.SetRevealed(false)
 	w.outboxBanner.ConnectButtonClicked(w.openOutbox)
 
-	// When no Gmail client could be built the UI is read-only; say so instead of
+	// When no provider backend could be built the UI is read-only; say so instead of
 	// leaving the actions silently inert. MAILBOX_DEMO hides it for screenshots
-	// taken against a synthetic cache that has no Gmail client by design.
-	w.readOnlyBanner = adw.NewBanner("Read-only — not connected to Gmail")
+	// taken against a synthetic cache that has no provider backend by design.
+	w.readOnlyBanner = adw.NewBanner("Read-only — no mail provider is connected")
 	w.readOnlyBanner.SetButtonLabel("How to connect")
 	w.readOnlyBanner.ConnectButtonClicked(w.showConnectHelp)
 	w.readOnlyBanner.SetRevealed(w.deps.ModifyLabels == nil && os.Getenv("MAILBOX_DEMO") == "")
@@ -1522,18 +1551,19 @@ func (w *window) setThreadCategory(threadID, cat string) {
 	}
 	msgID := t.Latest.GmailID
 	acctID := w.activeID
+	key := cacheKey(acctID, threadID)
 	logging.Trace("ui: set thread category", "thread", threadID, "id", msgID, "category", cat, "account", acctID)
-	delete(w.categoryFailed, threadID) // a manual decision resolves any pending "failed" state
+	delete(w.categoryFailed, key) // a manual decision resolves any pending "failed" state
 	if cat == "" {
 		// "None" clears the manual override entirely, reverting to the default
 		// (which, for a thread you replied to last, is the "Replied" tag).
-		delete(w.categories, threadID)
-		delete(w.manualCat, threadID)
+		delete(w.categories, key)
+		delete(w.manualCat, key)
 	} else {
-		w.categories[threadID] = cat
-		w.manualCat[threadID] = true // a hand-picked category outranks "Replied"
+		w.categories[key] = cat
+		w.manualCat[key] = true // a hand-picked category outranks "Replied"
 	}
-	w.categorizedMsg[threadID] = msgID // pin so categorizeInbox leaves the manual choice alone
+	w.categorizedMsg[key] = msgID // pin so categorizeInbox leaves the manual choice alone
 	w.refreshList(w.searchEntry.Text())
 	go func() {
 		var err error
@@ -1559,10 +1589,11 @@ func (w *window) recategorizeThread(threadID string) {
 	}
 	msgID := t.Latest.GmailID
 	logging.Trace("ui: recategorize thread", "thread", threadID, "id", msgID, "account", w.activeID)
-	delete(w.categories, threadID)
-	delete(w.categorizedMsg, threadID)
-	delete(w.manualCat, threadID) // re-running AI drops any manual override
-	delete(w.categoryFailed, threadID)
+	key := w.activeCacheKey(threadID)
+	delete(w.categories, key)
+	delete(w.categorizedMsg, key)
+	delete(w.manualCat, key) // re-running AI drops any manual override
+	delete(w.categoryFailed, key)
 	acctID := w.activeID
 	go func() {
 		if err := w.deps.Store.ClearMessageCategory(context.Background(), acctID, msgID); err != nil {
@@ -1634,10 +1665,10 @@ func (w *window) onRecategorize() {
 			if w.activeID != acctID {
 				return // account switched while clearing
 			}
-			w.categories = map[string]string{}
-			w.categorizedMsg = map[string]string{}
-			w.manualCat = map[string]bool{}
-			w.categoryFailed = map[string]bool{}
+			clearAccountCache(w.categories, acctID)
+			clearAccountCache(w.categorizedMsg, acctID)
+			clearAccountCache(w.manualCat, acctID)
+			clearAccountCache(w.categoryFailed, acctID)
 			// Drop the stale tags; the worker's AIUpdated events reveal the new
 			// ones as they are classified.
 			w.refreshList(w.searchEntry.Text())
@@ -1935,13 +1966,13 @@ func (w *window) runServerSearch(q string) {
 	w.emptyPage.SetDescription("")
 	w.searchAllBtn.SetSensitive(false)
 	acctID := w.activeID
-	key := threadPageKey{mode: threadPageServerSearch, accountID: acctID, query: q}
+	key := threadPageKey{mode: threadPageServerSearch, accountID: acctID, query: q, newest: w.searchSort.Selected() == 1}
 	w.startThreadLoad(key, false, func() { w.runServerSearch(q) }, func(ctx context.Context) (threadPageResult, error) {
 		ids, next, err := w.fetchServerSearchPage(ctx, acctID, q, "")
 		if err != nil {
 			return threadPageResult{}, err
 		}
-		sums, err := w.serverSearchSummaries(ctx, acctID, ids)
+		sums, err := w.serverSearchSummaries(ctx, acctID, ids, key.newest)
 		return threadPageResult{sums: sums, serverToken: next, serverIDs: ids, hasMore: next != ""}, err
 	}, func(err error) {
 		w.searchAllBtn.SetSensitive(true)
@@ -1967,7 +1998,7 @@ func (w *window) fetchServerSearchPage(ctx context.Context, acctID int64, q, tok
 // serverSearchSummaries maps provider message ids to conversations with two
 // batched store reads. Sorting by newest message preserves the list's existing
 // search behavior while the provider cursor remains independent and opaque.
-func (w *window) serverSearchSummaries(ctx context.Context, acctID int64, ids []string) ([]model.ThreadSummary, error) {
+func (w *window) serverSearchSummaries(ctx context.Context, acctID int64, ids []string, newest bool) ([]model.ThreadSummary, error) {
 	idToThread, err := w.deps.Store.ThreadIDsForMessages(ctx, acctID, ids)
 	if err != nil {
 		return nil, err
@@ -1986,15 +2017,9 @@ func (w *window) serverSearchSummaries(ctx context.Context, acctID int64, ids []
 	if err != nil {
 		return nil, err
 	}
-	sort.SliceStable(sums, func(i, j int) bool {
-		if sums[i].Latest.InternalDate.Equal(sums[j].Latest.InternalDate) {
-			if sums[i].Latest.RowID == sums[j].Latest.RowID {
-				return sums[i].ThreadID < sums[j].ThreadID
-			}
-			return sums[i].Latest.RowID > sums[j].Latest.RowID
-		}
-		return sums[i].Latest.InternalDate.After(sums[j].Latest.InternalDate)
-	})
+	if newest {
+		sortThreadSummariesNewest(sums)
+	}
 	return sums, nil
 }
 
@@ -2005,6 +2030,7 @@ func (w *window) onSearchChanged() {
 	q := strings.TrimSpace(w.searchEntry.Text())
 	logging.Trace("ui: search changed", "query", q, "serverQuery", w.serverQuery)
 	w.searchAllBtn.SetVisible(q != "" && w.canSearchServer())
+	w.searchSort.SetVisible(q != "")
 	// The search-changed signal is debounced, so a programmatic SetText (e.g.
 	// "Find emails from sender") arrives here after suppressSearch was cleared.
 	// Only a genuinely different query exits server-search mode back to local.
@@ -2082,7 +2108,7 @@ func (w *window) loadThreadsFor(query string) {
 	// background sync) without restarting its provider cursor.
 	if w.serverSearch && w.canSearchServer() {
 		logging.Trace("ui: load threads (server search)", "query", trimmed, "account", w.activeID)
-		key := threadPageKey{mode: threadPageServerSearch, accountID: w.activeID, query: trimmed}
+		key := threadPageKey{mode: threadPageServerSearch, accountID: w.activeID, query: trimmed, newest: w.searchSort.Selected() == 1}
 		if w.threadPage.loading && w.pageRequest == key {
 			return
 		}
@@ -2092,7 +2118,7 @@ func (w *window) loadThreadsFor(query string) {
 		}
 		state := w.threadPage
 		w.startThreadLoad(key, false, func() { w.loadThreadsFor(query) }, func(ctx context.Context) (threadPageResult, error) {
-			sums, err := w.serverSearchSummaries(ctx, key.accountID, state.serverIDs)
+			sums, err := w.serverSearchSummaries(ctx, key.accountID, state.serverIDs, key.newest)
 			return threadPageResult{
 				sums: sums, serverToken: state.serverToken, serverIDs: state.serverIDs,
 				hasMore: state.hasMore,
@@ -2102,7 +2128,7 @@ func (w *window) loadThreadsFor(query string) {
 	}
 
 	acct := w.activeID
-	key := threadPageKey{mode: threadPageLocalSearch, accountID: acct, query: trimmed}
+	key := threadPageKey{mode: threadPageLocalSearch, accountID: acct, query: trimmed, newest: w.searchSort.Selected() == 1}
 	if w.threadPage.loading && w.pageRequest == key {
 		return
 	}
@@ -2112,7 +2138,7 @@ func (w *window) loadThreadsFor(query string) {
 	}
 	logging.Trace("ui: load threads (local search)", "query", query, "account", acct)
 	w.startThreadLoad(key, false, func() { w.loadThreadsFor(query) }, func(ctx context.Context) (threadPageResult, error) {
-		sums, consumed, more, err := w.searchThreadPage(ctx, acct, query, target, 0)
+		sums, consumed, more, err := w.searchThreadPage(ctx, acct, query, target, 0, key.newest)
 		return threadPageResult{sums: sums, searchOffset: consumed, hasMore: more}, err
 	}, nil)
 }
@@ -2177,7 +2203,7 @@ func (w *window) startThreadLoad(key threadPageKey, loadingMore bool, retry func
 // searchThreadPage loads one bounded slice of FTS message hits and groups it
 // into thread summaries. consumed is the number of raw hits advanced: multiple
 // matching messages can belong to one visible conversation.
-func (w *window) searchThreadPage(ctx context.Context, acct int64, query string, limit, offset int) ([]model.ThreadSummary, int, bool, error) {
+func (w *window) searchThreadPage(ctx context.Context, acct int64, query string, limit, offset int, newest bool) ([]model.ThreadSummary, int, bool, error) {
 	msgs, err := w.deps.Store.SearchPage(ctx, acct, query, limit+1, offset)
 	if err != nil {
 		return nil, 0, false, err
@@ -2190,15 +2216,9 @@ func (w *window) searchThreadPage(ctx context.Context, acct int64, query string,
 	if err != nil {
 		return nil, 0, false, err
 	}
-	sort.SliceStable(sums, func(i, j int) bool {
-		if sums[i].Latest.InternalDate.Equal(sums[j].Latest.InternalDate) {
-			if sums[i].Latest.RowID == sums[j].Latest.RowID {
-				return sums[i].ThreadID < sums[j].ThreadID
-			}
-			return sums[i].Latest.RowID > sums[j].Latest.RowID
-		}
-		return sums[i].Latest.InternalDate.After(sums[j].Latest.InternalDate)
-	})
+	if newest {
+		sortThreadSummariesNewest(sums)
+	}
 	return sums, len(msgs), more, nil
 }
 
@@ -2258,9 +2278,9 @@ func (w *window) loadNextThreadPage() {
 			page, err := w.deps.Store.ListThreadsByLabelPage(ctx, key.accountID, key.label, threadPageSize, state.cursor)
 			return threadPageResult{sums: mergeThreadSummaries(state.sums, page.Threads), cursor: page.Next, hasMore: page.Next != nil}, err
 		case threadPageLocalSearch:
-			sums, consumed, more, err := w.searchThreadPage(ctx, key.accountID, key.query, threadPageSize, state.searchOffset)
+			sums, consumed, more, err := w.searchThreadPage(ctx, key.accountID, key.query, threadPageSize, state.searchOffset, key.newest)
 			return threadPageResult{
-				sums:         mergeThreadSummaries(state.sums, sums),
+				sums:         mergeSearchThreadSummaries(state.sums, sums, key.newest),
 				searchOffset: state.searchOffset + consumed, hasMore: more,
 			}, err
 		case threadPageServerSearch:
@@ -2269,7 +2289,7 @@ func (w *window) loadNextThreadPage() {
 				return threadPageResult{}, err
 			}
 			allIDs := appendUniqueStrings(state.serverIDs, ids)
-			sums, err := w.serverSearchSummaries(ctx, key.accountID, allIDs)
+			sums, err := w.serverSearchSummaries(ctx, key.accountID, allIDs, key.newest)
 			return threadPageResult{
 				sums: sums, serverToken: next, serverIDs: allIDs, hasMore: next != "",
 			}, err
@@ -2291,15 +2311,39 @@ func mergeThreadSummaries(existing, added []model.ThreadSummary) []model.ThreadS
 	for _, sum := range byID {
 		out = append(out, sum)
 	}
-	sort.SliceStable(out, func(i, j int) bool {
-		if out[i].Latest.InternalDate.Equal(out[j].Latest.InternalDate) {
-			if out[i].Latest.RowID == out[j].Latest.RowID {
-				return out[i].ThreadID < out[j].ThreadID
+	sortThreadSummariesNewest(out)
+	return out
+}
+
+func sortThreadSummariesNewest(sums []model.ThreadSummary) {
+	sort.SliceStable(sums, func(i, j int) bool {
+		if sums[i].Latest.InternalDate.Equal(sums[j].Latest.InternalDate) {
+			if sums[i].Latest.RowID == sums[j].Latest.RowID {
+				return sums[i].ThreadID < sums[j].ThreadID
 			}
-			return out[i].Latest.RowID > out[j].Latest.RowID
+			return sums[i].Latest.RowID > sums[j].Latest.RowID
 		}
-		return out[i].Latest.InternalDate.After(out[j].Latest.InternalDate)
+		return sums[i].Latest.InternalDate.After(sums[j].Latest.InternalDate)
 	})
+}
+
+func mergeSearchThreadSummaries(existing, added []model.ThreadSummary, newest bool) []model.ThreadSummary {
+	positions := make(map[string]int, len(existing)+len(added))
+	out := append([]model.ThreadSummary(nil), existing...)
+	for i, sum := range out {
+		positions[sum.ThreadID] = i
+	}
+	for _, sum := range added {
+		if i, ok := positions[sum.ThreadID]; ok {
+			out[i] = sum
+			continue
+		}
+		positions[sum.ThreadID] = len(out)
+		out = append(out, sum)
+	}
+	if newest {
+		sortThreadSummariesNewest(out)
+	}
 	return out
 }
 
@@ -2379,9 +2423,9 @@ func dateBucket(t, now time.Time) string {
 	case !t.Before(today.AddDate(0, 0, -1)):
 		return "Yesterday"
 	case !t.Before(today.AddDate(0, 0, -6)):
-		return "This week"
+		return "Last 7 days"
 	case !t.Before(today.AddDate(0, 0, -29)):
-		return "This month"
+		return "Last 30 days"
 	default:
 		return "Older"
 	}
@@ -2592,8 +2636,9 @@ func (w *window) renderSig(id string) string {
 			sel = "s"
 		}
 	}
+	key := w.activeCacheKey(id)
 	return fmt.Sprintf("%s\x1f%d\x1f%d\x1f%s\x1f%t\x1f%t\x1f%s\x1f%s\x1f%d\x1f%t\x1f%t\x1f%t\x1f%d\x1f%s",
-		sel, t.UnreadCount, t.Count, w.categories[id], w.manualCat[id], w.categoryFailed[id], who, m.Subject,
+		sel, t.UnreadCount, t.Count, w.categories[key], w.manualCat[key], w.categoryFailed[key], who, m.Subject,
 		m.InternalDate.Unix(), m.HasAttachments, m.IsStarred, t.RepliedByMe, t.SnoozedUntil, m.Snippet)
 }
 
@@ -2626,7 +2671,7 @@ func (w *window) categorizeInbox() {
 	// and marshal back through dispatch.
 	var cands []categoryCand
 	for id, t := range w.threadByID {
-		if w.categorizedMsg[id] == t.Latest.GmailID {
+		if w.categorizedMsg[w.activeCacheKey(id)] == t.Latest.GmailID {
 			continue
 		}
 		cands = append(cands, categoryCand{threadID: id, msgID: t.Latest.GmailID})
@@ -2667,19 +2712,20 @@ func (w *window) categorizeInbox() {
 			}
 			changed := false
 			for _, c := range cands {
+				key := cacheKey(acctID, c.threadID)
 				if cat, ok := cached[c.msgID]; ok {
-					if w.categories[c.threadID] != cat || w.categorizedMsg[c.threadID] != c.msgID || w.categoryFailed[c.threadID] {
+					if w.categories[key] != cat || w.categorizedMsg[key] != c.msgID || w.categoryFailed[key] {
 						changed = true
 					}
-					w.categories[c.threadID] = cat
-					w.categorizedMsg[c.threadID] = c.msgID
-					delete(w.categoryFailed, c.threadID)
-					if manual[c.msgID] && !w.manualCat[c.threadID] {
-						w.manualCat[c.threadID] = true
+					w.categories[key] = cat
+					w.categorizedMsg[key] = c.msgID
+					delete(w.categoryFailed, key)
+					if manual[c.msgID] && !w.manualCat[key] {
+						w.manualCat[key] = true
 						changed = true
 					}
-				} else if failedIDs[c.msgID] && !w.categoryFailed[c.threadID] {
-					w.categoryFailed[c.threadID] = true
+				} else if failedIDs[c.msgID] && !w.categoryFailed[key] {
+					w.categoryFailed[key] = true
 					changed = true
 				}
 			}
@@ -2939,7 +2985,7 @@ func (w *window) buildReader() *adw.NavigationPage {
 	motion.SetPropagationPhase(gtk.PhaseCapture)
 	motion.ConnectMotion(func(x, y float64) { w.readerPtrX, w.readerPtrY = x, y })
 	w.webview.AddController(motion)
-	w.sectionCache = make(map[string]cachedSection)
+	w.sectionCache = make(map[uiCacheKey]cachedSection)
 	// The view background is what WebKit paints where no content is (resize
 	// gutters, overscroll, the instant before the shell's first paint). Pin it
 	// to white so those areas always match email content, regardless of theme.
@@ -4273,9 +4319,10 @@ func (w *window) renderConversation(msgs []model.Message) {
 	// snooze just returned the thread to the inbox, the cached AI category is
 	// stale or beside the point — otherwise the reader header could keep
 	// showing e.g. "Needs reply" after the list row already moved on.
-	category := w.categories[w.openThreadID]
+	threadKey := w.activeCacheKey(w.openThreadID)
+	category := w.categories[threadKey]
 	outgoing := w.current == model.LabelSent || w.current == model.LabelDraft
-	if t, ok := w.threadByID[w.openThreadID]; ok && !outgoing && !w.manualCat[w.openThreadID] {
+	if t, ok := w.threadByID[w.openThreadID]; ok && !outgoing && !w.manualCat[threadKey] {
 		switch {
 		case t.RepliedByMe:
 			category = "Replied"
@@ -4283,7 +4330,7 @@ func (w *window) renderConversation(msgs []model.Message) {
 			category = "Snoozed"
 		}
 	}
-	w.setReaderCategory(category, w.categoryFailed[w.openThreadID])
+	w.setReaderCategory(category, w.categoryFailed[threadKey])
 	// Show a loading placeholder immediately when bodies need fetching (not all
 	// cached), so the user sees their click registered instead of staring at the
 	// previous message for up to the fetch timeout. When all bodies are cached
@@ -4312,7 +4359,7 @@ func (w *window) renderConversation(msgs []model.Message) {
 	// copy and the writes are merged back via dispatch.Main below.
 	refetched := make(map[string]bool, len(msgs))
 	for _, m := range msgs {
-		if w.inlineRefetched[m.GmailID] {
+		if w.inlineRefetched[cacheKey(m.AccountID, m.GmailID)] {
 			refetched[m.GmailID] = true
 		}
 	}
@@ -4512,12 +4559,12 @@ func (w *window) renderConversation(msgs []model.Message) {
 			"bytes", len(out), "html", logging.Body(out),
 			"fetch", fetchDur, "sanitize", time.Since(sanitizeStart))
 		dispatch.Main(func() {
-			w.mergeSectionCache(fresh) // cache newly-rendered sections (main thread)
+			w.mergeSectionCache(latest.AccountID, fresh) // cache newly-rendered sections (main thread)
 			// Merge the goroutine-local inline-refetch marks back into the main-thread
 			// map (even for a discarded render — the re-fetch already happened, so it
 			// must not repeat).
 			for id := range refetched {
-				w.inlineRefetched[id] = true
+				w.inlineRefetched[cacheKey(latest.AccountID, id)] = true
 			}
 			if w.openThreadID != threadID {
 				logging.Trace("ui: render conversation discarded", "thread", threadID, "openThread", w.openThreadID)
@@ -4548,9 +4595,9 @@ func (w *window) renderConversation(msgs []model.Message) {
 			for _, m := range msgs {
 				g, ok := gists[m.GmailID]
 				if ok {
-					delete(w.appliedGists, m.GmailID)
+					delete(w.appliedGists, cacheKey(m.AccountID, m.GmailID))
 				} else {
-					g = w.appliedGists[m.GmailID]
+					g = w.appliedGists[cacheKey(m.AccountID, m.GmailID)]
 				}
 				if g != "" {
 					w.fireGistJS(m.GmailID, g)
@@ -4633,10 +4680,11 @@ func (w *window) generateGists(threadID string, msgs []model.Message) {
 	}
 	var todo []model.Message
 	for _, m := range msgs {
-		if w.gistRequested[m.GmailID] {
+		key := cacheKey(m.AccountID, m.GmailID)
+		if w.gistRequested[key] {
 			continue
 		}
-		w.gistRequested[m.GmailID] = true
+		w.gistRequested[key] = true
 		todo = append(todo, m)
 	}
 	if len(todo) == 0 {
@@ -4660,13 +4708,13 @@ func (w *window) generateGists(threadID string, msgs []model.Message) {
 					lastErr = err
 				}
 				// Clear the mark so a later open retries this message.
-				dispatch.Main(func() { delete(w.gistRequested, m.GmailID) })
+				dispatch.Main(func() { delete(w.gistRequested, cacheKey(m.AccountID, m.GmailID)) })
 				continue
 			}
 			if serr := w.deps.Store.SetMessageGist(context.Background(), m.AccountID, m.GmailID, gist); serr != nil {
 				slog.Warn("ui: persist gist", "id", m.GmailID, "err", serr)
 			}
-			dispatch.Main(func() { w.applyGist(m.GmailID, m.ThreadID, gist) })
+			dispatch.Main(func() { w.applyGist(m.AccountID, m.GmailID, m.ThreadID, gist) })
 		}
 		done(doneErr(lastErr))
 	}()
@@ -4677,10 +4725,10 @@ func (w *window) generateGists(threadID string, msgs []model.Message) {
 // store), and when its thread is the one on screen the card is filled and
 // revealed in place via __mbGist — a full re-render would reset the reader's
 // scroll position. Main thread.
-func (w *window) applyGist(gmailID, threadID, gist string) {
-	w.invalidateSection(gmailID)
-	w.appliedGists[gmailID] = gist
-	if w.openThreadID != threadID {
+func (w *window) applyGist(accountID int64, gmailID, threadID, gist string) {
+	w.invalidateSection(accountID, gmailID)
+	w.appliedGists[cacheKey(accountID, gmailID)] = gist
+	if w.activeID != accountID || w.openThreadID != threadID {
 		return
 	}
 	w.fireGistJS(gmailID, gist)
@@ -4733,11 +4781,19 @@ const aiCacheCap = 400
 
 // capCache evicts arbitrary entries until m holds at most max. Main-thread only
 // (all session caches are main-thread confined).
-func capCache(m map[string]string, max int) {
+func capCache(m map[uiCacheKey]string, max int) {
 	for len(m) > max {
 		for k := range m {
 			delete(m, k)
 			break
+		}
+	}
+}
+
+func clearAccountCache[V any](m map[uiCacheKey]V, accountID int64) {
+	for k := range m {
+		if k.accountID == accountID {
+			delete(m, k)
 		}
 	}
 }
@@ -4748,7 +4804,7 @@ func capCache(m map[string]string, max int) {
 func (w *window) cachedSectionsFor(msgs []model.Message) map[string]cachedSection {
 	out := make(map[string]cachedSection, len(msgs))
 	for _, m := range msgs {
-		if cs, ok := w.sectionCache[m.GmailID]; ok {
+		if cs, ok := w.sectionCache[cacheKey(m.AccountID, m.GmailID)]; ok {
 			out[m.GmailID] = cs
 		}
 	}
@@ -4758,9 +4814,9 @@ func (w *window) cachedSectionsFor(msgs []model.Message) map[string]cachedSectio
 // mergeSectionCache stores newly-rendered sections, evicting arbitrary entries
 // when over the cap (sections are immutable, so an eviction is just a future
 // cache miss). Main-thread only.
-func (w *window) mergeSectionCache(fresh map[string]cachedSection) {
+func (w *window) mergeSectionCache(accountID int64, fresh map[string]cachedSection) {
 	for k, v := range fresh {
-		w.sectionCache[k] = v
+		w.sectionCache[cacheKey(accountID, k)] = v
 	}
 	for len(w.sectionCache) > sectionCacheCap {
 		for k := range w.sectionCache {
@@ -4772,9 +4828,9 @@ func (w *window) mergeSectionCache(fresh map[string]cachedSection) {
 
 // invalidateSection drops a message's cached section, so a re-synced message
 // (changed metadata/body) re-renders. Main-thread only.
-func (w *window) invalidateSection(gmailID string) {
+func (w *window) invalidateSection(accountID int64, gmailID string) {
 	if gmailID != "" {
-		delete(w.sectionCache, gmailID)
+		delete(w.sectionCache, cacheKey(accountID, gmailID))
 	}
 }
 
@@ -5361,43 +5417,16 @@ func (w *window) onMarkUnread() {
 	}
 }
 
-// buildLabelsMenu builds the popover content for the labels button: a checkbox
-// per user label, ticked when the open thread already carries it. Toggling
-// applies or removes that label across the whole conversation.
-func (w *window) buildLabelsMenu() gtk.Widgetter {
+// showLabelsDialog opens the label chooser for the current conversation.
+func (w *window) showLabelsDialog() {
 	if w.openThreadID == "" {
-		box := gtk.NewBox(gtk.OrientationVertical, 2)
-		setMargins(box, 8, 8, 8, 8)
-		box.Append(gtk.NewLabel("No conversation open"))
-		return box
+		return
 	}
-	// Use the open messages' own account, not the live active one — the open
-	// thread survives an account switch until another thread is opened.
 	acct := w.activeID
 	if len(w.openThreadMsgs) > 0 {
 		acct = w.openThreadMsgs[0].AccountID
 	}
-	return w.labelToggleBox(acct, w.openThreadID, w.openThreadMsgs)
-}
-
-// showLabelsDialog opens the label chooser (buildLabelsMenu) as a dialog. Labels
-// moved out of the reader header into the overflow menu (it's used rarely).
-func (w *window) showLabelsDialog() {
-	scroller := gtk.NewScrolledWindow()
-	scroller.SetPolicy(gtk.PolicyNever, gtk.PolicyAutomatic)
-	scroller.SetChild(w.buildLabelsMenu())
-	scroller.SetVExpand(true)
-
-	tv := adw.NewToolbarView()
-	tv.AddTopBar(adw.NewHeaderBar())
-	tv.SetContent(scroller)
-
-	dialog := adw.NewDialog()
-	dialog.SetTitle("Labels")
-	dialog.SetContentWidth(320)
-	dialog.SetContentHeight(400)
-	dialog.SetChild(tv)
-	dialog.Present(w.win)
+	w.showThreadLabelsDialog(acct, w.openThreadID)
 }
 
 // registerReaderActions registers the win.* actions backing the overflow menu,
@@ -5458,9 +5487,11 @@ func (w *window) buildReaderMenuModel() *gio.Menu {
 		}
 		menu.AppendSection("", sec)
 
-		lbl := gio.NewMenu()
-		lbl.Append("Labels…", "win.reader-labels")
-		menu.AppendSection("", lbl)
+		if !w.isIMAPAccount(w.activeID) {
+			lbl := gio.NewMenu()
+			lbl.Append("Labels…", "win.reader-labels")
+			menu.AppendSection("", lbl)
+		}
 	}
 	// Unsubscribe is about the conversation's mailing list, so it stays here
 	// (Gmail keeps it similarly prominent); the sender utilities live in the
@@ -5865,7 +5896,7 @@ func (w *window) onRetryLoading() {
 	}
 	logging.Trace("ui: retry loading", "thread", w.openThreadID, "msgs", len(w.openThreadMsgs))
 	for _, m := range w.openThreadMsgs {
-		w.invalidateSection(m.GmailID)
+		w.invalidateSection(m.AccountID, m.GmailID)
 	}
 	w.lastFetchFailed = false
 	w.renderConversation(w.openThreadMsgs)
@@ -5891,7 +5922,7 @@ func (w *window) onTranslate() {
 	// thread; the persisted cache is consulted in the goroutine before any AI).
 	var todo []model.Message
 	for _, m := range msgs {
-		if _, ok := w.translationCache[m.GmailID]; !ok {
+		if _, ok := w.translationCache[cacheKey(m.AccountID, m.GmailID)]; !ok {
 			todo = append(todo, m)
 		}
 	}
@@ -5978,10 +6009,10 @@ func (w *window) onTranslate() {
 				return
 			}
 			for id, out := range seeded {
-				w.translationCache[id] = out
+				w.translationCache[cacheKey(acctID, id)] = out
 			}
 			for id, out := range results {
-				w.translationCache[id] = out
+				w.translationCache[cacheKey(acctID, id)] = out
 			}
 			capCache(w.translationCache, aiCacheCap)
 			w.showTranslatedConversation(msgs)
@@ -6004,7 +6035,7 @@ func (w *window) showTranslatedConversation(msgs []model.Message) {
 	blocked := 0
 	for i := len(msgs) - 1; i >= 0; i-- {
 		m := msgs[i]
-		body := model.MessageBody{HTML: w.translationCache[m.GmailID]}
+		body := model.MessageBody{HTML: w.translationCache[cacheKey(m.AccountID, m.GmailID)]}
 		// No gist card here: the gist is in the email's original language, which
 		// would clash with the translated bodies this view exists to show.
 		sec, n := w.conversationSection(m, body, w.cleanHTML, false, "")
@@ -6125,9 +6156,10 @@ func (w *window) onSummarize() {
 	w.cardIcon.SetFromIconName("view-list-bullet-symbolic")
 	w.cardTitle.SetText("Summary")
 	key := w.summaryKey()
+	memoryKey := w.activeCacheKey(key)
 	logging.Trace("ui: summarize", "thread", w.openThreadID, "account", w.activeID)
 	w.summaryRevealer.SetRevealChild(true)
-	if cached, ok := w.summaryCache[key]; ok {
+	if cached, ok := w.summaryCache[memoryKey]; ok {
 		logging.Trace("ui: summarize cache hit (memory)", "thread", w.openThreadID)
 		w.summaryLabel.SetText(cached)
 		return
@@ -6137,7 +6169,7 @@ func (w *window) onSummarize() {
 	// re-summarized. A single indexed lookup, fine on the main thread.
 	if fp, sum, ok, err := w.deps.Store.ThreadSummary(context.Background(), w.activeID, w.openThreadID); err == nil && ok && fp == key {
 		logging.Trace("ui: summarize cache hit (persisted)", "thread", w.openThreadID)
-		w.summaryCache[key] = sum
+		w.summaryCache[memoryKey] = sum
 		capCache(w.summaryCache, aiCacheCap)
 		w.summaryLabel.SetText(sum)
 		return
@@ -6191,7 +6223,7 @@ func (w *window) onSummarize() {
 				return
 			}
 			if final != "" {
-				w.summaryCache[key] = final
+				w.summaryCache[cacheKey(acctID, key)] = final
 				capCache(w.summaryCache, aiCacheCap)
 				w.summaryLabel.SetText(final)
 			}
@@ -6233,7 +6265,7 @@ func (w *window) analyzeMessage(m model.Message) {
 	w.cardTitle.SetText(title)
 	logging.Trace("ui: analyze phishing", "id", m.GmailID, "thread", w.openThreadID, "account", w.activeID)
 	w.summaryRevealer.SetRevealChild(true)
-	key := "analyze:" + m.GmailID
+	key := cacheKey(m.AccountID, "analyze:"+m.GmailID)
 	if cached, ok := w.summaryCache[key]; ok {
 		logging.Trace("ui: analyze cache hit (memory)", "id", m.GmailID)
 		w.summaryLabel.SetText(cached)
@@ -6798,8 +6830,8 @@ func (w *window) subscribe() {
 func (w *window) onChange(c syncer.Change) {
 	logging.Trace("ui: sync change", "kind", c.Kind, "account", c.AccountID, "id", c.GmailID, "thread", c.ThreadID, "active", w.activeID)
 	switch c.Kind {
-	case syncer.MessageUpserted, syncer.MessageDeleted:
-		w.invalidateSection(c.GmailID) // a re-synced message must re-render
+	case syncer.MessageUpserted, syncer.MessageBodyFetched, syncer.MessageDeleted:
+		w.invalidateSection(c.AccountID, c.GmailID) // a re-synced message must re-render
 		if c.AccountID == w.activeID {
 			// A change to the open conversation (a reply you sent, or a synced
 			// message) re-renders it so the new message shows without re-opening.
@@ -6943,10 +6975,11 @@ func (w *window) checkNewMail(batch []notifyCandidate) {
 	selfUnread := map[int64][]string{}
 	for _, c := range batch {
 		m, err := w.deps.Store.GetMessage(ctx, c.accountID, c.gmailID)
-		if err != nil || !m.IsUnread || !m.InternalDate.After(w.startTime) {
+		if err != nil {
 			continue
 		}
-		if w.isOwnAddress(m.FromAddr) {
+		notify, clearUnread := newMailDisposition(m, w.startTime, w.isOwnAddress(m.FromAddr), c.userMarked)
+		if clearUnread {
 			// A message this app sent (a reply, or self-addressed mail) —
 			// Gmail can legitimately label its own sent copy INBOX+UNREAD, but
 			// it isn't new mail to look at, so don't notify. When the copy is
@@ -6955,12 +6988,9 @@ func (w *window) checkNewMail(batch []notifyCandidate) {
 			// copy (e.g. a recipient alias forwarding into this mailbox), so
 			// clear it too — unless the user explicitly marked it unread.
 			logging.Trace("ui: new-mail check skip self-sent", "id", m.GmailID, "from", m.FromAddr, "user_marked", c.userMarked)
-			if hasLabel(m, model.LabelSent) && !c.userMarked {
-				selfUnread[c.accountID] = append(selfUnread[c.accountID], m.GmailID)
-			}
-			continue
+			selfUnread[c.accountID] = append(selfUnread[c.accountID], m.GmailID)
 		}
-		if hasLabel(m, model.LabelInbox) {
+		if notify {
 			hits = append(hits, hit{accountID: c.accountID, msg: m})
 		}
 	}
@@ -6981,7 +7011,7 @@ func (w *window) checkNewMail(batch []notifyCandidate) {
 	// A gist may already be persisted (e.g. inbox categorization ran first) —
 	// look it up now, off the main thread, so the very first notification can
 	// show the same AI summary the reader would, instead of the raw snippet.
-	gists := map[string]string{}
+	gists := map[uiCacheKey]string{}
 	if w.aiGist {
 		byAccount := map[int64][]string{}
 		for _, h := range hits {
@@ -6990,16 +7020,41 @@ func (w *window) checkNewMail(batch []notifyCandidate) {
 		for accountID, ids := range byAccount {
 			if g, err := w.deps.Store.MessageGists(ctx, accountID, ids); err == nil {
 				for id, gist := range g {
-					gists[id] = gist
+					gists[cacheKey(accountID, id)] = gist
 				}
 			}
 		}
 	}
 	dispatch.Main(func() {
 		for _, h := range hits {
-			w.notifyNewMail(h.accountID, h.msg, gists[h.msg.GmailID])
+			key := cacheKey(h.accountID, h.msg.GmailID)
+			if !w.claimNotification(key) {
+				continue
+			}
+			w.notifyNewMail(h.accountID, h.msg, gists[key])
 		}
 	})
+}
+
+func newMailDisposition(m model.Message, started time.Time, ownAddress, userMarked bool) (notify, clearUnread bool) {
+	if !m.IsUnread || !m.InternalDate.After(started) {
+		return false, false
+	}
+	if ownAddress && hasLabel(m, model.LabelSent) {
+		return false, !userMarked
+	}
+	return hasLabel(m, model.LabelInbox), false
+}
+
+func (w *window) claimNotification(key uiCacheKey) bool {
+	if w.notified == nil {
+		w.notified = map[uiCacheKey]bool{}
+	}
+	if w.notified[key] {
+		return false
+	}
+	w.notified[key] = true
+	return true
 }
 
 // scheduleRefresh coalesces refreshes from a burst of change events: the first
@@ -7055,57 +7110,13 @@ func (w *window) notifyNewMail(accountID int64, m model.Message, gist string) {
 	// Unique id per message so concurrent accounts' notifications don't replace
 	// one another.
 	id := fmt.Sprintf("mailbox-mail-%d-%s", accountID, m.GmailID)
+	if w.app == nil {
+		return
+	}
 
-	// A gist is already in hand (persisted from an earlier pass), or no AI
-	// attempt will be made at all — nothing to wait for, show it now.
-	if gist != "" || w.deps.Assistant == nil || !w.aiGist || strings.TrimSpace(m.Snippet) == "" {
-		w.app.SendNotification(id, w.mailNotification(accountID, m, gist))
-		return
-	}
-	// Claim the message before generating (main thread): if the reader opened
-	// this mail and is already summarizing it, a second run here would produce
-	// a slightly different sentence and visibly rewrite the card. That run
-	// doesn't report back to us, so don't wait on it — show the snippet now
-	// rather than dropping the notification entirely.
-	if w.gistRequested[m.GmailID] {
-		logging.Trace("ui: notification gist already requested", "id", m.GmailID)
-		w.app.SendNotification(id, w.mailNotification(accountID, m, ""))
-		return
-	}
-	w.gistRequested[m.GmailID] = true
-	// Best-effort AI gist: hold the notification until it's ready (or fails/
-	// times out) so exactly one popup is ever shown for this message — sending
-	// once with the snippet and again with the gist double-pops the desktop
-	// banner (GNOME only dedupes the tray entry on a repeated id, not the
-	// transient popup). Bounded by BriefSummary's own timeout, so a slow or
-	// down AI delays the notification by at most that long, never loses it.
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		defer cancel()
-		done := w.aiActivityFor(w.emailByID(accountID), "Summarizing new mail")
-		gist, err := w.deps.Assistant.BriefSummary(ctx, gistContext(m))
-		done(doneErr(err))
-		if err != nil || gist == "" {
-			logging.Trace("ui: notification gist skipped", "id", m.GmailID, "err", err)
-			// Release the claim so a later thread open retries, and fall back
-			// to the snippet — the notification was held, not lost.
-			dispatch.Main(func() {
-				delete(w.gistRequested, m.GmailID)
-				w.app.SendNotification(id, w.mailNotification(accountID, m, ""))
-			})
-			return
-		}
-		// Persist the line so the reader's per-message summary card reuses it
-		// instead of asking the AI again for the same (immutable) message.
-		if serr := w.deps.Store.SetMessageGist(ctx, accountID, m.GmailID, gist); serr != nil {
-			slog.Warn("ui: persist notification gist", "id", m.GmailID, "err", serr)
-		}
-		dispatch.Main(func() {
-			logging.Trace("ui: notification gist", "id", m.GmailID, "gist", gist)
-			w.applyGist(m.GmailID, m.ThreadID, gist)
-			w.app.SendNotification(id, w.mailNotification(accountID, m, gist))
-		})
-	}()
+	// Delivery is immediate. A persisted gist can enrich it for free; generating
+	// one never delays the only notification the user receives.
+	w.app.SendNotification(id, w.mailNotification(accountID, m, gist))
 }
 
 // mailNotification builds the new-mail notification. Sender and subject form
@@ -7230,7 +7241,11 @@ func (w *window) snoozeUntil(acctID int64, threadID string, t time.Time) {
 			return
 		}
 		dispatch.Main(func() {
-			toast := adw.NewToast("Snoozed until " + formatWakeTime(t, time.Now()))
+			title := "Snoozed until " + formatWakeTime(t, time.Now())
+			if w.isIMAPAccount(acctID) {
+				title = "Snoozed on this device until " + formatWakeTime(t, time.Now())
+			}
+			toast := adw.NewToast(title)
 			toast.SetButtonLabel("Undo")
 			toast.SetTimeout(6)
 			toast.ConnectButtonClicked(func() { w.unsnooze(acctID, threadID) })

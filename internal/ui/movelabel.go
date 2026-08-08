@@ -5,6 +5,7 @@ import (
 
 	"github.com/diamondburned/gotk4-adwaita/pkg/adw"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
+	"github.com/jsnjack/mailbox/internal/dispatch"
 	"github.com/jsnjack/mailbox/internal/logging"
 	"github.com/jsnjack/mailbox/internal/model"
 )
@@ -14,8 +15,8 @@ import (
 // account is passed in — not read from w.activeID — so a picker opened from a
 // row keeps targeting that row's account even if the active account switches
 // while it is open. Nil on error (already logged).
-func (w *window) userLabels(acctID int64) []model.Label {
-	labels, err := w.deps.Store.ListLabels(context.Background(), acctID)
+func (w *window) userLabels(ctx context.Context, acctID int64) []model.Label {
+	labels, err := w.deps.Store.ListLabels(ctx, acctID)
 	if err != nil {
 		logging.Trace("ui: user labels", "account", acctID, "err", err)
 		return nil
@@ -35,7 +36,13 @@ func (w *window) userLabels(acctID int64) []model.Label {
 // thread vs. a bulk selection) and show the matching undo toast. Label ids are
 // per-account, so acctID must be the account of the messages being filed.
 func (w *window) showMoveToDialog(acctID int64, onPick func(labelID, name string)) {
-	labels := w.userLabels(acctID)
+	go func() {
+		labels := w.userLabels(context.Background(), acctID)
+		dispatch.Main(func() { w.presentMoveToDialog(acctID, labels, onPick) })
+	}()
+}
+
+func (w *window) presentMoveToDialog(acctID int64, labels []model.Label, onPick func(labelID, name string)) {
 	logging.Trace("ui: move-to dialog", "account", acctID, "labels", len(labels))
 
 	listBox := gtk.NewListBox()
@@ -45,7 +52,7 @@ func (w *window) showMoveToDialog(acctID int64, onPick func(labelID, name string
 	dialog := adw.NewDialog()
 
 	if len(labels) == 0 {
-		empty := gtk.NewLabel("No labels to move to.\nCreate labels in Gmail to file mail here.")
+		empty := gtk.NewLabel("No folders are available to move mail into.")
 		empty.AddCSSClass("dim-label")
 		empty.SetJustify(gtk.JustifyCenter)
 		setMargins(empty, 18, 18, 18, 18)
@@ -87,16 +94,10 @@ func (w *window) showMoveToDialog(acctID int64, onPick func(labelID, name string
 // labelToggleBox builds the user-label checklist for a thread: each user label
 // is a checkbox reflecting whether it's applied to the thread, and toggling it
 // adds/removes that label across all of the thread's messages.
-func (w *window) labelToggleBox(acctID int64, threadID string, msgs []model.Message) gtk.Widgetter {
+func (w *window) labelToggleBox(labels []model.Label, applied map[string]bool, msgs []model.Message) gtk.Widgetter {
 	box := gtk.NewBox(gtk.OrientationVertical, 2)
 	setMargins(box, 8, 8, 8, 8)
 
-	labels := w.userLabels(acctID)
-	applied, err := w.deps.Store.ThreadLabels(context.Background(), acctID, threadID)
-	if err != nil {
-		logging.Trace("ui: thread labels", "id", threadID, "err", err)
-		applied = map[string]bool{}
-	}
 	any := false
 	for _, l := range labels {
 		any = true
@@ -121,14 +122,27 @@ func (w *window) labelToggleBox(acctID int64, threadID string, msgs []model.Mess
 // showThreadLabelsDialog opens the label-toggle checklist for a single thread
 // (used from the row context menu), loading the thread's messages first.
 func (w *window) showThreadLabelsDialog(acctID int64, threadID string) {
-	msgs, err := w.deps.Store.ListThreadMessages(context.Background(), acctID, threadID)
-	if err != nil || len(msgs) == 0 {
-		logging.Trace("ui: thread labels dialog skipped", "id", threadID, "n", len(msgs), "err", err)
-		return
-	}
+	go func() {
+		ctx := context.Background()
+		msgs, err := w.deps.Store.ListThreadMessages(ctx, acctID, threadID)
+		if err != nil || len(msgs) == 0 {
+			logging.Trace("ui: thread labels dialog skipped", "id", threadID, "n", len(msgs), "err", err)
+			return
+		}
+		labels := w.userLabels(ctx, acctID)
+		applied, err := w.deps.Store.ThreadLabels(ctx, acctID, threadID)
+		if err != nil {
+			logging.Trace("ui: thread labels", "id", threadID, "err", err)
+			applied = map[string]bool{}
+		}
+		dispatch.Main(func() { w.presentThreadLabelsDialog(labels, applied, msgs) })
+	}()
+}
+
+func (w *window) presentThreadLabelsDialog(labels []model.Label, applied map[string]bool, msgs []model.Message) {
 	scroller := gtk.NewScrolledWindow()
 	scroller.SetPolicy(gtk.PolicyNever, gtk.PolicyAutomatic)
-	scroller.SetChild(w.labelToggleBox(acctID, threadID, msgs))
+	scroller.SetChild(w.labelToggleBox(labels, applied, msgs))
 	scroller.SetVExpand(true)
 
 	tv := adw.NewToolbarView()

@@ -16,6 +16,9 @@ type ChangeKind int
 const (
 	// MessageUpserted means a message's metadata was inserted or updated.
 	MessageUpserted ChangeKind = iota
+	// MessageBodyFetched means an existing message's body and attachments were
+	// cached. It refreshes readers without being treated as newly arrived mail.
+	MessageBodyFetched
 	// MessageDeleted means a message was removed.
 	MessageDeleted
 	// LabelsSynced means the account's label set was refreshed.
@@ -42,6 +45,8 @@ func kindName(k ChangeKind) string {
 	switch k {
 	case MessageUpserted:
 		return "MessageUpserted"
+	case MessageBodyFetched:
+		return "MessageBodyFetched"
 	case MessageDeleted:
 		return "MessageDeleted"
 	case LabelsSynced:
@@ -69,8 +74,8 @@ type Change struct {
 	Kind      ChangeKind
 	AccountID int64
 	GmailID   string
-	// ThreadID, when set on a MessageUpserted, lets the UI re-render the open
-	// conversation if the change belongs to it (a sent reply, or a synced message).
+	// ThreadID, when set on a message change, lets the UI re-render the open
+	// conversation if the change belongs to it.
 	ThreadID string
 	Count    int
 }

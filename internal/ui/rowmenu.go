@@ -99,7 +99,9 @@ func (w *window) showRowMenu(row gtk.Widgetter, threadID string, x, y float64) {
 			w.threadModifyAll(acct, threadID, "Moved to "+name, []string{labelID}, moveLocationRemovals)
 		})
 	})
-	item(box, "Label…", func() { w.showThreadLabelsDialog(acct, threadID) })
+	if !w.isIMAPAccount(acct) {
+		item(box, "Label…", func() { w.showThreadLabelsDialog(acct, threadID) })
+	}
 	// flyoutBtn builds a menu item that opens a nested popover, marked with a
 	// trailing chevron so it reads as "leads to more choices" (the plain items
 	// act immediately; dialogs use the "…" convention).
@@ -248,7 +250,7 @@ func (w *window) showRowMenu(row gtk.Widgetter, threadID string, x, y float64) {
 		// When this thread carries a category the user set by hand, offer a
 		// one-click way to drop it (reverting to the AI / "Replied" tag) rather
 		// than burying it under Categorize as → None.
-		if w.manualCat[threadID] {
+		if w.manualCat[w.activeCacheKey(threadID)] {
 			item(box, "Clear category", func() { w.setThreadCategory(threadID, "") })
 		}
 	}
@@ -295,14 +297,18 @@ func (w *window) confirmDiscardDraft(accountID int64, threadID string) {
 // change) when verb is non-empty — so a right-click archive/trash is as
 // recoverable as the reader's.
 func (w *window) threadModifyAll(acctID int64, threadID, verb string, add, remove []string) {
-	msgs, err := w.deps.Store.ListThreadMessages(context.Background(), acctID, threadID)
-	if err != nil || len(msgs) == 0 {
-		logging.Trace("ui: thread modify all skipped", "id", threadID, "account", acctID, "verb", verb, "n", len(msgs), "err", err)
-		return
-	}
-	logging.Trace("ui: thread modify all", "id", threadID, "account", acctID, "verb", verb, "n", len(msgs), "add", add, "remove", remove)
-	w.applyLabels(msgs, add, remove, nil)
-	if verb != "" {
-		w.showUndoToast(verb, msgs, add, remove)
-	}
+	go func() {
+		msgs, err := w.deps.Store.ListThreadMessages(context.Background(), acctID, threadID)
+		dispatch.Main(func() {
+			if err != nil || len(msgs) == 0 {
+				logging.Trace("ui: thread modify all skipped", "id", threadID, "account", acctID, "verb", verb, "n", len(msgs), "err", err)
+				return
+			}
+			logging.Trace("ui: thread modify all", "id", threadID, "account", acctID, "verb", verb, "n", len(msgs), "add", add, "remove", remove)
+			w.applyLabels(msgs, add, remove, nil)
+			if verb != "" {
+				w.showUndoToast(verb, msgs, add, remove)
+			}
+		})
+	}()
 }

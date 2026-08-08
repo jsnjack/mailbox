@@ -79,29 +79,54 @@ func (w *window) openOutbox() {
 
 	showAccount := len(accounts) > 1
 	var rebuild func()
+	var rebuildGen uint64
 	rebuild = func() {
+		rebuildGen++
+		gen := rebuildGen
 		for child := listBox.FirstChild(); child != nil; child = listBox.FirstChild() {
 			listBox.Remove(child)
 		}
-		total := 0
-		for _, a := range accounts {
-			items, err := w.deps.Store.ListPendingOutbox(context.Background(), a.ID, time.Now().Unix())
-			if err != nil {
-				slog.Warn("ui: list outbox", "account", a.ID, "err", err)
-				continue
+		loading := gtk.NewLabel("Loading outbox…")
+		loading.AddCSSClass("dim-label")
+		setMargins(loading, 12, 12, 18, 18)
+		listBox.Append(loading)
+		go func() {
+			type result struct {
+				account AccountInfo
+				items   []model.OutboxItem
 			}
-			for _, it := range items {
-				listBox.Append(w.outboxRow(a, it, showAccount, rebuild))
-				total++
+			var results []result
+			for _, a := range accounts {
+				items, err := w.deps.Store.ListPendingOutbox(context.Background(), a.ID, time.Now().Unix())
+				if err != nil {
+					slog.Warn("ui: list outbox", "account", a.ID, "err", err)
+					continue
+				}
+				results = append(results, result{account: a, items: items})
 			}
-		}
-		logging.Trace("ui: outbox dialog listed", "accounts", len(accounts), "items", total)
-		if total == 0 {
-			empty := gtk.NewLabel("The outbox is empty.")
-			empty.AddCSSClass("dim-label")
-			setMargins(empty, 12, 12, 18, 18)
-			listBox.Append(empty)
-		}
+			dispatch.Main(func() {
+				if gen != rebuildGen {
+					return
+				}
+				for child := listBox.FirstChild(); child != nil; child = listBox.FirstChild() {
+					listBox.Remove(child)
+				}
+				total := 0
+				for _, result := range results {
+					for _, it := range result.items {
+						listBox.Append(w.outboxRow(result.account, it, showAccount, rebuild))
+						total++
+					}
+				}
+				logging.Trace("ui: outbox dialog listed", "accounts", len(accounts), "items", total)
+				if total == 0 {
+					empty := gtk.NewLabel("The outbox is empty.")
+					empty.AddCSSClass("dim-label")
+					setMargins(empty, 12, 12, 18, 18)
+					listBox.Append(empty)
+				}
+			})
+		}()
 	}
 	rebuild()
 
@@ -110,10 +135,22 @@ func (w *window) openOutbox() {
 		sendNow := gtk.NewButtonWithLabel("Send now")
 		sendNow.AddCSSClass("suggested-action")
 		sendNow.ConnectClicked(func() {
+			if !sendNow.Sensitive() {
+				return
+			}
+			sendNow.SetSensitive(false)
+			sendNow.SetLabel("Sending…")
 			logging.Trace("ui: outbox send now", "accounts", len(accounts))
 			go func() {
 				var firstErr error
-				for _, a := range accounts {
+				for i, a := range accounts {
+					i, email := i, a.Email
+					dispatch.Main(func() {
+						sendNow.SetLabel(fmt.Sprintf("Sending %d/%d…", i+1, len(accounts)))
+						if email != "" {
+							sendNow.SetTooltipText("Sending for " + email)
+						}
+					})
 					if err := w.deps.SweepOutbox(context.Background(), a.ID); err != nil {
 						slog.Warn("ui: sweep outbox", "account", a.ID, "err", err)
 						if firstErr == nil {
@@ -123,6 +160,9 @@ func (w *window) openOutbox() {
 				}
 				logging.Trace("ui: outbox send now done", "accounts", len(accounts), "err", firstErr)
 				dispatch.Main(func() {
+					sendNow.SetSensitive(true)
+					sendNow.SetLabel("Send now")
+					sendNow.SetTooltipText("")
 					if firstErr != nil {
 						w.toast("Couldn't send — messages stay queued")
 					}
@@ -200,6 +240,7 @@ func (w *window) outboxRow(acct AccountInfo, it model.OutboxItem, showAccount bo
 
 	id := it.ID
 	acctID := acct.ID // the account these rows were listed for
+	busy := false
 	if w.deps.RetryOutbox != nil {
 		retry := gtk.NewButtonFromIconName("view-refresh-symbolic")
 		retryLabel := "Retry now"
@@ -211,6 +252,12 @@ func (w *window) outboxRow(acct AccountInfo, it model.OutboxItem, showAccount bo
 		retry.SetVAlign(gtk.AlignCenter)
 		retry.AddCSSClass("flat")
 		retryNow := func() {
+			if busy {
+				return
+			}
+			busy = true
+			row.SetSensitive(false)
+			status.SetText("Retrying…")
 			logging.Trace("ui: outbox retry item", "account", acctID, "id", id)
 			go func() {
 				err := w.deps.RetryOutbox(context.Background(), acctID, id)
@@ -255,6 +302,12 @@ func (w *window) outboxRow(acct AccountInfo, it model.OutboxItem, showAccount bo
 		discard.SetVAlign(gtk.AlignCenter)
 		discard.AddCSSClass("flat")
 		discard.ConnectClicked(func() {
+			if busy {
+				return
+			}
+			busy = true
+			row.SetSensitive(false)
+			status.SetText("Discarding…")
 			logging.Trace("ui: outbox discard item", "account", acctID, "id", id)
 			go func() {
 				ok, err := w.deps.DiscardOutbox(context.Background(), acctID, id)
