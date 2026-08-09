@@ -45,7 +45,11 @@ internal/
   ai/                provider abstraction (OpenAI-compatible + Anthropic), streaming; a failover provider chains the configured models in priority order — each chain entry may carry its own provider/endpoint/key ([[ai.chain]]), so a VPN-only proxy falls back to a local model. It switches on request failure or a stream error before any content, and a circuit breaker skips a failed entry for ~60s (probing after; ignored when every entry is cooling) with a 5s dial timeout so a blackholed endpoint can't stall every request. Classification runs at temperature 0 with tolerant reply parsing — MatchCategory.
   aiwork/            headless background AI worker: categorizes every account's inbox (launch catch-up + sync-event driven, debounced, capped per pass, cooldown on provider failure), persists to the store, publishes AIUpdated
   activity/          headless pub/sub of transient "what is the app doing" events (status bar)
-  ui/                all GTK/adw/webkit widget code (3-pane shell, list, reader, actions)
+  ui/                all GTK/adw/webkit widget code (3-pane shell, list, reader, actions).
+                     `threadlist.go` owns the middle pane (paged loading, row
+                     diffing, selection mode), `reader.go` the conversation
+                     render (bodies, sections, inline images, gists), and
+                     `window.go` the shell, sidebar, and everything else.
 ```
 
 Multi-account, multi-provider: `accounts.account_type` ('gmail'|'imap') selects
