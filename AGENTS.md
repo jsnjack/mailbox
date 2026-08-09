@@ -101,9 +101,14 @@ soft accent-tinted AI summary card. Folder icons stay the theme foreground and
 the account switcher is plain text (no avatars).
 
 UI state (implemented): 3-pane shell renders the cached account live; opening a
-Gmail conversation first hydrates its complete server-side message membership
-once (persisted in `thread_hydrations`, so a capped backfill cannot leave older
-messages and their attachments invisible), then lazily fetches + sanitizes +
+conversation renders what is cached immediately and completes itself around
+that. A Gmail conversation's full server-side message membership is hydrated
+once in the background (`hydrateThread`, persisted in `thread_hydrations`, so a
+capped backfill cannot leave older messages and their attachments invisible);
+when it adds any, the resulting `MessageUpserted` re-renders the open
+conversation through the ordinary change path. Only a conversation with nothing
+cached waits for that lookup, since there it is the only way to open it at all.
+The reader lazily fetches + sanitizes +
 renders its bodies (WebKit; remote images load through a hardened local cache,
 with a global privacy opt-out). A render fetches the thread's missing bodies
 concurrently and claims them (`renderFetching`), so the `MessageBodyFetched`

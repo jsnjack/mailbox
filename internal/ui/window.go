@@ -2595,18 +2595,18 @@ func (w *window) showThread(threadID string) {
 	gen := w.openGen
 	acctID := w.activeID
 	go func() {
-		if w.deps.HydrateThread != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), threadHydrateTimeout)
-			if _, err := w.deps.HydrateThread(ctx, acctID, threadID); err != nil {
-				// Opening mail must remain useful offline: hydration repairs a
-				// partial cache when possible, but never hides what is already local.
-				logging.Trace("ui: hydrate thread failed; using cache", "thread", threadID, "err", err)
-			}
-			cancel()
+		msgs, err := w.readThreadMessages(acctID, threadID)
+		// Hydration completes a conversation the backfill capped, which is a
+		// provider round trip. Waiting for it here would put the network in front
+		// of mail that is already cached, so it runs after the render below —
+		// except when there is nothing cached to render, where it is the only way
+		// to open the conversation at all.
+		hydrated := false
+		if len(msgs) == 0 && err == nil && w.deps.HydrateThread != nil {
+			w.hydrateThread(acctID, threadID)
+			hydrated = true
+			msgs, err = w.readThreadMessages(acctID, threadID)
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), openThreadTimeout)
-		msgs, err := w.deps.Store.ListThreadMessages(ctx, acctID, threadID)
-		cancel()
 		dispatch.Main(func() {
 			if gen != w.openGen {
 				logging.Trace("ui: show thread superseded", "thread", threadID)
@@ -2622,7 +2622,38 @@ func (w *window) showThread(threadID string) {
 			}
 			w.showThreadMsgs(threadID, msgs)
 		})
+		if !hydrated && len(msgs) > 0 && w.deps.HydrateThread != nil {
+			w.hydrateThread(acctID, threadID)
+		}
 	}()
+}
+
+// readThreadMessages reads one conversation from the local cache. Off the main
+// thread: it is normally instant, but a background VACUUM holds an exclusive
+// lock, and a synchronous read would freeze the UI behind it.
+func (w *window) readThreadMessages(accountID int64, threadID string) ([]model.Message, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), openThreadTimeout)
+	defer cancel()
+	return w.deps.Store.ListThreadMessages(ctx, accountID, threadID)
+}
+
+// hydrateThread fetches a conversation's complete server-side message membership
+// once (the result is persisted, so it is a no-op on every later open). When it
+// adds messages the engine publishes MessageUpserted for the thread, which
+// re-renders it if it is the one on screen — so a capped backfill's missing
+// older messages appear a moment after the cached ones, rather than the cached
+// ones waiting on the network. Off the main thread.
+func (w *window) hydrateThread(accountID int64, threadID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), threadHydrateTimeout)
+	defer cancel()
+	added, err := w.deps.HydrateThread(ctx, accountID, threadID)
+	if err != nil {
+		// Opening mail must remain useful offline: hydration repairs a partial
+		// cache when possible, but never hides what is already local.
+		logging.Trace("ui: hydrate thread failed; using cache", "thread", threadID, "err", err)
+		return
+	}
+	logging.Trace("ui: hydrate thread done", "thread", threadID, "added", added)
 }
 
 // openThreadTimeout bounds the store read behind opening a conversation. The
