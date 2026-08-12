@@ -1637,10 +1637,12 @@ func (w *window) buildReader() *adw.NavigationPage {
 
 	// Revealed while an in-place translation is shown; reverts to the original.
 	w.translationBanner = adw.NewBanner("Showing translation")
+	w.translationBanner.SetUseMarkup(false)
 	w.translationBanner.SetButtonLabel("Show original")
 	w.translationBanner.SetRevealed(false)
 	w.translationBanner.ConnectButtonClicked(w.showOriginal)
 	w.remoteImageBanner = adw.NewBanner("")
+	w.remoteImageBanner.SetUseMarkup(false)
 	w.remoteImageBanner.SetRevealed(false)
 	// The banner only appears when the privacy opt-out withheld images, so its
 	// action is always "load them now".
@@ -4278,7 +4280,19 @@ func (w *window) toast(msg string) {
 	if w.toastOverlay == nil {
 		return
 	}
-	w.toastOverlay.AddToast(adw.NewToast(msg))
+	w.toastOverlay.AddToast(newToast(msg))
+}
+
+// newToast builds a toast whose title is literal text. libadwaita parses a
+// toast title as Pango markup by default, so a subject, sender or filename
+// containing "&" — "Summit & more", "Ben & Jerry's" — fails to parse and the
+// toast appears with no text at all, just its buttons. Nothing the app puts in
+// a toast is ever markup, so the parse is switched off rather than every call
+// site being made to escape.
+func newToast(text string) *adw.Toast {
+	t := adw.NewToast(text)
+	t.SetUseMarkup(false)
+	return t
 }
 
 // defaultSendUndoDelay is how long a sent message is held (with an Undo toast)
@@ -4324,7 +4338,7 @@ func (w *window) deferSend(accountID int64, msg model.OutgoingMessage) {
 // reopens the message in compose so it isn't lost.
 func (w *window) showSendUndoToast(accountID, outboxID int64, msg model.OutgoingMessage) {
 	cancelled := false
-	toast := adw.NewToast("Sending…")
+	toast := newToast("Sending…")
 	toast.SetButtonLabel("Undo")
 	toast.SetTimeout(0) // we control the lifetime via the timer below
 	toast.ConnectButtonClicked(func() {
@@ -4416,7 +4430,7 @@ func (w *window) showUndoToast(verb string, msgs []model.Message, add, remove []
 		w.undoVerb, w.undoAdd, w.undoRemove = verb, add, remove
 	}
 	burst := w.undoMsgs
-	t := adw.NewToast(undoTitle(verb, burst))
+	t := newToast(undoTitle(verb, burst))
 	t.SetButtonLabel("Undo")
 	t.SetTimeout(6)
 	t.ConnectButtonClicked(func() {
@@ -4907,7 +4921,7 @@ func (w *window) snoozeUntil(acctID int64, threadID string, t time.Time) {
 			if w.isIMAPAccount(acctID) {
 				title = "Snoozed on this device until " + formatWakeTime(t, time.Now())
 			}
-			toast := adw.NewToast(title)
+			toast := newToast(title)
 			toast.SetButtonLabel("Undo")
 			toast.SetTimeout(6)
 			toast.ConnectButtonClicked(func() { w.unsnooze(acctID, threadID) })

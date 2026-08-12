@@ -221,6 +221,10 @@ func (w *window) openSubscriptions() {
 			for _, sub := range subs {
 				sub := sub
 				row := adw.NewActionRow()
+				// A list sender is very often "Ben & Jerry's" or "M&S"; a row
+				// title is Pango markup by default, and use-markup covers the
+				// subtitle too, so both would come out blank. See newToast.
+				row.SetUseMarkup(false)
 				row.SetTitle(sub.FromName)
 				row.SetSubtitle(fmt.Sprintf("%d emails · %s", sub.Count, sub.FromAddr))
 				btn := gtk.NewButtonWithLabel("Unsubscribe")

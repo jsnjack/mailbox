@@ -95,6 +95,7 @@ func (w *window) openSettings() {
 	}
 	addEntry := func(e AIModelEntry, expand bool) {
 		u := &aiEntryUI{row: adw.NewExpanderRow()}
+		u.row.SetUseMarkup(false) // a model id or endpoint is literal text — see newToast
 		u.model = adw.NewEntryRow()
 		u.model.SetTitle("Model")
 		u.model.SetText(e.Model)
@@ -265,6 +266,7 @@ func (w *window) openSettings() {
 	for _, a := range w.deps.Accounts {
 		a := a
 		r := adw.NewEntryRow()
+		r.SetUseMarkup(false) // the title is an address, not markup — see newToast
 		r.SetTitle(a.Email)
 		r.SetText(w.accountNames[a.Email])
 		// When the sign-in moment is known, show its age — the number that makes

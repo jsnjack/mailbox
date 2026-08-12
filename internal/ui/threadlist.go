@@ -237,7 +237,10 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 	searchBar.Append(w.searchSort)
 	searchBar.Append(w.searchAllBtn)
 
+	// Banner titles name folders and accounts, which can contain "&" (a label
+	// called "R&D"): parsed as markup they would render empty. See newToast.
 	w.outboxBanner = adw.NewBanner("")
+	w.outboxBanner.SetUseMarkup(false)
 	w.outboxBanner.SetButtonLabel("Outbox")
 	w.outboxBanner.SetRevealed(false)
 	w.outboxBanner.ConnectButtonClicked(w.openOutbox)
@@ -246,6 +249,7 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 	// leaving the actions silently inert. MAILBOX_DEMO hides it for screenshots
 	// taken against a synthetic cache that has no provider backend by design.
 	w.readOnlyBanner = adw.NewBanner("Read-only — no mail provider is connected")
+	w.readOnlyBanner.SetUseMarkup(false)
 	w.readOnlyBanner.SetButtonLabel("How to connect")
 	w.readOnlyBanner.ConnectButtonClicked(w.showConnectHelp)
 	w.readOnlyBanner.SetRevealed(w.deps.ModifyLabels == nil && os.Getenv("MAILBOX_DEMO") == "")
@@ -253,6 +257,7 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 	w.buildSelectionBar()
 
 	w.emptyFolderBanner = adw.NewBanner("")
+	w.emptyFolderBanner.SetUseMarkup(false)
 	w.emptyFolderBanner.SetButtonLabel("Empty now")
 	w.emptyFolderBanner.SetRevealed(false)
 	w.emptyFolderBanner.ConnectButtonClicked(w.onEmptyFolder)
@@ -261,6 +266,7 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 	// invalid_grant): the account can't recover without re-login, so say so
 	// instead of silently failing to sync.
 	w.authBanner = adw.NewBanner("")
+	w.authBanner.SetUseMarkup(false)
 	w.authBanner.SetButtonLabel("Reconnect")
 	w.authBanner.SetRevealed(false)
 	w.authBanner.ConnectButtonClicked(w.onReconnect)
@@ -668,7 +674,7 @@ func (w *window) bulkSnooze(t time.Time) {
 			}
 		}
 		dispatch.Main(func() {
-			toast := adw.NewToast(fmt.Sprintf("Snoozed %d conversations until %s", len(ids), formatWakeTime(t, time.Now())))
+			toast := newToast(fmt.Sprintf("Snoozed %d conversations until %s", len(ids), formatWakeTime(t, time.Now())))
 			toast.SetButtonLabel("Undo")
 			toast.SetTimeout(6)
 			toast.ConnectButtonClicked(func() {
