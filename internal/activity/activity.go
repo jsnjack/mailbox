@@ -6,6 +6,7 @@ package activity
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/jsnjack/mailbox/internal/logging"
@@ -20,6 +21,76 @@ func Plural(n int, one, many string) string {
 	}
 	return fmt.Sprintf("%d %s", n, many)
 }
+
+// pastLabels pairs each gerund operation label we publish with how it reads
+// once the work is done, so a finished operation can follow the app's voice
+// rule — gerunds while running, past tense when complete. Entries are matched
+// as prefixes so a label carrying a dynamic tail keeps it ("Categorizing 12
+// conversations" → "Categorized 12 conversations"), and the longer of two
+// overlapping phrasings must come first.
+var pastLabels = []struct{ gerund, past string }{
+	{"Checking mail", "Mail checked"},
+	{"Checking grammar", "Grammar checked"},
+	{"Checking for phishing", "Phishing check finished"},
+	{"Re-fetching HTML bodies", "HTML bodies re-fetched"},
+	{"Fetching message", "Message fetched"},
+	{"Sending queued mail", "Queued mail sent"},
+	{"Sending message", "Message sent"},
+	{"Retrying queued message", "Queued message retried"},
+	{"Discarding queued message", "Queued message discarded"},
+	{"Compacting the database", "Database compacted"},
+	{"Clearing cached mail files", "Cached mail files cleared"},
+	{"Adding the account", "Account added"},
+	{"Removing the account", "Account removed"},
+	{"Unsubscribing from ", "Unsubscribed from "},
+	{"Testing the AI connection", "AI connection tested"},
+	{"Testing ", "Tested "},
+	{"Saving draft locally", "Draft saved"},
+	{"Discarding draft", "Draft discarded"},
+	{"Opening the draft", "Draft opened"},
+	{"Downloading attachment", "Attachment downloaded"},
+	{"Searching all mail", "Search finished"},
+	{"Summarizing thread", "Thread summarized"},
+	{"Summarizing message", "Message summarized"},
+	{"Summarizing ", "Summarized "},
+	{"Translating conversation", "Conversation translated"},
+	{"Drafting message", "Message drafted"},
+	{"Refining text", "Text refined"},
+	{"Suggesting snooze times", "Snooze times suggested"},
+	{"Suggesting a subject", "Subject suggested"},
+	{"Suggesting replies", "Replies suggested"},
+	{"Categorizing ", "Categorized "},
+	{"Marking as spam", "Marked as spam"},
+	{"Marking ", "Marked "},
+	{"Moving to ", "Moved to "},
+	{"Filing to ", "Filed to "},
+	{"Deleting ", "Deleted "},
+	{"Emptying ", "Emptied "},
+	{"Changing labels", "Changed labels"},
+	{"Archiving", "Archived"},
+	{"Starring", "Starred"},
+	{"Unstarring", "Unstarred"},
+}
+
+// PastTense renders a running operation's label as it should read once the
+// operation has finished ("Checking mail" → "Mail checked"). A label that is
+// already past tense — every Report publishes one — has no pairing and is
+// returned unchanged, which is also what a newly added operation gets: its own
+// wording rather than a generic "Done".
+func PastTense(label string) string {
+	for _, e := range pastLabels {
+		if strings.HasPrefix(label, e.gerund) {
+			return e.past + label[len(e.gerund):]
+		}
+	}
+	return label
+}
+
+// NoteUpToDate is the result note of a mail check that found nothing. It is
+// named because two things must agree on it: the sync publishes it, and the
+// activity row uses it to tell the app breathing (a minute-by-minute check with
+// no news) apart from an event worth announcing.
+const NoteUpToDate = "up to date"
 
 // Phase marks where an operation is in its lifecycle.
 type Phase int

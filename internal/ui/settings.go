@@ -11,10 +11,21 @@ import (
 	"github.com/diamondburned/gotk4-adwaita/pkg/adw"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 
+	"github.com/jsnjack/mailbox/internal/ai"
 	"github.com/jsnjack/mailbox/internal/config"
 	"github.com/jsnjack/mailbox/internal/dispatch"
 	"github.com/jsnjack/mailbox/internal/logging"
 )
+
+// testAILabel names a connection test in the activity log by the model it
+// probes, shortened the way AI notes are elsewhere so a long id can't push the
+// rest of the row off the end.
+func testAILabel(model string) string {
+	if m := ai.ShortModel(strings.TrimSpace(model)); m != "" {
+		return "Testing " + m
+	}
+	return "Testing the AI connection"
+}
 
 // humanBytes formats a byte count as B/KB/MB/GB.
 func humanBytes(n int64) string {
@@ -135,11 +146,13 @@ func (w *window) openSettings() {
 				test.RemoveCSSClass("success")
 				test.RemoveCSSClass("error")
 				test.SetTooltipText(testTip)
+				done := w.opActivity("ai", "", testAILabel(e.Model))
 				go func() {
 					ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 					defer cancel()
 					err := w.deps.TestAISettings(ctx, []AIModelEntry{e})
 					dispatch.Main(func() {
+						done(doneErr(err))
 						test.SetSensitive(true)
 						if err != nil {
 							logging.Trace("ui: settings test AI model failed", "model", e.Model, "err", err)
@@ -459,12 +472,15 @@ func (w *window) openSettings() {
 	clearBtn.SetVAlign(gtk.AlignCenter)
 	clearBtn.ConnectClicked(func() {
 		logging.Trace("ui: settings clear mail cache")
+		done := w.opActivity("mail", "", "Clearing cached mail files")
 		freed, err := config.ClearMailCache()
 		if err != nil {
+			done(doneErr(err))
 			slog.Warn("ui: clear mail cache", "err", err)
 			clearRow.SetSubtitle("Couldn't clear the cache.")
 			return
 		}
+		done("freed " + humanBytes(freed))
 		logging.Trace("ui: settings cleared mail cache", "freed", freed)
 		clearRow.SetSubtitle(fmt.Sprintf("Cleared — freed %s.", humanBytes(freed)))
 		clearBtn.SetSensitive(false)
@@ -486,11 +502,17 @@ func (w *window) openSettings() {
 		compactBtn.SetLabel("Compacting…")
 		before, _ := config.DBSize()
 		logging.Trace("ui: settings compact database", "before", before)
+		done := w.opActivity("mail", "", "Compacting the database")
 		go func() {
 			err := w.deps.Store.Vacuum(context.Background())
 			after, _ := config.DBSize()
 			dispatch.Main(func() {
 				compactBtn.SetLabel("Compact")
+				note := doneErr(err)
+				if err == nil && before-after > 0 {
+					note = "freed " + humanBytes(before-after)
+				}
+				done(note)
 				logging.Trace("ui: settings compact database done", "before", before, "after", after, "err", err)
 				if err != nil {
 					slog.Warn("ui: compact database", "err", err)
@@ -686,9 +708,11 @@ func (w *window) confirmRemoveAccount(a AccountInfo, onRemoved func()) {
 			return
 		}
 		logging.Trace("ui: remove account confirmed", "id", a.ID, "email", a.Email)
+		done := w.opActivity("mail", a.Email, "Removing the account")
 		go func() {
 			err := w.deps.RemoveAccount(context.Background(), a.ID)
 			dispatch.Main(func() {
+				done(doneErr(err))
 				if err != nil {
 					logging.Trace("ui: remove account failed", "id", a.ID, "err", err)
 					w.toast("Couldn't remove account: " + err.Error())

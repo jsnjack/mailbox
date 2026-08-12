@@ -189,6 +189,17 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 	scroller.SetHExpand(true)
 	scroller.SetChild(bodyView)
 
+	// composeRow is this window's own activity row, mounted in its bottom bar
+	// once the toolbar exists (below). Work started here reports here: the main
+	// window's row is behind the compose window, so on its own it would announce
+	// a five-second AI draft to nobody. The handlers below close over the
+	// variable, which is assigned before any of them can run.
+	var composeRow *activityRow
+
+	// status carries outcomes the form itself must keep saying — an attachment
+	// that could not be read, a draft that failed to save. Transient "…in
+	// progress" lines belong to composeRow instead, so the same operation is
+	// never narrated in two places at once.
 	status := gtk.NewLabel("")
 	status.SetXAlign(0)
 	status.SetVisible(false)
@@ -399,18 +410,24 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 				return
 			}
 			subjBtn.SetSensitive(false)
-			status.SetVisible(true)
-			status.SetText("Generating subject…")
 			logging.Trace("ui: ai generate subject", "body_len", len(body))
-			done := w.aiActivity("Suggesting a subject")
+			done := w.aiActivityIn(composeRow, "Suggesting a subject")
 			go func() {
 				subject, err := w.deps.Assistant.GenerateSubject(aiCtx, body)
 				dispatch.Main(func() {
-					done(doneErr(err))
+					// One outcome, reported once: a model that answers with
+					// nothing has failed as surely as one that errors, and the
+					// row is the window's single narrator — it carries the
+					// reason, which a fixed "Couldn't generate a subject" never
+					// did.
+					note := doneErr(err)
+					if note == "" && subject == "" {
+						note = "error: the model returned nothing"
+					}
+					done(note)
 					subjBtn.SetSensitive(true)
-					logging.Trace("ui: ai generate subject done", "subject", subject, "err", err)
-					if err != nil || subject == "" {
-						status.SetText("Couldn't generate a subject")
+					logging.Trace("ui: ai generate subject done", "subject", subject, "err", err, "note", note)
+					if note != "" {
 						return
 					}
 					subjEntry.SetText(subject)
@@ -491,6 +508,13 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 	tv := adw.NewToolbarView()
 	tv.AddTopBar(hb)
 	tv.SetContent(box)
+	// A dialog has nothing to report at rest, so its row is transient: revealed
+	// while work runs, held for a moment on the result, then gone again. It
+	// deliberately gets no windowActive rule — the user pressed the button in
+	// this window, and its results are also visible in the editor itself, so
+	// there is nothing here worth holding on screen until they look back.
+	composeRow = newActivityRow(nil)
+	composeRow.mount(tv, true)
 
 	win := adw.NewWindow()
 	win.SetTitle(title)
@@ -585,14 +609,15 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 					return
 				}
 				discardDraftBtn.SetSensitive(false)
-				status.SetText("Discarding draft…")
-				status.SetVisible(true)
+				discardDone := composeRow.begin("Discarding draft")
 				acctID := selectedAccount().ID
 				go func() {
 					err := w.deps.DeleteDraft(context.Background(), acctID, discardTarget)
 					dispatch.Main(func() {
+						discardDone(doneErr(err))
 						if err != nil {
 							discardDraftBtn.SetSensitive(true)
+							status.SetVisible(true)
 							status.SetText("Could not discard draft: " + err.Error())
 							return
 						}
@@ -616,7 +641,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 	// saveSnapshot serializes saves from this window. A second edit can be
 	// captured while the first DB write is finishing, but it reuses the stable id
 	// and updates the saved fingerprint only for its own exact snapshot.
-	saveSnapshot := func(msg model.OutgoingMessage, accountID int64, quiet bool, done func(error)) {
+	saveSnapshot := func(msg model.OutgoingMessage, accountID int64, done func(error)) {
 		go func() {
 			saveSerial.Lock()
 			draftStateMu.Lock()
@@ -647,11 +672,14 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 						accountDD.SetSensitive(false)
 						accountDD.SetTooltipText("From is fixed after the draft is saved")
 					}
-					status.SetVisible(true)
+					// Only a failure is worth saying here. Announcing every
+					// autosave was the loudest thing in the window — it fires
+					// 1.5s after each burst of typing, so the line was rewritten
+					// continuously while the activity row said the same thing.
+					// A save that worked needs no announcement.
 					if err != nil {
+						status.SetVisible(true)
 						status.SetText("Could not save draft locally: " + err.Error())
-					} else if quiet {
-						status.SetText("Draft saved locally")
 					}
 				}
 				if done != nil {
@@ -677,7 +705,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 			isClosed := closed
 			draftStateMu.Unlock()
 			if !isClosed {
-				saveSnapshot(msg, accountID, true, nil)
+				saveSnapshot(msg, accountID, nil)
 			}
 		})
 		autosaveMu.Unlock()
@@ -694,6 +722,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 			draftStateMu.Unlock()
 			stopAutosave()
 			cancelAI()
+			composeRow.destroy() // its timers outlive the window otherwise
 			saveComposeSize()
 			return false // allow the close
 		}
@@ -726,7 +755,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 				// Save before closing: only dismiss the window once the draft is
 				// safely stored. If the save fails the window stays open with the
 				// content intact, so a transient failure can't silently drop it.
-				saveSnapshot(msg, acctID, false, func(err error) {
+				saveSnapshot(msg, acctID, func(err error) {
 					if err != nil {
 						slog.Warn("ui: save draft on close", "err", err)
 						logging.Trace("ui: compose save draft on close failed", "err", err)
@@ -875,18 +904,19 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 			acctID := selectedAccount().ID
 			logging.Trace("ui: compose save draft", "account", acctID, "to", msg.To, "subject", msg.Subject, "draft_id", msg.DraftID, "local_draft", msg.LocalDraftID)
 			draftBtn.SetSensitive(false)
-			status.SetVisible(true)
-			status.SetText("Saving draft locally…")
-			saveSnapshot(msg, acctID, false, func(err error) {
+			// An explicit save is an operation the user is waiting on, so the
+			// row narrates it; saveSnapshot itself surfaces a failure in the
+			// form, where it persists until they do something about it.
+			saveDone := composeRow.begin("Saving draft locally")
+			saveSnapshot(msg, acctID, func(err error) {
 				draftBtn.SetSensitive(true)
+				saveDone(doneErr(err))
 				if err != nil {
 					slog.Warn("ui: save draft", "err", err)
 					logging.Trace("ui: compose save draft failed", "err", err)
-					status.SetText("Could not save draft locally: " + err.Error())
 					return
 				}
 				logging.Trace("ui: compose save draft done", "account", acctID)
-				status.SetText("Draft saved locally")
 			})
 		})
 	}
@@ -914,7 +944,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 			// The body already carries the configured signature; tell the AI not to
 			// add its own sign-off so the reply isn't double-signed.
 			omitSig := addSignature && strings.TrimSpace(w.signature) != ""
-			done := w.aiActivity("Drafting message")
+			done := w.aiActivityIn(composeRow, "Drafting message")
 			go func() {
 				var ch <-chan ai.Chunk
 				var err error
@@ -986,9 +1016,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 			startMark := buf.CreateMark("", startIter, true)
 			endMark := buf.CreateMark("", endIter, false)
 			grammarBtn.SetSensitive(false)
-			status.SetVisible(true)
-			status.SetText("Checking grammar…")
-			done := w.aiActivity("Checking grammar")
+			done := w.aiActivityIn(composeRow, "Checking grammar")
 			go func() {
 				ch, err := w.deps.Assistant.Proofread(aiCtx, original)
 				var acc strings.Builder
@@ -1001,12 +1029,15 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 				}
 				corrected := strings.TrimRight(acc.String(), " \t\r\n")
 				dispatch.Main(func() {
-					done(doneErr(err))
+					note := doneErr(err)
+					if note == "" && strings.TrimSpace(corrected) == "" {
+						note = "error: the model returned nothing"
+					}
+					done(note)
 					grammarBtn.SetSensitive(true)
-					logging.Trace("ui: ai proofread done", "corrected_len", len(corrected), "err", err)
+					logging.Trace("ui: ai proofread done", "corrected_len", len(corrected), "err", err, "note", note)
 					defer func() { buf.DeleteMark(startMark); buf.DeleteMark(endMark) }()
-					if err != nil || strings.TrimSpace(corrected) == "" {
-						status.SetText("Grammar check failed")
+					if note != "" {
 						return
 					}
 					si := buf.IterAtMark(startMark)
@@ -1082,9 +1113,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 			startMark := buf.CreateMark("", startIter, true)
 			endMark := buf.CreateMark("", endIter, false)
 			refineBtn.SetSensitive(false)
-			status.SetVisible(true)
-			status.SetText("Refining…")
-			done := w.aiActivity("Refining text")
+			done := w.aiActivityIn(composeRow, "Refining text")
 			go func() {
 				ch, err := w.deps.Assistant.Refine(aiCtx, original, instruction)
 				var acc strings.Builder
@@ -1097,12 +1126,15 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 				}
 				refined := strings.TrimRight(acc.String(), " \t\r\n")
 				dispatch.Main(func() {
-					done(doneErr(err))
+					note := doneErr(err)
+					if note == "" && strings.TrimSpace(refined) == "" {
+						note = "error: the model returned nothing"
+					}
+					done(note)
 					refineBtn.SetSensitive(true)
-					logging.Trace("ui: ai refine done", "refined_len", len(refined), "err", err)
+					logging.Trace("ui: ai refine done", "refined_len", len(refined), "err", err, "note", note)
 					defer func() { buf.DeleteMark(startMark); buf.DeleteMark(endMark) }()
-					if err != nil || strings.TrimSpace(refined) == "" {
-						status.SetText("Refine failed")
+					if note != "" {
 						return
 					}
 					si := buf.IterAtMark(startMark)

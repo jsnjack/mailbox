@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/diamondburned/gotk4-adwaita/pkg/adw"
 	"github.com/diamondburned/gotk4/pkg/glib/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 	"github.com/diamondburned/gotk4/pkg/pango"
@@ -18,7 +17,7 @@ import (
 	"github.com/jsnjack/mailbox/internal/model"
 )
 
-// statusLogCap bounds how many recent operations the log popover keeps.
+// statusLogCap bounds how many recent operations the log panel keeps.
 const statusLogCap = 200
 
 // logRow is one operation's row in the activity log. An operation gets a
@@ -29,98 +28,170 @@ const statusLogCap = 200
 type logRow struct {
 	box     *gtk.Box   // the whole row, so a superseded row can be removed
 	status  *gtk.Label // ▸ running · ✓ ok · ✗ error · – cancelled
+	lbl     *gtk.Label // the operation, re-worded to past tense once it is done
 	dur     *gtk.Label // live progress ("3/10") while running, duration when done
 	note    *gtk.Label // result note (counts, errors); empty until Done
 	started time.Time
 }
 
-// buildStatusBar constructs the bottom status bar. It is activity-first: the
-// left shows what the app is doing right now (spinner + label + elapsed time,
-// with a progress bar that pulses for indeterminate work); cumulative session
-// stats live behind the activity-log button so they don't masquerade as live
-// state.
-func (w *window) buildStatusBar() gtk.Widgetter {
-	w.statusStarted = make(map[string]time.Time)
-	w.statusProgText = make(map[string]string)
-	w.statusLogRows = make(map[string][]*logRow)
-	w.statusQuietRows = make(map[string]*gtk.Box)
-	// Keep the relative idle text ("Synced 2 min ago") honest while nothing is
-	// happening; a cheap label repaint twice a minute.
-	glib.TimeoutSecondsAdd(30, func() bool {
-		if len(w.statusActive) == 0 && !w.lastSyncAt.IsZero() {
-			w.refreshStatusLabel()
-		}
-		return true
-	})
-
-	bar := gtk.NewBox(gtk.OrientationHorizontal, 8)
-	bar.AddCSSClass("status-bar")
-	setMargins(bar, 10, 8, 2, 2)
-
-	w.statusSpinner = adw.NewSpinner()
-	w.statusSpinner.SetVisible(false)
-
-	w.statusLabel = gtk.NewLabel("Idle")
-	w.statusLabel.SetXAlign(0)
-	w.statusLabel.SetEllipsize(pango.EllipsizeEnd)
-	w.statusLabel.AddCSSClass("dim-label")
-
-	left := gtk.NewBox(gtk.OrientationHorizontal, 6)
-	left.SetHExpand(true)
-	left.Append(w.statusSpinner)
-	left.Append(w.statusLabel)
-
-	// Shown when AI requests are failing (e.g. the provider is unreachable), so
-	// the user knows AI features are degraded; hidden again on the next success.
-	w.aiWarnIcon = gtk.NewImageFromIconName("dialog-warning-symbolic")
-	w.aiWarnIcon.AddCSSClass("warning")
-	w.aiWarnIcon.SetTooltipText("AI provider unavailable — the last request failed")
-	w.aiWarnIcon.SetVisible(false)
-
-	bar.Append(left)
-	bar.Append(w.aiWarnIcon)
-	bar.Append(w.buildActivityLogButton())
-	return bar
+// statCell is one label/value pair in the panel's session grid.
+type statCell struct {
+	box   *gtk.Box
+	value *gtk.Label
+	unit  *gtk.Label
 }
 
-// buildActivityLogButton returns the "activity log" button and its popover,
-// which holds the recent-operation log and a session-stats section.
-func (w *window) buildActivityLogButton() gtk.Widgetter {
+// buildActivityRow builds the main window's activity row — the permanent one at
+// the bottom of the sidebar — together with the log panel it opens. See
+// activityRow for the surface's behaviour.
+func (w *window) buildActivityRow() *activityRow {
+	w.statusLogRows = make(map[string][]*logRow)
+	w.statusQuietRows = make(map[string]*gtk.Box)
+
+	w.activity = newActivityRow(func() string {
+		return restingText(w.lastSyncAt, time.Now(), w.aiFailing)
+	})
+	w.activity.windowActive = func() bool { return w.win != nil && w.win.IsActive() }
+	w.activity.setPanel(w.buildActivityPanel())
+
+	// Keep the resting line honest ("Up to date · just now" becomes a clock
+	// time) while nothing is happening; a cheap label repaint twice a minute.
+	glib.TimeoutSecondsAdd(30, func() bool {
+		w.activity.refreshResting()
+		return true
+	})
+	return w.activity
+}
+
+// buildActivityPanel returns the popover the activity row opens: this session's
+// operations, then what the app has spent.
+func (w *window) buildActivityPanel() *gtk.Popover {
 	w.statusLogBox = gtk.NewBox(gtk.OrientationVertical, 1)
+	w.statusLogEmpty = gtk.NewLabel("No activity yet")
+	w.statusLogEmpty.AddCSSClass("dim-label")
+	w.statusLogEmpty.SetXAlign(0)
+	setMargins(w.statusLogEmpty, 2, 2, 6, 6)
+	w.statusLogBox.Append(w.statusLogEmpty)
+
 	scroller := gtk.NewScrolledWindow()
 	scroller.SetPolicy(gtk.PolicyNever, gtk.PolicyAutomatic)
 	scroller.SetChild(w.statusLogBox)
-	scroller.SetSizeRequest(440, 220)
-
-	w.statusStatsLabel = gtk.NewLabel("")
-	w.statusStatsLabel.SetXAlign(0)
-	w.statusStatsLabel.SetWrap(true)
-	w.statusStatsLabel.AddCSSClass("caption")
-	w.statusStatsLabel.AddCSSClass("dim-label")
+	// Natural height, capped: four rows make a four-row panel rather than a
+	// mostly-empty box of a fixed size.
+	scroller.SetMaxContentHeight(300)
+	scroller.SetPropagateNaturalHeight(true)
 
 	content := gtk.NewBox(gtk.OrientationVertical, 4)
 	setMargins(content, 8, 8, 8, 8)
+	content.SetSizeRequest(470, -1)
 	content.Append(heading("Activity"))
 	content.Append(scroller)
 	content.Append(gtk.NewSeparator(gtk.OrientationHorizontal))
 	content.Append(heading("Session"))
-	content.Append(w.statusStatsLabel)
+	content.Append(w.buildSessionGrid())
 
 	pop := gtk.NewPopover()
 	pop.SetChild(content)
 	pop.ConnectShow(w.refreshStatusStats) // stats are read on demand, not polled
-
-	btn := gtk.NewMenuButton()
-	btn.SetIconName("view-list-symbolic")
-	btn.SetTooltipText("Activity log & stats")
-	a11yLabel(btn, "Activity log and stats")
-	btn.AddCSSClass("flat")
-	btn.SetPopover(pop)
-	w.statusLogBtn = btn
-	return btn
+	return pop
 }
 
-// heading is a small bold section label for the popover.
+// buildSessionGrid lays the cumulative counters out as label/value pairs: the
+// number carries the weight, its units are demoted beside it, and the caption
+// above says what it counts. As one wrapped paragraph of "key: value" lines,
+// none of it was scannable.
+func (w *window) buildSessionGrid() *gtk.Widget {
+	grid := gtk.NewGrid()
+	grid.SetColumnSpacing(18)
+	grid.SetRowSpacing(10)
+	grid.SetColumnHomogeneous(true)
+	setMargins(grid, 2, 2, 4, 2)
+
+	w.statGrid = grid
+	w.statNet = newStatCell("Transferred")
+	w.statAPI = newStatCell("Gmail API")
+	w.statAI = newStatCell("AI")
+	w.statCache = newStatCell("Cache")
+	w.layoutStats()
+
+	w.statModel = gtk.NewLabel("")
+	w.statModel.SetXAlign(0)
+	w.statModel.SetEllipsize(pango.EllipsizeEnd)
+	w.statModel.AddCSSClass("stat-model")
+	w.statModelChip = gtk.NewLabel("fallback")
+	w.statModelChip.AddCSSClass("stat-chip")
+	w.statModelChip.SetVisible(false)
+
+	w.statModelBox = gtk.NewBox(gtk.OrientationHorizontal, 8)
+	setMargins(w.statModelBox, 2, 2, 2, 0)
+	serving := gtk.NewLabel("Serving")
+	serving.AddCSSClass("stat-key")
+	w.statModelBox.Append(serving)
+	w.statModelBox.Append(w.statModel)
+	w.statModelBox.Append(w.statModelChip)
+	w.statModelBox.SetVisible(false)
+
+	box := gtk.NewBox(gtk.OrientationVertical, 8)
+	box.Append(grid)
+	box.Append(w.statModelBox)
+	return &box.Widget
+}
+
+// layoutStats places the visible counters in reading order across two columns.
+// A counter is hidden when the app hasn't done that kind of work at all (no AI
+// requests this session), and leaving its cell in place would put a hole in the
+// middle of the grid rather than closing the gap.
+func (w *window) layoutStats() {
+	slot := 0
+	for _, c := range []*statCell{w.statNet, w.statAPI, w.statAI, w.statCache} {
+		if c.box.Parent() != nil {
+			w.statGrid.Remove(c.box)
+		}
+		if !c.box.Visible() {
+			continue
+		}
+		w.statGrid.Attach(c.box, slot%2, slot/2, 1, 1)
+		slot++
+	}
+}
+
+// newStatCell builds one caption-over-value pair for the session grid.
+func newStatCell(key string) *statCell {
+	k := gtk.NewLabel(key)
+	k.SetXAlign(0)
+	k.AddCSSClass("stat-key")
+
+	c := &statCell{
+		value: gtk.NewLabel("—"),
+		unit:  gtk.NewLabel(""),
+	}
+	c.value.AddCSSClass("stat-value")
+	c.unit.SetXAlign(0)
+	c.unit.AddCSSClass("stat-unit")
+	c.unit.SetEllipsize(pango.EllipsizeEnd)
+
+	line := gtk.NewBox(gtk.OrientationHorizontal, 5)
+	line.Append(c.value)
+	line.Append(c.unit)
+
+	c.box = gtk.NewBox(gtk.OrientationVertical, 1)
+	c.box.Append(k)
+	c.box.Append(line)
+	return c
+}
+
+// set fills a cell and reveals it; an absent counter hides the cell instead of
+// showing a zero that means "we never did this".
+func (c *statCell) set(show bool, value, unit string) {
+	c.box.SetVisible(show)
+	if !show {
+		return
+	}
+	c.value.SetText(value)
+	c.unit.SetText(unit)
+}
+
+// heading is a small bold section label for the panel.
 func heading(text string) *gtk.Label {
 	l := gtk.NewLabel(text)
 	l.SetXAlign(0)
@@ -147,11 +218,12 @@ func doneErr(err error) string {
 	}
 }
 
-// aiActivity reports an AI operation for the active account to the status bar;
-// the returned function ends it (pass a note, e.g. a token count or "" ). The
-// log note is suffixed with the model that served the request (failover-aware),
-// so the log shows which chain entry answered. It also records AI health so the
-// status bar can flag a failing provider. Safe when no hub is wired.
+// aiActivity reports an AI operation for the active account to the activity
+// hub; the returned function ends it (pass a note, e.g. a token count or "" ).
+// The log note is suffixed with the model that served the request
+// (failover-aware), so the log shows which chain entry answered. It also
+// records AI health so the row's dot can flag a failing provider. Safe when no
+// hub is wired.
 func (w *window) aiActivity(label string) func(note string) {
 	return w.aiActivityFor(w.activeEmail, label)
 }
@@ -169,6 +241,55 @@ func (w *window) aiActivityFor(email, label string) func(note string) {
 		}
 		w.noteAIResult(note)
 	}
+}
+
+// aiActivityIn is aiActivity for work started from a dialog with its own
+// activity row (compose): the operation is reported to the app-wide hub, so it
+// still reaches the log, and to that window's row, so the window the user is
+// looking at is the one that reports its own progress.
+func (w *window) aiActivityIn(row *activityRow, label string) func(note string) {
+	end := w.aiActivity(label)
+	if row == nil {
+		return end
+	}
+	rowEnd := row.begin(label)
+	return func(note string) {
+		// The row gets the bare result; which chain entry served it is a detail
+		// for the log, and the model name would crowd out the result itself.
+		rowEnd(note)
+		end(note)
+	}
+}
+
+// opActivity brackets an operation the UI performs itself — a dialog action, a
+// maintenance task — into the activity hub, so the log is a complete record of
+// what the app did rather than only the work the background layers happen to
+// publish. Pass "" for account for app-wide work. The returned function ends
+// it with a result note, exactly like activity.Hub.Begin.
+func (w *window) opActivity(op, email, label string) func(note string) {
+	if w.deps.Activity == nil {
+		return func(string) {}
+	}
+	return w.deps.Activity.Begin(op, email, label)
+}
+
+// reportActivity logs an operation that is already over — one with no waiting
+// to narrate. Its label is written in past tense, like every other Report.
+func (w *window) reportActivity(op, email, label, note string) {
+	if w.deps.Activity != nil {
+		w.deps.Activity.Report(op, email, label, note)
+	}
+}
+
+// emailForAccount resolves an account id to the address activity events are
+// keyed by; unknown ids report as app-wide rather than inventing a name.
+func (w *window) emailForAccount(id int64) string {
+	for _, a := range w.deps.Accounts {
+		if a.ID == id {
+			return a.Email
+		}
+	}
+	return ""
 }
 
 func (w *window) isIMAPAccount(id int64) bool {
@@ -222,9 +343,9 @@ func doneErrCtx(ctx context.Context, err error) string {
 }
 
 // noteAIResult reads an AI op's completion note (doneErr yields "error: …" on
-// failure) and toggles the status-bar warning, recording the failure time so
-// auto-categorization can back off (see categorizeInbox). A user-cancelled op
-// is neutral — it neither marks the provider failing nor healthy.
+// failure) and tints the activity row's health dot, recording the failure time
+// so auto-categorization can back off (see categorizeInbox). A user-cancelled
+// op is neutral — it neither marks the provider failing nor healthy.
 func (w *window) noteAIResult(note string) {
 	if note == noteCancelled {
 		logging.Trace("ui: ai result cancelled — health unchanged")
@@ -238,15 +359,19 @@ func (w *window) noteAIResult(note string) {
 		if w.aiFailing != failed {
 			w.aiFailing = failed
 			logging.Trace("ui: ai provider health changed", "failing", failed, "note", note)
-			if w.aiWarnIcon != nil {
-				w.aiWarnIcon.SetVisible(failed)
+			if w.activity != nil {
+				health := healthOK
+				if failed {
+					health = healthWarning
+				}
+				w.activity.setHealth(health)
 			}
 		}
 	})
 }
 
-// subscribeActivity drains the activity hub into the status bar (on the main
-// thread). No-op when no hub is wired (read-only/no-account mode).
+// subscribeActivity drains the activity hub into the row and its log (on the
+// main thread). No-op when no hub is wired (read-only/no-account mode).
 func (w *window) subscribeActivity() {
 	if w.deps.Activity == nil {
 		return
@@ -260,29 +385,25 @@ func (w *window) subscribeActivity() {
 	}()
 }
 
-// onActivity updates the bar (and log) for one event. Main thread only.
+// onActivity updates the row (and log) for one event. Main thread only.
 func (w *window) onActivity(e activity.Event) {
 	key := e.Op + "\x00" + e.Account + "\x00" + e.Label
 	tag := w.accountTag(e.Account)
 	disp := barText(tag, e.Label)
 	switch e.Phase {
 	case activity.Start:
-		w.statusActive = append(w.statusActive, disp)
-		w.statusStarted[disp] = time.Now()
 		// Concurrent identical ops queue up; Done finishes the oldest (FIFO), so
 		// no row is ever orphaned in the running state.
 		w.statusLogRows[key] = append(w.statusLogRows[key], w.newLogRow(e.Op, tag, e.Label))
-		logging.Trace("ui: activity start", "op", e.Op, "label", e.Label, "active", len(w.statusActive))
+		logging.Trace("ui: activity start", "op", e.Op, "label", e.Label)
 	case activity.Progress:
 		if e.Total > 0 {
 			p := fmt.Sprintf("%d/%d", e.Done, e.Total)
-			w.statusProgText[disp] = p
 			if rows := w.statusLogRows[key]; len(rows) > 0 {
 				rows[0].dur.SetText(p)
 			}
 		}
 	case activity.Done:
-		w.statusActive = removeFirst(w.statusActive, disp)
 		var row *logRow
 		if rows := w.statusLogRows[key]; len(rows) > 0 {
 			row = rows[0]
@@ -296,6 +417,8 @@ func (w *window) onActivity(e activity.Event) {
 			// before the UI subscribed. One row, no duration.
 			row = w.newLogRow(e.Op, tag, e.Label)
 			row.started = time.Time{}
+			// The row never ran, so the row widget never saw a Start either.
+			w.activity.reportDone(e.Op, e.Label, e.Note)
 		}
 		var dur time.Duration
 		if !row.started.IsZero() {
@@ -313,13 +436,17 @@ func (w *window) onActivity(e activity.Event) {
 			row.note.AddCSSClass("log-error")
 		default:
 			row.status.SetText("✓")
+			row.status.AddCSSClass("log-ok")
+			// A finished operation reads in past tense, the same way the row
+			// above it does.
+			row.lbl.SetText(activity.PastTense(e.Label))
 		}
 		if e.Note != "" {
 			row.note.SetText("· " + e.Note)
 		}
 		// A quiet mail check repeats every minute per account — keep only the
 		// newest such row so the log records real events, not wallpaper.
-		if e.Op == "sync" && (e.Note == "up to date" || e.Note == "") {
+		if e.Op == "sync" && (e.Note == activity.NoteUpToDate || e.Note == "") {
 			if old := w.statusQuietRows[key]; old != nil && old != row.box && old.Parent() != nil {
 				w.statusLogBox.Remove(old)
 				w.statusLogLines--
@@ -327,128 +454,57 @@ func (w *window) onActivity(e activity.Event) {
 			w.statusQuietRows[key] = row.box
 		}
 		logging.Trace("ui: activity done", "op", e.Op, "label", e.Label, "dur", dur, "note", e.Note)
-		delete(w.statusStarted, disp)
-		delete(w.statusProgText, disp)
 		if e.Op == "sync" {
 			w.lastSyncAt = time.Now()
 		}
 	}
-	w.refreshStatusLabel()
+	// The row shows the account alongside the phrase; the log has its own chip
+	// for it, so the two surfaces stay differently shaped on purpose.
+	w.activity.feed(e, disp)
 }
 
-// refreshStatusLabel starts/stops the live-activity ticker and shows either the
-// current operation or an idle line.
-func (w *window) refreshStatusLabel() {
-	if len(w.statusActive) > 0 {
-		if w.activityTimer == 0 {
-			w.statusSpinner.SetVisible(true) // AdwSpinner animates while visible
-			w.activityTimer = glib.TimeoutAdd(120, w.tickActivity)
-		}
-		w.paintActivity()
-		return
-	}
-	if w.activityTimer != 0 {
-		glib.SourceRemove(w.activityTimer)
-		w.activityTimer = 0
-	}
-	w.statusSpinner.SetVisible(false)
-	if !w.lastSyncAt.IsZero() {
-		w.statusLabel.SetText(syncedAgo(w.lastSyncAt, time.Now()))
-	} else {
-		w.statusLabel.SetText("Idle")
-	}
-}
-
-// syncedAgo renders the idle status as a relative time ("Synced 00:15" read as
-// a clock time; "2 min ago" doesn't). Older than an hour falls back to the
-// absolute clock, which is more useful than "247 min ago".
-func syncedAgo(t, now time.Time) string {
-	switch d := now.Sub(t); {
-	case d < time.Minute:
-		return "Synced just now"
-	case d < time.Hour:
-		return fmt.Sprintf("Synced %d min ago", int(d.Minutes()))
-	default:
-		return "Synced at " + t.Format("15:04")
-	}
-}
-
-// tickActivity repaints the live label while work is in flight; it returns false
-// (removing itself) once everything is idle.
-func (w *window) tickActivity() bool {
-	if len(w.statusActive) == 0 {
-		w.activityTimer = 0
-		w.refreshStatusLabel()
-		return false
-	}
-	w.paintActivity()
-	return true
-}
-
-// paintActivity renders the current operation, any bounded progress, and the
-// live elapsed time (the spinner conveys that it's ongoing).
-func (w *window) paintActivity() {
-	label := w.statusActive[len(w.statusActive)-1]
-	text := label
-	if p := w.statusProgText[label]; p != "" {
-		text += " " + p
-	}
-	text += fmt.Sprintf("… %s", humanDuration(time.Since(w.statusStarted[label])))
-	if extra := len(w.statusActive) - 1; extra > 0 {
-		text += fmt.Sprintf("  (+%d more)", extra)
-	}
-	w.statusLabel.SetText(text)
-}
-
-// humanDuration formats an elapsed duration compactly: "0.4s", "12.3s", "2m05s".
-func humanDuration(d time.Duration) string {
-	if d < time.Minute {
-		return fmt.Sprintf("%.1fs", d.Seconds())
-	}
-	return fmt.Sprintf("%dm%02ds", int(d.Minutes()), int(d.Seconds())%60)
-}
-
-// refreshStatusStats fills the popover's session-stats section from deps.Stats.
-// The gathering (a COUNT(*), an os.Stat, a recursive attachment-dir walk) runs
-// off the main thread; only the label update dispatches back.
+// refreshStatusStats fills the panel's session grid from deps.Stats. The
+// gathering (a COUNT(*), an os.Stat, a recursive attachment-dir walk) runs off
+// the main thread; only the label updates dispatch back.
 func (w *window) refreshStatusStats() {
 	if w.deps.Stats == nil {
-		w.statusStatsLabel.SetText("No connected account.")
+		w.statNet.set(false, "", "")
+		w.statAPI.set(false, "", "")
+		w.statAI.set(false, "", "")
+		w.statCache.set(true, "—", "no connected account")
+		w.layoutStats()
+		w.statModelBox.SetVisible(false)
 		return
 	}
 	go func() {
 		s := w.deps.Stats()
-		var lines []string
-		if s.Requests > 0 {
-			lines = append(lines,
-				fmt.Sprintf("API: %d requests · %d quota units (of 6000/min)", s.Requests, s.QuotaUnits),
-				fmt.Sprintf("Transferred: ↓ %s · ↑ %s", humanBytes(s.BytesIn), humanBytes(s.BytesOut)))
-		}
-		if s.AIRequests > 0 {
-			lines = append(lines,
-				fmt.Sprintf("AI: %d requests · ↓ %s · ↑ %s", s.AIRequests, humanBytes(s.AIBytesIn), humanBytes(s.AIBytesOut)))
-		}
-		// Which model serves AI requests right now — with a failover chain the
-		// entry the last request committed to, called out when it isn't the
-		// primary.
+		var model string
+		var fallback bool
 		if w.deps.Assistant != nil {
-			if m, fallback := w.deps.Assistant.ModelStatus(); m != "" {
-				if fallback {
-					m += " (fallback)"
-				}
-				lines = append(lines, "AI model: "+m)
-			}
-		}
-		lines = append(lines, fmt.Sprintf("Cache: %s messages · DB %s", humanCount(s.Messages), humanBytes(s.DBBytes)))
-		if s.CacheBytes > 0 {
-			lines = append(lines, fmt.Sprintf("Cached files: %s", humanBytes(s.CacheBytes)))
+			model, fallback = w.deps.Assistant.ModelStatus()
 		}
 		logging.Trace("ui: refresh session stats", "requests", s.Requests, "quota", s.QuotaUnits,
 			"bytes_in", s.BytesIn, "bytes_out", s.BytesOut,
 			"ai_requests", s.AIRequests, "ai_bytes_in", s.AIBytesIn, "ai_bytes_out", s.AIBytesOut,
 			"messages", s.Messages, "db_bytes", s.DBBytes, "cache_bytes", s.CacheBytes)
-		text := strings.Join(lines, "\n")
-		dispatch.Main(func() { w.statusStatsLabel.SetText(text) })
+		dispatch.Main(func() {
+			w.statNet.set(s.Requests > 0 || s.BytesIn > 0,
+				humanBytes(s.BytesIn), "in · "+humanBytes(s.BytesOut)+" out")
+			w.statAPI.set(s.Requests > 0, fmt.Sprintf("%d", s.Requests),
+				plural(s.Requests, "request", "requests")+" · "+
+					activity.Plural(int(s.QuotaUnits), "quota unit", "quota units"))
+			w.statAI.set(s.AIRequests > 0, fmt.Sprintf("%d", s.AIRequests),
+				plural(s.AIRequests, "request", "requests")+" · "+humanBytes(s.AIBytesIn+s.AIBytesOut))
+			cache := humanBytes(s.DBBytes)
+			if s.CacheBytes > 0 {
+				cache += " · " + humanBytes(s.CacheBytes) + " files"
+			}
+			w.statCache.set(true, humanCount(s.Messages), "messages · "+cache)
+			w.layoutStats()
+			w.statModelBox.SetVisible(model != "")
+			w.statModel.SetText(model)
+			w.statModelChip.SetVisible(fallback)
+		})
 	}()
 }
 
@@ -456,7 +512,7 @@ func (w *window) refreshStatusStats() {
 // capped at statusLogCap) and returns it for in-place updates. A single dense
 // line per operation, the account as its own chip after the kind:
 //
-//	15:04:05 SYNC Work ✓ · 1 change(s)              1.2s
+//	15:04:05 SYNC Work ✓ Mail checked · up to date              1.2s
 //
 // The note rides inline after the label, dim (error-tinted on failure), with
 // the full text in a tooltip only when ellipsized.
@@ -480,10 +536,10 @@ func (w *window) newLogRow(op, account, label string) *logRow {
 	r.status.AddCSSClass("log-time")
 	r.status.SetWidthChars(1)
 
-	lbl := gtk.NewLabel(label)
-	lbl.SetXAlign(0)
-	lbl.SetEllipsize(pango.EllipsizeEnd)
-	tooltipWhenTruncated(lbl)
+	r.lbl = gtk.NewLabel(label)
+	r.lbl.SetXAlign(0)
+	r.lbl.SetEllipsize(pango.EllipsizeEnd)
+	tooltipWhenTruncated(r.lbl)
 
 	// Always visible (even empty) — it is the row's only hexpand child, so
 	// hiding it would let the duration collapse inward off the right edge.
@@ -506,15 +562,16 @@ func (w *window) newLogRow(op, account, label string) *logRow {
 		box.Append(acct)
 	}
 	box.Append(r.status)
-	box.Append(lbl)
+	box.Append(r.lbl)
 	box.Append(r.note)
 	box.Append(r.dur)
 	r.box = box
 
+	w.statusLogEmpty.SetVisible(false)
 	w.statusLogBox.Prepend(box)
 	w.statusLogLines++
 	for w.statusLogLines > statusLogCap {
-		if last := w.statusLogBox.LastChild(); last != nil {
+		if last := w.statusLogBox.LastChild(); last != nil && last != &w.statusLogEmpty.Widget {
 			w.statusLogBox.Remove(last)
 			w.statusLogLines--
 		} else {
@@ -539,9 +596,9 @@ func tooltipWhenTruncated(l *gtk.Label) {
 	})
 }
 
-// barText renders an in-flight operation for the bottom bar's label, where
-// there are no chips. Labels are self-describing phrases ("Checking mail",
-// "Summarizing thread"), so the bar just adds which account it's for.
+// barText renders an in-flight operation for the activity row, where there are
+// no chips. Labels are self-describing phrases ("Checking mail", "Summarizing
+// thread"), so the row just adds which account it's for.
 func barText(account, label string) string {
 	if account == "" {
 		return label
@@ -549,14 +606,22 @@ func barText(account, label string) string {
 	return label + " · " + account
 }
 
-// removeFirst removes the first occurrence of s from xs (order preserved).
-func removeFirst(xs []string, s string) []string {
-	for i, x := range xs {
-		if x == s {
-			return append(xs[:i], xs[i+1:]...)
-		}
+// humanDuration formats an elapsed duration compactly: "0.4s", "12.3s", "2m05s".
+func humanDuration(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%.1fs", d.Seconds())
 	}
-	return xs
+	return fmt.Sprintf("%dm%02ds", int(d.Minutes()), int(d.Seconds())%60)
+}
+
+// plural picks the noun for n without repeating the count: in the session grid
+// the number is the value label sitting right beside it, so activity.Plural
+// would print it twice ("1  1 request").
+func plural(n int64, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }
 
 // humanCount formats a count compactly (1.2k, 3.4M).

@@ -636,9 +636,10 @@ func launchUI(mailto string) error {
 		if err != nil {
 			return err
 		}
-		err = engine.ModifyLabelsBatch(ctx, c, accountID, gmailIDs, add, remove)
-		// Instant local change + async mirror — log it as a completed op,
-		// phrased as the action taken ("Archived", "Filed to Receipts").
+		// The local change is instant and the provider mirror is not, so this
+		// runs as a real operation: "Archiving" while the mirror is in flight,
+		// then "Archived" with the count. The phrase is the action taken
+		// ("Archiving", "Filing to Receipts"), never the raw label delta.
 		nameOf := func(id string) string {
 			if n, ok := folderNames[id]; ok {
 				return n
@@ -649,10 +650,12 @@ func launchUI(mailto string) error {
 			return id
 		}
 		label, note := labelChangeText(add, remove, len(gmailIDs), nameOf)
+		done := act.Begin("mail", emailOf(accountID), label)
+		err = engine.ModifyLabelsBatch(ctx, c, accountID, gmailIDs, add, remove)
 		if err != nil {
 			note = doneNote(err)
 		}
-		act.Report("mail", emailOf(accountID), label, note)
+		done(note)
 		return err
 	}
 	// Snooze/Unsnooze route through the manager so every snooze is mirrored to
@@ -725,9 +728,14 @@ func launchUI(mailto string) error {
 		if errors.Is(err, syncer.ErrHistoryExpired) {
 			n, err = engine.Resync(ctx, c, accountID, resyncBackfillLimit)
 		}
-		if err != nil {
+		switch {
+		case err != nil:
 			done(doneNote(err))
-		} else {
+		case n == 0:
+			// Same note as the background pass: a check that found nothing is not
+			// an event, and the activity row keys on this to stay quiet.
+			done(activity.NoteUpToDate)
+		default:
 			done(activity.Plural(n, "change", "changes"))
 		}
 		return err
@@ -796,12 +804,25 @@ func launchUI(mailto string) error {
 		if err != nil {
 			return err
 		}
-		return engine.RetryOutbox(ctx, c, accountID, id)
+		done := act.Begin("send", emailOf(accountID), "Retrying queued message")
+		err = engine.RetryOutbox(ctx, c, accountID, id)
+		done(doneNote(err))
+		return err
 	}
 	// Discarding needs no Gmail client, so a stuck send can be cleared even
 	// when the account currently has no working connection.
 	deps.DiscardOutbox = func(ctx context.Context, accountID, id int64) (bool, error) {
-		return engine.DiscardOutbox(ctx, accountID, id)
+		done := act.Begin("send", emailOf(accountID), "Discarding queued message")
+		ok, err := engine.DiscardOutbox(ctx, accountID, id)
+		switch {
+		case err != nil:
+			done(doneNote(err))
+		case !ok:
+			done("already being sent")
+		default:
+			done("")
+		}
+		return ok, err
 	}
 	deps.DeleteForever = func(ctx context.Context, accountID int64, gmailIDs []string) error {
 		c, err := clientFor(accountID)
@@ -873,10 +894,11 @@ func folderName(id string) string {
 	return id
 }
 
-// labelChangeText renders a label mutation as the past-tense action the user
-// took ("Archived", "Marked read", "Filed to Receipts") plus a message-count
-// note — the log speaks in actions, never raw label ids. nameOf resolves a
-// user label id to its display name.
+// labelChangeText renders a label mutation as the action the user took, phrased
+// as a running operation ("Archiving", "Marking read", "Filing to Receipts")
+// plus a message-count note — the log speaks in actions, never raw label ids.
+// activity.PastTense turns the phrase around once the mirror lands. nameOf
+// resolves a user label id to its display name.
 func labelChangeText(add, remove []string, n int, nameOf func(string) string) (label, note string) {
 	has := func(ids []string, want string) bool {
 		for _, id := range ids {
@@ -889,23 +911,23 @@ func labelChangeText(add, remove []string, n int, nameOf func(string) string) (l
 	note = activity.Plural(n, "message", "messages")
 	switch {
 	case has(add, model.LabelTrash):
-		return "Moved to Trash", note
+		return "Moving to Trash", note
 	case has(add, model.LabelSpam):
-		return "Marked as spam", note
+		return "Marking as spam", note
 	case has(add, model.LabelInbox):
-		return "Moved to Inbox", note
+		return "Moving to Inbox", note
 	case has(remove, model.LabelInbox) && len(add) == 0:
-		return "Archived", note
+		return "Archiving", note
 	case has(add, model.LabelUnread):
-		return "Marked unread", note
+		return "Marking unread", note
 	case has(remove, model.LabelUnread):
-		return "Marked read", note
+		return "Marking read", note
 	case has(add, model.LabelStarred):
-		return "Starred", note
+		return "Starring", note
 	case has(remove, model.LabelStarred):
-		return "Unstarred", note
+		return "Unstarring", note
 	case len(add) == 1:
-		return "Filed to " + nameOf(add[0]), note
+		return "Filing to " + nameOf(add[0]), note
 	}
 	// An unrecognized combination still reads as names, not ids.
 	var parts []string
@@ -916,7 +938,7 @@ func labelChangeText(add, remove []string, n int, nameOf func(string) string) (l
 		parts = append(parts, "−"+nameOf(id))
 	}
 	if len(parts) == 0 {
-		return "Changed labels", note
+		return "Changing labels", note
 	}
 	return strings.Join(parts, " "), note
 }
@@ -1270,7 +1292,7 @@ func backgroundSync(ctx context.Context, engine *syncer.Engine, act *activity.Hu
 		if n > 0 {
 			done(activity.Plural(n, "change", "changes"))
 		} else {
-			done("up to date")
+			done(activity.NoteUpToDate)
 		}
 		select {
 		case <-ctx.Done():

@@ -79,25 +79,27 @@ type window struct {
 	outerSplit   *adw.NavigationSplitView
 	innerSplit   *adw.NavigationSplitView
 
-	// Bottom status bar: activity-first (spinner + current op + live elapsed on
-	// the left); cumulative session stats + the log live in a popover.
-	statusSpinner    *adw.Spinner
-	statusLabel      *gtk.Label
-	aiWarnIcon       *gtk.Image           // status-bar warning shown when AI requests are failing
-	statusStatsLabel *gtk.Label           // session stats inside the popover
-	statusLogBox     *gtk.Box             // log lines (newest first) inside the popover
-	statusLogBtn     *gtk.MenuButton      // opens the activity-log popover
-	statusActive     []string             // labels of in-flight operations, most recent last
-	statusStarted    map[string]time.Time // op label → start time (elapsed + duration)
-	statusProgText   map[string]string    // op label → bounded "N/M" progress text
-	statusLogRows    map[string][]*logRow // op+label → in-flight log rows (FIFO), finished in place
-	statusQuietRows  map[string]*gtk.Box  // op+account+label → last quiet mail-check row (deduped)
-	statusLogLines   int                  // current number of log rows (capped)
-	activityTimer    glib.SourceHandle
-	markReadTimer    glib.SourceHandle // pending "mark thread read" (cancelled if the user navigates away first)
-	pendingMarkRead  func()            // the deferred mark-read body, so an explicit action can flush it early
-	lastSyncAt       time.Time         // when the last sync finished (idle status text)
-	accountBox       *gtk.ListBox
+	// The activity row at the bottom of the sidebar, and the log panel it opens
+	// (the app's one status surface — see activityRow).
+	activity        *activityRow
+	statusLogBox    *gtk.Box             // log lines (newest first) inside the panel
+	statusLogEmpty  *gtk.Label           // "No activity yet", hidden once a row exists
+	statusLogRows   map[string][]*logRow // op+label → in-flight log rows (FIFO), finished in place
+	statusQuietRows map[string]*gtk.Box  // op+account+label → last quiet mail-check row (deduped)
+	statusLogLines  int                  // current number of log rows (capped)
+	// The panel's session grid: cumulative counters, filled on open.
+	statGrid        *gtk.Grid
+	statNet         *statCell
+	statAPI         *statCell
+	statAI          *statCell
+	statCache       *statCell
+	statModelBox    *gtk.Box
+	statModel       *gtk.Label
+	statModelChip   *gtk.Label
+	markReadTimer   glib.SourceHandle // pending "mark thread read" (cancelled if the user navigates away first)
+	pendingMarkRead func()            // the deferred mark-read body, so an explicit action can flush it early
+	lastSyncAt      time.Time         // when the last sync finished (resting status text)
+	accountBox      *gtk.ListBox
 	// accountHeader wraps the switcher list-box and its separator; it is hidden
 	// when no account is connected (zero-account first run) and revealed once the
 	// first account is added, so the switcher appears without a restart.
@@ -113,7 +115,6 @@ type window struct {
 	labelBox     *gtk.ListBox
 	newBtn       *gtk.Button // "New message" — gated on having a connected account
 	refreshBtn   *gtk.Button
-	syncSpinner  *adw.Spinner                 // shown in place of refreshBtn during a manual sync
 	sidebar      []sidebarItem                // one entry per row in labelBox (incl. headings)
 	sidebarSig   string                       // signature of the rendered sidebar, to skip no-op rebuilds
 	sectionCache map[uiCacheKey]cachedSection // rendered message sections, reused across thread re-opens
@@ -616,10 +617,9 @@ func (w *window) build() {
 	w.toastOverlay.SetChild(w.outerSplit)
 	w.toastOverlay.SetVExpand(true)
 
-	root := gtk.NewBox(gtk.OrientationVertical, 0)
-	root.Append(w.toastOverlay)
-	root.Append(w.buildStatusBar())
-	w.win.SetContent(root)
+	// No full-width strip under the panes: the activity row is mounted inside
+	// the sidebar (buildSidebar), the way Nautilus places its operations row.
+	w.win.SetContent(w.toastOverlay)
 	w.subscribeActivity()
 	w.addBreakpoints()
 	w.addShortcuts()
@@ -1039,10 +1039,6 @@ func (w *window) buildSidebar() *adw.NavigationPage {
 	w.refreshBtn.SetSensitive(w.deps.Sync != nil && len(w.deps.Accounts) > 0)
 	w.refreshBtn.ConnectClicked(w.onRefresh)
 
-	w.syncSpinner = adw.NewSpinner()
-	w.syncSpinner.SetTooltipText("Syncing…")
-	w.syncSpinner.SetVisible(false)
-
 	// Primary (hamburger) menu — the GNOME-standard home for Preferences,
 	// Keyboard Shortcuts and About, consolidating what used to be a lone gear.
 	w.registerAppMenuActions()
@@ -1064,14 +1060,17 @@ func (w *window) buildSidebar() *adw.NavigationPage {
 	a11yLabel(primaryBtn, "Main menu")
 	primaryBtn.SetMenuModel(menu)
 	// PackEnd is right-to-left: the primary menu sits at the trailing edge (GNOME
-	// convention), with refresh — or its sync spinner — to its left.
+	// convention), with refresh to its left.
 	hb.PackEnd(primaryBtn)
 	hb.PackEnd(w.refreshBtn)
-	hb.PackEnd(w.syncSpinner)
 
 	tv := adw.NewToolbarView()
 	tv.AddTopBar(hb)
 	tv.SetContent(box)
+	// The permanent activity row sits under the folder list, in the pane rather
+	// than across the window. Collapsed layouts show the sidebar as its own
+	// page, where the row simply comes with it.
+	tv.AddBottomBar(w.buildActivityRow().bar)
 	return adw.NewNavigationPage(tv, "Mailbox")
 }
 
@@ -1282,8 +1281,10 @@ func (w *window) onRefresh() {
 		dispatch.Main(func() {
 			w.setSyncing(false)
 			if err != nil {
+				// The activity row already reports the failure with its reason,
+				// and the log keeps it; a toast saying the same thing would be
+				// the second answer to one click.
 				slog.Warn("ui: sync now", "err", err)
-				w.toast("Sync failed — will retry automatically")
 				return
 			}
 			w.loadLabels()
@@ -1477,11 +1478,12 @@ func openExternal(target string) {
 	}
 }
 
-// setSyncing swaps the refresh button for a running spinner while a manual sync
-// is in flight (and back when it finishes), giving the user visible feedback.
+// setSyncing marks a manual sync in flight. The activity row narrates it —
+// spinner, phrase, elapsed — so the header only has to stop offering a second
+// sync; swapping the button for another spinner would put the same fact in two
+// places, and swapping widgets in a header bar makes it twitch.
 func (w *window) setSyncing(on bool) {
-	w.refreshBtn.SetVisible(!on)
-	w.syncSpinner.SetVisible(on) // AdwSpinner animates whenever it is visible
+	w.refreshBtn.SetSensitive(!on)
 }
 
 func (w *window) onThreadSelected() {
@@ -2778,8 +2780,13 @@ func hasLabel(m model.Message, label string) bool {
 func (w *window) openDraftForEdit(threadID string) {
 	logging.Trace("ui: open draft for edit", "thread", threadID, "account", w.activeID)
 	acctID := w.activeID
-	w.toast("Opening draft…")
+	// Progress belongs to the activity row, not a toast: a toast acknowledges a
+	// finished action, and one that says "…" leaves a notice that never
+	// resolves. Resolving a provider draft can take two network round trips.
+	endOpen := w.opActivity("draft", w.emailForAccount(acctID), "Opening the draft")
 	go func() {
+		note := ""
+		defer func() { dispatch.Main(func() { endOpen(note) }) }()
 		ctx := context.Background()
 		// Local-first drafts contain the complete compose payload (including
 		// attachments), so reopening them never needs the network.
@@ -2787,6 +2794,7 @@ func (w *window) openDraftForEdit(threadID string) {
 			d, err := w.deps.Store.LocalDraft(ctx, threadID)
 			if err != nil {
 				slog.Warn("ui: load local draft", "id", threadID, "err", err)
+				note = doneErr(err)
 				dispatch.Main(func() { w.toast("Couldn't open this draft") })
 				return
 			}
@@ -2802,6 +2810,9 @@ func (w *window) openDraftForEdit(threadID string) {
 		if err != nil || len(msgs) == 0 {
 			if err != nil {
 				slog.Warn("ui: load draft thread", "thread", threadID, "err", err)
+				note = doneErr(err)
+			} else {
+				note = "error: the draft is no longer in the cache"
 			}
 			return
 		}
@@ -2825,6 +2836,7 @@ func (w *window) openDraftForEdit(threadID string) {
 		if !dm.BodyFetched {
 			// Never replace an unfetched provider draft with its short list snippet:
 			// saving that offline would destroy most of the original body.
+			note = "error: the full body isn't available offline yet"
 			dispatch.Main(func() { w.toast("This draft's full body isn't available offline yet") })
 			return
 		}

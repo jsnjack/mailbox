@@ -225,11 +225,16 @@ func (w *window) openAddAccount(prefill *addAccountPrefill) {
 		// halfway and leave an orphaned credential.
 		dialog.SetCanClose(false)
 		status.SetText("Saving account…")
+		// The wizard narrates itself in its own status line — that is where its
+		// result lands — but the account actually being added is a change to the
+		// app, so it belongs in the activity log like every other one.
+		endOp := w.opActivity("mail", acct.Email, "Adding the account")
 		go func() {
 			persistCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			id, err := w.deps.AddIMAPAccount(persistCtx, acct, secret)
 			dispatch.Main(func() {
+				endOp(doneErr(err))
 				if err != nil {
 					logging.Trace("ui: add account persist failed", "email", acct.Email, "err", err)
 					status.SetText("Couldn't add account: " + friendlyConnError(err))

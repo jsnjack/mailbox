@@ -63,6 +63,7 @@ func parseListUnsubscribe(header string, oneClick bool) (unsubTargets, bool) {
 // send path (undo-able), or opening the list's page in the browser. done (may
 // be nil) receives the outcome text shown to the user.
 func (w *window) performUnsubscribe(acctID int64, sender string, t unsubTargets, done func(outcome string)) {
+	acctEmail := w.emailForAccount(acctID)
 	report := func(outcome string) {
 		logging.Trace("ui: unsubscribe outcome", "sender", sender, "outcome", outcome)
 		w.toast(outcome)
@@ -79,22 +80,33 @@ func (w *window) performUnsubscribe(acctID int64, sender string, t unsubTargets,
 			return
 		}
 		logging.Trace("ui: unsubscribe one-click", "sender", sender)
+		// Only this branch does the unsubscribing itself, so only this one is an
+		// operation to wait on. The other two hand the job to the outbox or the
+		// browser and are over the moment they start — they report what they did
+		// instead of claiming the list was left.
+		endOp := w.opActivity("mail", acctEmail, "Unsubscribing from "+sender)
 		go func() {
 			client := unsubscribeClient()
 			resp, err := client.Post(t.OneClickURL, "application/x-www-form-urlencoded",
 				strings.NewReader("List-Unsubscribe=One-Click"))
 			outcome := "Unsubscribed from " + sender
+			note := ""
 			if err != nil {
 				outcome = "Unsubscribe request failed — try again later"
+				note = "error: " + err.Error()
 				logging.Trace("ui: unsubscribe one-click failed", "sender", sender, "err", err)
 			} else {
 				_ = resp.Body.Close()
 				if resp.StatusCode >= 400 {
 					outcome = fmt.Sprintf("Unsubscribe request was rejected (HTTP %d)", resp.StatusCode)
+					note = fmt.Sprintf("error: rejected with HTTP %d", resp.StatusCode)
 					logging.Trace("ui: unsubscribe one-click rejected", "sender", sender, "status", resp.StatusCode)
 				}
 			}
-			dispatch.Main(func() { report(outcome) })
+			dispatch.Main(func() {
+				endOp(note)
+				report(outcome)
+			})
 		}()
 	case t.Mailto != "":
 		email := ""
@@ -113,10 +125,12 @@ func (w *window) performUnsubscribe(acctID int64, sender string, t unsubTargets,
 			From: email, To: t.Mailto, Subject: subj,
 			Body: "Please remove this address from your mailing list.",
 		})
+		w.reportActivity("mail", acctEmail, "Sent an unsubscribe request to "+sender, "")
 		report("Unsubscribe request sent to " + sender)
 	case t.URL != "":
 		logging.Trace("ui: unsubscribe via browser", "sender", sender, "url", t.URL)
 		openExternal(t.URL)
+		w.reportActivity("mail", acctEmail, "Opened the unsubscribe page for "+sender, "")
 		report("Unsubscribe page opened in the browser")
 	}
 }

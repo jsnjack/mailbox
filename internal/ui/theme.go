@@ -148,11 +148,52 @@ const appCSS = `
 	color: alpha(@error_color, 0.85);
 }
 
-/* Bottom status bar: a quiet strip set off by a hairline top border. */
-.status-bar {
-	border-top: 1px solid alpha(@card_fg_color, 0.12);
+/* Activity row: an inset card in a window's bottom bar, not a strip across the
+   app — the Nautilus operations-row placement, and gdiff's measurements, so the
+   two applications read as siblings. The fill is the only chrome; the accent
+   appears once, as a flash, when an operation finishes. */
+.status-row {
+	margin: 6px;
+	padding: 4px 8px;
+	min-height: 0;
+	border-radius: 8px;
+	background-color: alpha(@card_fg_color, 0.07);
 	font-size: 0.85em;
-	min-height: 22px;
+}
+.status-row label { font-weight: normal; }
+
+/* Nautilus' needs-attention animation (src/resources/style.css): the accent
+   washes through once, slowly and lightly, at the 10% keyframe of 2s. */
+@keyframes status-needs-attention {
+	0%   { }
+	10%  { background-color: @accent_bg_color; color: @accent_fg_color; }
+	100% { }
+}
+.status-row.needs-attention {
+	animation: status-needs-attention 2s ease-in-out;
+}
+
+/* The resting light: neutral while everything works, amber while a provider is
+   failing — this is the whole of that state's UI, so there is no separate
+   warning icon competing with it. */
+.status-dot {
+	font-size: 9px;
+	color: alpha(@window_fg_color, 0.35);
+}
+.status-dot.warning { color: @warning_color; }
+
+/* Live elapsed time, kept in its own monospace label so the ticking digits
+   never reflow the phrase beside them. */
+.status-detail {
+	font-family: monospace;
+	font-size: 0.9em;
+	color: alpha(@window_fg_color, 0.45);
+}
+
+/* Bounded progress, as a hairline under the phrase rather than an "N/M" count. */
+.status-progress trough,
+.status-progress progress {
+	min-height: 3px;
 }
 
 /* Activity log rows (the status-bar popover): developer density. A monospace
@@ -182,6 +223,40 @@ const appCSS = `
 }
 .log-error {
 	color: alpha(@error_color, 0.90);
+}
+/* The verdict glyph carries colour so a failed operation is findable by eye in
+   a long log; the row's text stays neutral. */
+.log-time.log-ok {
+	color: @success_color;
+}
+
+/* Session grid in the activity panel: the number carries the weight, its units
+   are demoted beside it, and the caption above says what is being counted. */
+.stat-key {
+	font-family: monospace;
+	font-size: 0.68em;
+	letter-spacing: 0.08em;
+	color: alpha(@window_fg_color, 0.45);
+}
+.stat-value {
+	font-size: 1.05em;
+	color: @window_fg_color;
+}
+.stat-unit {
+	font-size: 0.82em;
+	color: alpha(@window_fg_color, 0.55);
+}
+.stat-model {
+	font-family: monospace;
+	font-size: 0.82em;
+}
+/* "fallback": the chain's primary model isn't the one answering. */
+.stat-chip {
+	font-size: 0.72em;
+	padding: 0 6px;
+	border-radius: 999px;
+	background-color: alpha(@warning_color, 0.18);
+	color: @warning_color;
 }
 
 /* Right-click row context menu. It is hand-built from flat buttons (a
