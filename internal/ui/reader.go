@@ -237,43 +237,40 @@ func (w *window) renderConversation(msgs []model.Message) {
 				latestAuth = body.RawHeaders
 				latestHTML = body.HTML
 				if cs, ok := cached[m.GmailID]; ok {
-					b.WriteString(cs.html)
+					b.WriteString(composeSection(cs.head, cs.body, false))
 					blocked += cs.trackers
 					continue
 				}
-				sec, n := w.conversationSection(m, body, w.cleanHTML, fetchFailed[m.GmailID], gists[m.GmailID])
+				head, rest, n := w.conversationSection(m, body, w.cleanHTML, fetchFailed[m.GmailID], gists[m.GmailID])
 				// A failure section (snippet + "could not be loaded" notice) is
 				// transient — caching it would keep showing the failure after the
 				// body becomes fetchable again. Only real bodies are immutable.
 				if !fetchFailed[m.GmailID] {
-					fresh[m.GmailID] = cachedSection{html: sec, trackers: n}
+					fresh[m.GmailID] = cachedSection{head: head, body: rest, trackers: n}
 				}
-				b.WriteString(sec)
+				b.WriteString(composeSection(head, rest, false))
 				blocked += n
 				continue
 			}
-			var sec string
+			var head, rest string
 			if cs, ok := cached[m.GmailID]; ok {
-				sec = cs.html
+				head, rest = cs.head, cs.body
 				blocked += cs.trackers
 			} else {
 				body := w.bodyForRender(ctx, m, refetched)
-				s2, n := w.conversationSection(m, body, w.cleanHTML, fetchFailed[m.GmailID], gists[m.GmailID])
+				h2, r2, n := w.conversationSection(m, body, w.cleanHTML, fetchFailed[m.GmailID], gists[m.GmailID])
 				// Transient failure sections are not cached — see the
 				// latest-message branch above.
 				if !fetchFailed[m.GmailID] {
-					fresh[m.GmailID] = cachedSection{html: s2, trackers: n}
+					fresh[m.GmailID] = cachedSection{head: h2, body: r2, trackers: n}
 				}
-				sec = s2
+				head, rest = h2, r2
 				blocked += n
 			}
 			// In longer threads the history opens collapsed (newest message
-			// expanded, older ones a one-line <details> each) — a 30-message
-			// thread reads as a list, not a wall. Native disclosure, no JS.
-			if len(msgs) > 2 {
-				sec = collapsedSection(m, sec)
-			}
-			b.WriteString(sec)
+			// expanded, older ones folded to their header) — a 30-message thread
+			// reads as a list, not a wall. Native disclosure, no JS.
+			b.WriteString(composeSection(head, rest, len(msgs) > 2))
 		}
 		out := b.String()
 		// Naming the images costs no network (see resolveRemoteImages), so the
@@ -486,20 +483,16 @@ func (w *window) fireGistJS(gmailID, gist string) {
 	evalJS(w.webview, "window.__mbGist("+string(idJSON)+","+string(gistJSON)+");")
 }
 
-// collapsedSection wraps an older message's rendered section in a native
-// <details>, summarized as "sender · date — preview" (the preview hides once
-// expanded — the section carries its own full header).
-func collapsedSection(m model.Message, section string) string {
-	preview := strings.TrimSpace(m.Snippet)
-	if r := []rune(preview); len(r) > 80 {
-		preview = string(r[:79]) + "…"
+// composeSection joins a message's header and the rest of it. The newest
+// message shows both outright; an older one folds into a native <details>
+// whose summary is that same header — so a message has exactly one identity
+// line, open or closed, instead of a summary and a header introducing it twice
+// in a row. CSS decides which parts of the header each state shows.
+func composeSection(head, rest string, collapsed bool) string {
+	if !collapsed {
+		return head + rest
 	}
-	date := ""
-	if !m.InternalDate.IsZero() {
-		date = " · " + m.InternalDate.Format("Jan 2")
-	}
-	return `<details class="mbmsg"><summary><b>` + html.EscapeString(displayFrom(m)) + `</b>` + date +
-		` <span class="mbprev">` + html.EscapeString(preview) + `</span></summary>` + section + `</details>`
+	return `<details class="mbmsg"><summary>` + head + `</summary>` + rest + `</details>`
 }
 
 // capCache evicts arbitrary entries until m holds at most max. Main-thread only
@@ -605,21 +598,31 @@ func (w *window) formatRecipients(list string) string {
 // and body; when still empty a hidden placeholder is emitted instead, so a gist
 // generated while the thread is open slots in via __mbGist (a targeted DOM
 // update — a full re-render would reset the reader's scroll position).
-func (w *window) conversationSection(m model.Message, body model.MessageBody, clean func(string) (string, int), fetchFailed bool, gist string) (string, int) {
+func (w *window) conversationSection(m model.Message, body model.MessageBody, clean func(string) (string, int), fetchFailed bool, gist string) (head, rest string, blocked int) {
 	var hb strings.Builder
 	// Sender left, date right (flex); the sender is a link to the in-app
 	// sender actions (mbaction: is intercepted by onDecidePolicy — it never
 	// navigates or leaves the app).
-	hb.WriteString(`<div style="border-top:1px solid #ddd;margin-top:18px;padding-top:8px;color:#555;font-size:90%">`)
-	hb.WriteString(`<div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap"><span>`)
+	hb.WriteString(`<div class="mbhead">`)
+	hb.WriteString(`<div class="mbline"><span>`)
+	// The disclosure triangle lives inside the header, because for every
+	// message but the newest this header IS the <details> summary — one
+	// identity line per message, whether it is open or closed.
+	hb.WriteString(`<span class="mbchev"></span>`)
 	fmt.Fprintf(&hb, `<a href="mbaction:sender/%s" style="color:inherit;text-decoration:none" title="Sender actions"><b>%s</b>`,
 		url.QueryEscape(m.GmailID), html.EscapeString(displayFrom(m)))
-	// Always show the actual sender address, not just the display name.
+	// Always show the actual sender address, not just the display name. It is
+	// the first thing to go when the message is folded shut, where the snippet
+	// says more about what the message is.
 	if addr := strings.TrimSpace(m.FromAddr); addr != "" && !strings.EqualFold(addr, displayFrom(m)) {
-		fmt.Fprintf(&hb, ` <span style="color:#888">&lt;%s&gt;</span>`, html.EscapeString(addr))
+		fmt.Fprintf(&hb, ` <span class="mbaddr">&lt;%s&gt;</span>`, html.EscapeString(addr))
 	}
-	hb.WriteString(`</a></span>`)
-	hb.WriteString(`<span style="color:#888;white-space:nowrap">`)
+	hb.WriteString(`</a>`)
+	if preview := messagePreview(m); preview != "" {
+		fmt.Fprintf(&hb, ` <span class="mbprev">%s</span>`, html.EscapeString(preview))
+	}
+	hb.WriteString(`</span>`)
+	hb.WriteString(`<span class="mbdate">`)
 	hb.WriteString(formatMsgDate(m.InternalDate, time.Now()))
 	// Per-message actions: the header bar acts on the conversation, this ⋯
 	// opens the menu of actions on this specific message (reply/forward when
@@ -627,32 +630,42 @@ func (w *window) conversationSection(m model.Message, body model.MessageBody, cl
 	hb.WriteString(msgMenuIcon(m.GmailID))
 	hb.WriteString(`</span></div>`)
 	if to := strings.TrimSpace(m.ToAddrs); to != "" {
-		fmt.Fprintf(&hb, `<div style="color:#888">to %s</div>`, w.formatRecipients(to))
+		fmt.Fprintf(&hb, `<div class="mbrcpt-line">to %s</div>`, w.formatRecipients(to))
 	}
 	if cc := strings.TrimSpace(m.CcAddrs); cc != "" {
-		fmt.Fprintf(&hb, `<div style="color:#888">cc %s</div>`, w.formatRecipients(cc))
+		fmt.Fprintf(&hb, `<div class="mbrcpt-line">cc %s</div>`, w.formatRecipients(cc))
 	}
 	// Only your own copies (sent mail, drafts) ever carry Bcc — shown like
 	// Gmail shows it on a sent message.
 	if bcc := strings.TrimSpace(m.BccAddrs); bcc != "" {
-		fmt.Fprintf(&hb, `<div style="color:#888">bcc %s</div>`, w.formatRecipients(bcc))
+		fmt.Fprintf(&hb, `<div class="mbrcpt-line">bcc %s</div>`, w.formatRecipients(bcc))
 	}
 	hb.WriteString(`</div>`)
-	hb.WriteString(gistCard(m.GmailID, gist))
 	header := hb.String()
+	rest = gistCard(m.GmailID, gist)
 	switch {
 	case body.HTML != "":
 		cleaned, blocked := clean(body.HTML)
-		return header + cleaned, blocked
+		return header, rest + cleaned, blocked
 	case body.Text != "":
-		return header + "<pre style=\"white-space:pre-wrap\">" + linkifyText(body.Text) + "</pre>", 0
+		return header, rest + "<pre style=\"white-space:pre-wrap\">" + linkifyText(body.Text) + "</pre>", 0
 	default:
 		notice := ""
 		if fetchFailed {
 			notice = `<p style="color:#a00;font-style:italic;margin-bottom:8px">⚠ Message body could not be loaded — you may be offline. Select "Retry loading" from the menu to try again.</p>`
 		}
-		return header + notice + "<p>" + linkifyText(m.Snippet) + "</p>", 0
+		return header, rest + notice + "<p>" + linkifyText(m.Snippet) + "</p>", 0
 	}
+}
+
+// messagePreview is the one-line snippet a folded message shows in place of its
+// address — what the message is about, where the open one shows who it is to.
+func messagePreview(m model.Message) string {
+	preview := strings.TrimSpace(m.Snippet)
+	if r := []rune(preview); len(r) > 80 {
+		preview = string(r[:79]) + "…"
+	}
+	return preview
 }
 
 // bodyForRender loads a message's body, re-fetching once (this session) when it
@@ -1006,7 +1019,7 @@ html{overflow-x:hidden}
 body{font-family:sans-serif;margin:8px 16px 16px;color:#222;line-height:1.4;overflow-x:hidden;overflow-wrap:anywhere}
 table{table-layout:auto}
 td,th{overflow-wrap:break-word;word-break:normal}
-.mbwrap>div:first-child{border-top:none!important;margin-top:0!important}
+.mbwrap>.mbhead:first-child,.mbwrap>details.mbmsg:first-child{margin-top:0}
 .mbmenu{color:inherit;text-decoration:none;margin-left:12px;opacity:.55}
 .mbmenu:hover{opacity:1}
 .mbmenu svg{width:15px;height:15px;vertical-align:-3px}
@@ -1018,12 +1031,31 @@ a.mbmore:hover{text-decoration:underline}
 img,video{max-width:100%!important;height:auto!important}
 img[hidden],video[hidden]{display:none!important}
 pre{font-family:monospace;white-space:pre-wrap}
-details.mbmsg>summary{cursor:pointer;list-style:none;color:#555;font-size:90%;border-top:1px solid #ddd;margin-top:18px;padding:8px 0 2px}
+/* One message = one header. For every message but the newest that header is
+   also the <details> summary, so opening a message reveals its body without
+   introducing the sender a second time. The header sits on a faint band bled to
+   the pane edges: the reader cannot draw a boundary an email is unable to
+   imitate, but it can draw a surface. */
+.mbhead{color:#555;font-size:90%;background:rgba(0,0,0,.045);
+  margin:0 0 10px;padding:8px 10px 9px}
+.mbline{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.mbdate{color:#888;white-space:nowrap}
+.mbaddr,.mbrcpt-line{color:#888}
+.mbprev{color:#888;display:none}
+.mbchev{display:none}
+/* Messages are set apart by the space between them as much as by the band. */
+details.mbmsg{margin-top:26px}
+details.mbmsg>summary{cursor:pointer;list-style:none}
 details.mbmsg>summary::-webkit-details-marker{display:none}
-details.mbmsg>summary::before{content:"▸ ";color:#999}
-details.mbmsg[open]>summary::before{content:"▾ ";color:#999}
-details.mbmsg[open]>summary .mbprev{display:none}
-.mbprev{color:#888}
+details.mbmsg>summary>.mbhead{margin-bottom:0}
+details.mbmsg[open]>summary>.mbhead{margin-bottom:10px}
+details.mbmsg .mbchev{display:inline;color:#999}
+details.mbmsg .mbchev::before{content:"▸ "}
+details.mbmsg[open] .mbchev::before{content:"▾ "}
+/* Folded, the header says who wrote and what about; open, it says who wrote,
+   from which address, and to whom. */
+details.mbmsg:not([open]) .mbaddr,details.mbmsg:not([open]) .mbrcpt-line{display:none}
+details.mbmsg:not([open]) .mbprev{display:inline}
 .mbgist{background:rgba(53,132,228,.08);border:1px solid rgba(53,132,228,.16);border-radius:8px;padding:6px 10px;margin:10px 0 2px;color:#333;font-size:92%;line-height:1.35}
 .mbgist-tag{color:#1a5fb4;font-weight:600;font-size:78%;text-transform:uppercase;letter-spacing:.07em;margin-right:6px;white-space:nowrap}`
 
@@ -1064,6 +1096,10 @@ details.mbmsg[open]>summary .mbprev{display:none}
 		`document.addEventListener('click',function(e){var t=e.target&&e.target.closest?e.target.closest('a.mbmore'):null;if(!t)return;` +
 		`e.preventDefault();var r=t.parentNode.querySelector('.mbrest');if(!r)return;r.hidden=!r.hidden;` +
 		`t.textContent=r.hidden?t.dataset.more:t.dataset.less;requestFit();},true);` +
+		// Folding a message changes the document height, which the scaled-down
+		// layout has baked into body.style.height — refit or the content below
+		// is clipped.
+		`document.addEventListener('toggle',function(){requestFit();},true);` +
 		`try{window.webkit.messageHandlers.` + shellReadyHandler + `.postMessage(true);}catch(e){}}` +
 		`if(document.readyState!=='loading'){setup();}else{document.addEventListener('DOMContentLoaded',setup);}})();</script>`
 

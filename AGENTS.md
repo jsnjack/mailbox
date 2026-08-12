@@ -337,7 +337,18 @@ changed set/order triggers a full splice — so the list keeps its scroll positi
 instead of rebuilding on every event. `store`
 provides `ListThreadsByLabel`/`ListThreadMessages`/`GetThreadSummaries`. Opening a
 thread renders all its messages stacked in the reader (bodies fetched lazily,
-each a sanitized section); archive/trash apply to the whole thread, the header
+each a sanitized section). A message is one header plus its body: the header
+(`.mbhead`, a faint inset band so a boundary the reader drew can't be confused
+with a rule the email drew) doubles as the `<details>` summary for every
+message but the newest, so folding one shows the same header rather than a
+second one introducing it — folded it shows sender + snippet, open it shows
+sender + address + recipients (`composeSection`). The band must stay inside the
+content width: bleeding it past the edges makes `wrap.scrollWidth` exceed the
+pane, which sets the fit-to-width script scaling the whole conversation and
+moves every hit target. Links inside a summary follow without toggling the
+disclosure (WebKit skips activation for interactive descendants), so the
+per-message ⋯ works on a folded message too; the `toggle` event refits, since
+folding changes the height the scaled layout baked in. Archive/trash apply to the whole thread, the header
 reply button (a SplitButton defaulting to **Reply all** — sender-only Reply and
 Forward in its dropdown, `r` = reply all) and star to its newest message, and
 each stacked message carries an always-visible dim ⋯ in its header

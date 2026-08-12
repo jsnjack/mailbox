@@ -2865,7 +2865,8 @@ const loadingInner = `<div style="display:flex;align-items:center;justify-conten
 // section HTML plus its blocked-tracker count. Sections are immutable once a
 // message's body is fetched, so they can be reused across thread re-opens.
 type cachedSection struct {
-	html     string
+	head     string // the message's header, which doubles as its <details> summary
+	body     string // gist card + rendered body, shown only while it is open
 	trackers int
 }
 
@@ -3683,8 +3684,10 @@ func (w *window) showTranslatedConversation(msgs []model.Message) {
 		body := model.MessageBody{HTML: w.translationCache[cacheKey(m.AccountID, m.GmailID)]}
 		// No gist card here: the gist is in the email's original language, which
 		// would clash with the translated bodies this view exists to show.
-		sec, n := w.conversationSection(m, body, w.cleanHTML, false, "")
-		b.WriteString(sec)
+		head, rest, n := w.conversationSection(m, body, w.cleanHTML, false, "")
+		// The translated view is a flat stack: every message is shown in full,
+		// so none of them folds.
+		b.WriteString(composeSection(head, rest, false))
 		blocked += n
 	}
 	w.setTrackerCount(blocked)
