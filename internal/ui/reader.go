@@ -642,19 +642,23 @@ func (w *window) conversationSection(m model.Message, body model.MessageBody, cl
 	}
 	hb.WriteString(`</div>`)
 	header := hb.String()
+	// The body is wrapped so it can be padded onto the same text column as the
+	// header band and the summary card above it; the page margin is 2px, so this
+	// is what puts a message's own text where it belongs.
+	body_ := func(inner string) string { return `<div class="mbbody">` + inner + `</div>` }
 	rest = gistCard(m.GmailID, gist)
 	switch {
 	case body.HTML != "":
 		cleaned, blocked := clean(body.HTML)
-		return header, rest + cleaned, blocked
+		return header, rest + body_(cleaned), blocked
 	case body.Text != "":
-		return header, rest + "<pre style=\"white-space:pre-wrap\">" + linkifyText(body.Text) + "</pre>", 0
+		return header, rest + body_("<pre style=\"white-space:pre-wrap\">"+linkifyText(body.Text)+"</pre>"), 0
 	default:
 		notice := ""
 		if fetchFailed {
 			notice = `<p style="color:#a00;font-style:italic;margin-bottom:8px">⚠ Message body could not be loaded — you may be offline. Select "Retry loading" from the menu to try again.</p>`
 		}
-		return header, rest + notice + "<p>" + linkifyText(m.Snippet) + "</p>", 0
+		return header, rest + body_(notice+"<p>"+linkifyText(m.Snippet)+"</p>"), 0
 	}
 }
 
@@ -1016,7 +1020,7 @@ func readerShellHTML() string {
 	// scrollbar nor cropping.
 	const style = `
 html{overflow-x:hidden}
-body{font-family:sans-serif;margin:8px 16px 16px;color:#222;line-height:1.4;overflow-x:hidden;overflow-wrap:anywhere}
+body{font-family:sans-serif;margin:8px 2px 16px;color:#222;line-height:1.4;overflow-x:hidden;overflow-wrap:anywhere}
 table{table-layout:auto}
 td,th{overflow-wrap:break-word;word-break:normal}
 .mbwrap>.mbhead:first-child,.mbwrap>details.mbmsg:first-child{margin-top:0}
@@ -1036,18 +1040,21 @@ pre{font-family:monospace;white-space:pre-wrap}
    introducing the sender a second time. The header sits on a faint band bled to
    the pane edges: the reader cannot draw a boundary an email is unable to
    imitate, but it can draw a surface. */
+/* One text column, at 16px from the pane edge — where body text has always
+   sat. Each surface reaches nearly to the edge (the page margin is 2px) and
+   pads its own text back out to the column, so the header, the summary card
+   and the message all start on the same line, and no tinted box has text
+   against its edge. Padding, never negative margins: a surface wider than the
+   wrap makes the fit-to-width script scale the conversation (see AGENTS.md). */
 .mbhead{color:#555;font-size:90%;margin:0 0 12px}
 /* The tint belongs to the identity line alone — recipients are detail, and
-   including them made a three-line slab of the newest message's header. It
-   carries no horizontal padding: its edges are the text column's edges, so the
-   sender lines up with the body underneath instead of sitting indented from it.
-   (Bleeding it wider than the column is what makes the fit-to-width script
-   scale the conversation — see AGENTS.md.) */
-.mbline{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;
-  background:rgba(0,0,0,.035);border-radius:6px;padding:6px 0}
+   including them made a three-line slab of the newest message's header. */
+.mbline{position:relative;display:flex;justify-content:space-between;gap:12px;
+  flex-wrap:wrap;background:rgba(0,0,0,.035);border-radius:6px;padding:6px 14px}
 .mbdate{color:#888;white-space:nowrap}
 .mbaddr{color:#888}
-.mbrcpt-line{color:#888;padding-top:4px}
+.mbrcpt-line{color:#888;padding:4px 14px 0}
+.mbbody{padding:0 14px}
 .mbprev{color:#888;display:none}
 .mbchev{display:none}
 /* Messages are set apart by the space between them as much as by the band. */
@@ -1056,14 +1063,14 @@ details.mbmsg>summary{cursor:pointer;list-style:none}
 details.mbmsg>summary::-webkit-details-marker{display:none}
 details.mbmsg>summary>.mbhead{margin-bottom:0}
 details.mbmsg[open]>summary>.mbhead{margin-bottom:12px}
-details.mbmsg .mbchev{display:inline;color:#999}
-details.mbmsg .mbchev::before{content:"▸ "}
-details.mbmsg[open] .mbchev::before{content:"▾ "}
+details.mbmsg .mbchev{display:block;position:absolute;left:4px;top:6px;color:#999}
+details.mbmsg .mbchev::before{content:"▸"}
+details.mbmsg[open] .mbchev::before{content:"▾"}
 /* Folded, the header says who wrote and what about; open, it says who wrote,
    from which address, and to whom. */
 details.mbmsg:not([open]) .mbaddr,details.mbmsg:not([open]) .mbrcpt-line{display:none}
 details.mbmsg:not([open]) .mbprev{display:inline}
-.mbgist{background:rgba(53,132,228,.08);border:1px solid rgba(53,132,228,.16);border-radius:8px;padding:6px 10px;margin:10px 0 2px;color:#333;font-size:92%;line-height:1.35}
+.mbgist{background:rgba(53,132,228,.08);border:1px solid rgba(53,132,228,.16);border-radius:8px;padding:6px 13px;margin:12px 0 2px;color:#333;font-size:92%;line-height:1.35}
 .mbgist-tag{color:#1a5fb4;font-weight:600;font-size:78%;text-transform:uppercase;letter-spacing:.07em;margin-right:6px;white-space:nowrap}`
 
 	// Fit-to-width: scale wide content down to fit the reader. WebKitGTK ignores
