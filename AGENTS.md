@@ -344,7 +344,9 @@ thread renders all its messages stacked in the reader (bodies fetched lazily,
 each a sanitized section). A message is one header plus its body: the header
 (`.mbhead` — space above it, a hairline, and the sender's name in full-ink
 semibold; no fill, since a stack of tinted headers reads as slabs and no email
-footer ever puts a bold name straight under a rule) doubles as the `<details>`
+footer ever puts a bold name straight under a rule — the per-message AI gist
+keeps its tinted card, margined to the same width as the body's content box so
+it can't overhang the email or reach under the scrollbar) doubles as the `<details>`
 summary for every
 message but the newest, so folding one shows the same header rather than a
 second one introducing it — folded it shows sender + snippet, open it shows

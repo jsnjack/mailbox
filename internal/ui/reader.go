@@ -1074,12 +1074,14 @@ details.mbmsg[open] .mbchev::before{content:"▾"}
    from which address, and to whom. */
 details.mbmsg:not([open]) .mbaddr,details.mbmsg:not([open]) .mbrcpt-line{display:none}
 details.mbmsg:not([open]) .mbprev{display:inline}
-/* The per-message gist is a line, not a card. As a bordered box it was the one
-   element wider than the message's own content — it spanned the full wrap while
-   the body sits inside its padding — so it ran past the email and under the
-   scrollbar. A line cannot be the wrong width, and the accent label is enough
-   to mark it as the AI's words rather than the sender's. */
-.mbgist{padding:0 10px;margin:12px 0;color:#444;font-size:92%;line-height:1.4}
+/* The gist is a tinted card — it has to be visible as the AI's words rather
+   than the sender's. Its margin matches the padding the body sits inside, so
+   the card and the message's own content box are exactly the same width: as a
+   full-width box it overhung the email on both sides and ran under the
+   scrollbar. The 10px it indents its own text by is a card's inset, not a
+   misalignment with the header above it. */
+.mbgist{background:rgba(53,132,228,.08);border:1px solid rgba(53,132,228,.16);
+  border-radius:8px;padding:6px 9px;margin:12px 10px;color:#333;font-size:92%;line-height:1.35}
 .mbgist-tag{color:#1a5fb4;font-weight:600;font-size:78%;text-transform:uppercase;letter-spacing:.07em;margin-right:6px;white-space:nowrap}`
 
 	// Fit-to-width: scale wide content down to fit the reader. WebKitGTK ignores
