@@ -29,6 +29,7 @@ import (
 	glib "github.com/diamondburned/gotk4/pkg/glib/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 	"github.com/diamondburned/gotk4/pkg/pango"
+	"github.com/jsnjack/mailbox/internal/activity"
 	"github.com/jsnjack/mailbox/internal/ai"
 	"github.com/jsnjack/mailbox/internal/config"
 	"github.com/jsnjack/mailbox/internal/dispatch"
@@ -327,8 +328,10 @@ type window struct {
 	summaryBtn      *gtk.Button
 	summaryRevealer *gtk.Revealer
 	summaryLabel    *gtk.Label
-	cardIcon        *gtk.Image // card icon (set per action: summary vs analysis)
-	cardTitle       *gtk.Label // card title (set per action)
+	cardMark        *gtk.Label // ✦ — shown when the card holds AI prose
+	cardIcon        *gtk.Image // shown instead for the security analysis
+	cardTitle       *gtk.Label
+	cardScope       *gtk.Label // what the card covers: a message count, or whose message // card title (set per action)
 	summaryCancel   context.CancelFunc
 	summaryCache    map[uiCacheKey]string
 
@@ -3754,14 +3757,29 @@ func (w *window) resetTranslation() {
 // at the top of the reader: a title row with a close button and the streamed
 // summary below. Returns the revealer wrapping it.
 func (w *window) buildSummaryCard() *gtk.Revealer {
-	w.cardIcon = gtk.NewImageFromIconName("summarize-symbolic")
+	// ✦ marks AI-written text, printed as the glyph rather than an icon so the
+	// panel wears exactly the mark the reader prints inline in each message.
+	// The image beside it is for the card's other user, the security analysis,
+	// which is not AI prose and keeps its own icon; one of the two shows.
+	w.cardMark = gtk.NewLabel("✦")
+	w.cardMark.AddCSSClass("summary-title")
+	w.cardIcon = gtk.NewImageFromIconName("security-high-symbolic")
 	w.cardIcon.AddCSSClass("summary-title")
+	w.cardIcon.SetVisible(false)
 
-	w.cardTitle = gtk.NewLabel("Summary")
+	w.cardTitle = gtk.NewLabel("Conversation summary")
 	w.cardTitle.AddCSSClass("summary-title")
 	w.cardTitle.AddCSSClass("heading")
 	w.cardTitle.SetXAlign(0)
-	w.cardTitle.SetHExpand(true)
+
+	// What the panel covers, next to its name — the inline note inside each
+	// message says "In short", so between them nothing has to be guessed.
+	w.cardScope = gtk.NewLabel("")
+	w.cardScope.AddCSSClass("dim-label")
+	w.cardScope.AddCSSClass("caption")
+	w.cardScope.SetXAlign(0)
+	w.cardScope.SetHExpand(true)
+	w.cardScope.SetVisible(false)
 
 	closeBtn := gtk.NewButtonFromIconName("window-close-symbolic")
 	closeBtn.AddCSSClass("flat")
@@ -3771,8 +3789,10 @@ func (w *window) buildSummaryCard() *gtk.Revealer {
 	closeBtn.ConnectClicked(w.hideSummary)
 
 	titleRow := gtk.NewBox(gtk.OrientationHorizontal, 6)
+	titleRow.Append(w.cardMark)
 	titleRow.Append(w.cardIcon)
 	titleRow.Append(w.cardTitle)
+	titleRow.Append(w.cardScope)
 	titleRow.Append(closeBtn)
 
 	w.summaryLabel = gtk.NewLabel("")
@@ -3806,15 +3826,18 @@ func (w *window) onSummarize() {
 		w.summaryCancel()
 		w.summaryCancel = nil
 	}
-	w.cardIcon.SetFromIconName("view-list-bullet-symbolic")
-	w.cardTitle.SetText("Summary")
+	w.cardMark.SetVisible(true)
+	w.cardIcon.SetVisible(false)
+	w.cardTitle.SetText("Conversation summary")
+	w.cardScope.SetText(activity.Plural(len(w.openThreadMsgs), "message", "messages"))
+	w.cardScope.SetVisible(len(w.openThreadMsgs) > 0)
 	key := w.summaryKey()
 	memoryKey := w.activeCacheKey(key)
 	logging.Trace("ui: summarize", "thread", w.openThreadID, "account", w.activeID)
 	w.summaryRevealer.SetRevealChild(true)
 	if cached, ok := w.summaryCache[memoryKey]; ok {
 		logging.Trace("ui: summarize cache hit (memory)", "thread", w.openThreadID)
-		w.summaryLabel.SetText(cached)
+		w.summaryLabel.SetMarkup(markdownToPango(cached))
 		return
 	}
 	// Persisted summary for this exact message set (no AI cost). The stored
@@ -3824,7 +3847,7 @@ func (w *window) onSummarize() {
 		logging.Trace("ui: summarize cache hit (persisted)", "thread", w.openThreadID)
 		w.summaryCache[memoryKey] = sum
 		capCache(w.summaryCache, aiCacheCap)
-		w.summaryLabel.SetText(sum)
+		w.summaryLabel.SetMarkup(markdownToPango(sum))
 		return
 	}
 	logging.Trace("ui: summarize cache miss → AI", "thread", w.openThreadID)
@@ -3853,13 +3876,15 @@ func (w *window) onSummarize() {
 			if w.openThreadID != threadID || ctx.Err() != nil {
 				return
 			}
-			w.summaryLabel.SetText(bulletize(text))
+			w.summaryLabel.SetMarkup(markdownToPango(text))
 		})
 		// Finalize + persist off the main thread, so an unchanged thread's summary
 		// survives restarts.
 		final := ""
 		if serr == nil {
-			final = bulletize(strings.TrimSpace(text))
+			// Stored as written: the markdown is rendered at display time, so a
+			// summary persisted today still renders if the rendering changes.
+			final = strings.TrimSpace(text)
 			if final != "" {
 				if perr := w.deps.Store.SetThreadSummary(context.Background(), acctID, threadID, key, final); perr != nil {
 					slog.Warn("ui: persist summary", "err", perr)
@@ -3878,7 +3903,7 @@ func (w *window) onSummarize() {
 			if final != "" {
 				w.summaryCache[cacheKey(acctID, key)] = final
 				capCache(w.summaryCache, aiCacheCap)
-				w.summaryLabel.SetText(final)
+				w.summaryLabel.SetMarkup(markdownToPango(final))
 			}
 		})
 	}()
@@ -3908,20 +3933,23 @@ func (w *window) analyzeMessage(m model.Message) {
 		w.summaryCancel()
 		w.summaryCancel = nil
 	}
-	w.cardIcon.SetFromIconName("security-high-symbolic")
-	// The card is shared with the thread summary — name the target when it
+	w.cardMark.SetVisible(false)
+	w.cardIcon.SetVisible(true)
+	// The card is shared with the conversation summary — name the target when it
 	// isn't the newest message, so it's clear which message was analyzed.
-	title := "Security analysis"
+	w.cardTitle.SetText("Security analysis")
+	scope := ""
 	if m.GmailID != w.openMsg.GmailID {
-		title += " — " + displayFrom(m)
+		scope = displayFrom(m)
 	}
-	w.cardTitle.SetText(title)
+	w.cardScope.SetText(scope)
+	w.cardScope.SetVisible(scope != "")
 	logging.Trace("ui: analyze phishing", "id", m.GmailID, "thread", w.openThreadID, "account", w.activeID)
 	w.summaryRevealer.SetRevealChild(true)
 	key := cacheKey(m.AccountID, "analyze:"+m.GmailID)
 	if cached, ok := w.summaryCache[key]; ok {
 		logging.Trace("ui: analyze cache hit (memory)", "id", m.GmailID)
-		w.summaryLabel.SetText(cached)
+		w.summaryLabel.SetMarkup(markdownToPango(cached))
 		return
 	}
 	// Persisted analysis for this message (no AI cost). The message + its signals
@@ -3931,7 +3959,7 @@ func (w *window) analyzeMessage(m model.Message) {
 		logging.Trace("ui: analyze cache hit (persisted)", "id", m.GmailID)
 		w.summaryCache[key] = a
 		capCache(w.summaryCache, aiCacheCap)
-		w.summaryLabel.SetText(a)
+		w.summaryLabel.SetMarkup(markdownToPango(a))
 		return
 	}
 	logging.Trace("ui: analyze cache miss → AI", "id", m.GmailID)
@@ -3963,13 +3991,15 @@ func (w *window) analyzeMessage(m model.Message) {
 			if w.openThreadID != threadID || ctx.Err() != nil {
 				return
 			}
-			w.summaryLabel.SetText(bulletize(text))
+			w.summaryLabel.SetMarkup(markdownToPango(text))
 		})
 		// Finalize + persist off the main thread, so re-opening the message reuses
 		// the analysis instead of re-running the AI.
 		final := ""
 		if serr == nil {
-			final = bulletize(strings.TrimSpace(text))
+			// Stored as written: the markdown is rendered at display time, so a
+			// summary persisted today still renders if the rendering changes.
+			final = strings.TrimSpace(text)
 			if final != "" {
 				if perr := w.deps.Store.SetAnalysis(context.Background(), acctID, gmailID, final); perr != nil {
 					slog.Warn("ui: persist analysis", "err", perr)
@@ -3988,7 +4018,7 @@ func (w *window) analyzeMessage(m model.Message) {
 			if final != "" {
 				w.summaryCache[key] = final
 				capCache(w.summaryCache, aiCacheCap)
-				w.summaryLabel.SetText(final)
+				w.summaryLabel.SetMarkup(markdownToPango(final))
 			}
 		})
 	}()
@@ -4059,22 +4089,6 @@ func (w *window) threadContextAll() string {
 		b.WriteString("\n\n---\n\n")
 	}
 	return b.String()
-}
-
-// bulletize rewrites Markdown-style "- "/"* " line prefixes as "•  " bullets so
-// the model's plain-text summary reads cleanly in the card.
-func bulletize(s string) string {
-	lines := strings.Split(s, "\n")
-	for i, ln := range lines {
-		t := strings.TrimLeft(ln, " \t")
-		switch {
-		case strings.HasPrefix(t, "- "):
-			lines[i] = "•  " + t[2:]
-		case strings.HasPrefix(t, "* "):
-			lines[i] = "•  " + t[2:]
-		}
-	}
-	return strings.Join(lines, "\n")
 }
 
 // bodyTextFor returns the best plain-text representation of a message for AI

@@ -173,7 +173,7 @@ shared AI card, titled with the sender when it isn't the newest message),
 **persisted** per message
 (`store.{SetAnalysis,Analysis}`, `message_analyses` table — the message + its
 signals are immutable, so it's reused on re-open without re-running the AI). A thread is rendered newest-message-first, with quoted reply history collapsed
-behind a native <details> "Show quoted text" toggle (`cleanEmailHTML`, same single HTML pass as tracker stripping, no JS). An AI-summary button reveals a card
+behind a native <details> "Show quoted text" toggle (`cleanEmailHTML`, same single HTML pass as tracker stripping, no JS). An AI-summary button reveals the **Conversation summary** card
 pinned above the conversation that streams a bullet summary (`SummarizeThread`),
 cached by the thread's message-id fingerprint (`summaryKey`) so reopening is
 instant and a new reply auto-invalidates it; the summary is also **persisted**
@@ -311,6 +311,15 @@ chip, no paperclip — only when the body actually references its Content-ID
 reader): forwarding makes Gmail stamp a Content-ID on every part, so keying on
 its presence alone hid a forwarded PDF completely; clicking one downloads it (content-addressed under the cache dir)
 and opens it with `xdg-open`.
+
+Every AI answer is written in markdown whether or not it was asked for, so it is
+rendered rather than shown raw (`internal/ui/markdown.go`: bold, inline code,
+italics, bullets and headings, into Pango markup for GTK labels and HTML for the
+reader). Only balanced markers produce tags — a half-streamed `**` stays literal
+instead of yielding markup Pango would refuse, which blanks a label. ✦ marks
+AI-written text everywhere (the card's title, the reader's inline note), and the
+words carry the scope: the panel is the "Conversation summary" with the message
+count beside it, each message's own line is "In short".
 
 Inbox mail is auto-categorized by AI into action tags (Needs reply / Calendar /
 Travel / Receipt / Finance / Security / Discount / Newsletter / Notification; no
