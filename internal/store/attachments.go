@@ -15,7 +15,10 @@ import (
 // rows no longer reported by the provider. Download metadata is retained when
 // the provider attachment id still exists: a body re-fetch must not make an
 // already-cached attachment unavailable offline or leak its orphaned file.
-func (s *Store) ReplaceAttachments(ctx context.Context, messageRowID int64, atts []model.Attachment) error {
+// inlineRefs holds the Content-IDs the message body references (see
+// model.ReferencedCIDs); a part carrying one of those is an inline image, and
+// anything else counts as a downloadable attachment for the list's paperclip.
+func (s *Store) ReplaceAttachments(ctx context.Context, messageRowID int64, atts []model.Attachment, inlineRefs map[string]bool) error {
 	start := time.Now()
 	logging.TraceContext(ctx, "store: replace attachments", "rowid", messageRowID, "count", len(atts))
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
@@ -71,7 +74,7 @@ func (s *Store) ReplaceAttachments(ctx context.Context, messageRowID int64, atts
 		}
 		hasDownloadable := false
 		for _, a := range atts {
-			if a.ContentID == "" {
+			if !model.IsInlineAttachment(a, inlineRefs) {
 				hasDownloadable = true
 				break
 			}

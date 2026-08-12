@@ -286,7 +286,7 @@ func (w *window) renderConversation(msgs []model.Message) {
 		warnings := phishingWarnings(latest, latestHTML)
 		// Local reads only: attachment rows and the inline-image index. The
 		// downloads behind them happen on demand.
-		atts := w.threadAttachments(ctx, msgs)
+		atts := w.threadAttachments(ctx, msgs, model.ReferencedCIDs(out))
 		inlineImgs := w.inlineImageIndex(ctx, msgs)
 		slog.Debug("ui: renderConversation", "msgs", len(msgs), "fetched", fetched,
 			"trackers", blocked, "auth", verdict.level, "fetch", fetchDur, "sanitize", time.Since(sanitizeStart))

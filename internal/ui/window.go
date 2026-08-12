@@ -2907,7 +2907,7 @@ type threadAttachment struct {
 // threadAttachments collects every attachment across the thread's messages. It
 // runs off the main thread (one DB query per message) and returns nil when
 // attachments can't be opened.
-func (w *window) threadAttachments(ctx context.Context, msgs []model.Message) []threadAttachment {
+func (w *window) threadAttachments(ctx context.Context, msgs []model.Message, inlineRefs map[string]bool) []threadAttachment {
 	if w.deps.OpenAttach == nil {
 		return nil
 	}
@@ -2920,9 +2920,12 @@ func (w *window) threadAttachments(ctx context.Context, msgs []model.Message) []
 			continue
 		}
 		for _, a := range atts {
-			// Inline images (cid:) are rendered in the body, not offered as
-			// downloadable chips.
-			if a.ContentID != "" {
+			// An inline image the body actually shows is not offered as a chip
+			// as well. Having a Content-ID is not enough to decide that:
+			// forwarding a message makes Gmail stamp one on every part, so a
+			// forwarded PDF arrives with a Content-ID nothing references — and
+			// skipping it hid the attachment entirely, while Gmail lists it.
+			if model.IsInlineAttachment(a, inlineRefs) {
 				continue
 			}
 			// The same file is usually carried by every message in a reply chain;

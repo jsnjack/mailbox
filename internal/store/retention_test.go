@@ -28,7 +28,7 @@ func TestPruneBodies(t *testing.T) {
 		if err := s.UpsertBody(ctx, model.MessageBody{MessageRowID: row, Text: "searchable body " + gmailID, HTML: "<p>hi</p>"}); err != nil {
 			t.Fatalf("upsert body %s: %v", gmailID, err)
 		}
-		if err := s.ReplaceAttachments(ctx, row, []model.Attachment{{GmailAttID: "a-" + gmailID, Filename: "f.pdf"}}); err != nil {
+		if err := s.ReplaceAttachments(ctx, row, []model.Attachment{{GmailAttID: "a-" + gmailID, Filename: "f.pdf"}}, nil); err != nil {
 			t.Fatalf("attachments %s: %v", gmailID, err)
 		}
 		if err := s.SetTranslation(ctx, acc, gmailID, "English", "hoi"); err != nil {

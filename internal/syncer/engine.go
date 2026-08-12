@@ -539,7 +539,7 @@ func (e *Engine) FetchBody(ctx context.Context, b backend.Backend, accountID int
 	if err := e.Store.UpsertBody(ctx, body); err != nil {
 		return err
 	}
-	if err := e.Store.ReplaceAttachments(ctx, m.RowID, atts); err != nil {
+	if err := e.Store.ReplaceAttachments(ctx, m.RowID, atts, model.ReferencedCIDs(body.HTML)); err != nil {
 		slog.Default().Warn("store attachments", "id", gmailID, "err", err)
 	}
 	e.publish(Change{Kind: MessageBodyFetched, AccountID: accountID, GmailID: gmailID, ThreadID: m.ThreadID})
@@ -595,7 +595,7 @@ func (e *Engine) BackfillHTMLBodies(ctx context.Context, b backend.Backend, acco
 				slog.Default().Warn("html backfill: store body", "id", id, "err", err)
 				return
 			}
-			if err := e.Store.ReplaceAttachments(ctx, m.RowID, atts); err != nil {
+			if err := e.Store.ReplaceAttachments(ctx, m.RowID, atts, model.ReferencedCIDs(body.HTML)); err != nil {
 				slog.Default().Warn("html backfill: store attachments", "id", id, "err", err)
 			}
 			n.Add(1)

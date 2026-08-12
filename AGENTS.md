@@ -305,7 +305,11 @@ keyed by gmail id + target lang — a body is immutable so they never go stale),
 see `deleteMessageTx`.) Draft-reply streams into a compose
 window via the `ai` provider. Incoming
 attachments are extracted on body fetch (`ReplaceAttachments`) and shown as chips
-in the reader; clicking one downloads it (content-addressed under the cache dir)
+in the reader. A part is treated as an inline image — rendered in the body, no
+chip, no paperclip — only when the body actually references its Content-ID
+(`model.ReferencedCIDs`/`IsInlineAttachment`, shared by the store and the
+reader): forwarding makes Gmail stamp a Content-ID on every part, so keying on
+its presence alone hid a forwarded PDF completely; clicking one downloads it (content-addressed under the cache dir)
 and opens it with `xdg-open`.
 
 Inbox mail is auto-categorized by AI into action tags (Needs reply / Calendar /
