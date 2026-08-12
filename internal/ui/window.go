@@ -3783,7 +3783,7 @@ func (w *window) buildSummaryCard() *gtk.Revealer {
 
 	card := gtk.NewBox(gtk.OrientationVertical, 6)
 	card.AddCSSClass("summary-card")
-	setMargins(card, 6, 6, 6, 6)
+	setMargins(card, 16, 16, 6, 6)
 	card.Append(titleRow)
 	card.Append(w.summaryLabel)
 

@@ -279,11 +279,13 @@ const appCSS = `
 	border-color: alpha(@window_fg_color, 0.25);
 }
 
-/* Cards above the conversation. Their horizontal padding is 10px and their
-   margin 6px, which lands their text on 16px — the same column the message
-   header, the summary card and the body use inside the WebView, so the reader
-   has one left edge from the subject down. The padding also keeps text and
-   buttons off the border (margins only push the card itself). */
+/* Cards above the conversation. They line up with the per-message summary card
+   inside the WebView, which is margined 10px inside a page margin of 6: box at
+   16px, text at 26 once the 1px border is counted. Plain rows — the subject,
+   attachment chips, the phishing caution — are margined 16 instead, so their
+   text sits on the 16px column with the message header's. A card indenting its
+   own contents is fine; two cards on different edges is not. The padding also
+   keeps text and buttons off the border (margins only push the card itself). */
 .invite-card { padding: 12px 9px; } /* 9 + the card's 1px border = the 10px column offset */
 
 /* AI thread-summary card: a soft accent-tinted panel pinned above the thread. */
