@@ -22,10 +22,7 @@ import (
 	"github.com/jsnjack/mailbox/internal/remotecache"
 )
 
-const (
-	remoteImagePromptThreshold = 20
-	remoteImageWorkers         = 6
-)
+const remoteImageWorkers = 6
 
 // imageFetchSlots caps how many images (external or inline) download at once.
 // WebKit asks for every image in the page at once and our fetches bypass its
@@ -34,9 +31,8 @@ const (
 var imageFetchSlots = make(chan struct{}, remoteImageWorkers)
 
 type remoteImageStats struct {
-	Total    int
-	Blocked  int
-	Deferred int
+	Total   int
+	Blocked int
 }
 
 var (
@@ -52,11 +48,11 @@ var (
 // download off the render's critical path — the conversation is readable as soon
 // as its text is sanitized, and images fill in as they arrive, the way a browser
 // loads a page. References that must not be requested at all (the privacy
-// opt-out, or an image-heavy message whose one-time prompt is unconfirmed) lose
-// their attribute here, so nothing can reach the network behind that decision.
+// opt-out) lose their attribute here, so nothing can reach the network behind
+// that decision.
 // It returns the rewritten HTML, what the banner has to say, and the key → URL
 // map the scheme handler fetches against.
-func (w *window) resolveRemoteImages(source string, allowNetwork, largeSetApproved bool) (string, remoteImageStats, map[string]string) {
+func (w *window) resolveRemoteImages(source string, allowNetwork bool) (string, remoteImageStats, map[string]string) {
 	doc, err := xhtml.Parse(strings.NewReader(source))
 	if err != nil {
 		return source, remoteImageStats{}, nil
@@ -65,14 +61,9 @@ func (w *window) resolveRemoteImages(source string, allowNetwork, largeSetApprov
 	stats := remoteImageStats{Total: len(urls)}
 	entries := make(map[string]remotecache.Entry, len(urls))
 	pending := make(map[string]string, len(urls))
-	largeSetBlocked := len(urls) > remoteImagePromptThreshold && !largeSetApproved
 	for _, rawURL := range urls {
-		switch {
-		case !allowNetwork:
+		if !allowNetwork {
 			stats.Blocked++
-			continue
-		case largeSetBlocked:
-			stats.Deferred++
 			continue
 		}
 		key, err := remotecache.Key(rawURL)
@@ -299,14 +290,14 @@ func imageNoun(n int) string {
 	return "images"
 }
 
-func remoteImageBannerCopy(stats remoteImageStats) (title, button string, loadAll bool) {
+// remoteImageBannerCopy describes images the reader deliberately withheld. That
+// is only ever the privacy opt-out: with images on they load as they arrive,
+// however many there are, the way a browser loads a page.
+func remoteImageBannerCopy(stats remoteImageStats) (title, button string) {
 	if stats.Blocked > 0 {
-		return fmt.Sprintf("%d external %s blocked for privacy", stats.Blocked, imageNoun(stats.Blocked)), "Show images", false
+		return fmt.Sprintf("%d external %s blocked for privacy", stats.Blocked, imageNoun(stats.Blocked)), "Show images"
 	}
-	if stats.Deferred > 0 {
-		return fmt.Sprintf("This message contains %d external images", stats.Total), "Load images", true
-	}
-	return "", "", false
+	return "", ""
 }
 
 // remoteImageFetchTimeout bounds one on-demand image download. The cache's HTTP
@@ -408,9 +399,7 @@ func (w *window) finishImageRequest(req *webkit.URISchemeRequest, path, mime str
 // applyRemoteImageBanner reveals (or hides) the remote-image banner for stats.
 // Main thread only.
 func (w *window) applyRemoteImageBanner(stats remoteImageStats) {
-	title, button, loadAll := remoteImageBannerCopy(stats)
-	w.remoteImageTotal = stats.Total
-	w.remoteImageLoadAll = loadAll
+	title, button := remoteImageBannerCopy(stats)
 	if title == "" {
 		w.remoteImageBanner.SetRevealed(false)
 		return

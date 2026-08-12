@@ -92,7 +92,6 @@ func (w *window) renderConversation(msgs []model.Message) {
 		}
 	}
 	loadRemoteImages := w.imagesEnabled
-	remoteImageBulkApproved := w.remoteImageBulkApproved
 	logging.Trace("ui: render conversation", "thread", threadID, "msgs", len(msgs), "cachedSections", len(cached))
 	// Cancel a still-running previous render (rapid thread open, a background
 	// refresh, a re-render) so its in-flight body fetches abort immediately
@@ -281,7 +280,7 @@ func (w *window) renderConversation(msgs []model.Message) {
 		// conversation is swapped in as soon as its text is ready and every image
 		// — external and inline alike — arrives afterwards through its scheme
 		// handler.
-		out, remoteStats, pendingImages := w.resolveRemoteImages(out, loadRemoteImages, remoteImageBulkApproved)
+		out, remoteStats, pendingImages := w.resolveRemoteImages(out, loadRemoteImages)
 		if renderCtx.Err() != nil {
 			logging.Trace("ui: external image pass cancelled", "thread", threadID)
 			return
@@ -297,7 +296,7 @@ func (w *window) renderConversation(msgs []model.Message) {
 		logging.Trace("ui: render conversation ready", "thread", threadID, "msgs", len(msgs), "fetched", fetched,
 			"newSections", len(fresh), "trackers", blocked, "auth", verdict.level, "warnings", len(warnings),
 			"attachments", len(atts), "inlineImages", len(inlineImgs), "remoteImages", remoteStats.Total,
-			"blockedRemoteImages", remoteStats.Blocked, "deferredRemoteImages", remoteStats.Deferred,
+			"blockedRemoteImages", remoteStats.Blocked,
 			"bytes", len(out), "html", logging.Body(out),
 			"fetch", fetchDur, "sanitize", time.Since(sanitizeStart))
 		dispatch.Main(func() {

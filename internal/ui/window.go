@@ -256,21 +256,18 @@ type window struct {
 	// quietly), so an event for one of these ids is this render's own echo — the
 	// render reads the body itself and must not be restarted by it. Main-thread
 	// only.
-	renderFetching          map[uiCacheKey]bool
-	renderGen               uint64
-	lastFetchFailed         bool             // true if the last render had fetch failures (for retry menu item)
-	replyBtn                *adw.SplitButton // primary action (Reply all); dropdown has Reply/Forward
-	aiReplyBtn              *gtk.MenuButton  // AI reply: popover of suggestions + intents
-	archiveBtn              *gtk.Button
-	translateBtn            *gtk.Button
-	overflowBtn             *gtk.MenuButton   // secondary reader actions (native menu model)
-	starAction              *gio.SimpleAction // stateful: the open message's Starred toggle
-	unreadAction            *gio.SimpleAction // stateful: the thread-list "show unread only" filter
-	imagesEnabled           bool              // whether remote images are loaded in the reader
-	blockImages             bool              // global remote-image opt-out (Preferences)
-	remoteImageBulkApproved bool              // user approved loading a conversation with more than the automatic threshold
-	remoteImageTotal        int               // unique remote URLs in the last completed render
-	remoteImageLoadAll      bool              // banner action approves a large set rather than lifting the privacy opt-out
+	renderFetching  map[uiCacheKey]bool
+	renderGen       uint64
+	lastFetchFailed bool             // true if the last render had fetch failures (for retry menu item)
+	replyBtn        *adw.SplitButton // primary action (Reply all); dropdown has Reply/Forward
+	aiReplyBtn      *gtk.MenuButton  // AI reply: popover of suggestions + intents
+	archiveBtn      *gtk.Button
+	translateBtn    *gtk.Button
+	overflowBtn     *gtk.MenuButton   // secondary reader actions (native menu model)
+	starAction      *gio.SimpleAction // stateful: the open message's Starred toggle
+	unreadAction    *gio.SimpleAction // stateful: the thread-list "show unread only" filter
+	imagesEnabled   bool              // whether remote images are loaded in the reader
+	blockImages     bool              // global remote-image opt-out (Preferences)
 
 	// AI inbox categorization, keyed by thread. The four facts about a thread's
 	// tag are always read and written together, so they live in one value: a
@@ -1645,19 +1642,9 @@ func (w *window) buildReader() *adw.NavigationPage {
 	w.translationBanner.ConnectButtonClicked(w.showOriginal)
 	w.remoteImageBanner = adw.NewBanner("")
 	w.remoteImageBanner.SetRevealed(false)
-	w.remoteImageBanner.ConnectButtonClicked(func() {
-		if w.remoteImageLoadAll {
-			w.remoteImageBulkApproved = true
-			w.rerenderOpenThread()
-			return
-		}
-		// The banner only appears when images were withheld, so its action is
-		// always "load them now".
-		if !w.imagesEnabled && w.remoteImageTotal > remoteImagePromptThreshold {
-			w.remoteImageBulkApproved = true
-		}
-		w.setImagesEnabled(true)
-	})
+	// The banner only appears when the privacy opt-out withheld images, so its
+	// action is always "load them now".
+	w.remoteImageBanner.ConnectButtonClicked(func() { w.setImagesEnabled(true) })
 
 	box := gtk.NewBox(gtk.OrientationVertical, 0)
 	box.Append(w.translationBanner)
@@ -2496,9 +2483,6 @@ func (w *window) clearReader() {
 	w.openThreadID = ""
 	w.openThreadMsgs = nil
 	w.openMsg = model.Message{}
-	w.remoteImageBulkApproved = false
-	w.remoteImageTotal = 0
-	w.remoteImageLoadAll = false
 	w.remoteImageBanner.SetRevealed(false)
 	w.resetTranslation()
 	w.hideSummary()
@@ -2672,11 +2656,6 @@ const threadHydrateTimeout = 15 * time.Second
 // messages have been read.
 func (w *window) showThreadMsgs(threadID string, msgs []model.Message) {
 	logging.Trace("ui: show thread", "thread", threadID, "n", len(msgs), "account", w.activeID)
-	if w.openThreadID != threadID {
-		w.remoteImageBulkApproved = false
-		w.remoteImageTotal = 0
-		w.remoteImageLoadAll = false
-	}
 	w.openThreadID = threadID
 	w.openThreadMsgs = msgs
 	w.openMsg = msgs[len(msgs)-1] // newest, for reply/forward/star/unread

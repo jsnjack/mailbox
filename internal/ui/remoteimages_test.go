@@ -29,11 +29,11 @@ func TestResolveRemoteImagesNamesCacheKeysWithoutFetching(t *testing.T) {
 	imageURL := srv.URL + "/hero.png"
 	source := `<img src="` + imageURL + `" alt="hero"><div style="background:url('` + imageURL + `')">x</div>`
 
-	got, stats, pending := w.resolveRemoteImages(source, true, false)
+	got, stats, pending := w.resolveRemoteImages(source, true)
 	if requests.Load() != 0 {
 		t.Fatalf("resolving made %d requests; the fetch belongs to the scheme handler", requests.Load())
 	}
-	if stats.Total != 1 || stats.Blocked != 0 || stats.Deferred != 0 {
+	if stats.Total != 1 || stats.Blocked != 0 {
 		t.Fatalf("stats = %+v", stats)
 	}
 	if strings.Contains(got, srv.URL) || strings.Count(got, "mbcache:") != 2 {
@@ -86,7 +86,7 @@ func TestResolveRemoteImagesNeverNamesNonImageCSSResources(t *testing.T) {
 		`.pointer{cursor:url(` + srv.URL + `/cursor.png),auto}` +
 		`</style><div class="hero">Hello</div>`
 
-	got, stats, pending := w.resolveRemoteImages(source, true, false)
+	got, stats, pending := w.resolveRemoteImages(source, true)
 	mu.Lock()
 	defer mu.Unlock()
 	if len(requests) != 0 {
@@ -111,7 +111,7 @@ func TestResolveRemoteImagesRemovesBlockedURLs(t *testing.T) {
 	w := &window{remoteImages: remotecache.NewWithClient(t.TempDir(), http.DefaultClient)}
 	source := `<img src="https://tracking.example/pixel.png"><div style="background:url(https://tracking.example/bg.png)">x</div>`
 
-	got, stats, pending := w.resolveRemoteImages(source, false, false)
+	got, stats, pending := w.resolveRemoteImages(source, false)
 	if stats.Blocked != 2 || len(pending) != 0 {
 		t.Fatalf("stats=%+v pending=%v", stats, pending)
 	}
@@ -120,41 +120,43 @@ func TestResolveRemoteImagesRemovesBlockedURLs(t *testing.T) {
 	}
 }
 
-func TestResolveRemoteImagesRequiresApprovalForLargeSets(t *testing.T) {
+// An image-heavy newsletter is named in full and loads like any other: there is
+// no count at which the reader stops asking for pictures, because the sender
+// already knows the message was opened from the first one.
+func TestResolveRemoteImagesNamesEveryImageOfALargeSet(t *testing.T) {
 	w := &window{remoteImages: remotecache.NewWithClient(t.TempDir(), http.DefaultClient)}
+	const many = 60
 	var source strings.Builder
-	for i := range remoteImagePromptThreshold + 1 {
+	for i := range many {
 		fmt.Fprintf(&source, `<img src="https://images.example/%d.png">`, i)
 	}
 
-	got, stats, pending := w.resolveRemoteImages(source.String(), true, false)
-	if stats.Total != remoteImagePromptThreshold+1 || stats.Deferred != stats.Total || len(pending) != 0 || strings.Contains(got, "mbcache:") {
-		t.Fatalf("unapproved pass stats=%+v pending=%d: %s", stats, len(pending), got)
+	got, stats, pending := w.resolveRemoteImages(source.String(), true)
+	if stats.Total != many || stats.Blocked != 0 {
+		t.Fatalf("stats=%+v, want %d total and none blocked", stats, many)
 	}
-
-	got, stats, pending = w.resolveRemoteImages(source.String(), true, true)
-	if stats.Deferred != 0 || len(pending) != stats.Total || strings.Count(got, "mbcache:") != stats.Total {
-		t.Fatalf("approved pass stats=%+v pending=%d: %s", stats, len(pending), got)
+	if len(pending) != many || strings.Count(got, "mbcache:") != many {
+		t.Fatalf("pending=%d, mbcache refs=%d; want %d of each", len(pending), strings.Count(got, "mbcache:"), many)
 	}
 }
 
 func TestRemoteImageBannerCopy(t *testing.T) {
 	tests := []struct {
-		name    string
-		stats   remoteImageStats
-		title   string
-		button  string
-		loadAll bool
+		name   string
+		stats  remoteImageStats
+		title  string
+		button string
 	}{
 		{name: "blocked", stats: remoteImageStats{Blocked: 2}, title: "2 external images blocked for privacy", button: "Show images"},
-		{name: "large set", stats: remoteImageStats{Total: 21, Deferred: 21}, title: "This message contains 21 external images", button: "Load images", loadAll: true},
+		// A large set is not withheld any more, so it has nothing to say.
+		{name: "large set", stats: remoteImageStats{Total: 60}},
 		{name: "none", stats: remoteImageStats{}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			title, button, loadAll := remoteImageBannerCopy(tt.stats)
-			if title != tt.title || button != tt.button || loadAll != tt.loadAll {
-				t.Fatalf("got %q, %q, %v; want %q, %q, %v", title, button, loadAll, tt.title, tt.button, tt.loadAll)
+			title, button := remoteImageBannerCopy(tt.stats)
+			if title != tt.title || button != tt.button {
+				t.Fatalf("got %q, %q; want %q, %q", title, button, tt.title, tt.button)
 			}
 		})
 	}

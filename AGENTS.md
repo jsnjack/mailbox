@@ -145,13 +145,12 @@ An image that can't be fetched is answered with a transparent pixel rather than
 an error, so the reader never draws a broken-image glyph; the failure is traced
 and nothing is said in the UI, because an expired campaign URL is not something
 the reader can act on. The banner is therefore only ever an offer to load images
-that were deliberately withheld ("Show images" behind the privacy opt-out,
-"Load images" for an image-heavy message). The image collector
+that were deliberately withheld — "Show images" behind the privacy opt-out, and
+nothing else: there is no count at which the reader stops asking for pictures,
+since one image already tells the sender the message was opened, so an
+image-heavy newsletter loads like any other page. The image collector
 parses CSS declarations and names only image-bearing properties; remote
 `@import`, fonts, cursors, and other CSS resources are removed without a request.
-A conversation with more than 20 unique external image URLs makes no new image
-requests until its single "Load images" banner is confirmed; cached images still
-render, and approval loads the complete set rather than asking in batches.
 A plain-text body (and the snippet fallback) is HTML-escaped into a `<pre>` with
 bare http(s) URLs auto-linkified (`linkifyText` — explicit-scheme match only, so
 no false positives or non-http schemes), so links in text-only mail (CI/cron/
