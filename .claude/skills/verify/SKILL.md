@@ -19,6 +19,7 @@ cp -r ~/.local/share/mailbox $SB/data/mailbox
 cp -r ~/.config/mailbox   $SB/config/mailbox
 
 Xvfb :77 -screen 0 1400x900x24 &   # pick a free display
+sbx_stop                           # ALWAYS, before every launch — see Gotchas
 
 XDG_DATA_HOME=$SB/data XDG_CONFIG_HOME=$SB/config XDG_CACHE_HOME=$SB/cache \
 DISPLAY=:77 GDK_BACKEND=x11 GSK_RENDERER=cairo \
@@ -81,9 +82,45 @@ python3-Xlib with XTEST works for clicks/keys/typing — see the drive.py patter
   single-instance per app id on the session bus: if an earlier sandbox with the
   same `MAILBOX_APP_ID` is still running (even from a past session), a new
   launch just activates it and exits — you screenshot the OLD binary and the
-  change appears to be missing/unverified. Before launching, find and kill any
-  process whose `/proc/<pid>/environ` has `MAILBOX_APP_ID=…sandbox`.
-- Kill by PID you saved at launch; `pgrep -x mailbox` can also match a real
-  running instance — check `/proc/<pid>/environ` for `MAILBOX_APP_ID` first.
+  change appears to be missing/unverified.
+
+  Stopping it is where this goes wrong, in three ways that all fail *silently*:
+
+  - **`/proc/<pid>/exe` reads `…/bin/mailbox (deleted)` after any rebuild**,
+    because `go build` replaced the file the process is running. An exact
+    string match on the exe path stops matching every instance you started
+    before the last build, so the kill quietly does nothing.
+  - **`pkill -f 'MAILBOX_APP_ID=…'` matches the killing shell itself** — its own
+    command line contains the pattern — so the shell dies (exit 144, no output)
+    while the app lives on.
+  - **Killing is not instant.** Launch immediately after and the new process
+    hands off to the still-dying one.
+
+  Match on the environment instead, and wait for the process to actually go:
+
+  ```bash
+  sbx_pids() {   # every sandbox process, whatever happened to its binary
+    for p in /proc/[0-9]*; do
+      grep -qz 'MAILBOX_APP_ID=com.jsnjack.mailbox.sandbox' "$p/environ" 2>/dev/null &&
+        echo "${p#/proc/}"
+    done
+  }
+  sbx_stop() {
+    for pid in $(sbx_pids); do kill "$pid" 2>/dev/null; done
+    for _ in $(seq 30); do [ -z "$(sbx_pids)" ] && return 0; sleep 1; done
+    for pid in $(sbx_pids); do kill -9 "$pid" 2>/dev/null; done; sleep 2
+  }
+  ```
+
+  It also catches the WebKit helper processes, which inherit the environment.
+  Keep `MAILBOX_APP_ID` inline on the launch command — `export` it in your
+  driving shell and the shell matches itself again.
+
+  **The symptom to recognise:** an edit has no visible effect no matter what you
+  change. Do not start theorising about GTK; prove which binary is on screen by
+  putting an absurd marker in the UI (`gtk.NewLabel("ZZZ")`), rebuilding, and
+  relaunching. If ZZZ doesn't appear, you are screenshotting a stale instance —
+  every before/after comparison you made since the last rebuild is void.
+
 - The sandbox truncates `/tmp/mailbox.log`; if you need the real session's
   trace, copy it before launching.
