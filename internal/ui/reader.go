@@ -1036,11 +1036,18 @@ pre{font-family:monospace;white-space:pre-wrap}
    introducing the sender a second time. The header sits on a faint band bled to
    the pane edges: the reader cannot draw a boundary an email is unable to
    imitate, but it can draw a surface. */
-.mbhead{color:#555;font-size:90%;background:rgba(0,0,0,.045);
-  margin:0 0 10px;padding:8px 10px 9px}
-.mbline{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.mbhead{color:#555;font-size:90%;margin:0 0 12px}
+/* The tint belongs to the identity line alone — recipients are detail, and
+   including them made a three-line slab of the newest message's header. It
+   carries no horizontal padding: its edges are the text column's edges, so the
+   sender lines up with the body underneath instead of sitting indented from it.
+   (Bleeding it wider than the column is what makes the fit-to-width script
+   scale the conversation — see AGENTS.md.) */
+.mbline{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;
+  background:rgba(0,0,0,.035);border-radius:6px;padding:6px 0}
 .mbdate{color:#888;white-space:nowrap}
-.mbaddr,.mbrcpt-line{color:#888}
+.mbaddr{color:#888}
+.mbrcpt-line{color:#888;padding-top:4px}
 .mbprev{color:#888;display:none}
 .mbchev{display:none}
 /* Messages are set apart by the space between them as much as by the band. */
@@ -1048,7 +1055,7 @@ details.mbmsg{margin-top:26px}
 details.mbmsg>summary{cursor:pointer;list-style:none}
 details.mbmsg>summary::-webkit-details-marker{display:none}
 details.mbmsg>summary>.mbhead{margin-bottom:0}
-details.mbmsg[open]>summary>.mbhead{margin-bottom:10px}
+details.mbmsg[open]>summary>.mbhead{margin-bottom:12px}
 details.mbmsg .mbchev{display:inline;color:#999}
 details.mbmsg .mbchev::before{content:"▸ "}
 details.mbmsg[open] .mbchev::before{content:"▾ "}
