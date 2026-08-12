@@ -342,8 +342,10 @@ instead of rebuilding on every event. `store`
 provides `ListThreadsByLabel`/`ListThreadMessages`/`GetThreadSummaries`. Opening a
 thread renders all its messages stacked in the reader (bodies fetched lazily,
 each a sanitized section). A message is one header plus its body: the header
-(`.mbhead`, a faint inset band so a boundary the reader drew can't be confused
-with a rule the email drew) doubles as the `<details>` summary for every
+(`.mbhead` — space above it, a hairline, and the sender's name in full-ink
+semibold; no fill, since a stack of tinted headers reads as slabs and no email
+footer ever puts a bold name straight under a rule) doubles as the `<details>`
+summary for every
 message but the newest, so folding one shows the same header rather than a
 second one introducing it — folded it shows sender + snippet, open it shows
 sender + address + recipients (`composeSection`). The band must stay inside the

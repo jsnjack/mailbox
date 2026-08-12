@@ -1023,7 +1023,7 @@ html{overflow-x:hidden}
 body{font-family:sans-serif;margin:8px 6px 16px;color:#222;line-height:1.4;overflow-x:hidden;overflow-wrap:anywhere}
 table{table-layout:auto}
 td,th{overflow-wrap:break-word;word-break:normal}
-.mbwrap>.mbhead:first-child,.mbwrap>details.mbmsg:first-child{margin-top:0}
+.mbwrap>details.mbmsg:first-child>summary>.mbhead{margin-top:0;padding-top:0;border-top:none}
 .mbmenu{color:inherit;text-decoration:none;margin-left:12px;opacity:.55}
 .mbmenu:hover{opacity:1}
 .mbmenu svg{width:15px;height:15px;vertical-align:-3px}
@@ -1040,37 +1040,46 @@ pre{font-family:monospace;white-space:pre-wrap}
    introducing the sender a second time. The header sits on a faint band bled to
    the pane edges: the reader cannot draw a boundary an email is unable to
    imitate, but it can draw a surface. */
-/* One text column, at 16px from the pane edge — where body text has always
-   sat. Each surface reaches nearly to the edge (the page margin is 2px) and
-   pads its own text back out to the column, so the header, the summary card
-   and the message all start on the same line, and no tinted box has text
-   against its edge. Padding, never negative margins: a surface wider than the
-   wrap makes the fit-to-width script scale the conversation (see AGENTS.md). */
-.mbhead{color:#555;font-size:90%;margin:0 0 12px}
-/* The tint belongs to the identity line alone — recipients are detail, and
-   including them made a three-line slab of the newest message's header. */
+/* A message is separated by space, a hairline and the weight of its sender's
+   name — not by a fill. Tinted headers made a thread a stack of grey slabs, and
+   every surface in this app is otherwise plain; what carries the boundary here
+   is that no email footer ever puts a full-ink, semibold name directly under a
+   rule. Text sits on one column, 16px from the pane edge: each part pads out to
+   it (the page margin is 6px) so the header, the summary card and the body all
+   start on the same line. Padding, never negative margins — a surface wider
+   than the wrap makes the fit-to-width script scale the conversation. */
+.mbhead{color:#555;font-size:90%;margin:22px 0 12px;padding-top:12px;
+  border-top:1px solid rgba(0,0,0,.07)}
+.mbwrap>.mbhead:first-child{margin-top:0;padding-top:0;border-top:none}
 .mbline{position:relative;display:flex;justify-content:space-between;gap:12px;
-  flex-wrap:wrap;background:rgba(0,0,0,.035);border-radius:6px;padding:6px 10px}
+  flex-wrap:wrap;padding:0 10px}
+/* The sender is the loudest thing in the header — that is what says "another
+   message starts here" once the tint is gone. */
+.mbline a b{color:#1a1a1a;font-size:1.1em}
 .mbdate{color:#888;white-space:nowrap}
 .mbaddr{color:#888}
 .mbrcpt-line{color:#888;padding:4px 10px 0}
 .mbbody{padding:0 10px}
 .mbprev{color:#888;display:none}
 .mbchev{display:none}
-/* Messages are set apart by the space between them as much as by the band. */
-details.mbmsg{margin-top:26px}
+details.mbmsg{margin-top:0} /* the header carries the spacing and the rule */
 details.mbmsg>summary{cursor:pointer;list-style:none}
 details.mbmsg>summary::-webkit-details-marker{display:none}
 details.mbmsg>summary>.mbhead{margin-bottom:0}
 details.mbmsg[open]>summary>.mbhead{margin-bottom:12px}
-details.mbmsg .mbchev{display:block;position:absolute;left:1px;top:6px;color:#999}
+details.mbmsg .mbchev{display:block;position:absolute;left:1px;top:1px;color:#bbb}
 details.mbmsg .mbchev::before{content:"▸"}
 details.mbmsg[open] .mbchev::before{content:"▾"}
 /* Folded, the header says who wrote and what about; open, it says who wrote,
    from which address, and to whom. */
 details.mbmsg:not([open]) .mbaddr,details.mbmsg:not([open]) .mbrcpt-line{display:none}
 details.mbmsg:not([open]) .mbprev{display:inline}
-.mbgist{background:rgba(53,132,228,.08);border:1px solid rgba(53,132,228,.16);border-radius:8px;padding:6px 9px;margin:12px 0 2px;color:#333;font-size:92%;line-height:1.35}
+/* The per-message gist is a line, not a card. As a bordered box it was the one
+   element wider than the message's own content — it spanned the full wrap while
+   the body sits inside its padding — so it ran past the email and under the
+   scrollbar. A line cannot be the wrong width, and the accent label is enough
+   to mark it as the AI's words rather than the sender's. */
+.mbgist{padding:0 10px;margin:12px 0;color:#444;font-size:92%;line-height:1.4}
 .mbgist-tag{color:#1a5fb4;font-weight:600;font-size:78%;text-transform:uppercase;letter-spacing:.07em;margin-right:6px;white-space:nowrap}`
 
 	// Fit-to-width: scale wide content down to fit the reader. WebKitGTK ignores
