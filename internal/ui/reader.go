@@ -1053,12 +1053,15 @@ pre{font-family:monospace;white-space:pre-wrap}
 .mbhead{color:#555;font-size:90%;margin:22px 0 12px;padding-top:12px;
   border-top:1px solid rgba(0,0,0,.07)}
 .mbwrap>.mbhead:first-child{margin-top:0;padding-top:0;border-top:none}
+/* One line, always: the date and the ⋯ stay pinned right, and a long snippet
+   ellipsizes rather than wrapping them onto a second row. */
 .mbline{position:relative;display:flex;justify-content:space-between;gap:12px;
-  flex-wrap:wrap;padding:0 10px}
+  align-items:baseline;padding:0 10px}
+.mbline>span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* The sender is the loudest thing in the header — that is what says "another
    message starts here" once the tint is gone. */
 .mbline a b{color:#1a1a1a;font-size:1.1em}
-.mbdate{color:#888;white-space:nowrap}
+.mbdate{color:#888;white-space:nowrap;flex:none}
 .mbaddr{color:#888}
 .mbrcpt-line{color:#888;padding:4px 10px 0}
 .mbbody{padding:0 10px}
