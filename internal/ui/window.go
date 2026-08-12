@@ -1606,7 +1606,7 @@ func (w *window) buildReader() *adw.NavigationPage {
 	w.trackerLabel.SetTooltipText("Likely tracking resources removed before loading")
 	w.trackerLabel.SetVisible(false)
 	headerRow := gtk.NewBox(gtk.OrientationHorizontal, 6)
-	setMargins(headerRow, 12, 12, 8, 8)
+	setMargins(headerRow, 16, 16, 8, 8)
 	headerRow.Append(w.authIcon)
 	headerRow.Append(w.header)
 	headerRow.Append(w.trackerLabel)
@@ -1621,7 +1621,7 @@ func (w *window) buildReader() *adw.NavigationPage {
 	w.attachBox.SetColumnSpacing(6)
 	w.attachBox.SetRowSpacing(6)
 	w.attachBox.SetHomogeneous(false)
-	setMargins(w.attachBox, 12, 12, 0, 8)
+	setMargins(w.attachBox, 16, 16, 0, 8)
 	w.attachBox.SetVisible(false)
 
 	w.cautionLabel = gtk.NewLabel("")
@@ -1632,7 +1632,7 @@ func (w *window) buildReader() *adw.NavigationPage {
 	w.cautionLabel.SetWrapMode(pango.WrapWordChar)
 	w.cautionLabel.AddCSSClass("caption")
 	w.cautionLabel.AddCSSClass("warning")
-	setMargins(w.cautionLabel, 12, 12, 0, 6)
+	setMargins(w.cautionLabel, 16, 16, 0, 6)
 	w.cautionLabel.SetVisible(false)
 
 	// Revealed while an in-place translation is shown; reverts to the original.
@@ -3780,7 +3780,7 @@ func (w *window) buildSummaryCard() *gtk.Revealer {
 
 	card := gtk.NewBox(gtk.OrientationVertical, 6)
 	card.AddCSSClass("summary-card")
-	setMargins(card, 12, 12, 6, 6)
+	setMargins(card, 6, 6, 6, 6)
 	card.Append(titleRow)
 	card.Append(w.summaryLabel)
 

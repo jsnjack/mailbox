@@ -279,16 +279,19 @@ const appCSS = `
 	border-color: alpha(@window_fg_color, 0.25);
 }
 
-/* Meeting-invite card: a neutral panel above the conversation. The padding
-   keeps text and buttons off the border (margins only push the card itself). */
-.invite-card { padding: 12px 14px; }
+/* Cards above the conversation. Their horizontal padding is 10px and their
+   margin 6px, which lands their text on 16px — the same column the message
+   header, the summary card and the body use inside the WebView, so the reader
+   has one left edge from the subject down. The padding also keeps text and
+   buttons off the border (margins only push the card itself). */
+.invite-card { padding: 12px 9px; } /* 9 + the card's 1px border = the 10px column offset */
 
 /* AI thread-summary card: a soft accent-tinted panel pinned above the thread. */
 .summary-card {
 	background-color: alpha(@accent_color, 0.08);
 	border: 1px solid alpha(@accent_color, 0.28);
-	border-radius: 12px;
-	padding: 10px 12px;
+	border-radius: 10px;
+	padding: 10px 9px; /* 9 + the 1px border lands the text on the column */
 }
 .summary-title { color: @accent_color; }
 `

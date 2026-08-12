@@ -1020,7 +1020,7 @@ func readerShellHTML() string {
 	// scrollbar nor cropping.
 	const style = `
 html{overflow-x:hidden}
-body{font-family:sans-serif;margin:8px 2px 16px;color:#222;line-height:1.4;overflow-x:hidden;overflow-wrap:anywhere}
+body{font-family:sans-serif;margin:8px 6px 16px;color:#222;line-height:1.4;overflow-x:hidden;overflow-wrap:anywhere}
 table{table-layout:auto}
 td,th{overflow-wrap:break-word;word-break:normal}
 .mbwrap>.mbhead:first-child,.mbwrap>details.mbmsg:first-child{margin-top:0}
@@ -1050,11 +1050,11 @@ pre{font-family:monospace;white-space:pre-wrap}
 /* The tint belongs to the identity line alone — recipients are detail, and
    including them made a three-line slab of the newest message's header. */
 .mbline{position:relative;display:flex;justify-content:space-between;gap:12px;
-  flex-wrap:wrap;background:rgba(0,0,0,.035);border-radius:6px;padding:6px 14px}
+  flex-wrap:wrap;background:rgba(0,0,0,.035);border-radius:6px;padding:6px 10px}
 .mbdate{color:#888;white-space:nowrap}
 .mbaddr{color:#888}
-.mbrcpt-line{color:#888;padding:4px 14px 0}
-.mbbody{padding:0 14px}
+.mbrcpt-line{color:#888;padding:4px 10px 0}
+.mbbody{padding:0 10px}
 .mbprev{color:#888;display:none}
 .mbchev{display:none}
 /* Messages are set apart by the space between them as much as by the band. */
@@ -1063,14 +1063,14 @@ details.mbmsg>summary{cursor:pointer;list-style:none}
 details.mbmsg>summary::-webkit-details-marker{display:none}
 details.mbmsg>summary>.mbhead{margin-bottom:0}
 details.mbmsg[open]>summary>.mbhead{margin-bottom:12px}
-details.mbmsg .mbchev{display:block;position:absolute;left:4px;top:6px;color:#999}
+details.mbmsg .mbchev{display:block;position:absolute;left:1px;top:6px;color:#999}
 details.mbmsg .mbchev::before{content:"▸"}
 details.mbmsg[open] .mbchev::before{content:"▾"}
 /* Folded, the header says who wrote and what about; open, it says who wrote,
    from which address, and to whom. */
 details.mbmsg:not([open]) .mbaddr,details.mbmsg:not([open]) .mbrcpt-line{display:none}
 details.mbmsg:not([open]) .mbprev{display:inline}
-.mbgist{background:rgba(53,132,228,.08);border:1px solid rgba(53,132,228,.16);border-radius:8px;padding:6px 13px;margin:12px 0 2px;color:#333;font-size:92%;line-height:1.35}
+.mbgist{background:rgba(53,132,228,.08);border:1px solid rgba(53,132,228,.16);border-radius:8px;padding:6px 9px;margin:12px 0 2px;color:#333;font-size:92%;line-height:1.35}
 .mbgist-tag{color:#1a5fb4;font-weight:600;font-size:78%;text-transform:uppercase;letter-spacing:.07em;margin-right:6px;white-space:nowrap}`
 
 	// Fit-to-width: scale wide content down to fit the reader. WebKitGTK ignores

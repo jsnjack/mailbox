@@ -345,11 +345,14 @@ second one introducing it — folded it shows sender + snippet, open it shows
 sender + address + recipients (`composeSection`). The band must stay inside the
 content width: bleeding it past the edges makes `wrap.scrollWidth` exceed the
 pane, which sets the fit-to-width script scaling the whole conversation and
-moves every hit target. Everything a message shows sits on one text column —
-the page margin is 2px and the header band, the summary card and the body
-(`.mbbody`) each pad their own text back out to it, with the disclosure arrow
-hanging in the band's padding — so a surface can have padding without its text
-stepping away from the message's. Links inside a summary follow without toggling the
+moves every hit target. The whole reader pane sits on one text
+column at 16px: filled surfaces (the thread-summary and invite cards outside the
+WebView, the header band and gist inside it) are inset 6px and pad 10px — 9px
+where a 1px border makes up the difference — while plain rows (subject,
+attachment chips, the phishing caution) are simply margined 16px, and the body
+(`.mbbody`) pads to the same column with the disclosure arrow hanging in the
+band's padding. Change one of those numbers and the pane grows a second left
+edge. Links inside a summary follow without toggling the
 disclosure (WebKit skips activation for interactive descendants), so the
 per-message ⋯ works on a folded message too; the `toggle` event refits, since
 folding changes the height the scaled layout baked in. Archive/trash apply to the whole thread, the header

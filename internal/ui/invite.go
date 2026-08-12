@@ -20,7 +20,7 @@ func (w *window) buildInviteCard() gtk.Widgetter {
 	w.inviteCard = gtk.NewBox(gtk.OrientationVertical, 4)
 	w.inviteCard.AddCSSClass("card")
 	w.inviteCard.AddCSSClass("invite-card") // inner padding — see theme.go
-	setMargins(w.inviteCard, 12, 12, 6, 6)
+	setMargins(w.inviteCard, 6, 6, 6, 6)
 	w.inviteCard.SetVisible(false)
 	return w.inviteCard
 }
