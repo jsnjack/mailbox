@@ -112,19 +112,50 @@ TIMEOUT = 900
 # big file: bound it so one slow pull cannot block a whole sweep.
 PULL_TIMEOUT = 1800
 
-DEFAULT_TARGETS = [
-    "granite-4.1-8b-GGUF-Q5_K_M",   # baseline: today's local fallback
-    "Gemma-4-E4B-it-GGUF",          # same size class, strongest translator
-    "Qwen3.5-4B-MTP-GGUF",          # multi-token prediction, speed play
-    "granite-4.0-h-tiny-GGUF",      # granite family, MoE, tiny
-    "Qwen3.5-35B-A3B-GGUF",         # 35B total / 3B active -- fast AND big?
-]
+# The model mailbox is configured to use. Every run puts it first and reports
+# the others as deltas against it, so "is this candidate better?" is answerable
+# without remembering last week's numbers. Change it here when the app's
+# [[ai.chain]] local entry changes.
+BASELINE = "Gemma-4-E4B-it-GGUF"
+
+DEFAULT_TARGETS = [BASELINE]
 
 # Inbox mix used for the frequency-WEIGHTED score. Per-class recall shows where
 # a model is weak; this shows what you would actually experience day to day.
 # NB a model that blindly answers "Notification" scores ~87% weighted and ~30%
 # raw -- always read both, plus "Needs reply" recall.
 REAL_FREQ = synthetic.INBOX_MIX
+
+
+def sample_across_classes(cases, n):
+    """
+    Take n cases that still cover every category, instead of the first n.
+
+    The set is grouped by class, so cases[:60] is 60 Notifications and a capped
+    run silently reports 0% on "Needs reply" — which reads as a model failure
+    rather than a missing sample. Round-robin keeps the proportions roughly
+    intact and guarantees each class appears while it can.
+    """
+    if n >= len(cases):
+        return cases
+    buckets = defaultdict(list)
+    for c in cases:
+        buckets[c["label"]].append(c)
+    # largest class first, so the mix stays close to the real distribution
+    order = sorted(buckets, key=lambda k: -len(buckets[k]))
+    out, i = [], 0
+    while len(out) < n:
+        added = False
+        for label in order:
+            if i < len(buckets[label]):
+                out.append(buckets[label][i])
+                added = True
+                if len(out) == n:
+                    break
+        if not added:
+            break
+        i += 1
+    return sorted(out, key=lambda c: c["id"])
 
 
 def load_cases():
@@ -1060,8 +1091,9 @@ def write_artifact(rows, args, meta):
     # prefill tps belongs here: summaries and translation are input-bound, so a
     # model can have better gen tps than the baseline and still be slower at the
     # two features the user actually waits for.
-    hdr = (f"{'target':<32}{'RAM':>6}{'pre':>6}{'gen':>6}{'ttft':>6}{'raw%':>7}"
-           f"{'wtd%':>7}{'reply%':>8}{'hard%':>7}{'trans%':>7}{'flip%':>6}")
+    hdr = (f"{'model':<34}{'RAM':>6}{'pre':>6}{'gen':>6}{'ttft':>6}{'raw%':>7}"
+           f"{'wtd%':>7}{'rep-R':>7}{'rep-P':>7}{'hard%':>7}{'trans%':>7}"
+           f"{'flip%':>6}")
     print("\n" + hdr + "\n" + "-" * len(hdr))
     base = None
     for r in rows:
@@ -1071,11 +1103,15 @@ def write_artifact(rows, args, meta):
         s, c = r.get("speed", {}), r.get("categorisation", {})
         t, d = r.get("translation", {}), c.get("per_difficulty", {})
         m, cy = r.get("memory_gb", {}), r.get("consistency", {})
-        print(f"{r['target']:<32}{m.get('peak_gb') or 0:>6.1f}"
+        fp = sum(1 for x in c.get("misses", []) if x["stored"] == "Needs reply")
+        tp = c.get("per_category", {}).get("Needs reply", {}).get("correct", 0)
+        prec = 100.0 * tp / (tp + fp) if tp + fp else 0.0
+        name = r["target"] + ("  (baseline)" if r["target"] == BASELINE else "")
+        print(f"{name:<34}{m.get('peak_gb') or 0:>6.1f}"
               f"{s.get('prefill_tok_s') or 0:>6.0f}"
               f"{s.get('gen_tok_s') or 0:>6.1f}{r.get('ttft_s') or 0:>6.2f}"
               f"{c.get('accuracy_pct',0):>7}{c.get('weighted_accuracy_pct',0):>7}"
-              f"{c.get('needs_reply_recall_pct',0):>8}"
+              f"{c.get('needs_reply_recall_pct',0):>7}{prec:>7.1f}"
               f"{d.get('hard',{}).get('accuracy_pct',0):>7}"
               f"{t.get('facts_kept_pct',0):>7}"
               f"{cy.get('flip_pct', 0):>6}")
@@ -1098,8 +1134,39 @@ def write_artifact(rows, args, meta):
                   f"speed {g / bg:4.2f}x   RAM {mm / bm:4.2f}x"
                   + (f"   {per_gb:+.2f}pp per extra GB" if per_gb else ""))
     ran = rows[0].get("categorisation", {}).get("n", meta["scored"]) if rows else meta["scored"]
-    print(f"\nraw% over {ran} cases; wtd% weighted by your true "
-          f"inbox mix; reply% = 'Needs reply' recall (the one that costs you most)")
+    if ran < meta["scored"]:
+        print(f"\n  NOTE: capped at {ran} of {meta['scored']} cases. The sample "
+              f"covers every category, but\n  wtd% is computed from very few "
+              f"Notification cases and will swing. Use a full run\n  before "
+              f"trusting a comparison.")
+    print(f"""
+what the columns mean ({ran} labelled emails)
+
+  RAM     GB resident while the model is loaded — weights plus the KV cache
+          llama.cpp preallocates. This is NOT the download size; expect 1.3-2.3x.
+  pre     prefill tok/s: how fast it READS. Drives thread summaries and
+          translation, which are long-input, short-output.
+  gen     generation tok/s: how fast it WRITES. Drives draft replies.
+  ttft    seconds to the first visible token. This is what "feels" fast when a
+          draft streams into the compose window; throughput is not.
+
+  raw%    accuracy over all cases, each counted once.
+  wtd%    accuracy weighted by how often each category actually arrives (~87%
+          Notification). Closer to what you experience — but read it WITH raw%:
+          a model answering "Notification" to everything scores ~87% here and
+          ~17% raw.
+  rep-R   "Needs reply" recall: of the mail that needs an answer, how much it
+          catches.
+  rep-P   "Needs reply" precision: of the mail it tags, how much really needs an
+          answer. A model can hold 100% recall while a third of its badges are
+          false, so this is the one that decides whether you trust the tag.
+  hard%   accuracy on cases that probe a specific boundary rule — the ones weak
+          models fail first.
+  trans%  key facts (dates, amounts, names) surviving a Dutch and a German
+          translation.
+  flip%   answers that changed on a repeat pass. Categories are cached per
+          message, so a flip sticks until you re-categorise.
+""")
     print(f"artifact -> {ARTIFACT} ({os.path.getsize(ARTIFACT)/1024:.0f} KB)")
     print("Give Claude artifact.json to grade the summaries and drafts.")
 
@@ -1128,11 +1195,15 @@ def main():
     consumed = {flagval("--reps", None), catlimit}
     specs = [a for a in argv if not a.startswith("--") and a not in consumed] \
         or DEFAULT_TARGETS
+    # Naming a model means "compare this with what I run today", so the baseline
+    # goes in front unless it is already there or explicitly waived.
+    if "--solo" not in argv and BASELINE not in specs:
+        specs = [BASELINE] + specs
     targets = [Target(s) for s in specs]
 
     cases, meta = load_cases()
     if catlimit:
-        cases = cases[:int(catlimit)]
+        cases = sample_across_classes(cases, int(catlimit))
 
     print(f"category set : {len(cases)} emails, {meta['source']}")
     print(f"prompt       : production, {len(CATEGORIZE_SYSTEM)} chars")

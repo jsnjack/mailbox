@@ -63,6 +63,23 @@ IMAP providers need only an app password; Gmail and Outlook need a one-time
 client setup. **[docs/SETUP.md](docs/SETUP.md)** walks through every option,
 including turning on the AI.
 
+## Choosing an AI model
+
+The AI runs against whatever model you point it at, and the difference between
+models is large: across seven local models the inbox tagging ranged from 34% to
+96% correct, and the best one was neither the biggest nor the slowest.
+
+If you want to try a model on your own hardware, `bench/` has a benchmark that
+scores tagging, summaries, drafts and translation, and measures real memory and
+speed. Name a model and it is compared against the one you're running:
+
+```bash
+cd bench && python3 bench_models.py Qwen3.5-9B-GGUF
+```
+
+**[docs/BENCHMARK.md](docs/BENCHMARK.md)** explains what the numbers mean and
+which models have been measured so far.
+
 ## License
 
 [MIT](LICENSE)
