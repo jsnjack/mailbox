@@ -7,13 +7,16 @@ mailbox.db
 # OAuth client secrets — never commit
 credentials.json
 client_secret*.json
-# Local model benchmark — held back entirely for now.
-#
-# The harness itself is clean, but bench/cases.py is not the synthetic set it
-# claims to be: a 6-word-shingle comparison against the real mail it was derived
-# from found 524 shared phrases, including a resignation thread, a compensation
-# discussion, an own sent reply, a card's last four digits and a real flight
-# route. It has to be genuinely rewritten before any of bench/ is committed.
-/bench/
+# Local model benchmark. The harness and the synthetic test set are committed;
+# everything below is either generated output or built from real mail, and must
+# never be. Before committing a change to bench/cases.py, re-run the shingle
+# check against pool.json — a name scan is not sufficient and once let a whole
+# corpus through.
+/bench/pool.json
+/bench/realcases.py
+/bench/artifact.json
+/bench/probe_thinking.json
+/bench/prompt.py
+/bench/__pycache__/
 dist/
 .claude/worktrees/
