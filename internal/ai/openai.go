@@ -51,6 +51,16 @@ func (p *openAIProvider) StreamOpts(ctx context.Context, system string, msgs []M
 	if o.Temperature != nil {
 		payload["temperature"] = *o.Temperature
 	}
+	if !o.AllowReasoning {
+		// Two keys because servers disagree on which one they honour, and both
+		// are ignored when unknown: "reasoning_effort" is the OpenAI-style knob
+		// (llama.cpp and vLLM accept it), "chat_template_kwargs" is how
+		// llama.cpp/lemonade passes enable_thinking into a Qwen-style chat
+		// template. Sending both is what makes one config work across the
+		// endpoints a user might chain together.
+		payload["reasoning_effort"] = "none"
+		payload["chat_template_kwargs"] = map[string]any{"enable_thinking": false}
+	}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)

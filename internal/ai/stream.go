@@ -53,6 +53,18 @@ func streamSSE(ctx context.Context, client *http.Client, req *http.Request, extr
 		streamStart := time.Now()
 		logging.Trace("ai: stream start", "provider", provider, "model", model)
 		var chunks, bytesOut int
+		var think thinkFilter // drops inline chain-of-thought, see think.go
+		// Registered after close(ch) so it runs BEFORE it (defers are LIFO):
+		// releases text the filter withheld while it looked like the start of a
+		// <think> tag but turned out to be ordinary content at end of stream.
+		defer func() {
+			if tail := think.flush(); tail != "" {
+				select {
+				case ch <- Chunk{Text: tail}:
+				case <-ctx.Done():
+				}
+			}
+		}()
 		sc := bufio.NewScanner(resp.Body)
 		sc.Buffer(make([]byte, 0, 64*1024), maxSSELine)
 		for sc.Scan() {
@@ -78,6 +90,9 @@ func streamSSE(ctx context.Context, client *http.Client, req *http.Request, extr
 				case <-ctx.Done():
 				}
 				return
+			}
+			if text != "" {
+				text = think.feed(text)
 			}
 			if text != "" {
 				chunks++
