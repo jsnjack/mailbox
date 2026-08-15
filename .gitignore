@@ -8,12 +8,13 @@ mailbox.db
 credentials.json
 client_secret*.json
 # Local model benchmark. The harness and the synthetic test set are committed;
-# everything below is either generated output or built from real mail, and must
-# never be. Before committing a change to bench/cases.py, re-run the shingle
-# check against pool.json — a name scan is not sufficient and once let a whole
-# corpus through.
-/bench/pool.json
-/bench/realcases.py
+# everything below is generated output.
+#
+# bench/cases.py must stay synthetic. Do not author it with real mail open: an
+# earlier version was, and reproduced 524 phrases from a real mailbox while a
+# name scan reported it clean. The real corpus it was checked against has since
+# been deleted, so that check can no longer be re-run — which makes the rule
+# "never paste real mail in", not "scrub it afterwards".
 /bench/artifact.json
 /bench/probe_thinking.json
 /bench/prompt.py

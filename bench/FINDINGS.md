@@ -270,16 +270,18 @@ single gate all 13 ops call through, so suppression is now the default everywher
 and an op must deliberately opt in. A new op cannot accidentally inherit
 13-second drafts.
 
-### Harness bug #7: the detector was reactive
+### Harness bug #7: the detector was reactive (fixed)
 
-The bench latch fires only when a reply comes back *blank*. With a 512-token
-budget a thinking model often finishes thinking and answers correctly — just 15×
-slower — so the latch never triggers and the cost is invisible. A verification
-run paid ~15s/email for ten calls before one reply happened to overrun and flip
-the latch.
+The bench originally suppressed thinking only *reactively*, when a reply came
+back blank. With a 512-token budget a thinking model often finishes deliberating
+and answers correctly — just 15× slower — so nothing triggered and the cost was
+invisible: a selftest run paid 14–18s per email while reporting 8/8 correct.
 
-The sweep itself was NOT affected: its warmup call uses `max_tokens=5`, which a
-thinking model cannot satisfy, so the latch fired before any measurement. Log
-ordering confirms it — `(reasoning model detected)` precedes the `speed` line for
-all five thinking models. But the harness should mirror production and suppress
-proactively on the categorisation path rather than waiting for a blank reply.
+The sweep results were NOT affected, because its warmup call uses
+`max_tokens=5`, which a thinking model cannot satisfy, so suppression engaged
+before any measurement; log ordering confirms `(reasoning model detected)`
+precedes the `speed` line for all five thinking models.
+
+The harness now suppresses unconditionally on every call, exactly as
+`Assistant.stream` does. Same selftest afterwards: 0.3s per email instead of
+14–18s, and the latch, the retry and the detection branch all disappeared.

@@ -11,11 +11,9 @@ FIDELITY
   * same item format: "From: <who> / Subject: <subj> / <snippet>"
   * same tolerant parsing: Python port of parseCategories + MatchCategory, so a
     model is scored on what mailbox would ACTUALLY store
-  * 170 synthetic labelled emails (bench/cases.py) whose archetypes, category
+  * 272 synthetic labelled emails (bench/cases.py) whose archetypes, category
     boundaries and decoys are modelled on a real inbox, but which contain no
     real names, senders or content -- committed and safe to share.
-    --private swaps in a local ground-truth set built from real mail, if you
-    keep one (bench/realcases.py + pool.json, both gitignored).
 
 TARGET SYNTAX
   granite-4.1-8b-GGUF-Q5_K_M          local lemonade model
@@ -33,7 +31,7 @@ MISSING LOCAL MODELS
 USAGE
   python3 genprompt.py ~/workspace/mailbox      # once, and after prompt edits
   python3 bench_models.py --selftest            # ~1 min, no eviction
-  python3 bench_models.py --quick               # speed + all 170 categories
+  python3 bench_models.py --quick               # speed + all 272 categories
   python3 bench_models.py                       # adds translation/summary/draft
   python3 bench_models.py --remote-models proteus          # what's on proteus
   python3 bench_models.py granite-4.1-8b-GGUF-Q5_K_M local-qwen@proteus
@@ -129,21 +127,9 @@ DEFAULT_TARGETS = [
 REAL_FREQ = synthetic.INBOX_MIX
 
 
-def load_cases(private=False):
-    """
-    Synthetic set by default (bench/cases.py, committed, no private data).
-    --private uses bench/realcases.py + pool.json if you keep a local
-    ground-truth set built from real mail; those files are gitignored.
-    -> (cases, ambiguous, meta)
-    """
-    if private:
-        try:
-            import realcases
-        except ImportError:
-            sys.exit("--private needs bench/realcases.py + pool.json (not committed)")
-        return realcases.load()
-    c, meta = synthetic.load()
-    return c, [], meta
+def load_cases():
+    """The labelled set from cases.py -> (cases, meta)."""
+    return synthetic.load()
 
 
 # ---------------------------------------------------------------- targets
@@ -275,7 +261,6 @@ class Target:
         self.spec = spec
         self.empty = 0            # replies whose content was blank
         self.reasoning_only = 0   # ...but which carried chain-of-thought
-        self.no_think = False     # latched on when a reasoning model is detected
         if "@" in spec:
             self.model, ep = spec.rsplit("@", 1)
             self.base = ENDPOINT_ALIASES.get(ep, ep)
@@ -289,19 +274,21 @@ class Target:
         return f"<{self.kind} {self.model} @ {self.base}>"
 
 
-def post(target, messages, max_tokens, temp, _retry=True):
+def post(target, messages, max_tokens, temp):
+    # Thinking is suppressed on every call, because internal/ai does the same:
+    # Options.AllowReasoning defaults to false in Assistant.stream. Measured on
+    # Qwen3.5-35B-A3B, one classification costs 772 tokens and 31.5s with
+    # thinking and 4 tokens and 0.3s without, for the same answer. An earlier
+    # version of this script only suppressed *reactively*, after a reply came
+    # back blank -- so a model that thinks and then answers correctly, just 15x
+    # slower, was never detected and the cost stayed invisible. Both keys are
+    # sent because servers differ in which one they honour, and both are ignored
+    # when unknown.
     payload_out = {"model": target.model, "messages": messages,
                    "max_tokens": max_tokens, "temperature": temp,
-                   "stream": False}
-    if target.no_think:
-        # Measured on Qwen3.5-35B-A3B: with thinking on, a classification costs
-        # 772 completion tokens and 31.5s and needs max_tokens>=2048 to emit an
-        # answer at all. With it off: 4 tokens, 0.3s, same answer. Classification
-        # wants the argmax, not deliberation -- which is why the production prompt
-        # already pins temperature 0. Both keys are sent because servers differ in
-        # which one they honour.
-        payload_out["chat_template_kwargs"] = {"enable_thinking": False}
-        payload_out["reasoning_effort"] = "none"
+                   "stream": False,
+                   "chat_template_kwargs": {"enable_thinking": False},
+                   "reasoning_effort": "none"}
     body = json.dumps(payload_out).encode()
     headers = {"Content-Type": "application/json"}
     if target.key:
@@ -316,21 +303,8 @@ def post(target, messages, max_tokens, temp, _retry=True):
     msg = (payload["choices"][0].get("message") or {})
     txt = THINK_RE.sub("", msg.get("content") or "").strip()
     if not txt:
-        reasoned = bool((msg.get("reasoning_content")
-                         or msg.get("reasoning") or "").strip())
-        # Self-heal: a blank answer plus chain-of-thought means a reasoning model
-        # burned the budget deliberating. Latch thinking off for this target and
-        # retry once; every later call is then fast and parseable.
-        if reasoned and not target.no_think and _retry:
-            target.no_think = True
-            print(f"      (reasoning model detected on {target.model}: "
-                  f"disabling thinking)", flush=True)
-            try:
-                return post(target, messages, max_tokens, temp, _retry=False)
-            except urllib.error.HTTPError:
-                target.no_think = False   # server rejects the knobs; give up
         target.empty += 1
-        if reasoned:
+        if (msg.get("reasoning_content") or msg.get("reasoning") or "").strip():
             target.reasoning_only += 1
     return (txt, u.get("prompt_tokens", 0), u.get("completion_tokens", 0), el)
 
@@ -513,9 +487,8 @@ def measure_ttft(target, prompt, max_tokens=120):
     payload = {"model": target.model, "stream": True, "max_tokens": max_tokens,
                "temperature": 0.3,
                "messages": [{"role": "user", "content": prompt}]}
-    if target.no_think:
-        payload["reasoning_effort"] = "none"
-        payload["chat_template_kwargs"] = {"enable_thinking": False}
+    payload["reasoning_effort"] = "none"
+    payload["chat_template_kwargs"] = {"enable_thinking": False}
     headers = {"Content-Type": "application/json"}
     if target.key:
         headers["Authorization"] = f"Bearer {target.key}"
@@ -1022,9 +995,7 @@ def bench(target, idx, args, cases):
                                        args["reps"], "dr")
         print(f"      generated {len(rec['summaries'])} summaries + "
               f"{len(rec['drafts'])} drafts for Claude", flush=True)
-    # Recorded because it changes how the generative output should be read: once
-    # thinking is latched off it stays off for the summaries and drafts too.
-    rec["thinking_disabled"] = target.no_think
+    rec["thinking_disabled"] = True   # always, mirroring internal/ai
     return rec
 
 
@@ -1035,7 +1006,7 @@ def selftest():
     if not m:
         sys.exit("could not determine the loaded model; is the server running?")
     t = Target(m)
-    cases, amb, meta = load_cases("--private" in sys.argv)
+    cases, meta = load_cases()
     print(f"loaded model : {m}")
     print(f"ground truth : {meta}")
     print(f"prompt       : {len(CATEGORIZE_SYSTEM)} chars, "
@@ -1056,7 +1027,7 @@ def selftest():
 
 # ------------------------------------------------------------------ artifact
 
-def write_artifact(rows, args, meta, ambiguous):
+def write_artifact(rows, args, meta):
     doc = {
         "purpose": "Claude grades summaries + drafts by reading this; the script "
                    "already scored speed, categorisation and translation.",
@@ -1080,8 +1051,6 @@ def write_artifact(rows, args, meta, ambiguous):
             "summary_asked_for": "exactly three factual bullets, no preamble",
             "draft_requirements": DRAFT_REQUIREMENTS,
         },
-        "ambiguous_excluded": [{"id": a["id"], "item": a["item"][:120],
-                                "app_label": a["app_label"]} for a in ambiguous],
         "reps": args["reps"],
         "models": rows,
     }
@@ -1161,13 +1130,11 @@ def main():
         or DEFAULT_TARGETS
     targets = [Target(s) for s in specs]
 
-    cases, ambiguous, meta = load_cases("--private" in argv)
+    cases, meta = load_cases()
     if catlimit:
         cases = cases[:int(catlimit)]
 
-    excl = meta.get("ambiguous_excluded")
-    print(f"category set : {len(cases)} emails, {meta['source']}"
-          + (f" ({excl} ambiguous excluded)" if excl else ""))
+    print(f"category set : {len(cases)} emails, {meta['source']}")
     print(f"prompt       : production, {len(CATEGORIZE_SYSTEM)} chars")
     print("preflight:")
     targets = preflight(targets, "--pull" in argv)
@@ -1191,7 +1158,7 @@ def main():
         if original:
             print(f"\nrestoring {original} ...")
             load_local(original)
-    write_artifact(rows, args, meta, ambiguous)
+    write_artifact(rows, args, meta)
 
 
 if __name__ == "__main__":

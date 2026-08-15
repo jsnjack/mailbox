@@ -44,7 +44,7 @@ when it drops — that is the category with real action value.
 
 ## Test set
 
-`cases.py` — 170 synthetic labelled emails, 10 categories, tagged
+`cases.py` — 272 synthetic labelled emails, 10 categories, tagged
 `easy`/`med`/`hard`, with 38 **probes**: regression tests for one specific
 boundary rule each, e.g.
 
@@ -69,7 +69,7 @@ models see the identical set — the comparison is paired.
 ```bash
 python3 genprompt.py ~/workspace/mailbox   # required once; writes prompt.py
 python3 bench_models.py --selftest         # ~1 min, uses the LOADED model only
-python3 bench_models.py --quick            # speed + all 170 categories
+python3 bench_models.py --quick            # speed + all 272 categories
 python3 bench_models.py                    # adds translation, summaries, drafts
 ```
 
@@ -109,6 +109,4 @@ on Ctrl-C. Remote targets evict nothing.
 | `genprompt.py` | yes | extracts the production prompt from the Go source |
 | `prompt.py` | no (generated) | output of `genprompt.py` |
 | `artifact.json` | no (generated) | raw outputs + scores, for grading |
-| `realcases.py`, `pool.json` | **no (private)** | optional ground-truth set built
-  from real mail; enable with `--private`. Contains real senders and subjects —
-  gitignored, keep it that way. |
+| `probe_thinking.json` | no (generated) | output of `probe_thinking.py` |
