@@ -863,12 +863,16 @@ func launchUI(mailto string) error {
 			}
 			act.Report("ai", "", "AI model", note)
 		})
-		// Background categorization for every connected account — new mail is
-		// tagged as it arrives (plus a catch-up sweep at launch), so switching
-		// accounts shows ready tags instead of kicking off classification.
+		// Background categorization and gists for every connected account — new
+		// mail is tagged and summarized as it arrives (plus a catch-up sweep at
+		// launch), so switching accounts shows ready tags instead of kicking off
+		// classification, and a new-mail notification has a gist to show.
 		worker := aiwork.New(st, asst, hub, act, func() bool {
 			p, _ := config.LoadPrefs()
 			return !p.DisableInboxCategories
+		}, func() bool {
+			p, _ := config.LoadPrefs()
+			return !p.DisableGist
 		})
 		go worker.Run(ctx)
 		deps.RecategorizeInbox = worker.Trigger

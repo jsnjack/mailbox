@@ -1,10 +1,13 @@
 // Package aiwork runs AI enrichment that must not wait for the user to look at
-// an account: inbox categorization for every connected account, both as mail
-// arrives (sync events) and as a catch-up sweep at launch. It is headless —
-// results are persisted to the store and announced over the sync Hub as
-// AIUpdated changes; the UI seeds its tags from the cache. (One-line gists are
-// generated on arrival by the notification path, which already covers all
-// accounts.)
+// an account: for every connected account it assigns inbox categories and
+// writes each thread's one-line gist, both as mail arrives (sync events) and as
+// a catch-up sweep at launch. It is headless — results are persisted to the
+// store and announced over the sync Hub as AIUpdated changes; the UI seeds its
+// tags and summary cards from the cache.
+//
+// Gists live here rather than only in the reader because a new-mail
+// notification shows one, and the reader only produces a gist for a
+// conversation someone has opened — never the message a notification is about.
 package aiwork
 
 import (
@@ -44,21 +47,44 @@ const (
 	inboxScan = 5000
 )
 
-// Worker is the background categorizer. Create with New, run with Run.
+// Worker is the background AI pass over inbox mail: it assigns categories and
+// writes each thread's one-line gist. Create with New, run with Run.
 type Worker struct {
-	st      *store.Store
-	asst    *ai.Assistant
-	hub     *syncer.Hub
-	act     *activity.Hub
-	enabled func() bool // the "Categorize inbox with AI" preference, read per pass
+	st          *store.Store
+	asst        *ai.Assistant
+	hub         *syncer.Hub
+	act         *activity.Hub
+	enabled     func() bool // "Categorize inbox with AI", read per pass
+	gistEnabled func() bool // "one-line AI summary", read per pass
+
+	// Gists have no persisted failure marker (categories do), so a message the
+	// model cannot summarize would be retried on every pass forever. Remember
+	// the failures for this session instead; a restart retries them.
+	mu         sync.Mutex
+	gistFailed map[string]bool
 
 	kick chan int64
 }
 
-// New assembles a Worker. act may be nil (no status-bar reporting); enabled may
-// be nil (always on).
-func New(st *store.Store, asst *ai.Assistant, hub *syncer.Hub, act *activity.Hub, enabled func() bool) *Worker {
-	return &Worker{st: st, asst: asst, hub: hub, act: act, enabled: enabled, kick: make(chan int64, 16)}
+// New assembles a Worker. act may be nil (no status-bar reporting); either
+// enabled func may be nil (that half always on).
+func New(st *store.Store, asst *ai.Assistant, hub *syncer.Hub, act *activity.Hub,
+	enabled, gistEnabled func() bool) *Worker {
+	return &Worker{st: st, asst: asst, hub: hub, act: act, enabled: enabled,
+		gistEnabled: gistEnabled, gistFailed: map[string]bool{},
+		kick: make(chan int64, 16)}
+}
+
+func (w *Worker) markGistFailed(accountID int64, gmailID string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.gistFailed[fmt.Sprintf("%d|%s", accountID, gmailID)] = true
+}
+
+func (w *Worker) gistHasFailed(accountID int64, gmailID string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.gistFailed[fmt.Sprintf("%d|%s", accountID, gmailID)]
 }
 
 // Trigger queues an immediate pass for the account (0 = every connected
@@ -146,21 +172,173 @@ func (w *Worker) markAll(ctx context.Context, pending map[int64]bool) {
 	}
 }
 
-// pass categorizes up to passCap of the account's uncategorized inbox threads
-// (newest first), persisting each result, and returns how many candidates
-// remain for a follow-up pass. Already-categorized threads cost two indexed
-// queries and no AI. A pass that stored or failed anything publishes an
-// AIUpdated change so an open UI refreshes its tags.
+// pass brings one account up to date: categories for threads that lack one,
+// gists for threads that lack one. Each half has its own preference gate and
+// its own passCap, and returns how many candidates remain for a follow-up
+// pass, so a large backlog trickles instead of stampeding. A half that stored
+// or failed anything publishes an AIUpdated change so an open UI refreshes.
 func (w *Worker) pass(ctx context.Context, accountID int64) (remaining int, err error) {
-	if w.enabled != nil && !w.enabled() {
-		logging.Trace("aiwork: pass skipped", "account", accountID, "reason", "categorization disabled")
+	wantCats := w.enabled == nil || w.enabled()
+	wantGists := w.gistEnabled == nil || w.gistEnabled()
+	if !wantCats && !wantGists {
+		logging.Trace("aiwork: pass skipped", "account", accountID, "reason", "both AI passes disabled")
 		return 0, nil
 	}
 	begin := time.Now()
+	// One listing serves both halves; an up-to-date account costs this query
+	// plus one indexed lookup each and no AI.
 	threads, err := w.st.ListThreadsByLabel(ctx, accountID, model.LabelInbox, inboxScan, 0)
 	if err != nil {
 		return 0, fmt.Errorf("list inbox threads: %w", err)
 	}
+	var firstErr error
+	if wantCats {
+		left, cerr := w.categorize(ctx, accountID, threads)
+		remaining += left
+		firstErr = cerr
+	}
+	if wantGists {
+		left, gerr := w.gists(ctx, accountID, threads)
+		remaining += left
+		if firstErr == nil {
+			firstErr = gerr
+		}
+	}
+	logging.Trace("aiwork: pass done", "account", accountID, "threads", len(threads),
+		"remaining", remaining, "dur", time.Since(begin), "err", firstErr)
+	return remaining, firstErr
+}
+
+// gists writes the one-line AI gist for inbox threads that lack one.
+//
+// This exists because the gist is what a new-mail desktop notification shows,
+// and it used to be produced ONLY by the reader when a conversation was opened.
+// A message that had never been opened therefore never had a gist — which is
+// every message a new-mail notification is about, so the notification always
+// fell back to the raw snippet. Producing gists here makes that path reachable.
+//
+// Same shape as categorize: newest first, capped per pass, concurrent, each
+// result persisted as it lands.
+func (w *Worker) gists(ctx context.Context, accountID int64, threads []model.ThreadSummary) (remaining int, err error) {
+	begin := time.Now()
+	ids := make([]string, len(threads))
+	for i, t := range threads {
+		ids[i] = t.Latest.GmailID
+	}
+	cached, err := w.st.MessageGists(ctx, accountID, ids)
+	if err != nil {
+		return 0, fmt.Errorf("load cached gists: %w", err)
+	}
+	type cand struct {
+		msgID  string
+		prompt string
+	}
+	var todo []cand
+	for _, t := range threads {
+		m := t.Latest
+		if _, ok := cached[m.GmailID]; ok {
+			continue
+		}
+		if w.gistHasFailed(accountID, m.GmailID) {
+			continue
+		}
+		todo = append(todo, cand{
+			msgID: m.GmailID,
+			// Byte-for-byte the context the reader builds (ui.gistContext), so a
+			// gist written here is indistinguishable from one written on open.
+			prompt: fmt.Sprintf("From: %s\nSubject: %s\n\n%s",
+				displayFrom(m), m.Subject, ai.CleanContext(m.Snippet)),
+		})
+	}
+	if len(todo) == 0 {
+		logging.Trace("aiwork: gists up to date", "account", accountID, "threads", len(threads))
+		return 0, nil
+	}
+	if len(todo) > passCap {
+		remaining = len(todo) - passCap
+		todo = todo[:passCap]
+	}
+	logging.Trace("aiwork: gist pass", "account", accountID, "todo", len(todo), "remaining", remaining)
+
+	var done func(string)
+	if w.act != nil {
+		email := ""
+		if acc, aerr := w.st.GetAccountByID(ctx, accountID); aerr == nil {
+			email = acc.Email
+		}
+		done = w.act.Begin("ai", email, "Summarizing "+activity.Plural(len(todo), "message", "messages"))
+	}
+	aiCtx, cancel := context.WithTimeout(ctx, passTimeout)
+	defer cancel()
+
+	type result struct {
+		c    cand
+		gist string
+		err  error
+	}
+	results := make(chan result, len(todo))
+	sem := make(chan struct{}, passWorkers)
+	var wg sync.WaitGroup
+	for _, c := range todo {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(c cand) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			gist, gerr := w.asst.BriefSummary(aiCtx, c.prompt)
+			if gerr == nil && strings.TrimSpace(gist) == "" {
+				gerr = fmt.Errorf("gist %q: empty reply", c.msgID)
+			}
+			results <- result{c: c, gist: strings.TrimSpace(gist), err: gerr}
+		}(c)
+	}
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	var firstErr error
+	written, failed := 0, 0
+	for r := range results {
+		if r.err != nil {
+			failed++
+			if firstErr == nil {
+				firstErr = r.err
+			}
+			logging.Trace("aiwork: gist failed", "account", accountID, "id", r.c.msgID, "err", r.err)
+			w.markGistFailed(accountID, r.c.msgID)
+			continue
+		}
+		if serr := w.st.SetMessageGist(ctx, accountID, r.c.msgID, r.gist); serr != nil {
+			logging.Trace("aiwork: persist gist", "id", r.c.msgID, "err", serr)
+			continue
+		}
+		written++
+	}
+	logging.Trace("aiwork: gist pass done", "account", accountID, "written", written,
+		"failed", failed, "remaining", remaining, "dur", time.Since(begin), "err", firstErr)
+	if done != nil {
+		if firstErr != nil {
+			done("error: " + firstErr.Error())
+		} else {
+			note := fmt.Sprintf("%d summarized", written)
+			if m := ai.ShortModel(w.asst.ActiveModel()); m != "" {
+				note += " · " + m
+			}
+			done(note)
+		}
+	}
+	if written > 0 {
+		// Wakes an open reader's summary card and, more importantly, the
+		// new-mail notification that is waiting for this gist.
+		w.hub.Publish(syncer.Change{Kind: syncer.AIUpdated, AccountID: accountID, Count: written})
+	}
+	return remaining, firstErr
+}
+
+// categorize assigns a category to inbox threads that lack one.
+func (w *Worker) categorize(ctx context.Context, accountID int64, threads []model.ThreadSummary) (remaining int, err error) {
+	begin := time.Now()
 	ids := make([]string, len(threads))
 	for i, t := range threads {
 		ids[i] = t.Latest.GmailID
@@ -185,7 +363,7 @@ func (w *Worker) pass(ctx context.Context, accountID int64) (remaining int, err 
 		})
 	}
 	if len(todo) == 0 {
-		logging.Trace("aiwork: pass up to date", "account", accountID, "threads", len(threads), "dur", time.Since(begin))
+		logging.Trace("aiwork: categories up to date", "account", accountID, "threads", len(threads))
 		return 0, nil
 	}
 	if len(todo) > passCap {

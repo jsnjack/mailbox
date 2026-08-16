@@ -23,6 +23,11 @@ type fakeProvider struct {
 
 func (f *fakeProvider) Name() string { return "fake" }
 
+// off disables one half of a pass, so a test can assert the other half's AI
+// call count without the second half adding to it.
+func off() bool { return false }
+func on() bool  { return true }
+
 func (f *fakeProvider) Stream(_ context.Context, _ string, _ []ai.Msg) (<-chan ai.Chunk, error) {
 	f.calls.Add(1)
 	if f.err != nil {
@@ -66,7 +71,7 @@ func TestPassCategorizesAndCaches(t *testing.T) {
 	hub := syncer.NewHub()
 	events, unsub := hub.Subscribe()
 	defer unsub()
-	w := New(s, ai.NewAssistant(p), hub, nil, nil)
+	w := New(s, ai.NewAssistant(p), hub, nil, nil, off)
 
 	remaining, err := w.pass(ctx, acct)
 	if err != nil || remaining != 0 {
@@ -114,7 +119,7 @@ func TestPassRespectsDisabled(t *testing.T) {
 		t.Fatalf("UpsertMessages: %v", err)
 	}
 	p := &fakeProvider{reply: `["Receipt"]`}
-	w := New(s, ai.NewAssistant(p), syncer.NewHub(), nil, func() bool { return false })
+	w := New(s, ai.NewAssistant(p), syncer.NewHub(), nil, off, off)
 	if remaining, err := w.pass(ctx, acct); err != nil || remaining != 0 {
 		t.Fatalf("pass = %d, %v", remaining, err)
 	}
@@ -134,7 +139,7 @@ func TestPassMarksFailures(t *testing.T) {
 		t.Fatalf("UpsertMessages: %v", err)
 	}
 	p := &fakeProvider{err: context.DeadlineExceeded}
-	w := New(s, ai.NewAssistant(p), syncer.NewHub(), nil, nil)
+	w := New(s, ai.NewAssistant(p), syncer.NewHub(), nil, nil, off)
 	if _, err := w.pass(ctx, acct); err == nil {
 		t.Fatal("expected the pass to report the failure")
 	}
@@ -144,5 +149,86 @@ func TestPassMarksFailures(t *testing.T) {
 	}
 	if !failed["g1"] {
 		t.Fatal("failed classification must be marked in the store")
+	}
+}
+
+// The gist half exists so a new-mail notification has something better than the
+// raw snippet to show. Before this, gists were written only by the reader, so a
+// message nobody had opened never had one -- which is every message a
+// notification is about.
+func TestPassWritesGists(t *testing.T) {
+	s, acct := testStore(t)
+	ctx := context.Background()
+	if err := s.UpsertMessages(ctx, []model.Message{
+		{AccountID: acct, GmailID: "g1", ThreadID: "t1", FromName: "Ada",
+			Subject: "Invoice due", Snippet: "Please pay by Friday",
+			Labels: []string{model.LabelInbox}},
+		{AccountID: acct, GmailID: "g2", ThreadID: "t2", Subject: "Not in the inbox",
+			Snippet: "x", Labels: []string{}},
+	}); err != nil {
+		t.Fatalf("UpsertMessages: %v", err)
+	}
+	p := &fakeProvider{reply: "They want payment by Friday."}
+	hub := syncer.NewHub()
+	events, unsub := hub.Subscribe()
+	defer unsub()
+	w := New(s, ai.NewAssistant(p), hub, nil, off, on)
+
+	if remaining, err := w.pass(ctx, acct); err != nil || remaining != 0 {
+		t.Fatalf("pass = %d, %v", remaining, err)
+	}
+	if got := p.calls.Load(); got != 1 {
+		t.Fatalf("AI calls = %d, want 1 (only the inbox thread)", got)
+	}
+	gists, err := s.MessageGists(ctx, acct, []string{"g1", "g2"})
+	if err != nil {
+		t.Fatalf("MessageGists: %v", err)
+	}
+	if gists["g1"] != "They want payment by Friday." {
+		t.Fatalf("persisted gist = %q", gists["g1"])
+	}
+	if _, ok := gists["g2"]; ok {
+		t.Fatal("a non-inbox message must not be summarized")
+	}
+	select {
+	case c := <-events:
+		if c.Kind != syncer.AIUpdated || c.AccountID != acct {
+			t.Fatalf("published %+v, want AIUpdated for %d", c, acct)
+		}
+	default:
+		t.Fatal("a written gist must publish AIUpdated so a waiting notification wakes")
+	}
+
+	// A second pass must not re-summarize what is already stored.
+	if _, err := w.pass(ctx, acct); err != nil {
+		t.Fatalf("second pass: %v", err)
+	}
+	if got := p.calls.Load(); got != 1 {
+		t.Fatalf("AI calls after a second pass = %d, want 1 (cached)", got)
+	}
+}
+
+// Gists have no persisted failure marker, so without an in-memory memo a message
+// the model cannot summarize would be retried on every single pass.
+func TestGistFailureIsNotRetriedThisSession(t *testing.T) {
+	s, acct := testStore(t)
+	ctx := context.Background()
+	if err := s.UpsertMessages(ctx, []model.Message{
+		{AccountID: acct, GmailID: "g1", ThreadID: "t1", Subject: "s", Snippet: "x",
+			Labels: []string{model.LabelInbox}},
+	}); err != nil {
+		t.Fatalf("UpsertMessages: %v", err)
+	}
+	p := &fakeProvider{err: context.DeadlineExceeded}
+	w := New(s, ai.NewAssistant(p), syncer.NewHub(), nil, off, on)
+	if _, err := w.pass(ctx, acct); err == nil {
+		t.Fatal("expected the pass to report the failure")
+	}
+	first := p.calls.Load()
+	if _, err := w.pass(ctx, acct); err != nil {
+		t.Fatalf("second pass should find nothing to do, got %v", err)
+	}
+	if got := p.calls.Load(); got != first {
+		t.Fatalf("AI calls went %d -> %d; a failed gist must not be retried", first, got)
 	}
 }

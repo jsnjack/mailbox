@@ -4659,10 +4659,6 @@ func (w *window) queueNewMailCheck(accountID int64, gmailID string) {
 // a desktop notification for each genuinely new unread inbox message (arrived
 // after launch). Only the notification dispatch touches the main thread.
 func (w *window) checkNewMail(batch []notifyCandidate) {
-	type hit struct {
-		accountID int64
-		msg       model.Message
-	}
 	ctx := context.Background()
 	var hits []hit
 	selfUnread := map[int64][]string{}
@@ -4701,31 +4697,95 @@ func (w *window) checkNewMail(batch []notifyCandidate) {
 	if len(hits) == 0 {
 		return
 	}
-	// A gist may already be persisted (e.g. inbox categorization ran first) —
-	// look it up now, off the main thread, so the very first notification can
-	// show the same AI summary the reader would, instead of the raw snippet.
-	gists := map[uiCacheKey]string{}
-	if w.aiGist {
-		byAccount := map[int64][]string{}
-		for _, h := range hits {
-			byAccount[h.accountID] = append(byAccount[h.accountID], h.msg.GmailID)
+	// The gist is what makes a notification say what the mail is ABOUT rather
+	// than quoting its opening line, so it is worth a short wait: the background
+	// worker (internal/aiwork) writes one within a pass or two of arrival. Look
+	// for it now, and for anything still missing hand over to waitForGists.
+	gists := w.lookupGists(ctx, hitKeys(hits))
+	var pending []hit
+	for _, h := range hits {
+		if !w.aiGist || gists[cacheKey(h.accountID, h.msg.GmailID)] != "" {
+			w.dispatchNotify(h.accountID, h.msg, gists[cacheKey(h.accountID, h.msg.GmailID)])
+			continue
 		}
-		for accountID, ids := range byAccount {
-			if g, err := w.deps.Store.MessageGists(ctx, accountID, ids); err == nil {
-				for id, gist := range g {
-					gists[cacheKey(accountID, id)] = gist
-				}
-			}
+		pending = append(pending, h)
+	}
+	if len(pending) == 0 {
+		return
+	}
+	logging.Trace("ui: new mail waiting for gist", "n", len(pending), "timeout", gistWaitTimeout)
+	go w.waitForGists(pending)
+}
+
+// hitKeys groups the message ids of a notification batch by account.
+func hitKeys(hits []hit) map[int64][]string {
+	byAccount := map[int64][]string{}
+	for _, h := range hits {
+		byAccount[h.accountID] = append(byAccount[h.accountID], h.msg.GmailID)
+	}
+	return byAccount
+}
+
+// lookupGists reads the persisted gists for a batch. Off the main thread.
+func (w *window) lookupGists(ctx context.Context, byAccount map[int64][]string) map[uiCacheKey]string {
+	out := map[uiCacheKey]string{}
+	if !w.aiGist {
+		return out
+	}
+	for accountID, ids := range byAccount {
+		g, err := w.deps.Store.MessageGists(ctx, accountID, ids)
+		if err != nil {
+			logging.Trace("ui: gist lookup failed", "account", accountID, "err", err)
+			continue
+		}
+		for id, gist := range g {
+			out[cacheKey(accountID, id)] = gist
 		}
 	}
-	dispatch.Main(func() {
-		for _, h := range hits {
-			key := cacheKey(h.accountID, h.msg.GmailID)
-			if !w.claimNotification(key) {
+	return out
+}
+
+// waitForGists holds a batch's notifications until each message has an AI gist,
+// giving up per message after gistWaitTimeout and notifying with the snippet.
+//
+// This deliberately DELAYS the notification rather than sending twice. Re-sending
+// with the same id replaces the banner, but on some shells that re-alerts, so a
+// user would be pinged twice for one email. A minute is the outer bound because
+// a notification that arrives long after the mail is worse than a vague one — and
+// the worker normally lands a gist in a few seconds.
+//
+// Runs off the main thread; every notification goes through dispatchNotify.
+func (w *window) waitForGists(pending []hit) {
+	ctx := context.Background()
+	deadline := time.Now().Add(gistWaitTimeout)
+	for len(pending) > 0 && time.Now().Before(deadline) {
+		time.Sleep(gistWaitPoll)
+		gists := w.lookupGists(ctx, hitKeys(pending))
+		var still []hit
+		for _, h := range pending {
+			if gist := gists[cacheKey(h.accountID, h.msg.GmailID)]; gist != "" {
+				logging.Trace("ui: gist arrived for pending notification", "id", h.msg.GmailID)
+				w.dispatchNotify(h.accountID, h.msg, gist)
 				continue
 			}
-			w.notifyNewMail(h.accountID, h.msg, gists[key])
+			still = append(still, h)
 		}
+		pending = still
+	}
+	// Timed out: the snippet is better than silence.
+	for _, h := range pending {
+		logging.Trace("ui: gist wait timed out, notifying with snippet", "id", h.msg.GmailID)
+		w.dispatchNotify(h.accountID, h.msg, "")
+	}
+}
+
+// dispatchNotify claims and sends one notification on the main thread.
+func (w *window) dispatchNotify(accountID int64, m model.Message, gist string) {
+	dispatch.Main(func() {
+		if !w.claimNotification(cacheKey(accountID, m.GmailID)) {
+			return
+		}
+		w.notifyNewMail(accountID, m, gist)
 	})
 }
 
@@ -4798,6 +4858,21 @@ func (w *window) refreshOpenThread() {
 	w.rerenderOpenThread()        // keeps a shown translation shown
 }
 
+// hit is one message that passed the new-mail test and is owed a notification.
+type hit struct {
+	accountID int64
+	msg       model.Message
+}
+
+// How long a new-mail notification waits for the background worker to write the
+// message's one-line gist before falling back to the snippet, and how often it
+// checks. The wait is what lets the notification say what the mail is about; the
+// bound is what stops a quiet AI from swallowing the notification entirely.
+const (
+	gistWaitTimeout = time.Minute
+	gistWaitPoll    = 2 * time.Second
+)
+
 func (w *window) notifyNewMail(accountID int64, m model.Message, gist string) {
 	logging.Trace("ui: notify new mail", "account", accountID, "id", m.GmailID, "from", m.FromAddr, "subject", m.Subject, "has_gist", gist != "")
 	// Unique id per message so concurrent accounts' notifications don't replace
@@ -4813,8 +4888,8 @@ func (w *window) notifyNewMail(accountID int64, m model.Message, gist string) {
 }
 
 // mailNotification builds the new-mail notification. Sender and subject form
-// the title; the body is the snippet until the AI's one-sentence gist replaces
-// it. The gist must be the FIRST body line: GNOME's collapsed banner shows only
+// the title; the body is the AI's one-sentence gist, or the snippet when no
+// gist arrived within gistWaitTimeout. The gist must be the FIRST body line: GNOME's collapsed banner shows only
 // the title plus one body line, so a summary on a second line is invisible
 // until the notification is expanded in the tray — which is exactly where a
 // glanceable gist is useless.
