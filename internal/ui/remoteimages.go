@@ -145,7 +145,11 @@ func collectInlineCSSImageURLs(cssText string, add func(string)) {
 }
 
 func collectStylesheetImageURLs(cssText string, add func(string)) {
-	stylesheet, err := parser.Parse(cssText)
+	// Whatever reaches a CSS parse is scrubbed of markup scaffolding first: this
+	// text comes from a <style> in the rendered document, and one leftover
+	// conditional-comment marker hangs douceur's parser for good (see
+	// stripCSSMarkupScaffolding).
+	stylesheet, err := parser.Parse(stripCSSMarkupScaffolding(cssText))
 	if err != nil {
 		return
 	}

@@ -66,10 +66,33 @@ var styleBlockRe = regexp.MustCompile(`(?is)<style[^>]*>(.*?)</style>`)
 func extractStyleCSS(htmlStr string) string {
 	var b strings.Builder
 	for _, m := range styleBlockRe.FindAllStringSubmatch(htmlStr, -1) {
-		b.WriteString(m[1])
+		b.WriteString(stripCSSMarkupScaffolding(m[1]))
 		b.WriteByte('\n')
 	}
 	return b.String()
+}
+
+// cssMarkupScaffoldingRe matches the markup scaffolding email stylesheets carry
+// inside <style>: the legacy CDO/CDC tokens that once hid CSS from browsers
+// without stylesheet support, and the Outlook conditional comments built on
+// them ("<!--[if (gte mso 9)|(IE)]>li{…}<![endif]-->" — the tail of a Ziggo
+// invoice, and of a great deal of transactional mail).
+var cssMarkupScaffoldingRe = regexp.MustCompile(`(?is)<!--\[if[^\]]*\]>|<!\[endif\]-->|<!\[endif\]|<!-->|<!--|-->`)
+
+// stripCSSMarkupScaffolding removes that scaffolding before any CSS parse. A
+// browser's parser skips these tokens and error-recovers from the selector they
+// corrupt; douceur has neither behaviour — it keeps a rule whose selector is the
+// leftover markup, and its serialization of that rule ("<![endif]-->;") sends
+// douceur's own parser into an infinite loop when the reader parses the scoped
+// stylesheet again to find its image URLs. That wedges the render goroutine at
+// 100% of a core, permanently: the conversation never appears, and whatever the
+// reader was showing stays up. The scaffolding carries no style, so dropping it
+// costs nothing and keeps the declarations around it.
+func stripCSSMarkupScaffolding(cssText string) string {
+	if !strings.Contains(cssText, "<!") && !strings.Contains(cssText, "-->") {
+		return cssText
+	}
+	return cssMarkupScaffoldingRe.ReplaceAllString(cssText, " ")
 }
 
 // scopeCSS prefixes every selector in an email's CSS with scopeSel so the rules
@@ -88,11 +111,20 @@ func scopeCSS(cssText, scopeSel string) string {
 // scopeEmailCSS scopes email styles and removes remote resources from rules
 // that explicitly conceal them or use a known tracking endpoint.
 func scopeEmailCSS(cssText, scopeSel string) (string, int) {
+	// The breakout test runs on the input as well as the output below: a
+	// "</style><script>" rides in as a selector, and dropMarkupRules would now
+	// remove that rule before the output test could ever see it. A stylesheet
+	// carrying a closing style tag has nothing legitimate to offer anyway.
+	if strings.Contains(strings.ToLower(cssText), "</style") {
+		logging.Trace("ui: scope css rejected", "reason", "closes style tag", "where", "input")
+		return "", 0
+	}
 	ss, err := parser.Parse(cssText)
 	if err != nil {
 		logging.Trace("ui: scope css parse failed", "err", err, "bytes", len(cssText))
 		return "", 0
 	}
+	ss.Rules = dropMarkupRules(ss.Rules)
 	scopeRules(ss.Rules, scopeSel)
 	trackers := stripTrackerCSSRules(ss.Rules)
 	out := ss.String()
@@ -102,6 +134,37 @@ func scopeEmailCSS(cssText, scopeSel string) (string, int) {
 	}
 	logging.Trace("ui: scope css", "scope", scopeSel, "in_bytes", len(cssText), "out_bytes", len(out), "trackers", trackers)
 	return out, trackers
+}
+
+// dropMarkupRules removes rules whose selector or at-rule prelude still holds
+// markup rather than CSS. stripCSSMarkupScaffolding removes the forms we know;
+// this is the backstop for the ones we don't, and it is what makes the scoped
+// stylesheet safe to parse again: "<" cannot begin a selector, so a rule
+// carrying one is markup that leaked into the stylesheet, and serializing it
+// would put markup back into text a parser has to read (see
+// stripCSSMarkupScaffolding for what that costs).
+func dropMarkupRules(rules []*css.Rule) []*css.Rule {
+	kept := rules[:0]
+	for _, r := range rules {
+		if strings.Contains(r.Prelude, "<") || strings.Contains(r.Name, "<") {
+			logging.Trace("ui: css rule dropped", "reason", "markup in prelude", "prelude", logging.Body(r.Prelude))
+			continue
+		}
+		markup := false
+		for _, sel := range r.Selectors {
+			if strings.Contains(sel, "<") {
+				markup = true
+				break
+			}
+		}
+		if markup {
+			logging.Trace("ui: css rule dropped", "reason", "markup in selector", "selectors", strings.Join(r.Selectors, ","))
+			continue
+		}
+		r.Rules = dropMarkupRules(r.Rules)
+		kept = append(kept, r)
+	}
+	return kept
 }
 
 func stripTrackerCSSRules(rules []*css.Rule) int {

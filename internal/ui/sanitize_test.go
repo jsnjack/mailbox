@@ -104,3 +104,74 @@ func TestEmailPolicyStripsDangerousContent(t *testing.T) {
 		t.Errorf("benign style dropped: %s", out)
 	}
 }
+
+// A <style> block that ends in an Outlook conditional comment — the tail of a
+// great deal of transactional mail — used to reach douceur as a rule whose
+// selector was the leftover marker. Serialized back into the scoped stylesheet,
+// that rule sent douceur's own parser into an infinite loop when the reader read
+// the stylesheet again for its image URLs: the render goroutine spun at 100% of
+// a core forever, the conversation never appeared, and whatever the reader was
+// already showing stayed on screen under the new subject.
+//
+// A regression hangs this test rather than failing it — which is the point: the
+// hang is the bug.
+func TestConditionalCommentInStyleDoesNotWedgeTheCSSParser(t *testing.T) {
+	const body = `<html><head><style>
+.wrap { color: #123456; }
+#MessageViewBody{width: 100% !important;}<!--[if (gte mso 9)|(IE)]>li {text-indent: -1em;}<![endif]-->
+</style></head><body><div class="wrap" style="background-image:url(https://example.com/bg.png)">hi</div></body></html>`
+
+	w := &window{sanitizer: emailPolicy()}
+	clean, _ := w.cleanHTML(body)
+	if strings.Contains(clean, "endif") || strings.Contains(clean, "[if ") {
+		t.Fatalf("conditional-comment marker survived into the document: %q", clean)
+	}
+	// The rules around the marker are ordinary CSS and must survive it.
+	if !strings.Contains(clean, "#123456") {
+		t.Fatalf("stylesheet lost its rules: %q", clean)
+	}
+	// Reading the scoped stylesheet back is where the loop used to happen.
+	if _, stats, _ := w.resolveRemoteImages(clean, true); stats.Total == 0 {
+		t.Fatal("no remote image found; the image pass did not read the document")
+	}
+}
+
+func TestStripCSSMarkupScaffolding(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"plain css is untouched", ".a { color: red; }", ".a { color: red; }"},
+		{
+			"downlevel-hidden conditional",
+			`.a{color:red}<!--[if (gte mso 9)|(IE)]>li {text-indent:-1em;}<![endif]-->`,
+			`.a{color:red} li {text-indent:-1em;} `,
+		},
+		{
+			"downlevel-revealed conditional keeps its css",
+			`<!--[if !mso]><!-->.b{color:blue}<!--<![endif]-->`,
+			`  .b{color:blue}  `,
+		},
+		{"bare cdo/cdc tokens", `<!--.c{color:green}-->`, ` .c{color:green} `},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := stripCSSMarkupScaffolding(tt.in); got != tt.want {
+				t.Fatalf("stripCSSMarkupScaffolding(%q)\n  = %q\nwant %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// The backstop for markup this strip doesn't know: a rule whose selector is
+// markup is dropped rather than serialized back into text a parser must read.
+func TestScopeEmailCSSDropsMarkupRules(t *testing.T) {
+	out, _ := scopeEmailCSS(`.a{color:red}<x-bogus>{color:blue}`, ".mbx")
+	if strings.Contains(out, "<") {
+		t.Fatalf("markup serialized back into the scoped stylesheet: %q", out)
+	}
+	if !strings.Contains(out, "red") {
+		t.Fatalf("valid rule dropped with the markup one: %q", out)
+	}
+}
