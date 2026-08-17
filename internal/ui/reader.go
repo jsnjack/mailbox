@@ -29,6 +29,25 @@ import (
 // thread as stacked sections in the reader.
 func (w *window) renderConversation(msgs []model.Message) {
 	latest := msgs[len(msgs)-1]
+	threadID := w.openThreadID // guard against a newer thread being opened mid-render
+	// Show a loading placeholder immediately when bodies need fetching (not all
+	// cached), so the user sees their click registered instead of staring at the
+	// previous message for up to the fetch timeout.
+	needsFetch := false
+	if w.deps.FetchBody != nil {
+		for _, m := range msgs {
+			if !m.BodyFetched {
+				needsFetch = true
+				break
+			}
+		}
+	}
+	if w.coverPreviousContent(cacheKey(latest.AccountID, threadID), needsFetch) {
+		w.blankReaderContent()
+		if needsFetch {
+			w.setReaderHTML(loadingInner)
+		}
+	}
 	// The pinned header is the thread title: subject plus a message count for a
 	// real conversation. Each message's sender/date/recipients live in its own
 	// section below (conversationSection), so the header no longer repeats the
@@ -59,25 +78,6 @@ func (w *window) renderConversation(msgs []model.Message) {
 		}
 	}
 	w.setReaderCategory(category, cat.failed)
-	// Show a loading placeholder immediately when bodies need fetching (not all
-	// cached), so the user sees their click registered instead of staring at the
-	// previous message for up to the fetch timeout. When all bodies are cached
-	// (the common case) the previous message stays (no flash) and the rendered
-	// thread swaps in near-instantly behind the cover.
-	needsFetch := false
-	if w.deps.FetchBody != nil {
-		for _, m := range msgs {
-			if !m.BodyFetched {
-				needsFetch = true
-				break
-			}
-		}
-	}
-	if needsFetch {
-		w.setReaderHTML(loadingInner)
-	}
-
-	threadID := w.openThreadID // guard against a newer thread being opened mid-render
 	// Snapshot already-rendered sections on the main thread; the goroutine reuses
 	// these and only sanitizes the misses, so re-opening a thread is near-instant.
 	cached := w.cachedSectionsFor(msgs)
@@ -326,6 +326,9 @@ func (w *window) renderConversation(msgs []model.Message) {
 			w.setAuthBadge(verdict)
 			w.setCaution(warnings)
 			w.setReaderHTML(out)
+			// The pane now holds this conversation, so a repaint of it may keep
+			// the content up instead of blanking first.
+			w.readerShows = cacheKey(latest.AccountID, threadID)
 			// Re-assert known gists over the fresh swap: a section may have come
 			// from the cache with its placeholder still hidden, or this render's
 			// store query may predate a gist persisted mid-render — either way
@@ -352,6 +355,19 @@ func (w *window) renderConversation(msgs []model.Message) {
 			w.detectInviteLater(threadID, rgen, atts)
 		})
 	}()
+}
+
+// coverPreviousContent reports whether this render must blank the reader before
+// it starts, rather than leave what is on screen up (no flash) while it works.
+// Keeping the previous content is only honest when it is this same conversation
+// being repainted — a live refresh, a gist landing, a zoom. For any other one
+// the pane would be showing that conversation's mail, attachments and all,
+// under the subject the header already changed to, which reads as the wrong
+// email opening — and across accounts, as another account's mail. The render
+// tail is normally sub-frame, but it waits on the store (a background vacuum
+// holds an exclusive lock), so "normally" is not a guarantee. Main-thread only.
+func (w *window) coverPreviousContent(want uiCacheKey, needsFetch bool) bool {
+	return needsFetch || w.readerShows != want
 }
 
 // setReaderHTML swaps inner (sanitized conversation HTML) into the persistent

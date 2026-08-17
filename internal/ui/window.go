@@ -257,8 +257,18 @@ type window struct {
 	// quietly), so an event for one of these ids is this render's own echo — the
 	// render reads the body itself and must not be restarted by it. Main-thread
 	// only.
-	renderFetching  map[uiCacheKey]bool
-	renderGen       uint64
+	renderFetching map[uiCacheKey]bool
+	renderGen      uint64
+	// readerShows names the conversation whose content is currently swapped into
+	// the reader — the WebView document plus the indicators around it
+	// (attachments, trackers, sender auth, caution). It is what the pane is
+	// actually displaying, which is not the same as what is open: the header is
+	// set the moment a conversation opens, while its body arrives a render later.
+	// A render keeps the previous content up (no flash) only while this still
+	// names the conversation it is rendering; for any other one the pane is
+	// blanked first, so the reader can never show one conversation's mail under
+	// another's subject. Zero when the pane holds nothing. Main-thread only.
+	readerShows     uiCacheKey
 	lastFetchFailed bool             // true if the last render had fetch failures (for retry menu item)
 	replyBtn        *adw.SplitButton // primary action (Reply all); dropdown has Reply/Forward
 	aiReplyBtn      *gtk.MenuButton  // AI reply: popover of suggestions + intents
@@ -2488,13 +2498,32 @@ func (w *window) clearReader() {
 	w.openThreadID = ""
 	w.openThreadMsgs = nil
 	w.openMsg = model.Message{}
-	w.remoteImageBanner.SetRevealed(false)
 	w.resetTranslation()
 	w.hideSummary()
-	w.showInviteCard(0, nil)
-	w.setReaderCategory("", false)
+	w.blankReaderContent()
 	w.setActionsSensitive(false)
 	w.readerStack.SetVisibleChildName("empty")
+}
+
+// blankReaderContent empties what the reader is displaying: the conversation
+// in the WebView and every per-conversation indicator around it. Switching the
+// reader stack to "empty" only hides that page — the document and the chips
+// live on, so without this the next conversation to open flips the stack back
+// and re-reveals the previous one (another account's mail, after a switch)
+// until its own render lands. Main-thread only.
+func (w *window) blankReaderContent() {
+	w.setReaderHTML("")
+	w.readerShows = uiCacheKey{}
+	w.remoteImageURLs = nil // the blanked document references no image any more
+	w.inlineByCID = nil
+	w.lastFetchFailed = false
+	w.showThreadAttachments(nil)
+	w.setTrackerCount(0)
+	w.setAuthBadge(authVerdict{})
+	w.setCaution(nil)
+	w.setReaderCategory("", false)
+	w.showInviteCard(0, nil)
+	w.remoteImageBanner.SetRevealed(false)
 }
 
 // updateEmptyFolderBanner reveals the "Empty now" banner only when the current

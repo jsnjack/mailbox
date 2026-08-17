@@ -414,3 +414,32 @@ func TestOwnBodyFetchIgnoresOnlyTheRunningRenderFetches(t *testing.T) {
 		t.Fatal("a body fetched after the render finished was ignored")
 	}
 }
+
+// The reader may only keep what is on screen while a render runs when that is
+// the same conversation being repainted. Showing another one — an equal thread
+// id on the other account included — puts its body, attachments and gists under
+// the subject the header already changed to.
+func TestCoverPreviousContentKeepsOnlyTheSameConversation(t *testing.T) {
+	shown := uiCacheKey{accountID: 1, id: "t1"}
+	cases := []struct {
+		name       string
+		shows      uiCacheKey
+		want       uiCacheKey
+		needsFetch bool
+		cover      bool
+	}{
+		{"repaint of the shown conversation", shown, shown, false, false},
+		{"another conversation on the same account", shown, uiCacheKey{accountID: 1, id: "t2"}, false, true},
+		{"equal thread id on another account", shown, uiCacheKey{accountID: 2, id: "t1"}, false, true},
+		{"repaint that must fetch bodies first", shown, shown, true, true},
+		{"nothing shown yet", uiCacheKey{}, shown, false, true},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			w := &window{readerShows: tt.shows}
+			if got := w.coverPreviousContent(tt.want, tt.needsFetch); got != tt.cover {
+				t.Fatalf("coverPreviousContent = %v, want %v", got, tt.cover)
+			}
+		})
+	}
+}
