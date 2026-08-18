@@ -105,6 +105,11 @@ def config_endpoints():
 
 
 ENDPOINT_ALIASES = {"lemonade": LEMONADE_API, **config_endpoints()}
+# A CDN in front of a remote endpoint may block urllib's default User-Agent
+# ("Python-urllib/3.x") with a 403 that looks exactly like "the VPN is down".
+# Send our own on every request so a remote target is reachable at all.
+USER_AGENT = "mailbox-bench/1.0"
+
 OUTDIR = os.path.dirname(os.path.abspath(__file__))
 ARTIFACT = os.path.join(OUTDIR, "artifact.json")
 TIMEOUT = 900
@@ -321,7 +326,7 @@ def post(target, messages, max_tokens, temp):
                    "chat_template_kwargs": {"enable_thinking": False},
                    "reasoning_effort": "none"}
     body = json.dumps(payload_out).encode()
-    headers = {"Content-Type": "application/json"}
+    headers = {"Content-Type": "application/json", "User-Agent": USER_AGENT}
     if target.key:
         headers["Authorization"] = f"Bearer {target.key}"
     req = urllib.request.Request(f"{target.base}/chat/completions", data=body,
@@ -354,7 +359,8 @@ def ask(target, prompt, max_tokens, temp, nonce="", system=None):
 def remote_models(ep):
     base = ENDPOINT_ALIASES.get(ep, ep)
     key = keyring_key(base)
-    req = urllib.request.Request(f"{base}/models")
+    req = urllib.request.Request(f"{base}/models",
+                                 headers={"User-Agent": USER_AGENT})
     if key:
         req.add_header("Authorization", f"Bearer {key}")
     try:
@@ -520,7 +526,7 @@ def measure_ttft(target, prompt, max_tokens=120):
                "messages": [{"role": "user", "content": prompt}]}
     payload["reasoning_effort"] = "none"
     payload["chat_template_kwargs"] = {"enable_thinking": False}
-    headers = {"Content-Type": "application/json"}
+    headers = {"Content-Type": "application/json", "User-Agent": USER_AGENT}
     if target.key:
         headers["Authorization"] = f"Bearer {target.key}"
     req = urllib.request.Request(f"{target.base}/chat/completions",
@@ -656,7 +662,10 @@ Zou je volgende week donderdag om 14:00 tijd hebben voor een videogesprek?
 
 Met vriendelijke groet,
 Elena Novak""",
-     "facts": [["six weeks", "6 weeks"], ["august"],
+     # Hyphenated forms count: "the proposed six-week delivery timeline" keeps
+     # the fact. Accepting only "six weeks" scored a correct translation as a
+     # loss and pinned the metric at 92.3%.
+     "facts": [["six weeks", "6 weeks", "six-week", "6-week"], ["august"],
                ["12,500", "12.500", "12500"], ["thursday"],
                # Must match the signature in the email body above. When these
                # drifted apart the fact became unfindable and every model lost
