@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -627,5 +628,70 @@ func TestCleanSubject(t *testing.T) {
 		if got := cleanSubject(c.in); got != c.want {
 			t.Errorf("cleanSubject(%q) = %q, want %q", c.in, got, c.want)
 		}
+	}
+}
+
+func TestTranslateSegmentsKeyed(t *testing.T) {
+	// The reply is keyed, so it survives arriving out of order and with a key we
+	// never asked for.
+	fp := &fakeProvider{chunks: []Chunk{{Text: `{"2":"three","0":"one","1":"two","7":"stray"}`}}}
+	got, err := NewAssistant(fp).TranslateSegments(context.Background(), []string{"een", "twee", "drie"}, "English")
+	if err != nil {
+		t.Fatalf("TranslateSegments: %v", err)
+	}
+	if want := []string{"one", "two", "three"}; !slices.Equal(got, want) {
+		t.Fatalf("segments = %#v, want %#v", got, want)
+	}
+	// The request names each snippet by index, in numeric order.
+	if len(fp.gotMsgs) != 1 || fp.gotMsgs[0].Content != `{"0":"een","1":"twee","2":"drie"}` {
+		t.Fatalf("payload = %q", fp.gotMsgs[0].Content)
+	}
+}
+
+func TestTranslateSegmentsKeyedGapKeepsPosition(t *testing.T) {
+	// A snippet the model dropped comes back empty — and, crucially, in its own
+	// slot: the translations after it must not shift up onto the wrong text. This
+	// is the whole reason the protocol is keyed rather than positional.
+	fp := &fakeProvider{chunks: []Chunk{{Text: `{"0":"one","2":"three"}`}}}
+	got, err := NewAssistant(fp).TranslateSegments(context.Background(), []string{"een", "twee", "drie"}, "English")
+	if err != nil {
+		t.Fatalf("TranslateSegments: %v", err)
+	}
+	if want := []string{"one", "", "three"}; !slices.Equal(got, want) {
+		t.Fatalf("segments = %#v, want %#v", got, want)
+	}
+}
+
+func TestTranslateSegmentsKeyedNumberValue(t *testing.T) {
+	// A digits-only snippet can come back as a JSON number; one such value must
+	// not throw away the whole reply.
+	fp := &fakeProvider{chunks: []Chunk{{Text: `{"0":"one","1":2}`}}}
+	got, err := NewAssistant(fp).TranslateSegments(context.Background(), []string{"een", "2"}, "English")
+	if err != nil {
+		t.Fatalf("TranslateSegments: %v", err)
+	}
+	if want := []string{"one", "2"}; !slices.Equal(got, want) {
+		t.Fatalf("segments = %#v, want %#v", got, want)
+	}
+}
+
+func TestTranslateSegmentsArrayReplyStillWorks(t *testing.T) {
+	// A model that ignores the keyed shape and answers with an array is still
+	// usable, positionally, as before.
+	fp := &fakeProvider{chunks: []Chunk{{Text: `["one","two"]`}}}
+	got, err := NewAssistant(fp).TranslateSegments(context.Background(), []string{"een", "twee"}, "English")
+	if err != nil {
+		t.Fatalf("TranslateSegments: %v", err)
+	}
+	if want := []string{"one", "two"}; !slices.Equal(got, want) {
+		t.Fatalf("segments = %#v, want %#v", got, want)
+	}
+}
+
+func TestTranslateSegmentsUnusableReplyErrors(t *testing.T) {
+	// An object with none of the keys we asked for is not a translation.
+	fp := &fakeProvider{chunks: []Chunk{{Text: `{"note":"I cannot help with that"}`}}}
+	if _, err := NewAssistant(fp).TranslateSegments(context.Background(), []string{"een", "twee"}, "English"); err == nil {
+		t.Fatal("expected an error for a reply with no indexed translations")
 	}
 }

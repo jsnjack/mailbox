@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -146,25 +147,35 @@ func ShortModel(s string) string {
 	return string(r[:head]) + "…" + string(r[len(r)-tail:])
 }
 
-// TranslateSegments translates each text snippet into targetLang and returns the
-// translations in the same order. It sends only the text (as a compact JSON
-// array), never the surrounding markup, so the model generates a small fraction
-// of the tokens it would for whole-HTML translation — far faster. The caller
-// reinserts the results into the original markup, preserving styling.
+// TranslateSegments translates each text snippet into targetLang and returns one
+// translation per input segment, positionally — empty where the model gave no
+// answer for that segment, which the caller renders as the original text. It
+// sends only the text, never the surrounding markup, so the model generates a
+// small fraction of the tokens it would for whole-HTML translation — far faster.
+// The caller reinserts the results into the original markup, preserving styling.
+//
+// The request names each snippet by index (a JSON object, not an array), because
+// a positional reply cannot be trusted at length: models quietly merge snippets
+// on a longer body — 71 snippets measured back as 57 — and a reply short by one
+// shifts every later translation onto the wrong paragraph, which reads as fluent
+// prose attached to the wrong text. A key belongs to its snippet, so a dropped or
+// duplicated one costs only itself. An array reply is still accepted, for a model
+// that answers in the older shape.
 func (a *Assistant) TranslateSegments(ctx context.Context, segments []string, targetLang string) ([]string, error) {
 	start := time.Now()
 	logging.Trace("ai: translate segments", "op", "TranslateSegments", "provider", a.provider().Name(),
 		"lang", targetLang, "segments", len(segments))
-	payload, err := json.Marshal(segments)
+	payload, err := keyedSegments(segments)
 	if err != nil {
 		return nil, fmt.Errorf("encode segments: %w", err)
 	}
-	system := "You are a translation engine. The user message is a JSON array of short text snippets from " +
-		"an email. Translate each snippet into " + targetLang + " and reply with ONLY a JSON array of the " +
-		"same length and order, where each element is the translation of the corresponding input snippet. " +
-		"Leave snippets that are URLs, email addresses, numbers, or pure symbols unchanged. Do not merge or " +
-		"split snippets. No commentary and no code fences."
-	ch, err := a.stream(ctx, system, []Msg{{Role: RoleUser, Content: string(payload)}})
+	system := "You are a translation engine. The user message is a JSON object mapping an index to a text " +
+		"snippet from an email. Translate each snippet into " + targetLang + " and reply with ONLY a JSON " +
+		"object with exactly the same keys, where each value is the translation of the snippet with that " +
+		"key. Never add, drop, merge, or split keys: one key in, the same key out, even if a snippet is " +
+		"long or contains line breaks. Leave snippets that are URLs, email addresses, numbers, or pure " +
+		"symbols unchanged. No commentary and no code fences."
+	ch, err := a.stream(ctx, system, []Msg{{Role: RoleUser, Content: payload}})
 	if err != nil {
 		logging.Trace("ai: translate segments failed", "op", "TranslateSegments", "err", err)
 		return nil, err
@@ -177,17 +188,83 @@ func (a *Assistant) TranslateSegments(ctx context.Context, segments []string, ta
 		}
 		b.WriteString(c.Text)
 	}
-	out, err := parseTranslatedSegments(b.String())
-	if err != nil && len(segments) == 1 {
-		// A single segment often comes back as a bare string ("Hola") instead of a
-		// 1-element array; salvage it so a short one-line email still translates.
-		if v := stripScalar(b.String()); v != "" {
-			out, err = []string{v}, nil
+	out, missing, err := parseKeyedSegments(b.String(), len(segments))
+	if err != nil {
+		// A model that ignored the keyed shape and answered with an array, or with
+		// a bare string for a lone snippet ("Hola"), is still usable.
+		out, err = parseTranslatedSegments(b.String())
+		if err != nil && len(segments) == 1 {
+			if v := stripScalar(b.String()); v != "" {
+				out, err = []string{v}, nil
+			}
+		}
+		if err == nil {
+			logging.Trace("ai: translate segments array reply", "op", "TranslateSegments",
+				"results", len(out), "segments", len(segments))
 		}
 	}
 	logging.Trace("ai: translate segments done", "op", "TranslateSegments",
-		"bytes", b.Len(), "results", len(out), "dur", time.Since(start), "err", err)
+		"bytes", b.Len(), "results", len(out), "missing", missing, "dur", time.Since(start), "err", err)
 	return out, err
+}
+
+// keyedSegments encodes segments as a JSON object keyed by index, in numeric
+// order (marshalling a map would order the keys as strings — 1, 10, 11, 2 — which
+// is valid but reads as scrambled in a trace and to the model).
+func keyedSegments(segments []string) (string, error) {
+	var b strings.Builder
+	b.WriteByte('{')
+	for i, s := range segments {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		v, err := json.Marshal(s)
+		if err != nil {
+			return "", err
+		}
+		b.WriteString(`"` + strconv.Itoa(i) + `":`)
+		b.Write(v)
+	}
+	b.WriteByte('}')
+	return b.String(), nil
+}
+
+// parseKeyedSegments reads an index-keyed reply into n positional translations,
+// leaving a segment the model didn't answer for empty (the caller keeps its
+// original text). It also reports how many were missing. An error means the reply
+// wasn't a usable keyed object at all, so the caller can try another shape.
+func parseKeyedSegments(raw string, n int) ([]string, int, error) {
+	obj := firstJSONValue(raw, '{', '}')
+	if obj == "" {
+		return nil, 0, fmt.Errorf("no JSON object in reply")
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(obj), &m); err != nil {
+		return nil, 0, fmt.Errorf("parse object: %w", err)
+	}
+	out := make([]string, n)
+	missing := 0
+	for i := range out {
+		v, ok := m[strconv.Itoa(i)]
+		if !ok {
+			missing++
+			continue
+		}
+		var s string
+		if err := json.Unmarshal(v, &s); err != nil {
+			// A snippet that was pure digits can come back as a JSON number rather
+			// than a string; take it verbatim instead of dropping the whole reply.
+			s = strings.Trim(string(v), `"`)
+		}
+		if strings.TrimSpace(s) == "" {
+			missing++
+		}
+		out[i] = s
+	}
+	if missing == n {
+		return nil, missing, fmt.Errorf("no indexed translations in reply")
+	}
+	return out, missing, nil
 }
 
 // parseTranslatedSegments extracts a JSON array of strings from a model reply,
@@ -204,12 +281,15 @@ func parseTranslatedSegments(raw string) ([]string, error) {
 	return out, nil
 }
 
-// firstJSONArray returns the first balanced [...] substring of s, tracking
-// string literals so brackets inside strings don't confuse the match. This is
-// robust to models that wrap the array in prose or emit more than one array
+// firstJSONArray returns the first balanced [...] substring of s.
+func firstJSONArray(s string) string { return firstJSONValue(s, '[', ']') }
+
+// firstJSONValue returns the first balanced open…close substring of s, tracking
+// string literals so brackets or braces inside strings don't confuse the match.
+// This is robust to models that wrap the value in prose or emit more than one
 // (e.g. `["a","b"], ["c"]` — only the first is taken).
-func firstJSONArray(s string) string {
-	start := strings.IndexByte(s, '[')
+func firstJSONValue(s string, open, close byte) string {
+	start := strings.IndexByte(s, open)
 	if start < 0 {
 		return ""
 	}
@@ -227,9 +307,9 @@ func firstJSONArray(s string) string {
 			}
 		case c == '"':
 			inStr = true
-		case c == '[':
+		case c == open:
 			depth++
-		case c == ']':
+		case c == close:
 			if depth--; depth == 0 {
 				return s[start : i+1]
 			}
