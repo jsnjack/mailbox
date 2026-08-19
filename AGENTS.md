@@ -43,6 +43,12 @@ internal/
   sync/              per-account sync workers (backfill ↔ incremental) + notify.Hub; the engine takes a backend.Backend, never a concrete client
   snooze/            snooze mirroring: local snoozes rows + their provider label mirror ("Snoozed" + hidden "Snoozed/<wake time>" stamps), the wake sweeper, and the post-sync reconciler that makes snoozes hold and wake across machines
   ai/                provider abstraction (OpenAI-compatible + Anthropic), streaming; a failover provider chains the configured models in priority order — each chain entry may carry its own provider/endpoint/key ([[ai.chain]]), so a VPN-only proxy falls back to a local model. It switches on request failure or a stream error before any content, and a circuit breaker skips a failed entry for ~60s (probing after; ignored when every entry is cooling) with a 5s dial timeout so a blackholed endpoint can't stall every request. Classification runs at temperature 0 with tolerant reply parsing — MatchCategory.
+`TranslateSegments` names each snippet by index (a JSON object, not an array) and
+returns one translation per input, empty where the model gave none: a positional
+reply can't be trusted at length — models quietly merge snippets on a longer body
+(71 sent, 57 back, measured) and a reply short by one shifts every later
+translation onto the wrong paragraph, reading as fluent prose on the wrong text.
+An array reply is still parsed, for a model that answers in the older shape.
   aiwork/            headless background AI worker: categorizes every account's inbox (launch catch-up + sync-event driven, debounced, capped per pass, cooldown on provider failure), persists to the store, publishes AIUpdated
   activity/          headless pub/sub of transient "what is the app doing" events (status bar)
   ui/                all GTK/adw/webkit widget code (3-pane shell, list, reader, actions).
@@ -301,6 +307,30 @@ already-translated message isn't redone. Translations are also **persisted** per
 message (`store.{SetTranslation,Translations}`, `message_translations` table,
 keyed by gmail id + target lang — a body is immutable so they never go stale), so
 `onTranslate` seeds from the cache for free before calling the AI for the rest.
+Only the text travels, and the conversation's text travels **pooled**:
+`planTranslation` extracts each body's visible text into a `translationPlan`,
+`poolTranslations` translates the union of every body's segments, and
+`plan.render` writes the answers back into the original markup, so the model
+never sees a tag. Extraction and reassembly are separate phases precisely so the
+pool can span messages — each message quotes the ones before it, so the same
+paragraph appears in several bodies (314 segments, 85 distinct, on a real
+five-message thread), and pooling asks for it once and renders every copy
+identically instead of re-wording it per message. The pool goes out in bounded
+batches (`translateBatch` 40, `translateWorkers` 4): one request for a whole
+thread cannot overlap with itself and measured 67s where parallel batches of the
+same text measured 7.6s. Preformatted text is segmented **per paragraph**, not
+per node: a plain-text body is one `<pre>`, so the whole email is a single text
+node, and a whole email offered as one snippet reads to the model like several —
+it answers with one element per paragraph, and only the first would be kept
+(which silently dropped everything after the greeting). Flowed HTML is never
+split, where a blank line is insignificant whitespace inside a sentence.
+Translations are looked up by source text, so a segment the model skipped keeps
+its own original wording and nothing after it moves; a reply with *more* elements
+than segments still can't be paired up positionally, so a single segment re-joins
+them (`zipTranslations`) and anything else fails the batch rather than mixing one
+paragraph's translation into another's. A failed translation keeps the
+conversation on screen (the translation is only swapped in once ready) and says
+so in a toast, and persists nothing, so translating again retries.
 (Both AI caches, like categories, are dropped for a message when it is deleted —
 see `deleteMessageTx`.) Draft-reply streams into a compose
 window via the `ai` provider. Incoming

@@ -1,9 +1,12 @@
 package ui
 
 import (
+	"fmt"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode"
 
 	"golang.org/x/net/html"
@@ -301,61 +304,216 @@ func findBody(n *html.Node) *html.Node {
 	return nil
 }
 
-// translateHTMLText extracts the visible text from htmlStr, passes the segments
-// to translate (which must return one translation per segment, in order), writes
-// the results back into the original markup, and returns the re-rendered HTML.
-// The markup is preserved verbatim — only text changes — so the translator only
-// ever handles plain text, never tags.
-func translateHTMLText(htmlStr string, translate func([]string) ([]string, error)) (string, error) {
+// translationPlan is one email body prepared for translation: its parsed
+// document, the text worth translating, and where each translation goes back.
+// Extraction and reassembly are separate phases so a whole conversation can pool
+// its text into one set of requests — the same paragraph quoted in four replies
+// is then translated once instead of four times (measured at two thirds of the
+// work on a real five-message thread), and every copy of it reads identically.
+type translationPlan struct {
+	doc      *html.Node
+	nodes    []*html.Node
+	pieces   [][]textPiece
+	segments []string // in document order; may repeat within one body
+}
+
+// textPiece is one run of a text node: seg is the trimmed text to translate, or
+// "" for a separator kept verbatim. A node's pieces concatenate back to its
+// original text.
+type textPiece struct {
+	text string
+	seg  string
+}
+
+// planTranslation parses htmlStr and collects the visible text worth translating.
+//
+// Preformatted text is collected one segment per paragraph instead of one segment
+// per node: a plain-text body is rendered as a single <pre>, so the whole email is
+// one text node, and a whole email in one snippet reads to the model like several
+// snippets — it answers with one element per paragraph, and the reply no longer
+// lines up with what was asked for.
+func planTranslation(htmlStr string) (*translationPlan, error) {
 	doc, err := html.Parse(strings.NewReader(htmlStr))
 	if err != nil {
 		logging.Trace("ui: translate html parse failed", "err", err)
-		return "", err
+		return nil, err
 	}
-
-	var nodes []*html.Node
-	var texts []string
-	var walk func(n *html.Node)
-	walk = func(n *html.Node) {
+	p := &translationPlan{doc: doc}
+	var walk func(n *html.Node, inPre bool)
+	walk = func(n *html.Node, inPre bool) {
 		if n.Type == html.ElementNode {
 			switch n.Data {
 			case "script", "style", "head", "title":
 				return // non-visible content
+			case "pre":
+				inPre = true
 			}
 		}
 		if n.Type == html.TextNode && hasLetters(n.Data) {
-			nodes = append(nodes, n)
-			texts = append(texts, strings.TrimSpace(n.Data))
+			var ps []textPiece
+			for _, chunk := range splitParagraphs(n.Data, inPre) {
+				var seg string
+				if hasLetters(chunk) {
+					seg = strings.TrimSpace(chunk)
+					p.segments = append(p.segments, seg)
+				}
+				ps = append(ps, textPiece{text: chunk, seg: seg})
+			}
+			p.nodes = append(p.nodes, n)
+			p.pieces = append(p.pieces, ps)
 		}
 		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			walk(c)
+			walk(c, inPre)
 		}
 	}
-	walk(doc)
+	walk(doc, false)
+	logging.Trace("ui: translate html segments", "n", len(p.segments))
+	return p, nil
+}
 
-	if len(texts) == 0 {
-		logging.Trace("ui: translate html no text segments")
-		return htmlStr, nil
-	}
-	logging.Trace("ui: translate html segments", "n", len(texts))
-	translated, err := translate(texts)
-	if err != nil {
-		logging.Trace("ui: translate html failed", "err", err, "segments", len(texts))
-		return "", err
-	}
-	logging.Trace("ui: translate html done", "segments", len(translated))
-	for i, n := range nodes {
-		if i >= len(translated) || strings.TrimSpace(translated[i]) == "" {
-			continue // length mismatch or empty → keep the original text
+// render writes the translations back into the plan's markup and returns the
+// re-rendered HTML. Translations are looked up by source text, so a segment the
+// translator left out (or answered empty) simply keeps its original wording —
+// only that segment, never the ones after it. The markup is preserved verbatim.
+func (p *translationPlan) render(byText map[string]string) (string, error) {
+	for i, n := range p.nodes {
+		var b strings.Builder
+		for _, piece := range p.pieces[i] {
+			tr := byText[piece.seg]
+			if piece.seg == "" || strings.TrimSpace(tr) == "" {
+				b.WriteString(piece.text) // separator, or nothing came back
+				continue
+			}
+			b.WriteString(preserveSpacing(piece.text, tr))
 		}
-		n.Data = preserveSpacing(n.Data, translated[i])
+		n.Data = b.String()
 	}
-
 	var b strings.Builder
-	if err := html.Render(&b, doc); err != nil {
+	if err := html.Render(&b, p.doc); err != nil {
 		return "", err
 	}
 	return b.String(), nil
+}
+
+// How a conversation's pooled text is split into requests: batches of
+// translateBatch segments, translateWorkers of them in flight. Measured on real
+// threads: a long thread's text in one request took 67s, where the same text in
+// parallel batches took 13s, and a batch this size answers in a few seconds.
+const (
+	translateBatch   = 40
+	translateWorkers = 4
+)
+
+// poolTranslations translates the text of several bodies as one set and returns
+// the translation of every unique segment, keyed by source text.
+//
+// Pooling is what makes a conversation cheap to translate: every message quotes
+// the ones before it, so the same paragraph turns up in several bodies — two
+// thirds of the segments on a real five-message thread — and pooling asks for it
+// once. It also makes the result consistent, since a quoted paragraph is no
+// longer re-worded differently in each message that quotes it.
+func poolTranslations(plans []*translationPlan, translate func([]string) ([]string, error)) (map[string]string, error) {
+	var unique []string
+	seen := map[string]bool{}
+	total := 0
+	for _, p := range plans {
+		total += len(p.segments)
+		for _, seg := range p.segments {
+			if !seen[seg] {
+				seen[seg] = true
+				unique = append(unique, seg)
+			}
+		}
+	}
+	logging.Trace("ui: translate pooled segments", "bodies", len(plans), "segments", total, "unique", len(unique))
+
+	byText := make(map[string]string, len(unique))
+	var mu sync.Mutex
+	var firstErr error
+	sem := make(chan struct{}, translateWorkers)
+	var wg sync.WaitGroup
+	for start := 0; start < len(unique); start += translateBatch {
+		batch := unique[start:min(start+translateBatch, len(unique))]
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(batch []string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			out, err := translate(batch)
+			mu.Lock()
+			defer mu.Unlock()
+			if err == nil {
+				var got map[string]string
+				if got, err = zipTranslations(batch, out); err == nil {
+					for seg, tr := range got {
+						byText[seg] = tr
+					}
+				}
+			}
+			if err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}(batch)
+	}
+	wg.Wait()
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	return byText, nil
+}
+
+// translateHTMLText translates one body end to end: extract, translate, reassemble.
+// translate must return one translation per segment, in order.
+func translateHTMLText(htmlStr string, translate func([]string) ([]string, error)) (string, error) {
+	plan, err := planTranslation(htmlStr)
+	if err != nil {
+		return "", err
+	}
+	if len(plan.segments) == 0 {
+		logging.Trace("ui: translate html no text segments")
+		return htmlStr, nil
+	}
+	translated, err := translate(plan.segments)
+	if err != nil {
+		logging.Trace("ui: translate html failed", "err", err, "segments", len(plan.segments))
+		return "", err
+	}
+	byText, err := zipTranslations(plan.segments, translated)
+	if err != nil {
+		return "", err
+	}
+	logging.Trace("ui: translate html done", "segments", len(translated))
+	return plan.render(byText)
+}
+
+// zipTranslations pairs each segment with its translation by position, keyed by
+// source text so callers can look one up wherever it appears.
+//
+// More elements back than were asked for means the model split a snippet on its
+// own, and the reply can no longer be paired up by position. For a single snippet
+// the extra elements are the rest of its translation and re-join; otherwise this
+// refuses, because pairing element i with segment i would then put one
+// paragraph's translation on another paragraph's text. (Keeping only the elements
+// the segments had room for is what dropped everything after the greeting of a
+// plain-text email.) Fewer elements is safe: the tail keeps its original text.
+func zipTranslations(segments, translated []string) (map[string]string, error) {
+	if len(translated) > len(segments) {
+		if len(segments) != 1 {
+			logging.Trace("ui: translate segment mismatch", "want", len(segments), "got", len(translated))
+			return nil, fmt.Errorf("translator returned %d segments for %d", len(translated), len(segments))
+		}
+		translated = []string{joinSegments(translated)}
+	}
+	byText := make(map[string]string, len(segments))
+	for i, seg := range segments {
+		if i >= len(translated) || strings.TrimSpace(translated[i]) == "" {
+			continue
+		}
+		if _, ok := byText[seg]; !ok { // a repeated segment keeps the first answer
+			byText[seg] = translated[i]
+		}
+	}
+	return byText, nil
 }
 
 // hasLetters reports whether s contains a letter — i.e. is worth translating
@@ -375,4 +533,54 @@ func preserveSpacing(orig, translated string) string {
 	lead := orig[:len(orig)-len(strings.TrimLeft(orig, " \t\r\n"))]
 	trail := orig[len(strings.TrimRight(orig, " \t\r\n")):]
 	return lead + strings.TrimSpace(translated) + trail
+}
+
+// paragraphBreak matches a run of two or more line breaks — the paragraph
+// separator of a plain-text email body.
+var paragraphBreak = regexp.MustCompile(`\r?\n[ \t]*(?:\r?\n[ \t]*)+`)
+
+// splitParagraphs breaks a text node's data into alternating text and separator
+// chunks that concatenate back to the original string. Only preformatted text is
+// split: in flowed HTML a blank line is insignificant whitespace inside a
+// paragraph, so splitting there would hand the translator half a sentence.
+func splitParagraphs(s string, inPre bool) []string {
+	if !inPre {
+		return []string{s}
+	}
+	breaks := paragraphBreak.FindAllStringIndex(s, -1)
+	if len(breaks) == 0 {
+		return []string{s}
+	}
+	out := make([]string, 0, 2*len(breaks)+1)
+	last := 0
+	for _, b := range breaks {
+		out = append(out, s[last:b[0]], s[b[0]:b[1]])
+		last = b[1]
+	}
+	return append(out, s[last:])
+}
+
+// joinSegments reassembles a translation the model returned in several parts for
+// one requested snippet. Such a reply usually keeps each part's own trailing
+// line breaks, so the parts concatenate; when they were trimmed, the paragraph
+// breaks are restored, and parts with no line breaks at all (one paragraph split
+// by sentence) are joined with a space.
+func joinSegments(parts []string) string {
+	selfSeparating, multiline := true, false
+	for i, p := range parts {
+		if strings.ContainsAny(p, "\r\n") {
+			multiline = true
+		}
+		if i < len(parts)-1 && strings.TrimRight(p, " \t\r\n") == p {
+			selfSeparating = false
+		}
+	}
+	switch {
+	case selfSeparating:
+		return strings.Join(parts, "")
+	case multiline:
+		return strings.Join(parts, "\n\n")
+	default:
+		return strings.Join(parts, " ")
+	}
 }

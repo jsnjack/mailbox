@@ -15,7 +15,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	xhtml "golang.org/x/net/html"
@@ -3644,41 +3643,44 @@ func (w *window) onTranslate() {
 		}
 		logging.Trace("ui: translate seeded from cache", "seeded", len(seeded), "remaining", len(remaining), "account", acctID)
 
-		// 2) Translate the remainder concurrently (bounded), writing each result
-		// through to the store. Sources are read + sanitized here (off the main
-		// thread); bluemonday + the store are safe for concurrent use.
-		results := make(map[string]string, len(remaining))
-		var mu sync.Mutex
+		// 2) Prepare every remaining body, then translate the conversation's text as
+		// one pooled set: each message quotes the ones before it, so the same
+		// paragraph appears in several bodies. Sources are read + sanitized here,
+		// off the main thread.
+		plans := make([]*translationPlan, 0, len(remaining))
 		var firstErr error
-		sem := make(chan struct{}, 4)
-		var wg sync.WaitGroup
 		for _, m := range remaining {
-			wg.Add(1)
-			sem <- struct{}{}
-			go func(m model.Message) {
-				defer wg.Done()
-				defer func() { <-sem }()
-				out, err := translateHTMLText(w.bodyHTMLFor(m), func(segs []string) ([]string, error) {
-					return w.deps.Assistant.TranslateSegments(ctx, segs, translateLang)
-				})
+			plan, err := planTranslation(w.bodyHTMLFor(m))
+			if err != nil {
+				firstErr = err
+				break
+			}
+			plans = append(plans, plan)
+		}
+		var byText map[string]string
+		if firstErr == nil {
+			byText, firstErr = poolTranslations(plans, func(segs []string) ([]string, error) {
+				return w.deps.Assistant.TranslateSegments(ctx, segs, translateLang)
+			})
+		}
+
+		// 3) Reassemble each body from the pool and persist it per message, which is
+		// the granularity that survives a new reply arriving in the thread.
+		results := make(map[string]string, len(plans))
+		if firstErr == nil {
+			for i, plan := range plans {
+				out, err := plan.render(byText)
 				if err != nil {
-					mu.Lock()
-					if firstErr == nil {
-						firstErr = err
-					}
-					mu.Unlock()
-					return
+					firstErr = err
+					break
 				}
 				text := stripCodeFence(out)
-				if serr := w.deps.Store.SetTranslation(ctx, acctID, m.GmailID, translateLang, text); serr != nil {
+				if serr := w.deps.Store.SetTranslation(ctx, acctID, remaining[i].GmailID, translateLang, text); serr != nil {
 					slog.Warn("ui: persist translation", "err", serr)
 				}
-				mu.Lock()
-				results[m.GmailID] = text
-				mu.Unlock()
-			}(m)
+				results[remaining[i].GmailID] = text
+			}
 		}
-		wg.Wait()
 
 		logging.Trace("ui: translate done", "thread", threadID, "translated", len(results), "err", firstErr)
 		dispatch.Main(func() {
@@ -3688,7 +3690,12 @@ func (w *window) onTranslate() {
 				return // user switched conversations or reverted
 			}
 			if firstErr != nil {
-				w.setReaderHTML("<p>Translation failed: " + html.EscapeString(firstErr.Error()) + "</p>")
+				// The translation is only swapped in once it is ready, so the
+				// conversation is still on screen: keep it and say what happened
+				// rather than replacing the email with an error page. Nothing was
+				// persisted either, so pressing translate again retries.
+				w.translationBanner.SetRevealed(false)
+				w.toast("Couldn't translate — showing the original")
 				return
 			}
 			for id, out := range seeded {

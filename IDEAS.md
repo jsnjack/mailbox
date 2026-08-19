@@ -15,6 +15,41 @@ Add safe recovery and support tooling:
 - Strip message content, addresses, tokens, filesystem paths, and AI keys by default, and
   show a preview of every file before the bundle is saved.
 
+## Per-segment translation cache
+
+Translations are cached per message. The pooled request path already shows why a
+finer key would pay: on a real five-message thread, 314 extracted segments hold
+only 85 distinct ones, because every reply quotes the ones before it. Pooling
+collapses that within a single translate pass, but a later pass on a neighbouring
+thread — a forward of the same mail, a reply that arrives tomorrow — re-translates
+text the app has already translated verbatim.
+
+Storing `(hash(segment), lang) → translation` would make quoted history free
+across threads and restarts, and the render path already looks translations up by
+source text (`translationPlan.render`), so the shape fits. What needs thought is
+eviction (segments are unbounded where messages are not) and whether the row count
+stays sane on a large mailbox before it earns its schema.
+
+### One request per conversation (rejected, measured)
+
+Sending a whole conversation as a single translate request was measured against the
+current shape (one bounded batch per 40 pooled segments, four in flight) on real
+threads through the configured chain:
+
+| thread | per-message, concurrent | one request per thread | pooled batches (shipped) |
+| --- | --- | --- | --- |
+| 3 messages, 20 segments | 3.2s | 4.4s | — |
+| 4 messages, 163 segments | 6.9s | 17.1s | — |
+| 5 messages, 314 segments | 13.7s | 67.5s | 7.6s |
+
+One request cannot overlap with itself, so it degrades with thread length while
+parallel batches stay flat, and a single drifted reply loses the whole conversation
+rather than one batch. The win was never the request boundary: it was pooling the
+duplicate quoted text (roughly a quarter of the segments survive dedup) and naming
+each snippet by index so a merged reply can no longer shift translations onto the
+wrong paragraph — measured 71 snippets returning as 57 with a positional array,
+against 0 missing keys for the same body keyed.
+
 ## Optional community tracker list (deferred)
 
 Keep the current structural and URL heuristics as the only tracker protection for now.
