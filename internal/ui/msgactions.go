@@ -66,7 +66,17 @@ func (w *window) showMessageMenu(gmailID string) {
 		})
 		box.Append(b)
 	}
-	if w.deps.Send != nil {
+	switch {
+	case m.IsDraft:
+		// An unsent draft isn't mail to answer — its actions are resuming or
+		// discarding it (the discard queues the provider deletion, so it works
+		// like the Drafts-folder row menu).
+		item("Edit draft", func() { w.openDraftForEditMsg(m.ThreadID, m.GmailID) })
+		if w.deps.DeleteDraft != nil {
+			item("Discard draft…", func() { w.confirmDiscardDraft(m.AccountID, m.ThreadID) })
+		}
+		box.Append(gtk.NewSeparator(gtk.OrientationHorizontal))
+	case w.deps.Send != nil:
 		item("Reply all", func() { w.replyToMessage(gmailID, true) })
 		item("Reply", func() { w.replyToMessage(gmailID, false) })
 		item("Forward", func() { w.forwardMessage(gmailID) })

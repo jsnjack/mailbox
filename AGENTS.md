@@ -297,7 +297,24 @@ folder resumes editing it in compose (`openDraftForEdit`) instead of rendering
 it read-only: the body/recipients are prefilled and the draft's Gmail resource
 id is resolved (`Client.FindDraftID`) so Save updates that draft
 (`Drafts.Update`) and Send sends then removes it (`Drafts.Delete`) — never a
-duplicate.
+duplicate; a resumed draft never re-appends the signature, even when the
+resource id couldn't be resolved offline. **Drafts inside conversations**: a
+draft reply is autosaved by Gmail into the real thread, so without a mark it
+renders as delivered mail. `model.Message.IsDraft` is hydrated on every store
+read (an indexed EXISTS on the DRAFT label in `msgCols` — cheaper than label
+slices, which only writers populate) and `ThreadSummary.HasDraft`
+(`markHasDraft`) flags threads holding one: the list row shows a red "Draft"
+tag (`.cat-draft`, skipped in Sent/Drafts where it's redundant), and the
+reader's draft section carries a red "Draft" chip on its sender line plus an
+"Edit draft" link (`mbaction:editdraft` → `openDraftForEditMsg`, the
+message-targeted resume). A draft's ⋯ menu offers Edit/Discard instead of
+Reply/Forward, draft sections are excluded from the immutable-section cache
+(their bodies mutate between saves), and the header bar's
+reply/forward/star/unread target the newest *delivered* message
+(`newestActionable`) so answering a thread can't quote your own unsent draft.
+`openDraftForEdit` and the engine's `DiscardDraft` select the draft by
+`IsDraft`, never "newest" — after an incoming reply the newest message is
+someone else's mail.
 Translate (`onTranslate`) renders an English translation of the whole open
 conversation in place (markup preserved, "Show original" reverts): every message
 is translated concurrently and cached per message id in `translationCache`

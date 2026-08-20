@@ -244,8 +244,9 @@ func (w *window) renderConversation(msgs []model.Message) {
 				head, rest, n := w.conversationSection(m, body, w.cleanHTML, fetchFailed[m.GmailID], gists[m.GmailID])
 				// A failure section (snippet + "could not be loaded" notice) is
 				// transient — caching it would keep showing the failure after the
-				// body becomes fetchable again. Only real bodies are immutable.
-				if !fetchFailed[m.GmailID] {
+				// body becomes fetchable again. Only real bodies are immutable —
+				// which excludes drafts, whose body mutates as it is edited.
+				if !fetchFailed[m.GmailID] && !m.IsDraft {
 					fresh[m.GmailID] = cachedSection{head: head, body: rest, trackers: n}
 				}
 				b.WriteString(composeSection(head, rest, false))
@@ -259,9 +260,9 @@ func (w *window) renderConversation(msgs []model.Message) {
 			} else {
 				body := w.bodyForRender(ctx, m, refetched)
 				h2, r2, n := w.conversationSection(m, body, w.cleanHTML, fetchFailed[m.GmailID], gists[m.GmailID])
-				// Transient failure sections are not cached — see the
-				// latest-message branch above.
-				if !fetchFailed[m.GmailID] {
+				// Transient failure sections and mutable draft bodies are not
+				// cached — see the latest-message branch above.
+				if !fetchFailed[m.GmailID] && !m.IsDraft {
 					fresh[m.GmailID] = cachedSection{head: h2, body: r2, trackers: n}
 				}
 				head, rest = h2, r2
@@ -530,6 +531,12 @@ func capCache(m map[uiCacheKey]string, max int) {
 func (w *window) cachedSectionsFor(msgs []model.Message) map[string]cachedSection {
 	out := make(map[string]cachedSection, len(msgs))
 	for _, m := range msgs {
+		// A draft's body mutates in place as it is edited (a local draft keeps
+		// its id across saves), so the immutability the cache relies on doesn't
+		// hold — always re-render drafts.
+		if m.IsDraft {
+			continue
+		}
 		if cs, ok := w.sectionCache[cacheKey(m.AccountID, m.GmailID)]; ok {
 			out[m.GmailID] = cs
 		}
@@ -636,11 +643,24 @@ func (w *window) conversationSection(m model.Message, body model.MessageBody, cl
 		fmt.Fprintf(&hb, ` <span class="mbaddr">&lt;%s&gt;</span>`, html.EscapeString(addr))
 	}
 	hb.WriteString(`</a>`)
+	// An unsent draft renders inside the conversation it answers (Gmail files a
+	// draft reply into the real thread), so without a mark it reads as delivered
+	// mail. The chip stays visible folded or open.
+	if m.IsDraft {
+		hb.WriteString(` <span class="mbdraft">Draft</span>`)
+	}
 	if preview := messagePreview(m); preview != "" {
 		fmt.Fprintf(&hb, ` <span class="mbprev">%s</span>`, html.EscapeString(preview))
 	}
 	hb.WriteString(`</span>`)
 	hb.WriteString(`<span class="mbdate">`)
+	// A draft's primary action is resuming it, so the affordance sits right in
+	// the header rather than only behind the ⋯ menu (mbaction: is intercepted
+	// by onDecidePolicy — it never navigates).
+	if m.IsDraft {
+		fmt.Fprintf(&hb, `<a class="mbeditdraft" href="mbaction:editdraft/%s" title="Resume editing this draft">Edit draft</a>`,
+			url.QueryEscape(m.GmailID))
+	}
 	hb.WriteString(formatMsgDate(m.InternalDate, time.Now()))
 	// Per-message actions: the header bar acts on the conversation, this ⋯
 	// opens the menu of actions on this specific message (reply/forward when
@@ -1050,6 +1070,12 @@ a.mbrcpt{color:inherit;text-decoration:none}
 a.mbrcpt:hover{text-decoration:underline}
 a.mbmore{color:#1a5fb4;text-decoration:none;white-space:nowrap}
 a.mbmore:hover{text-decoration:underline}
+/* An unsent draft inside a conversation: a red chip on the sender line so it
+   can't be mistaken for delivered mail, and an explicit way back into compose. */
+.mbdraft{color:#a00;border:1px solid rgba(170,0,0,.4);border-radius:6px;
+  padding:0 5px;font-size:.82em;white-space:nowrap}
+a.mbeditdraft{color:#1a5fb4;text-decoration:none;white-space:nowrap;margin-right:12px}
+a.mbeditdraft:hover{text-decoration:underline}
 img,video{max-width:100%!important;height:auto!important}
 img[hidden],video[hidden]{display:none!important}
 pre{font-family:monospace;white-space:pre-wrap}

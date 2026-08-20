@@ -1469,9 +1469,9 @@ func (w *window) renderSig(id string) string {
 		}
 	}
 	cat := w.threadCats[w.activeCacheKey(id)]
-	return fmt.Sprintf("%s\x1f%d\x1f%d\x1f%s\x1f%t\x1f%t\x1f%s\x1f%s\x1f%d\x1f%t\x1f%t\x1f%t\x1f%d\x1f%s",
+	return fmt.Sprintf("%s\x1f%d\x1f%d\x1f%s\x1f%t\x1f%t\x1f%s\x1f%s\x1f%d\x1f%t\x1f%t\x1f%t\x1f%t\x1f%d\x1f%s",
 		sel, t.UnreadCount, t.Count, cat.tag, cat.manual, cat.failed, who, m.Subject,
-		m.InternalDate.Unix(), m.HasAttachments, m.IsStarred, t.RepliedByMe, t.SnoozedUntil, m.Snippet)
+		m.InternalDate.Unix(), m.HasAttachments, m.IsStarred, t.RepliedByMe, t.HasDraft, t.SnoozedUntil, m.Snippet)
 }
 
 // categoryCand is one thread whose tag to look up: its thread id and the gmail
@@ -1657,26 +1657,39 @@ func threadRow(t model.ThreadSummary, outgoing bool, category string, manualCat 
 	if !unread {
 		subj.AddCSSClass("dim-label")
 	}
+	// An unsent draft waits in this thread — marked in red (Gmail's convention)
+	// so the row isn't read as settled correspondence. Redundant in the Drafts
+	// folder itself, where every row is a draft.
+	hasDraft := t.HasDraft && !outgoing
 	// An AI category tag (e.g. "Needs reply") sits before the subject;
 	// uncategorized mail shows nothing.
-	if category != "" {
-		tag := gtk.NewLabel(category)
-		tag.AddCSSClass("cat-tag")
-		switch category {
-		case "Needs reply":
-			tag.AddCSSClass("cat-needsreply")
-		case "Replied":
-			tag.AddCSSClass("cat-replied")
-		case "Discount":
-			tag.AddCSSClass("cat-discount")
-		case "Snoozed":
-			tag.AddCSSClass("cat-snoozed")
-		case "Categorize failed":
-			tag.AddCSSClass("cat-failed")
-		}
-		tag.SetVAlign(gtk.AlignCenter)
+	if category != "" || hasDraft {
 		subjRow := gtk.NewBox(gtk.OrientationHorizontal, 6)
-		subjRow.Append(tag)
+		if hasDraft {
+			d := gtk.NewLabel("Draft")
+			d.AddCSSClass("cat-tag")
+			d.AddCSSClass("cat-draft")
+			d.SetVAlign(gtk.AlignCenter)
+			subjRow.Append(d)
+		}
+		if category != "" {
+			tag := gtk.NewLabel(category)
+			tag.AddCSSClass("cat-tag")
+			switch category {
+			case "Needs reply":
+				tag.AddCSSClass("cat-needsreply")
+			case "Replied":
+				tag.AddCSSClass("cat-replied")
+			case "Discount":
+				tag.AddCSSClass("cat-discount")
+			case "Snoozed":
+				tag.AddCSSClass("cat-snoozed")
+			case "Categorize failed":
+				tag.AddCSSClass("cat-failed")
+			}
+			tag.SetVAlign(gtk.AlignCenter)
+			subjRow.Append(tag)
+		}
 		subjRow.Append(subj)
 		box.Append(subjRow)
 	} else {

@@ -147,6 +147,12 @@ const appCSS = `
 	background-color: alpha(@error_color, 0.12);
 	color: alpha(@error_color, 0.85);
 }
+/* "Draft": an unsent draft waits in this thread — red, Gmail's convention, so
+   the conversation isn't read as settled while your reply never went out. */
+.cat-draft {
+	background-color: alpha(@error_color, 0.12);
+	color: @error_color;
+}
 
 /* Activity row: an inset card in a window's bottom bar, not a strip across the
    app — the Nautilus operations-row placement, and gdiff's measurements, so the

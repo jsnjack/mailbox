@@ -877,10 +877,17 @@ func (e *Engine) DiscardDraft(ctx context.Context, b backend.Backend, accountID 
 		if len(msgs) == 0 {
 			return store.ErrNotFound
 		}
-		// The action is reachable only from the Drafts view, whose summary was
-		// selected through the DRAFT label. ListThreadMessages intentionally does
-		// not hydrate per-message label slices, so use its newest message.
+		// The thread can hold delivered messages too (a draft reply sits inside
+		// the conversation it answers), so target the DRAFT-labeled message —
+		// newest first, matching what the UI shows — not blindly the newest,
+		// which after an incoming reply would be someone else's mail.
 		draft := &msgs[len(msgs)-1]
+		for i := len(msgs) - 1; i >= 0; i-- {
+			if msgs[i].IsDraft {
+				draft = &msgs[i]
+				break
+			}
+		}
 		if _, err := e.Store.QueueProviderDraftDelete(ctx, accountID, draft.GmailID, "", draft.ThreadID); err != nil {
 			return err
 		}

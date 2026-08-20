@@ -1336,6 +1336,11 @@ func (w *window) onDecidePolicy(decision webkit.PolicyDecisioner, dtype webkit.P
 			w.showRecipientActions(id)
 		case "menu":
 			w.showMessageMenu(id)
+		case "editdraft":
+			// The "Edit draft" affordance on a draft section of the open thread.
+			if m, ok := w.threadMessageByID(id); ok {
+				w.openDraftForEditMsg(m.ThreadID, m.GmailID)
+			}
 		default:
 			slog.Debug("ui: unknown mbaction", "uri", uri)
 		}
@@ -1947,6 +1952,20 @@ func (w *window) replyAllInitFor(m model.Message) model.OutgoingMessage {
 		References:    strings.TrimSpace(m.References + " " + m.RFC822MsgID),
 		ThreadID:      m.ThreadID,
 	}
+}
+
+// newestActionable returns the newest delivered message of a conversation —
+// what the header bar's reply/forward/star/unread actions target. An unsent
+// draft is skipped: replying quotes, and reply-all addresses, the mail being
+// answered, and your own half-written draft is neither. Falls back to the
+// newest message when the thread holds nothing but drafts.
+func newestActionable(msgs []model.Message) model.Message {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if !msgs[i].IsDraft {
+			return msgs[i]
+		}
+	}
+	return msgs[len(msgs)-1]
 }
 
 // threadMessageByID returns the open conversation's message with the given id
@@ -2691,9 +2710,9 @@ func (w *window) showThreadMsgs(threadID string, msgs []model.Message) {
 	logging.Trace("ui: show thread", "thread", threadID, "n", len(msgs), "account", w.activeID)
 	w.openThreadID = threadID
 	w.openThreadMsgs = msgs
-	w.openMsg = msgs[len(msgs)-1] // newest, for reply/forward/star/unread
-	w.resetTranslation()          // a freshly opened thread shows the original
-	w.hideSummary()               // collapse any summary from the previous thread
+	w.openMsg = newestActionable(msgs) // for reply/forward/star/unread
+	w.resetTranslation()               // a freshly opened thread shows the original
+	w.hideSummary()                    // collapse any summary from the previous thread
 	// Re-apply the global policy after a one-conversation "Show images" override.
 	if want := !w.blockImages; want != w.imagesEnabled {
 		w.imagesEnabled = want
@@ -2789,8 +2808,13 @@ func hasLabel(m model.Message, label string) bool {
 // draft body and resolves its Gmail draft id (so sending/saving replaces the
 // draft rather than duplicating it), then opens a compose window prefilled with
 // the draft's recipients, subject, and body.
-func (w *window) openDraftForEdit(threadID string) {
-	logging.Trace("ui: open draft for edit", "thread", threadID, "account", w.activeID)
+func (w *window) openDraftForEdit(threadID string) { w.openDraftForEditMsg(threadID, "") }
+
+// openDraftForEditMsg is openDraftForEdit targeting a specific message: msgID
+// names the draft to edit (the reader's per-message affordances know exactly
+// which section was clicked); "" picks the thread's newest draft.
+func (w *window) openDraftForEditMsg(threadID, msgID string) {
+	logging.Trace("ui: open draft for edit", "thread", threadID, "msg", msgID, "account", w.activeID)
 	acctID := w.activeID
 	// Progress belongs to the activity row, not a toast: a toast acknowledges a
 	// finished action, and one that says "…" leaves a notice that never
@@ -2828,12 +2852,26 @@ func (w *window) openDraftForEdit(threadID string) {
 			}
 			return
 		}
-		// The draft is the message carrying the DRAFT label (fall back to newest).
+		// Pick the draft to edit: the requested message when given, else the
+		// newest DRAFT-labeled message (the thread can hold delivered mail too —
+		// a draft reply sits inside the conversation it answers, so "newest"
+		// alone could be someone else's reply). Fall back to the newest message.
 		dm := msgs[len(msgs)-1]
-		for _, m := range msgs {
-			if hasLabel(m, model.LabelDraft) {
-				dm = m
-				break
+		picked := false
+		if msgID != "" {
+			for _, m := range msgs {
+				if m.GmailID == msgID {
+					dm, picked = m, true
+					break
+				}
+			}
+		}
+		if !picked {
+			for i := len(msgs) - 1; i >= 0; i-- {
+				if msgs[i].IsDraft {
+					dm = msgs[i]
+					break
+				}
 			}
 		}
 		if !dm.BodyFetched && w.deps.FetchBody != nil {
@@ -2875,15 +2913,20 @@ func (w *window) openDraftForEdit(threadID string) {
 		}
 		dispatch.Main(func() {
 			w.openCompose(model.OutgoingMessage{
-				To:              strings.TrimSpace(dm.ToAddrs),
-				Cc:              strings.TrimSpace(dm.CcAddrs),
-				Bcc:             strings.TrimSpace(dm.BccAddrs),
-				Subject:         dm.Subject,
-				Body:            body,
-				InReplyTo:       dm.InReplyTo,
-				References:      dm.References,
-				ThreadID:        dm.ThreadID,
-				DraftID:         draftID,
+				To:         strings.TrimSpace(dm.ToAddrs),
+				Cc:         strings.TrimSpace(dm.CcAddrs),
+				Bcc:        strings.TrimSpace(dm.BccAddrs),
+				Subject:    dm.Subject,
+				Body:       body,
+				InReplyTo:  dm.InReplyTo,
+				References: dm.References,
+				ThreadID:   dm.ThreadID,
+				DraftID:    draftID,
+				// The body is an existing draft, which already carries whatever
+				// sign-off it was written with — never re-append the signature,
+				// even when the provider draft id couldn't be resolved (offline)
+				// and openCompose's DraftID check can't tell it's a resume.
+				SkipSignature:   true,
 				SourceMessageID: dm.GmailID,
 			}, "", "Edit draft")
 		})
@@ -4890,8 +4933,8 @@ func (w *window) refreshOpenThread() {
 		return
 	}
 	w.openThreadMsgs = msgs
-	w.openMsg = msgs[len(msgs)-1] // newest, for reply/forward/star/unread
-	w.rerenderOpenThread()        // keeps a shown translation shown
+	w.openMsg = newestActionable(msgs) // for reply/forward/star/unread
+	w.rerenderOpenThread()             // keeps a shown translation shown
 }
 
 // hit is one message that passed the new-mail test and is owed a notification.

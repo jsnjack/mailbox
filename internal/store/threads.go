@@ -116,6 +116,9 @@ func (s *Store) ListThreadsByLabelPage(ctx context.Context, accountID int64, lab
 	if err := s.markWokeFromSnooze(ctx, accountID, out); err != nil {
 		return ThreadPage{}, err
 	}
+	if err := s.markHasDraft(ctx, accountID, out); err != nil {
+		return ThreadPage{}, err
+	}
 	logging.TraceContext(ctx, "store: list threads by label page done", "account", accountID, "label", labelID, "count", len(out), "more", next != nil, "dur", time.Since(start))
 	return ThreadPage{Threads: out, Next: next}, nil
 }
@@ -176,6 +179,9 @@ func (s *Store) ListAllThreadsPage(ctx context.Context, accountID int64, limit i
 		return ThreadPage{}, err
 	}
 	if err := s.markWokeFromSnooze(ctx, accountID, out); err != nil {
+		return ThreadPage{}, err
+	}
+	if err := s.markHasDraft(ctx, accountID, out); err != nil {
 		return ThreadPage{}, err
 	}
 	logging.TraceContext(ctx, "store: list all threads page done", "account", accountID, "count", len(out), "more", next != nil, "dur", time.Since(start))
@@ -265,6 +271,9 @@ func (s *Store) ListThreadsByLabel(ctx context.Context, accountID int64, labelID
 	if err := s.markWokeFromSnooze(ctx, accountID, out); err != nil {
 		return nil, err
 	}
+	if err := s.markHasDraft(ctx, accountID, out); err != nil {
+		return nil, err
+	}
 	logging.TraceContext(ctx, "store: list threads by label done", "account", accountID, "label", labelID, "count", len(out), "dur", time.Since(start))
 	return out, nil
 }
@@ -323,6 +332,9 @@ func (s *Store) ListAllThreads(ctx context.Context, accountID int64, limit, offs
 		return nil, err
 	}
 	if err := s.markWokeFromSnooze(ctx, accountID, out); err != nil {
+		return nil, err
+	}
+	if err := s.markHasDraft(ctx, accountID, out); err != nil {
 		return nil, err
 	}
 	logging.TraceContext(ctx, "store: list all threads done", "account", accountID, "count", len(out), "dur", time.Since(start))
@@ -470,6 +482,9 @@ func (s *Store) GetThreadSummaries(ctx context.Context, accountID int64, threadI
 		return nil, err
 	}
 	if err := s.markWokeFromSnooze(ctx, accountID, out); err != nil {
+		return nil, err
+	}
+	if err := s.markHasDraft(ctx, accountID, out); err != nil {
 		return nil, err
 	}
 	logging.TraceContext(ctx, "store: get thread summaries done", "account", accountID, "n", len(threadIDs), "count", len(out), "dur", time.Since(start))
@@ -642,6 +657,69 @@ func (s *Store) threadsWokeFromSnooze(ctx context.Context, accountID int64, ids 
 			WHERE account_id = ? AND notified = 1 AND thread_id IN (`+placeholders(len(batch))+`)`, args...)
 		if err != nil {
 			return nil, fmt.Errorf("threads woke from snooze: %w", err)
+		}
+		err = func() error {
+			defer func() { _ = rows.Close() }()
+			for rows.Next() {
+				var tid string
+				if err := rows.Scan(&tid); err != nil {
+					return err
+				}
+				out[tid] = true
+			}
+			return rows.Err()
+		}()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// markHasDraft sets HasDraft on each summary whose thread holds a DRAFT-labeled
+// message — an unsent draft is waiting there, which the list marks so it isn't
+// mistaken for delivered mail.
+func (s *Store) markHasDraft(ctx context.Context, accountID int64, sums []model.ThreadSummary) error {
+	if len(sums) == 0 {
+		return nil
+	}
+	ids := make([]string, len(sums))
+	for i := range sums {
+		ids[i] = sums[i].ThreadID
+	}
+	drafted, err := s.threadsWithDrafts(ctx, accountID, ids)
+	if err != nil {
+		return err
+	}
+	for i := range sums {
+		sums[i].HasDraft = drafted[sums[i].ThreadID]
+	}
+	return nil
+}
+
+// threadsWithDrafts returns the subset of threadIDs holding any DRAFT-labeled
+// message.
+func (s *Store) threadsWithDrafts(ctx context.Context, accountID int64, ids []string) (map[string]bool, error) {
+	out := make(map[string]bool, len(ids))
+	const chunk = 500
+	for start := 0; start < len(ids); start += chunk {
+		end := start + chunk
+		if end > len(ids) {
+			end = len(ids)
+		}
+		batch := ids[start:end]
+		args := make([]any, 0, len(batch)+2)
+		args = append(args, model.LabelDraft, accountID)
+		for _, id := range batch {
+			args = append(args, id)
+		}
+		rows, err := s.reader.QueryContext(ctx, `
+			SELECT DISTINCT m.thread_id
+			FROM messages m
+			JOIN message_labels ml ON ml.message_rowid = m.rowid AND ml.label_id = ?
+			WHERE m.account_id = ? AND m.thread_id IN (`+placeholders(len(batch))+`)`, args...)
+		if err != nil {
+			return nil, fmt.Errorf("threads with drafts: %w", err)
 		}
 		err = func() error {
 			defer func() { _ = rows.Close() }()

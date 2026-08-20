@@ -350,6 +350,61 @@ func TestRepliedByMe(t *testing.T) {
 	}
 }
 
+func TestDraftFlags(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	acc := seedAccount(t, s)
+
+	msgs := []model.Message{
+		// Thread A: a received message plus a newer unsent draft reply — the
+		// shape Gmail produces when a reply is autosaved into the conversation.
+		{AccountID: acc, GmailID: "a1", ThreadID: "A", InternalDate: time.Unix(100, 0), Subject: "ping", Labels: []string{"INBOX"}},
+		{AccountID: acc, GmailID: "a2", ThreadID: "A", InternalDate: time.Unix(300, 0), Subject: "re: ping", Labels: []string{"DRAFT"}},
+		// Thread B: plain received mail, no draft.
+		{AccountID: acc, GmailID: "b1", ThreadID: "B", InternalDate: time.Unix(200, 0), Subject: "hi", Labels: []string{"INBOX"}},
+	}
+	for _, m := range msgs {
+		if _, err := s.UpsertMessage(ctx, m); err != nil {
+			t.Fatalf("upsert %s: %v", m.GmailID, err)
+		}
+	}
+
+	// Every read hydrates IsDraft, so the reader can tell the unsent draft
+	// from delivered mail.
+	tm, err := s.ListThreadMessages(ctx, acc, "A")
+	if err != nil {
+		t.Fatalf("ListThreadMessages: %v", err)
+	}
+	if len(tm) != 2 || tm[0].IsDraft || !tm[1].IsDraft {
+		t.Fatalf("IsDraft hydration wrong: %+v", tm)
+	}
+
+	// The inbox summary marks the thread as holding a draft; its Latest stays
+	// the newest INBOX message (the draft carries DRAFT, not INBOX).
+	page, err := s.ListThreadsByLabelPage(ctx, acc, "INBOX", 50, nil)
+	if err != nil {
+		t.Fatalf("ListThreadsByLabelPage: %v", err)
+	}
+	got := map[string]model.ThreadSummary{}
+	for _, th := range page.Threads {
+		got[th.ThreadID] = th
+	}
+	if a := got["A"]; !a.HasDraft || a.Latest.GmailID != "a1" {
+		t.Errorf("thread A: HasDraft=%t latest=%s, want HasDraft=true latest=a1", a.HasDraft, a.Latest.GmailID)
+	}
+	if got["B"].HasDraft {
+		t.Errorf("thread B: HasDraft = true, want false (no draft in thread)")
+	}
+
+	sums, err := s.GetThreadSummaries(ctx, acc, []string{"A", "B"})
+	if err != nil {
+		t.Fatalf("GetThreadSummaries: %v", err)
+	}
+	if !sums[0].HasDraft || sums[1].HasDraft {
+		t.Fatalf("GetThreadSummaries HasDraft wrong: %+v", sums)
+	}
+}
+
 func TestListThreadsByLabelTiesAndNullDates(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()

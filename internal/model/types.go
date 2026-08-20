@@ -115,7 +115,11 @@ type Message struct {
 	// ListUnsubOneClick reports an RFC 8058 List-Unsubscribe-Post companion.
 	ListUnsubscribe   string
 	ListUnsubOneClick bool
-	Labels            []string
+	// IsDraft reports the DRAFT label. Unlike Labels (only populated by writers),
+	// every store read hydrates it, so any surface can tell an unsent draft from
+	// a real message of the thread.
+	IsDraft bool
+	Labels  []string
 }
 
 // ThreadSummary describes a conversation for the thread list: its newest message
@@ -135,6 +139,10 @@ type ThreadSummary struct {
 	// SnoozedUntil is the wake time (unix seconds) when this summary is shown in
 	// the Snoozed view; 0 everywhere else. Rows show it in place of the date.
 	SnoozedUntil int64
+	// HasDraft is true when any message of the thread carries the DRAFT label —
+	// an unsent draft is waiting in this conversation, which the row marks so
+	// it isn't mistaken for delivered mail.
+	HasDraft bool
 }
 
 // MessageBody holds the lazily-fetched body parts of a message.

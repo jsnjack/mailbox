@@ -17,7 +17,11 @@ import (
 const msgCols = `m.rowid, m.account_id, m.gmail_id, m.thread_id, m.internal_date, ` +
 	`m.from_name, m.from_addr, m.reply_to, m.to_addrs, m.cc_addrs, m.subject, m.snippet, ` +
 	`m.rfc822_msgid, m.in_reply_to, m.references_hdr, m.is_unread, m.is_starred, ` +
-	`m.has_attachments, m.size_estimate, m.body_fetched, m.list_unsubscribe, m.list_unsub_post, m.bcc_addrs`
+	`m.has_attachments, m.size_estimate, m.body_fetched, m.list_unsubscribe, m.list_unsub_post, m.bcc_addrs, ` +
+	// IsDraft: a point lookup on message_labels' (message_rowid, label_id) PK,
+	// so every read can tell an unsent draft from a delivered message without
+	// hydrating full label slices.
+	`EXISTS(SELECT 1 FROM message_labels mld WHERE mld.message_rowid = m.rowid AND mld.label_id = 'DRAFT')`
 
 // UpsertMessage inserts or updates a message's metadata, replaces its label set,
 // and refreshes its full-text index entry. It returns the message's local rowid.
@@ -886,13 +890,14 @@ func scanMessage(sc rowScanner) (model.Message, error) {
 		unsub   sql.NullString
 		unsubP  int
 		bcc     sql.NullString
+		isDraft int
 		strs    = make([]sql.NullString, 10) // from_name..references_hdr text columns
 	)
 	if err := sc.Scan(
 		&m.RowID, &m.AccountID, &m.GmailID, &m.ThreadID, &idate,
 		&strs[0], &strs[1], &strs[2], &strs[3], &strs[4], &strs[5],
 		&strs[6], &strs[7], &strs[8], &strs[9],
-		&unread, &starred, &hasAtt, &size, &fetched, &unsub, &unsubP, &bcc,
+		&unread, &starred, &hasAtt, &size, &fetched, &unsub, &unsubP, &bcc, &isDraft,
 	); err != nil {
 		return model.Message{}, err
 	}
@@ -908,6 +913,7 @@ func scanMessage(sc rowScanner) (model.Message, error) {
 	m.SizeEstimate = size.Int64
 	m.IsUnread, m.IsStarred, m.HasAttachments = unread != 0, starred != 0, hasAtt != 0
 	m.BodyFetched = fetched != 0
+	m.IsDraft = isDraft != 0
 	return m, nil
 }
 
