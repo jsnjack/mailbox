@@ -22,8 +22,8 @@ const maxSSELine = 1 << 20
 type extractFunc func(data []byte) (text string, done bool, err error)
 
 // streamSSE performs req and turns its Server-Sent-Events body into a channel of
-// Chunks, using extract to decode each data line. Non-2xx responses return an
-// error (with a snippet of the body) before any streaming begins.
+// Chunks, using extract to decode each data line. Non-2xx responses return a
+// status-only error before any streaming begins (the body goes to the trace).
 func streamSSE(ctx context.Context, client *http.Client, req *http.Request, extract extractFunc, provider, model string) (<-chan Chunk, error) {
 	reqStart := time.Now()
 	logging.Trace("ai: request", "provider", provider, "model", model,
@@ -35,12 +35,15 @@ func streamSSE(ctx context.Context, client *http.Client, req *http.Request, extr
 		return nil, fmt.Errorf("request: %w", err)
 	}
 	if resp.StatusCode/100 != 2 {
+		// The error carries only the status: the body can be a whole CDN error
+		// page (2KB of Cloudflare HTML, measured), which the activity log would
+		// render line by line. The trace keeps the full body for debugging.
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 		_ = resp.Body.Close()
 		logging.Trace("ai: response error", "provider", provider, "model", model,
 			"status", resp.StatusCode, "dur", time.Since(reqStart),
 			"body", logging.Body(strings.TrimSpace(string(b))))
-		return nil, fmt.Errorf("api status %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+		return nil, fmt.Errorf("api status %d %s", resp.StatusCode, http.StatusText(resp.StatusCode))
 	}
 	logging.Trace("ai: response", "provider", provider, "model", model,
 		"status", resp.StatusCode, "dur", time.Since(reqStart))
