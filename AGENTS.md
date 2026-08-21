@@ -125,7 +125,10 @@ message. A body fetched by anything else, or after the render finished, still
 re-renders the open conversation. The reader sanitizes with an email-tuned bluemonday policy
 (`emailPolicy`, keeps inline styles + tables so HTML mail isn't broken). The
 WebView loads **one persistent shell page** (`readerShellHTML`: styles, CSP, and
-a fit-to-width script that scales over-wide email to the pane) and every
+a fit-to-width script that scales each over-wide message body — its `.mbfit`
+wrapper — to the pane individually, so a fixed-width signature table shrinks
+only that email's body, never the app-owned header bands, gist cards, or the
+thread's other messages) and every
 conversation is swapped into it via script (`setReaderHTML` → `__mbSet`, an
 innerHTML swap through a small cgo `evalJS` shim) — **never a navigation**, so
 WebKit never tears down its composited surface and the reader cannot flash
@@ -224,7 +227,17 @@ mark-unread / star / move-to-inbox / report-spam (or not-spam in the Spam
 folder), plus "Delete forever" in Trash/Spam and an "Empty now" banner that empties
 the whole folder (`DeletePermanently`/`EmptyLabel` → `messages.batchDelete`), via
 optimistic `ModifyLabels` + Gmail mirror; opening an unread message marks it read;
-Ctrl +/-/0 zoom the message view (`WebView.SetZoomLevel`, persisted);
+Ctrl +/-/0 zoom the email bodies (persisted; implemented inside the shell's
+fit pass — `__mbZoom` lays each body out at avail/zoom and scales it by
+exactly zoom× its fit-to-width size, so every email's text grows while the
+reader's own header bands and gist cards keep their size; reflowing mail
+re-wraps and never overflows, while a width-locked body grows past the pane
+and the page pans horizontally — the html clip flips to auto and a styled
+always-visible scrollbar sits at the reader viewport's bottom edge (a
+per-body scroller put it at the bottom of the message, screens away on a
+tall email) — the browser bargain, chosen over a "cap at the pane" rule
+under which zoom silently did nothing on exactly those emails — never
+`WebView.SetZoomLevel`, whose page zoom scales the app chrome too);
 a 60s background incremental sync (each pass under a `syncPassTimeout` backstop; consecutive failures back off exponentially to `syncBackoffCap` instead of re-running a heavy resync every tick) updates label counts through `dispatch`→`Hub`,
 and new inbox mail (arriving after launch) raises an immediate desktop notification via
 `gio.Notification`. Notifications are account-qualified and deduplicated for the session, require a real SENT label before suppressing own-address mail, and ignore body-hydration events. A persisted AI gist is used when already available but AI never delays delivery. The background sync self-heals an expired history watermark
@@ -407,9 +420,9 @@ summary for every
 message but the newest, so folding one shows the same header rather than a
 second one introducing it — folded it shows sender + snippet, open it shows
 sender + address + recipients (`composeSection`). The band must stay inside the
-content width: bleeding it past the edges makes `wrap.scrollWidth` exceed the
-pane, which sets the fit-to-width script scaling the whole conversation and
-moves every hit target. The whole reader pane sits on one text
+content width: the fit-to-width pass only rescues message bodies (`.mbfit`), so
+app chrome bled past the pane edges is simply clipped by `overflow-x:hidden`.
+The whole reader pane sits on one text
 column at 16px: filled surfaces (the thread-summary and invite cards outside the
 WebView, the header band and gist inside it) are inset 6px and pad 10px — 9px
 where a 1px border makes up the difference — while plain rows (subject,
@@ -603,7 +616,7 @@ afterward. The `sync` command and the headless packages build without GTK.
 - Gmail REST API, not IMAP — native labels/threads, `history.list` incremental sync, server-side search.
 - Local SQLite + FTS5 as source of truth; metadata separate from bodies; bodies lazy-loaded.
 - Desktop polls `history.list` (no public endpoint for Pub/Sub push). Backfill fetches metadata concurrently (`backfillWorkers`) but commits in `store.UpsertMessages` batches of `backfillBatch` (200) — one transaction/fsync and FTS reindex per batch, not per message; incremental sync likewise batches its deletes (`store.DeleteMessages`) and upserts into one transaction each, then publishes a per-id `MessageUpserted` so new-mail notifications still fire.
-- HTML email rendered in a locked-down WebKitGTK view: email-tuned sanitizer (keeps styling), remote images loaded through the local cache with tracker stripping and a global opt-out, links open externally. One persistent shell page; conversations are swapped in by script, never by navigation (kills WebKit's black content-swap flash). Its fit-to-width pass reruns after every reader zoom change so a reset cannot retain stale scaled dimensions or horizontal overflow. JavaScript is enabled only to run the trusted shell script, fenced off by a nonce CSP with `default-src 'none'` so no email script can run or phone home. AI translate renders in place (markup-preserving) with a revert toggle.
+- HTML email rendered in a locked-down WebKitGTK view: email-tuned sanitizer (keeps styling), remote images loaded through the local cache with tracker stripping and a global opt-out, links open externally. One persistent shell page; conversations are swapped in by script, never by navigation (kills WebKit's black content-swap flash). Its per-body fit-to-width pass also implements reader zoom (lay out at avail/zoom, scale by zoom× the fit size; width-locked bodies pan at the page level rather than ignoring the zoom), so zoom touches only email bodies and every zoom change is just a refit — no stale scaled dimensions to retain. JavaScript is enabled only to run the trusted shell script, fenced off by a nonce CSP with `default-src 'none'` so no email script can run or phone home. AI translate renders in place (markup-preserving) with a revert toggle.
 - AI provider is user-configurable behind one `Provider` interface (OpenAI-compatible covers the LiteLLM proxy + OpenAI; Anthropic direct).
 - Distribution is RPM (GTK4/WebKit cannot be statically linked into a single binary).
 

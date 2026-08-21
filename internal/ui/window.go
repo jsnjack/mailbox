@@ -7,6 +7,7 @@ import (
 	"io"
 
 	"log/slog"
+	"math"
 	"net/mail"
 	"net/url"
 	"os"
@@ -905,7 +906,8 @@ func (w *window) present() {
 			w.readerZoom = vs.Zoom
 		}
 	}
-	w.webview.SetZoomLevel(w.readerZoom)
+	// The persisted zoom is applied when the reader shell reports ready (the
+	// shell page owns zoom now, and it hasn't finished loading here).
 	w.selectLabel(w.current)
 	w.refreshOutbox()
 	if vsErr == nil && vs.OpenThread != "" {
@@ -1558,8 +1560,13 @@ func (w *window) buildReader() *adw.NavigationPage {
 	ucm := w.webview.UserContentManager()
 	ucm.RegisterScriptMessageHandler(shellReadyHandler, "")
 	ucm.ConnectScriptMessageReceived(func(*javascriptcore.Value) {
-		logging.Trace("ui: reader shell ready", "pending", w.pendingReaderHTML != nil)
+		logging.Trace("ui: reader shell ready", "pending", w.pendingReaderHTML != nil, "zoom", w.readerZoom)
 		w.readerReady = true
+		// Restore the persisted zoom before any content lands, so the first
+		// fit pass already lays bodies out at the zoomed width.
+		if w.readerZoom != 1.0 {
+			evalJS(w.webview, readerZoomScript(w.readerZoom))
+		}
 		if w.pendingReaderHTML != nil {
 			inner := *w.pendingReaderHTML
 			w.pendingReaderHTML = nil
@@ -2597,7 +2604,8 @@ func (w *window) saveViewState() {
 }
 
 // adjustZoom changes the reader zoom by delta; setZoom clamps to a sane range,
-// applies it to the message view, and remembers it.
+// applies it to the email bodies (via the shell's fit pass — the reader's own
+// header bands and gist cards keep their size), and remembers it.
 func (w *window) adjustZoom(delta float64) { w.setZoom(w.readerZoom + delta) }
 
 func (w *window) setZoom(z float64) {
@@ -2607,10 +2615,14 @@ func (w *window) setZoom(z float64) {
 	case z > 3.0:
 		z = 3.0
 	}
+	// 0.1 steps accumulate float error; landing back on exactly 1 keeps the
+	// shell's zoom===1 fast path (no transform at all) reachable.
+	if math.Abs(z-1) < 0.001 {
+		z = 1
+	}
 	logging.Trace("ui: set zoom", "zoom", z)
 	w.readerZoom = z
-	w.webview.SetZoomLevel(z)
-	evalJS(w.webview, readerRefitScript)
+	evalJS(w.webview, readerZoomScript(z))
 	w.saveViewState()
 }
 

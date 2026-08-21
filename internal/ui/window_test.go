@@ -315,16 +315,56 @@ func TestReaderShellRefitsAfterZoom(t *testing.T) {
 		"html{overflow-x:hidden}",
 		"window.__mbFit=requestFit",
 		"window.addEventListener('resize',requestFit)",
+		// Zoom lives in the fit pass (bodies lay out at avail/zoom), never in
+		// WebKit's page zoom, which would scale the header bands and gist
+		// cards along with the email.
+		"window.__mbZoom=function",
+		"avail/zoom",
+		// Zoomed width-locked content pans at the page level with an
+		// always-visible (styled, non-overlay) scrollbar at the viewport
+		// bottom — a per-body scroller's bar sat screens away on tall mail.
+		"document.documentElement.style.overflowX=pan?'auto':'hidden'",
+		"::-webkit-scrollbar",
 	} {
 		if !strings.Contains(shell, want) {
 			t.Fatalf("reader shell missing zoom-fit safeguard %q", want)
 		}
 	}
-	if !strings.Contains(readerRefitScript, "__mbFit") {
-		t.Fatalf("zoom refit script does not call the reader fit hook: %q", readerRefitScript)
+	if got := readerZoomScript(1.5); got != "window.__mbZoom&&window.__mbZoom(1.5);" {
+		t.Fatalf("readerZoomScript(1.5) = %q", got)
 	}
 	if strings.Contains(shell, "img-src http:") || !strings.Contains(shell, "img-src data: cid: mbcache:") {
 		t.Fatal("reader CSP permits direct external image loads")
+	}
+}
+
+// One over-wide email (a fixed-width signature table) must shrink only its own
+// body: the fit pass scales per .mbfit unit, never the wrap that also holds the
+// app-owned header bands and gist cards.
+func TestReaderShellScalesPerMessageBody(t *testing.T) {
+	shell := readerShellHTML()
+	if !strings.Contains(shell, "querySelectorAll('.mbfit')") {
+		t.Fatal("reader shell fit pass does not iterate per-body .mbfit units")
+	}
+	for _, stale := range []string{"wrap.style.transform", "wrap.style.width", "wrap.scrollWidth"} {
+		if strings.Contains(shell, stale) {
+			t.Fatalf("reader shell still scales the whole wrap (%q found) — headers would shrink with the email", stale)
+		}
+	}
+
+	// The markup side of the contract: every rendered body sits in an .mbfit
+	// inside its .mbbody, and the header/gist stay outside it.
+	w := &window{sanitizer: emailPolicy()}
+	m := model.Message{GmailID: "m1", FromAddr: "a@x.com", InternalDate: time.Unix(1000, 0)}
+	head, rest, _ := w.conversationSection(m, model.MessageBody{HTML: "<p>hi</p>"}, w.cleanHTML, false, "")
+	if !strings.Contains(rest, `<div class="mbbody"><div class="mbfit">`) {
+		t.Fatalf("body is not wrapped in a per-message fit unit: %q", rest)
+	}
+	if strings.Contains(head, "mbfit") {
+		t.Fatalf("header must not sit inside a fit unit (it would scale with the email): %q", head)
+	}
+	if gistEnd := strings.Index(rest, "mbbody"); !strings.Contains(rest[:gistEnd], "mbgist") {
+		t.Fatalf("gist card must precede (sit outside) the body's fit unit: %q", rest)
 	}
 }
 

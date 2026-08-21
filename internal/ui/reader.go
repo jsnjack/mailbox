@@ -397,9 +397,14 @@ func (w *window) setReaderHTML(inner string) {
 // itself on once __mbSet is installed; buildReader flushes queued content then.
 const shellReadyHandler = "shellready"
 
-// readerRefitScript schedules the shell's fit-to-width pass after WebKit has
-// applied a native page-zoom change.
-const readerRefitScript = "window.__mbFit&&window.__mbFit();"
+// readerZoomScript builds the call that hands the reader zoom factor to the
+// shell's fit pass (__mbZoom refits as part of applying it). Zoom lives in the
+// shell, not in WebKit's SetZoomLevel: page zoom scales the entire page — the
+// app-owned header bands and gist cards included — where the fit pass zooms
+// only the email bodies.
+func readerZoomScript(z float64) string {
+	return fmt.Sprintf("window.__mbZoom&&window.__mbZoom(%g);", z)
+}
 
 // gistBatchCap bounds how many missing gists one thread render may queue for
 // generation; a longer thread's remainder is picked up on a later open.
@@ -682,8 +687,13 @@ func (w *window) conversationSection(m model.Message, body model.MessageBody, cl
 	header := hb.String()
 	// The body is wrapped so it can be padded onto the same text column as the
 	// header band and the summary card above it; the page margin is 2px, so this
-	// is what puts a message's own text where it belongs.
-	body_ := func(inner string) string { return `<div class="mbbody">` + inner + `</div>` }
+	// is what puts a message's own text where it belongs. Inside it, .mbfit is
+	// the fit-to-width unit: the shell script scales each one independently, so
+	// one message's fixed-width table shrinks only that message's body — never
+	// the header band, the gist card, or its siblings.
+	body_ := func(inner string) string {
+		return `<div class="mbbody"><div class="mbfit">` + inner + `</div></div>`
+	}
 	rest = gistCard(m.GmailID, gist)
 	switch {
 	case body.HTML != "":
@@ -1052,13 +1062,18 @@ func (w *window) onRetryLoading() {
 // navigation, so WebKit's composited surface survives and nothing flashes.
 func readerShellHTML() string {
 	// CSS keeps the common overflow culprits in check (images capped to the
-	// width, long URLs wrapped); the script then scales down anything still too
-	// wide — chiefly fixed-width newsletter tables that CSS cannot shrink below
-	// their min-content — so email fits the reader with neither a horizontal
-	// scrollbar nor cropping.
+	// width, long URLs wrapped); the script then scales down any message body
+	// still too wide — chiefly fixed-width newsletter tables that CSS cannot
+	// shrink below their min-content — so email fits the reader with neither a
+	// horizontal scrollbar nor cropping. Scaling is per message body (.mbfit),
+	// so the app's own chrome — header band, gist card, the thread's other
+	// messages — always renders at full size.
 	const style = `
 html{overflow-x:hidden}
-body{font-family:sans-serif;margin:8px 6px 16px;color:#222;line-height:1.4;overflow-x:hidden;overflow-wrap:anywhere}
+/* The horizontal clip lives on html alone (the fit pass flips it to auto when
+   zoomed content needs panning); a second clip on body would swallow the
+   overflow before it reaches the page scroller. */
+body{font-family:sans-serif;margin:8px 6px 16px;color:#222;line-height:1.4;overflow-wrap:anywhere}
 table{table-layout:auto}
 td,th{overflow-wrap:break-word;word-break:normal}
 .mbwrap>details.mbmsg:first-child>summary>.mbhead{margin-top:0;padding-top:0;border-top:none}
@@ -1090,8 +1105,9 @@ pre{font-family:monospace;white-space:pre-wrap}
    is that no email footer ever puts a full-ink, semibold name directly under a
    rule. Text sits on one column, 16px from the pane edge: each part pads out to
    it (the page margin is 6px) so the header, the summary card and the body all
-   start on the same line. Padding, never negative margins — a surface wider
-   than the wrap makes the fit-to-width script scale the conversation. */
+   start on the same line. Padding, never negative margins — the fit-to-width
+   pass only scales message bodies (.mbfit), so app chrome bled past the pane
+   would simply be clipped by overflow-x:hidden, unrescued. */
 .mbhead{color:#555;font-size:90%;margin:22px 0 12px;padding-top:12px;
   border-top:1px solid rgba(0,0,0,.07)}
 .mbwrap>.mbhead:first-child{margin-top:0;padding-top:0;border-top:none}
@@ -1107,6 +1123,20 @@ pre{font-family:monospace;white-space:pre-wrap}
 .mbaddr{color:#888}
 .mbrcpt-line{color:#888;padding:4px 10px 0}
 .mbbody{padding:0 10px}
+/* Zoomed width-locked content pans at the page level (fit flips the html
+   element's overflow-x to auto), so the horizontal scrollbar is pinned to the
+   bottom of the reader viewport — a per-body scroller put it at the bottom of
+   the message, which for a tall email is screens away from what's being read.
+   Styling the scrollbars switches WebKit from hover-only overlay bars to
+   classic, always-visible ones; without that the pan exists but is invisible
+   and unreachable from a plain mouse wheel. Styling any part disables the
+   native bars for both orientations, so the vertical bar is styled to match. */
+::-webkit-scrollbar{width:10px;height:10px;background:transparent}
+::-webkit-scrollbar-thumb{background:rgba(0,0,0,.28);border-radius:5px;
+  border:2px solid transparent;background-clip:content-box}
+::-webkit-scrollbar-thumb:hover{background:rgba(0,0,0,.45);
+  border:2px solid transparent;background-clip:content-box}
+::-webkit-scrollbar-corner{background:transparent}
 .mbprev{color:#888;display:none}
 .mbchev{display:none}
 details.mbmsg{margin-top:0} /* the header carries the spacing and the rule */
@@ -1132,24 +1162,69 @@ details.mbmsg:not([open]) .mbprev{display:inline}
 .mbgist-tag{color:#1a5fb4;font-weight:600;font-size:78%;text-transform:uppercase;letter-spacing:.07em;margin-right:6px;white-space:nowrap}`
 
 	// Fit-to-width: scale wide content down to fit the reader. WebKitGTK ignores
-	// CSS `zoom`, so content lives in a wrap div scaled with transform:scale
-	// (origin top-left). Because transform doesn't shrink the layout box, the
-	// wrapper is pinned to its natural width, the body height is collapsed to
-	// the scaled height (no trailing gap), and overflow-x is clipped. Measured
-	// before scaling so it never feeds back on itself; re-runs on resize, after
-	// every content swap, and as each image of the swapped content loads (a
-	// navigation's window.load re-ran it before; a swap has no load event).
+	// CSS `zoom`, so each message body's content lives in a .mbfit div scaled
+	// with transform:scale (origin top-left). Bodies are scaled independently —
+	// one message's fixed-width signature table (997px is out there) shrinks
+	// only its own body, never the app-owned header band, the gist card, or the
+	// other messages of the thread.
+	//
+	// Reader zoom (Ctrl +/-/0, __mbZoom) is the same mechanism run in reverse:
+	// native page zoom is "lay out in a narrower viewport, magnify back to full
+	// width", so the fit pass lays each body out at avail/zoom. The scale is
+	// always exactly zoom× the body's fit-to-width size — never capped by the
+	// pane — so every email's text answers Ctrl+= identically; the header bands
+	// and gist cards, which live outside the fit units, never zoom (that they
+	// zoomed was the whole complaint against WebKit's SetZoomLevel, which
+	// scales the entire page). Reflowing mail (the common case) re-wraps to the
+	// narrower column and never overflows. A width-locked body (a fixed-width
+	// signature table locks everything sharing its column — the flowed letter
+	// text above it included, since the layout is pinned to the widest element)
+	// grows past the pane instead and the page pans horizontally (the html
+	// clip flips to overflow-x:auto, putting an always-visible scrollbar at
+	// the bottom of the reader viewport) — the browser bargain for zooming a
+	// fixed-width page, chosen over an earlier "cap at the pane" rule under
+	// which Ctrl+= silently did nothing on exactly those emails, and over a
+	// per-body scroller whose scrollbar sat at the bottom of the message,
+	// screens away on a tall email. At zoom 1 the formula degenerates to
+	// plain fit-to-width and nothing pans.
+	//
+	// Because transform doesn't shrink the layout box, a transformed .mbfit is
+	// pinned to its widest content's width (so flowed text in a mixed body
+	// shares the wide element's column instead of being shrunk on the narrow
+	// one) and its .mbbody parent is collapsed to the scaled height (no
+	// trailing gap); overflow-x is clipped at the page. Measured with the
+	// transform reset so it never feeds back on itself; re-runs on resize, on
+	// zoom, after every content swap, on <details> toggles, and as each image
+	// of the swapped content loads (a navigation's window.load re-ran it
+	// before; a swap has no load event). A body folded shut measures 0×0 and is
+	// left alone until its toggle refits it.
 	//
 	// __mbSet is the app's content channel (setReaderHTML): an innerHTML swap of
 	// sanitized HTML — inserted markup never executes scripts, and the CSP keeps
 	// covering everything the content references. The ready postMessage lets the
 	// app know __mbSet exists before it starts swapping.
 	nonce := randNonce()
-	script := `<script nonce="` + nonce + `">(function(){var wrap,fitFrame=0;function fit(){var b=document.body;if(!b||!wrap)return;` +
-		`b.style.height='';wrap.style.transform='none';wrap.style.width='auto';var avail=b.clientWidth,natural=wrap.scrollWidth;` +
-		`if(natural>avail+1&&natural>0){var s=avail/natural;wrap.style.width=natural+'px';wrap.style.transformOrigin='top left';wrap.style.transform='scale('+s+')';b.style.height=(wrap.offsetHeight*s)+'px';}else{b.style.height='';}}` +
+	script := `<script nonce="` + nonce + `">(function(){var wrap,fitFrame=0,zoom=1;function fit(){if(!wrap)return;var pan=false;` +
+		`wrap.querySelectorAll('.mbfit').forEach(function(f){var box=f.parentElement;if(!box)return;` +
+		`f.style.transform='none';f.style.width='auto';box.style.height='';` +
+		`var avail=f.clientWidth;if(avail<=0)return;` +
+		`var L=avail/zoom;f.style.width=L+'px';var natural=f.scrollWidth,s;` +
+		// Reflowed to the zoom column → pure zoom; wider content pins the
+		// layout to its widest element and still gets the full zoom on top of
+		// its fit-to-width scale (avail/natural), overflowing if it must.
+		`if(natural<=L+1){s=zoom;}else{f.style.width=natural+'px';s=natural>avail?zoom*avail/natural:zoom;}` +
+		`if(zoom===1&&natural<=avail+1){f.style.width='auto';return;}` +
+		`f.style.transformOrigin='top left';f.style.transform='scale('+s+')';box.style.height=(f.offsetHeight*s)+'px';` +
+		`if(f.offsetWidth*s>avail+1){pan=true;}});` +
+		// Zoomed content wider than the pane pans at the page level, like a
+		// zoomed browser page: the html clip opens up and the viewport-bottom
+		// scrollbar takes over. Closed again the moment nothing overflows.
+		`document.documentElement.style.overflowX=pan?'auto':'hidden';}` +
 		`function requestFit(){if(fitFrame)cancelAnimationFrame(fitFrame);fitFrame=requestAnimationFrame(function(){fitFrame=0;fit();});}` +
-		`function setup(){var b=document.body;if(!b)return;wrap=document.createElement('div');wrap.className='mbwrap';b.appendChild(wrap);window.__mbFit=requestFit;window.addEventListener('resize',requestFit);` +
+		`function setup(){var b=document.body;if(!b)return;wrap=document.createElement('div');wrap.className='mbwrap';b.appendChild(wrap);window.__mbFit=requestFit;` +
+		// __mbZoom sets the reader zoom factor the fit pass bakes into every
+		// body's layout width; the refit is part of applying it.
+		`window.__mbZoom=function(z){zoom=z>0.01?z:1;requestFit();};window.addEventListener('resize',requestFit);` +
 		`function hideBroken(i){i.hidden=true;i.removeAttribute('width');i.removeAttribute('height');` +
 		`var p=i.parentElement,d=0;while(p&&p!==wrap&&d++<4){p.removeAttribute('height');p.style.removeProperty('height');p.style.removeProperty('min-height');` +
 		`if((p.textContent||'').trim()||p.querySelector('img:not([hidden]),video:not([hidden])'))break;p=p.parentElement;}requestFit();}` +
