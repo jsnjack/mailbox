@@ -27,9 +27,10 @@ const MaxOutgoingAttachmentBytes int64 = 18 << 20
 // plain-text-only message goes out text/plain; one with an HTMLBody or a
 // Calendar payload goes out multipart/alternative (text first, HTML preferred
 // by capable clients, inline text/calendar last for iTIP processing); one
-// with attachments wraps either shape in multipart/mixed. The body's newlines
-// are normalized to CRLF. Threading headers are included when present so
-// replies/forwards thread correctly.
+// with attachments wraps either shape in multipart/mixed. Text parts go out
+// quoted-printable with newlines normalized to CRLF (see writeQuotedPrintable).
+// Threading headers are included when present so replies/forwards thread
+// correctly.
 func BuildMIME(m model.OutgoingMessage) ([]byte, error) {
 	logging.Trace("backend: BuildMIME",
 		"from", m.From, "to", m.To, "cc", m.Cc, "bcc", m.Bcc,
@@ -100,9 +101,11 @@ func BuildMIME(m model.OutgoingMessage) ([]byte, error) {
 			return b.Bytes(), nil
 		}
 		header("Content-Type", "text/plain; charset=\"utf-8\"")
-		header("Content-Transfer-Encoding", "8bit")
+		header("Content-Transfer-Encoding", "quoted-printable")
 		b.WriteString("\r\n")
-		b.WriteString(normalizeNewlines(m.Body))
+		if err := writeQuotedPrintable(&b, m.Body); err != nil {
+			return nil, fmt.Errorf("write text body: %w", err)
+		}
 		logging.Trace("backend: BuildMIME done", "kind", "text/plain", "bytes", b.Len())
 		return b.Bytes(), nil
 	}
@@ -120,18 +123,16 @@ func BuildMIME(m model.OutgoingMessage) ([]byte, error) {
 // support, so HTML is preferred by capable ones), then an inline text/calendar
 // iTIP part when present — servers auto-process attendee responses only from
 // an inline calendar part, and calendar-aware clients render it as the RSVP.
-// The HTML part is quoted-printable — quoted original HTML routinely carries
-// lines far beyond SMTP's 998-byte limit, which 8bit would put on the wire
-// verbatim.
+// Both text parts are quoted-printable — see writeQuotedPrintable.
 func writeAlternative(mw *multipart.Writer, m model.OutgoingMessage) error {
 	text, err := mw.CreatePart(textproto.MIMEHeader{
 		"Content-Type":              {"text/plain; charset=\"utf-8\""},
-		"Content-Transfer-Encoding": {"8bit"},
+		"Content-Transfer-Encoding": {"quoted-printable"},
 	})
 	if err != nil {
 		return fmt.Errorf("create text part: %w", err)
 	}
-	if _, err := text.Write([]byte(normalizeNewlines(m.Body))); err != nil {
+	if err := writeQuotedPrintable(text, m.Body); err != nil {
 		return fmt.Errorf("write text part: %w", err)
 	}
 	if m.HTMLBody != "" {
@@ -142,12 +143,8 @@ func writeAlternative(mw *multipart.Writer, m model.OutgoingMessage) error {
 		if err != nil {
 			return fmt.Errorf("create html part: %w", err)
 		}
-		qp := quotedprintable.NewWriter(htmlPart)
-		if _, err := qp.Write([]byte(normalizeNewlines(m.HTMLBody))); err != nil {
+		if err := writeQuotedPrintable(htmlPart, m.HTMLBody); err != nil {
 			return fmt.Errorf("write html part: %w", err)
-		}
-		if err := qp.Close(); err != nil {
-			return fmt.Errorf("close html part: %w", err)
 		}
 	}
 	if len(m.Calendar) > 0 {
@@ -198,12 +195,12 @@ func buildMultipart(b *bytes.Buffer, header func(k, v string), m model.OutgoingM
 	} else {
 		text, err := mw.CreatePart(textproto.MIMEHeader{
 			"Content-Type":              {"text/plain; charset=\"utf-8\""},
-			"Content-Transfer-Encoding": {"8bit"},
+			"Content-Transfer-Encoding": {"quoted-printable"},
 		})
 		if err != nil {
 			return nil, fmt.Errorf("create text part: %w", err)
 		}
-		if _, err := text.Write([]byte(normalizeNewlines(m.Body))); err != nil {
+		if err := writeQuotedPrintable(text, m.Body); err != nil {
 			return nil, fmt.Errorf("write text part: %w", err)
 		}
 	}
@@ -266,6 +263,24 @@ func foldValue(v string, startCol int) string {
 		col += len(tok)
 	}
 	return out.String()
+}
+
+// writeQuotedPrintable writes body text (newlines normalized to CRLF) as
+// quoted-printable. Every outgoing text part uses it, never 8bit: Gmail's
+// outbound MTA hard-wraps 8bit plain-text lines longer than RFC 5322's 78-char
+// recommendation at word boundaries, and a receiver that renders newlines
+// literally (GitHub turns emailed replies into comments where every newline is
+// a line break) shows those wraps as mid-sentence breaks. QP's soft breaks
+// satisfy the line limit, so Gmail leaves the body alone, and they decode away
+// at the receiver — the text arrives exactly as written. It also keeps quoted
+// original HTML's routinely enormous lines within SMTP's 998-byte hard limit,
+// which 8bit would put on the wire verbatim.
+func writeQuotedPrintable(w io.Writer, body string) error {
+	qp := quotedprintable.NewWriter(w)
+	if _, err := qp.Write([]byte(normalizeNewlines(body))); err != nil {
+		return err
+	}
+	return qp.Close()
 }
 
 // writeWrappedBase64 writes data as base64 wrapped at 76 columns (RFC 2045).

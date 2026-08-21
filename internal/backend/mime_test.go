@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/base64"
 	"fmt"
+	"io"
+	"mime/quotedprintable"
 	"net/mail"
 	"strings"
 	"testing"
@@ -46,6 +48,39 @@ func TestBuildMIME(t *testing.T) {
 	}
 	if !strings.Contains(s, "Message-ID: <") || !strings.Contains(s, "@example.com>") {
 		t.Errorf("message-id not derived from sender domain:\n%s", s)
+	}
+}
+
+// TestBuildMIMEPlainTextSurvivesLongLines: outgoing text/plain must be
+// quoted-printable, never 8bit. Gmail's outbound MTA hard-wraps 8bit plain-text
+// lines longer than ~78 chars at word boundaries, and GitHub renders emailed
+// replies with every newline as a visible break — a one-line reply arrived as
+// two (measured). QP soft breaks keep wire lines short while decoding back to
+// the exact original text.
+func TestBuildMIMEPlainTextSurvivesLongLines(t *testing.T) {
+	body := "Cool. We will proceed with a detailed investigation on our side and keep you updated."
+	raw, err := BuildMIME(model.OutgoingMessage{
+		From: "me@example.com", To: "you@example.com", Subject: "hi", Body: body,
+	})
+	if err != nil {
+		t.Fatalf("BuildMIME: %v", err)
+	}
+	s := string(raw)
+	if !strings.Contains(s, "Content-Transfer-Encoding: quoted-printable") {
+		t.Fatalf("plain body not quoted-printable:\n%s", s)
+	}
+	wire := s[strings.Index(s, "\r\n\r\n")+4:]
+	for i, line := range strings.Split(wire, "\r\n") {
+		if len(line) > 78 {
+			t.Errorf("wire line %d is %d bytes; Gmail rewraps lines past 78", i, len(line))
+		}
+	}
+	dec, err := io.ReadAll(quotedprintable.NewReader(strings.NewReader(wire)))
+	if err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if got := string(dec); got != body {
+		t.Fatalf("body did not survive the round trip:\n got %q\nwant %q", got, body)
 	}
 }
 
