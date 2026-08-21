@@ -30,11 +30,14 @@ func (w *window) userLabels(ctx context.Context, acctID int64) []model.Label {
 	return out
 }
 
-// showMoveToDialog presents acctID's user labels; picking one calls onPick
-// with that label's id and name. Filing (add label + remove the current
-// location) is done by the caller so it can use the right batch path (a single
-// thread vs. a bulk selection) and show the matching undo toast. Label ids are
-// per-account, so acctID must be the account of the messages being filed.
+// showMoveToDialog presents acctID's move destinations: Inbox first (except
+// when the current view is the Inbox, where it is the one no-op destination),
+// then the account's user labels. Picking one calls onPick with that label's
+// id and name. Filing (add label + remove the current location, via
+// moveRemovals) is done by the caller so it can use the right batch path (a
+// single thread vs. a bulk selection) and show the matching undo toast. Label
+// ids are per-account, so acctID must be the account of the messages being
+// filed.
 func (w *window) showMoveToDialog(acctID int64, onPick func(labelID, name string)) {
 	go func() {
 		labels := w.userLabels(context.Background(), acctID)
@@ -43,7 +46,15 @@ func (w *window) showMoveToDialog(acctID int64, onPick func(labelID, name string
 }
 
 func (w *window) presentMoveToDialog(acctID int64, labels []model.Label, onPick func(labelID, name string)) {
-	logging.Trace("ui: move-to dialog", "account", acctID, "labels", len(labels))
+	// Inbox leads the list: out of any other view it is the most common
+	// relocation (un-archive, rescue out of a label), and every other Move-to
+	// surface (the row menu in Trash/Spam, the reader overflow) already offers
+	// it — a picker without it strands archived mail.
+	targets := labels
+	if w.current != model.LabelInbox {
+		targets = append([]model.Label{{GmailID: model.LabelInbox, Name: "Inbox"}}, labels...)
+	}
+	logging.Trace("ui: move-to dialog", "account", acctID, "targets", len(targets))
 
 	listBox := gtk.NewListBox()
 	listBox.AddCSSClass("boxed-list")
@@ -51,14 +62,14 @@ func (w *window) presentMoveToDialog(acctID int64, labels []model.Label, onPick 
 
 	dialog := adw.NewDialog()
 
-	if len(labels) == 0 {
+	if len(targets) == 0 {
 		empty := gtk.NewLabel("No folders are available to move mail into.")
 		empty.AddCSSClass("dim-label")
 		empty.SetJustify(gtk.JustifyCenter)
 		setMargins(empty, 18, 18, 18, 18)
 		listBox.Append(empty)
 	}
-	for _, l := range labels {
+	for _, l := range targets {
 		labelID, name := l.GmailID, l.Name
 		row := gtk.NewButton()
 		lbl := gtk.NewLabel(name)
@@ -160,3 +171,17 @@ func (w *window) presentThreadLabelsDialog(labels []model.Label, applied map[str
 // moveLocationRemovals is the set of "location" labels a Move-to strips, so
 // filing a thread into a label reliably relocates it out of Inbox/Trash/Spam.
 var moveLocationRemovals = []string{model.LabelInbox, model.LabelTrash, model.LabelSpam}
+
+// moveRemovals is the location set a Move-to strips for a given target: the
+// standard relocations minus the target itself, so moving to Inbox doesn't add
+// and remove INBOX in the same call. Every Move-to surface routes through this
+// so they all relocate identically.
+func moveRemovals(target string) []string {
+	out := make([]string, 0, len(moveLocationRemovals))
+	for _, l := range moveLocationRemovals {
+		if l != target {
+			out = append(out, l)
+		}
+	}
+	return out
+}

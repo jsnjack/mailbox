@@ -624,7 +624,7 @@ func (w *window) showBulkMoreMenu(parent gtk.Widgetter) {
 		// switch must not offer another account's labels (their ids are
 		// per-account and wouldn't exist on the selected messages' account).
 		w.showMoveToDialog(w.activeID, func(labelID, name string) {
-			w.bulkApply("Moved to "+name, []string{labelID}, moveLocationRemovals)
+			w.bulkApply("Moved to "+name, []string{labelID}, moveRemovals(labelID))
 		})
 	})
 

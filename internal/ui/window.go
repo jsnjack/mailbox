@@ -3151,14 +3151,36 @@ func (w *window) onTrash() {
 }
 
 // onMoveToInbox restores the open conversation to the inbox (adding INBOX and
-// clearing TRASH) — for un-archiving or recovering from Trash.
+// clearing TRASH/SPAM — the same relocation set every Move-to uses) — for
+// un-archiving or recovering from Trash or Spam.
 func (w *window) onMoveToInbox() {
 	if len(w.openThreadMsgs) == 0 {
 		return
 	}
 	logging.Trace("ui: move to inbox", "thread", w.openThreadID, "account", w.activeID)
-	w.applyLabels(w.openThreadMsgs, []string{model.LabelInbox}, []string{model.LabelTrash}, nil)
+	w.applyLabels(w.openThreadMsgs, []string{model.LabelInbox}, moveRemovals(model.LabelInbox), nil)
 	w.toast("Moved to Inbox")
+}
+
+// onMoveTo files the open conversation into a destination picked from the
+// shared Move-to dialog — the same list the row menu and the bulk bar offer —
+// relocating it out of Inbox/Trash/Spam. The open thread is captured when the
+// dialog opens: if the user has moved on by pick time (another conversation,
+// another account), the move still lands on the thread it was asked for, via
+// the by-id path, instead of whatever is open now.
+func (w *window) onMoveTo() {
+	acctID, threadID := w.activeID, w.openThreadID
+	if len(w.openThreadMsgs) == 0 {
+		return
+	}
+	w.showMoveToDialog(acctID, func(labelID, name string) {
+		logging.Trace("ui: reader move to", "thread", threadID, "account", acctID, "label", labelID)
+		if w.activeID == acctID && w.openThreadID == threadID {
+			w.removeFromList("Moved to "+name, []string{labelID}, moveRemovals(labelID))
+			return
+		}
+		w.threadModifyAll(acctID, threadID, "Moved to "+name, []string{labelID}, moveRemovals(labelID))
+	})
 }
 
 // onReportSpam moves the open conversation to Spam (and out of the inbox).
@@ -3310,6 +3332,7 @@ func (w *window) registerReaderActions() {
 	add("reader-forward", w.onForward)
 	add("reader-unread", w.onMarkUnread)
 	add("reader-move-inbox", w.onMoveToInbox)
+	add("reader-move-to", w.onMoveTo)
 	add("reader-report-spam", w.onReportSpam)
 	add("reader-not-spam", w.onNotSpam)
 	add("reader-trash", w.onTrash)
@@ -3342,6 +3365,7 @@ func (w *window) buildReaderMenuModel() *gio.Menu {
 		sec.Append("Starred", "win.reader-star")
 		sec.Append("Mark as unread", "win.reader-unread")
 		sec.Append("Move to Inbox", "win.reader-move-inbox")
+		sec.Append("Move to…", "win.reader-move-to")
 		if w.current == model.LabelSpam {
 			sec.Append("Not spam", "win.reader-not-spam")
 		} else {

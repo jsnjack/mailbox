@@ -96,7 +96,7 @@ func (w *window) showRowMenu(row gtk.Widgetter, threadID string, x, y float64) {
 	// current location; Label… toggles labels without moving it).
 	item(box, "Move to…", func() {
 		w.showMoveToDialog(acct, func(labelID, name string) {
-			w.threadModifyAll(acct, threadID, "Moved to "+name, []string{labelID}, moveLocationRemovals)
+			w.threadModifyAll(acct, threadID, "Moved to "+name, []string{labelID}, moveRemovals(labelID))
 		})
 	})
 	if !w.isIMAPAccount(acct) {
