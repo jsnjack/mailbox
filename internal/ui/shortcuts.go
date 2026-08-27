@@ -46,7 +46,7 @@ var shortcutDefs = []shortcutDef{
 			w.openCompose(model.OutgoingMessage{}, "", "New message")
 		}
 	}},
-	{"search", "Focus search", "/", func(w *window) { w.searchEntry.GrabFocus() }},
+	{"search", "Search mail", "/", (*window).openSearch},
 }
 
 // sanitizeKeys reduces a user-entered binding to at most three distinct

@@ -173,8 +173,12 @@ type window struct {
 	authExpiredID     int64          // the account the auth banner's Reconnect targets (0 = none/unknown)
 	authReported      map[int64]bool // accounts whose expiry already got an activity-log row (AuthExpired repeats every failed sync pass)
 	searchEntry       *gtk.SearchEntry
+	searchBar         *gtk.SearchBar
+	searchBtn         *gtk.ToggleButton
+	searchControls    *gtk.Box
+	searchStatus      *gtk.Label
 	searchSort        *gtk.DropDown // Relevant (provider/FTS rank) or Newest
-	searchAllBtn      *gtk.Button   // explicit provider search, available even when local FTS has hits
+	searchAllBtn      *gtk.Button   // explicit provider search, available while cached results are shown
 	suppressSearch    bool          // guards SetText from firing a search during label switch
 	serverSearch      bool          // current search is a provider-side search, not local FTS
 	serverQuery       string        // the active server-search query (guards the debounced change signal)
@@ -670,7 +674,7 @@ func (w *window) addShortcuts() {
 	focusSearch := gio.NewSimpleAction("focus-search", nil)
 	focusSearch.ConnectActivate(func(*glib.Variant) {
 		logging.Trace("ui: focus search (accel)")
-		w.searchEntry.GrabFocus()
+		w.openSearch()
 	})
 	w.win.AddAction(focusSearch)
 	w.app.SetAccelsForAction("win.focus-search", []string{"<Control>f"})
@@ -934,6 +938,8 @@ func (w *window) present() {
 		w.suppressSearch = true
 		w.searchEntry.SetText(q)
 		w.suppressSearch = false
+		w.openSearch()
+		w.updateSearchControls(q, false)
 		w.refreshList(q)
 	}
 	if os.Getenv("MAILBOX_OPEN_FIRST") == "1" {
@@ -2581,6 +2587,9 @@ func (w *window) selectLabel(labelID string) {
 	w.suppressSearch = true
 	w.searchEntry.SetText("")
 	w.suppressSearch = false
+	if w.searchBar.SearchMode() {
+		w.searchBar.SetSearchMode(false)
+	}
 	w.refreshList("")
 	// Keep the sidebar highlight on the chosen folder: a programmatic switch
 	// (opening an archived conversation from a notification) has no row click
@@ -3420,6 +3429,7 @@ func (w *window) buildReaderMenuModel() *gio.Menu {
 func (w *window) searchFrom(addr string) {
 	q := "from:" + strings.TrimSpace(addr)
 	logging.Trace("ui: find from sender", "query", q, "account", w.activeID)
+	w.openSearch()
 	w.suppressSearch = true
 	w.searchEntry.SetText(q)
 	w.suppressSearch = false

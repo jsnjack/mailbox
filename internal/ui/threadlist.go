@@ -205,37 +205,56 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 	w.pageStatus.SetVisible(false)
 
 	w.searchEntry = gtk.NewSearchEntry()
-	w.searchEntry.SetPlaceholderText("Search")
+	w.searchEntry.SetPlaceholderText("Search mail")
+	w.searchEntry.SetTooltipText("Search sender, subject, or message text")
 	w.searchEntry.SetHExpand(true)
 	w.searchEntry.ConnectSearchChanged(w.onSearchChanged)
-	// Esc in the search entry (stop-search) clears it, returning the list to the
-	// current label (the cleared text fires search-changed → refreshList("")).
-	w.searchEntry.ConnectStopSearch(func() {
-		if w.searchEntry.Text() == "" {
-			return
+	w.searchEntry.ConnectStopSearch(w.closeSearch)
+	w.searchEntry.ConnectActivate(func() {
+		if w.canSearchServer() && strings.TrimSpace(w.searchEntry.Text()) != "" && !w.serverSearch {
+			w.onSearchAllMail()
 		}
-		logging.Trace("ui: search cleared via Esc")
-		w.searchEntry.SetText("")
 	})
 	w.searchSort = gtk.NewDropDownFromStrings([]string{"Relevant", "Newest"})
 	w.searchSort.SetTooltipText("Search result order")
-	w.searchSort.SetVisible(false)
 	w.searchSort.Connect("notify::selected", func() {
 		if strings.TrimSpace(w.searchEntry.Text()) != "" {
 			w.loadThreadsFor(w.searchEntry.Text())
 		}
 	})
-	w.searchAllBtn = gtk.NewButtonFromIconName("edit-find-symbolic")
-	w.searchAllBtn.SetTooltipText("Search all mail on the provider")
+	w.searchAllBtn = gtk.NewButtonWithLabel("Search all")
+	w.searchAllBtn.SetTooltipText("Search the provider for messages outside the local cache (Enter)")
 	a11yLabel(w.searchAllBtn, "Search all mail on the provider")
 	w.searchAllBtn.AddCSSClass("flat")
 	w.searchAllBtn.SetVisible(false)
 	w.searchAllBtn.ConnectClicked(w.onSearchAllMail)
-	searchBar := gtk.NewBox(gtk.OrientationHorizontal, 4)
-	setMargins(searchBar, 6, 6, 6, 6)
-	searchBar.Append(w.searchEntry)
-	searchBar.Append(w.searchSort)
-	searchBar.Append(w.searchAllBtn)
+	w.searchStatus = gtk.NewLabel("")
+	w.searchStatus.SetXAlign(0)
+	w.searchStatus.SetHExpand(true)
+	w.searchStatus.SetEllipsize(pango.EllipsizeEnd)
+	w.searchStatus.AddCSSClass("dim-label")
+	w.searchStatus.AddCSSClass("caption")
+	w.searchControls = gtk.NewBox(gtk.OrientationHorizontal, 4)
+	w.searchControls.Append(w.searchStatus)
+	w.searchControls.Append(w.searchSort)
+	w.searchControls.Append(w.searchAllBtn)
+	w.searchControls.SetVisible(false)
+	searchContent := gtk.NewBox(gtk.OrientationVertical, 4)
+	searchContent.Append(w.searchEntry)
+	searchContent.Append(w.searchControls)
+	w.searchBar = gtk.NewSearchBar()
+	w.searchBar.SetChild(searchContent)
+	w.searchBar.ConnectEntry(w.searchEntry)
+	w.searchBar.SetShowCloseButton(false)
+	w.searchBar.Connect("notify::search-mode", func() {
+		open := w.searchBar.SearchMode()
+		if w.searchBtn != nil && w.searchBtn.Active() != open {
+			w.searchBtn.SetActive(open)
+		}
+		if !open {
+			w.clearSearch()
+		}
+	})
 
 	// Banner titles name folders and accounts, which can contain "&" (a label
 	// called "R&D"): parsed as markup they would render empty. See newToast.
@@ -276,7 +295,6 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 	content.Append(w.authBanner)
 	content.Append(w.outboxBanner)
 	content.Append(w.emptyFolderBanner)
-	content.Append(searchBar)
 	content.Append(w.selectionBar)
 	content.Append(w.threadStack)
 	content.Append(w.pageStatus)
@@ -311,8 +329,24 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 		hb.PackEnd(w.selectBtn)
 	}
 
+	w.searchBtn = gtk.NewToggleButton()
+	w.searchBtn.SetIconName("edit-find-symbolic")
+	w.searchBtn.SetTooltipText("Search mail (Ctrl+F)")
+	a11yLabel(w.searchBtn, "Search mail")
+	w.searchBtn.ConnectToggled(func() {
+		open := w.searchBtn.Active()
+		if w.searchBar.SearchMode() != open {
+			w.searchBar.SetSearchMode(open)
+		}
+		if open {
+			w.searchEntry.GrabFocus()
+		}
+	})
+	hb.PackEnd(w.searchBtn)
+
 	tv := adw.NewToolbarView()
 	tv.AddTopBar(hb)
+	tv.AddTopBar(w.searchBar)
 	tv.SetContent(content)
 	return adw.NewNavigationPage(tv, "Messages")
 }
@@ -742,6 +776,7 @@ func (w *window) onSearchAllMail() {
 	}
 	logging.Trace("ui: search all mail", "query", q, "account", w.activeID)
 	w.serverSearch = true // stay in server-search mode across refreshes
+	w.updateSearchControls(q, true)
 	w.runServerSearch(q)
 }
 
@@ -764,6 +799,8 @@ func (w *window) runServerSearch(q string) {
 	w.emptyPage.SetTitle("Searching all mail…")
 	w.emptyPage.SetDescription("")
 	w.searchAllBtn.SetSensitive(false)
+	w.searchStatus.SetText("Searching all mail…")
+	w.searchStatus.SetTooltipText("Searching all mail…")
 	acctID := w.activeID
 	key := threadPageKey{mode: threadPageServerSearch, accountID: acctID, query: q, newest: w.searchSort.Selected() == 1}
 	w.startThreadLoad(key, false, func() { w.runServerSearch(q) }, func(ctx context.Context) (threadPageResult, error) {
@@ -778,6 +815,7 @@ func (w *window) runServerSearch(q string) {
 		slog.Warn("ui: search all mail", "err", err)
 		w.toast("Couldn't search all mail — showing cached results")
 		w.serverSearch, w.serverQuery = false, ""
+		w.updateSearchControls(q, false)
 		w.refreshList(q)
 	})
 }
@@ -828,8 +866,6 @@ func (w *window) onSearchChanged() {
 	}
 	q := strings.TrimSpace(w.searchEntry.Text())
 	logging.Trace("ui: search changed", "query", q, "serverQuery", w.serverQuery)
-	w.searchAllBtn.SetVisible(q != "" && w.canSearchServer())
-	w.searchSort.SetVisible(q != "")
 	// The search-changed signal is debounced, so a programmatic SetText (e.g.
 	// "Find emails from sender") arrives here after suppressSearch was cleared.
 	// Only a genuinely different query exits server-search mode back to local.
@@ -837,11 +873,66 @@ func (w *window) onSearchChanged() {
 		w.searchAllBtn.SetSensitive(true)
 		w.serverSearch = false
 	}
+	w.updateSearchControls(q, q != "" && w.serverSearch)
+	if q != "" && !w.serverSearch {
+		w.searchStatus.SetText("Cached…")
+		w.searchStatus.SetTooltipText("Searching cached mail…")
+	}
 	// Cancelling the in-flight load here would be a guess about what the refresh
 	// below decides to do: startThreadLoad cancels the previous query when it
 	// actually starts a replacement, and when the refresh coalesces into that
 	// same query instead, killing it would abandon the list mid-load.
 	w.refreshList(q)
+}
+
+// openSearch reveals the temporary search surface and focuses its entry.
+func (w *window) openSearch() {
+	if !w.searchBar.SearchMode() {
+		logging.Trace("ui: search opened")
+		w.searchBar.SetSearchMode(true)
+	}
+	w.searchEntry.GrabFocus()
+}
+
+// closeSearch leaves search mode and returns the list to its current folder.
+func (w *window) closeSearch() {
+	if w.searchBar.SearchMode() {
+		logging.Trace("ui: search closed")
+		w.searchBar.SetSearchMode(false)
+		return
+	}
+	w.clearSearch()
+}
+
+func (w *window) clearSearch() {
+	if strings.TrimSpace(w.searchEntry.Text()) == "" {
+		w.updateSearchControls("", false)
+		return
+	}
+	w.suppressSearch = true
+	w.searchEntry.SetText("")
+	w.suppressSearch = false
+	w.serverSearch, w.serverQuery = false, ""
+	w.updateSearchControls("", false)
+	w.refreshList("")
+}
+
+func (w *window) updateSearchControls(query string, server bool) {
+	active := strings.TrimSpace(query) != ""
+	w.searchControls.SetVisible(active)
+	w.searchAllBtn.SetVisible(active && w.canSearchServer() && !server)
+}
+
+func searchResultStatus(server bool, count int, more bool) string {
+	scope := "cached"
+	if server {
+		scope = "all mail"
+	}
+	n := fmt.Sprintf("%d", count)
+	if more {
+		n += "+"
+	}
+	return n + " " + scope
 }
 
 // refreshList populates the thread list from either the current label (blank
@@ -1289,6 +1380,23 @@ func (w *window) showThreads(sums []model.ThreadSummary) {
 			}
 		}
 		sums = filtered
+	}
+	if strings.TrimSpace(w.searchEntry.Text()) != "" {
+		status := searchResultStatus(w.serverSearch, len(sums), w.threadPage.hasMore)
+		w.searchStatus.SetText(status)
+		word := "results"
+		if len(sums) == 1 && !w.threadPage.hasMore {
+			word = "result"
+		}
+		scope := "local cache"
+		if w.serverSearch {
+			scope = "all mail on the provider"
+		}
+		n := fmt.Sprintf("%d", len(sums))
+		if w.threadPage.hasMore {
+			n += "+"
+		}
+		w.searchStatus.SetTooltipText(fmt.Sprintf("%s %s loaded from %s", n, word, scope))
 	}
 
 	// Date group headers ("Today", …) are woven in as synthetic rows — the

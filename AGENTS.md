@@ -450,9 +450,14 @@ Unsubscribe, Print…, remote-images — never message- or sender-scoped items),
 each message's ⋯ acts on that message, and clicking a sender name opens the
 canonical sender surface (`showSenderActions`: copy address, find emails, and
 trust images — the link underlines on hover so it reads as
-clickable). A search entry runs instant local FTS5 search (`store.SearchPage`,
-sanitized into a quoted prefix MATCH) whose hits are grouped into threads; a Relevant/Newest selector defaults to the FTS/provider relevance order;
-clearing it returns to the current label. Conversation lists load in bounded
+clickable). The thread-list header's search toggle, Ctrl+F, and `/` reveal a
+native `GtkSearchBar`; Escape or the toggle hides it, clears the query, and
+returns to the current label. Its entry runs instant local FTS5 search
+(`store.SearchPage`, sanitized into a quoted prefix MATCH) whose hits are
+grouped into threads. The temporary search surface names the current scope and
+loaded result count; a Relevant/Newest selector defaults to the FTS/provider
+relevance order, while Search all (or Enter) switches from the cache to the
+paged provider search. Conversation lists load in bounded
 100-item pages as the user approaches the bottom: label and All Mail views use
 stable `(internal_date,rowid)` keyset cursors, local FTS advances by raw-hit
 offset (several hits may belong to one conversation), and provider search keeps
