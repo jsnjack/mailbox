@@ -923,13 +923,11 @@ func (w *window) cleanHTML(h string) (string, int) {
 	// The sanitizer strips <style>; re-add it scoped to a unique wrapper so an
 	// email's class-based layout renders (with its own cascade intact) without
 	// bleeding onto other messages in the thread or the reader chrome.
-	css := extractStyleCSS(h)
-	if strings.TrimSpace(css) == "" {
-		return clean, n
-	}
 	scope := "mbx-" + randNonce()[:12]
-	scoped, cssTrackers := scopeEmailCSS(css, "."+scope)
-	if scoped == "" {
+	// Each <style> block is scoped on its own, so one block the parser chokes on
+	// costs the email only that block's rules (see scopeEmailStyleBlocks).
+	scoped, cssTrackers := scopeEmailStyleBlocks(h, "."+scope)
+	if strings.TrimSpace(scoped) == "" {
 		return clean, n
 	}
 	return `<div class="` + scope + `"><style>` + scoped + `</style>` + clean + `</div>`, n + cssTrackers

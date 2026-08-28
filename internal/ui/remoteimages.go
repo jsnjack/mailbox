@@ -13,7 +13,6 @@ import (
 	xhtml "golang.org/x/net/html"
 
 	"github.com/aymerick/douceur/css"
-	"github.com/aymerick/douceur/parser"
 	"github.com/diamondburned/gotk4-webkitgtk/pkg/webkit/v6"
 	"github.com/diamondburned/gotk4/pkg/gio/v2"
 	"github.com/diamondburned/gotk4/pkg/glib/v2"
@@ -145,11 +144,12 @@ func collectInlineCSSImageURLs(cssText string, add func(string)) {
 }
 
 func collectStylesheetImageURLs(cssText string, add func(string)) {
-	// Whatever reaches a CSS parse is scrubbed of markup scaffolding first: this
-	// text comes from a <style> in the rendered document, and one leftover
-	// conditional-comment marker hangs douceur's parser for good (see
-	// stripCSSMarkupScaffolding).
-	stylesheet, err := parser.Parse(stripCSSMarkupScaffolding(cssText))
+	// This text is the scoped stylesheet already written into the rendered
+	// document, so it is being read a second time; parseStylesheet applies the
+	// same hardening the first pass did, which is what keeps a re-parse from
+	// hanging on something our own serialization reintroduced (see
+	// stripPreludeSemicolons).
+	stylesheet, err := parseStylesheet(cssText)
 	if err != nil {
 		return
 	}

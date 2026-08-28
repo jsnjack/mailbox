@@ -124,6 +124,24 @@ sibling fetches still in flight and turn one parallel pass into a round trip per
 message. A body fetched by anything else, or after the render finished, still
 re-renders the open conversation. The reader sanitizes with an email-tuned bluemonday policy
 (`emailPolicy`, keeps inline styles + tables so HTML mail isn't broken). The
+sanitizer drops `<style>`, so each block's CSS is re-added scoped to that
+message (`scopeEmailStyleBlocks` → `scopeEmailCSS`), and everything about that
+path is built for CSS that is malformed, because email CSS is: blocks are
+scoped **one at a time** so an unbalanced brace in one costs only that block;
+a stylesheet douceur cannot parse is retried **rule by rule**
+(`parseRulesIndividually`, over `splitTopLevelRules`) so only the bad rule is
+lost, the way a browser recovers; and every parse goes through the one hardened
+door (`parseStylesheet`), which is also the only reason the app cannot be hung
+by an email. douceur has exactly one input it makes no progress on — a `;` where
+a selector belongs, which `parseQualifiedRule` and `parsePrelude` hand back and
+forth forever — so `stripPreludeSemicolons` removes precisely that token
+(keeping the ones declarations and `@import` need). It arrives via an
+HTML-escaped `<style>`, where character references are not decoded and every
+`&gt;` in a child selector leaves a `;` behind: a Ryanair itinerary shipped one
+and pinned the render goroutine at 100% of a core for the life of the process,
+with the conversation never appearing. `cssParseTimeout` is the backstop for a
+pathology we have not seen, and `FuzzScopeEmailCSS` is what should find the next
+one instead of a user. The
 WebView loads **one persistent shell page** (`readerShellHTML`: styles, CSP, and
 a fit-to-width script that scales each over-wide message body — its `.mbfit`
 wrapper — to the pane individually, so a fixed-width signature table shrinks
