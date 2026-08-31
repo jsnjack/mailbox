@@ -19,9 +19,9 @@ import (
 // counters (requests, transferred-bytes baseline) so the status bar's numbers
 // survive a provider swap instead of resetting with the new provider object.
 type Assistant struct {
-	mu          sync.RWMutex
-	p           Provider
-	summaryLang string // language summaries are written in ("" = English, LanguageMatch = the mail's own)
+	mu   sync.RWMutex
+	p    Provider
+	lang string // language the AI speaks to the user in ("" = English, LanguageMatch = the mail's own)
 
 	reqs            atomic.Int64 // AI requests issued this session
 	baseIn, baseOut atomic.Int64 // bytes from providers swapped out earlier
@@ -56,52 +56,65 @@ func (a *Assistant) provider() Provider {
 }
 
 const (
-	// DefaultSummaryLanguage is the language summaries are written in unless the
-	// user picks another: an inbox in four languages still reads as one inbox,
-	// and the summary exists to be skimmed, not to be faithful to the original.
-	DefaultSummaryLanguage = "English"
-	// LanguageMatch is the summary-language value meaning "follow the mail's own
+	// DefaultLanguage is the language the AI addresses the user in unless they
+	// pick another: an inbox in four languages still reads as one inbox, and a
+	// summary exists to be skimmed, not to be faithful to the original.
+	DefaultLanguage = "English"
+	// LanguageMatch is the language value meaning "follow the mail's own
 	// language" instead of a fixed one.
 	LanguageMatch = "match"
 )
 
-// SetSummaryLanguage sets the language summaries are written in: a language name
-// as the model should read it ("English", "Portuguese"), "" for the default, or
+// SetLanguage sets the language the AI speaks to the user in: a language name as
+// the model should read it ("English", "Portuguese"), "" for the default, or
 // LanguageMatch to follow each mail. Like SetProvider it applies to a live
 // Assistant, so a Preferences change needs no restart.
 //
-// It reaches only the ops that summarize mail *for* the user (SummarizeThread,
-// BriefSummary) — never the ones that write mail *as* the user, where the
-// correspondent's language is the only right answer.
-func (a *Assistant) SetSummaryLanguage(lang string) {
+// It reaches every op that tells the user something *about* their mail — the
+// thread summary, the per-message gist, the phishing verdict and its reasons,
+// the reason on a suggested snooze time (and, via the UI reading Language(), the
+// Translate action's target) — and none of the ops that write mail *as* the user
+// (draft, refine, proofread, subject, quick replies), where the correspondent's
+// language is the only right answer.
+func (a *Assistant) SetLanguage(lang string) {
 	lang = strings.TrimSpace(lang)
 	a.mu.Lock()
-	prev := a.summaryLang
-	a.summaryLang = lang
+	prev := a.lang
+	a.lang = lang
 	a.mu.Unlock()
-	logging.Trace("ai: summary language", "lang", lang, "prev", prev)
+	logging.Trace("ai: language", "lang", lang, "prev", prev)
 }
 
-// SummaryLanguage reports the language summaries are written in —
-// DefaultSummaryLanguage when unset, or LanguageMatch.
-func (a *Assistant) SummaryLanguage() string {
+// Language reports the language the AI addresses the user in — DefaultLanguage
+// when unset, or LanguageMatch.
+func (a *Assistant) Language() string {
 	a.mu.RLock()
-	lang := a.summaryLang
+	lang := a.lang
 	a.mu.RUnlock()
 	if lang == "" {
-		return DefaultSummaryLanguage
+		return DefaultLanguage
 	}
 	return lang
 }
 
-// summaryLanguageClause is the sentence every summary prompt carries to name the
-// language its answer must be in. subject is what that prompt calls the mail
-// ("email", "thread"), so the instruction reads as one sentence with the rest.
-func (a *Assistant) summaryLanguageClause(subject string) string {
-	if lang := a.SummaryLanguage(); lang != LanguageMatch {
-		return "Always write the summary in " + lang + ", even when the " + subject + " is in another language. "
+// languageClause is the sentence a prompt carries to name the language its
+// answer must be in. what names the answer the op produces ("summary", "verdict
+// and reasons") and subject what that prompt calls the mail ("email", "thread"),
+// so the instruction reads as one sentence with the rest of it.
+func (a *Assistant) languageClause(what, subject string) string {
+	if lang := a.Language(); lang != LanguageMatch {
+		return "Always write the " + what + " in " + lang + ", even when the " + subject + " is in another language. "
 	}
-	return "Write the summary in the same language as the " + subject + ". "
+	return "Write the " + what + " in the same language as the " + subject + ". "
+}
+
+// languagePhrase is the same instruction where a whole sentence doesn't fit — a
+// parenthetical inside a strict output format, say.
+func (a *Assistant) languagePhrase(subject string) string {
+	if lang := a.Language(); lang != LanguageMatch {
+		return "in " + lang
+	}
+	return "in the " + subject + "'s language"
 }
 
 // stream is the single gate every Assistant op calls through: it counts the
@@ -752,14 +765,28 @@ func (a *Assistant) Refine(ctx context.Context, text, instruction string) (<-cha
 // heuristic warnings). The reply leads with a one-line verdict, then reasons.
 func (a *Assistant) AnalyzeEmail(ctx context.Context, emailContext string) (<-chan Chunk, error) {
 	logging.Trace("ai: analyze email", "op", "AnalyzeEmail", "provider", a.provider().Name(),
-		"bytes", len(emailContext), "context", logging.Body(emailContext))
+		"lang", a.Language(), "bytes", len(emailContext), "context", logging.Body(emailContext))
+	// The verdict line is prose the user reads, not a token anything parses, so
+	// off English it is written in the chosen language like the reasons under it.
+	// Naming the three judgements as English literals does not survive that: the
+	// model copies them, and a Russian analysis came back headed by an English
+	// "Verdict: Looks legitimate" above four Russian reasons (measured, twice —
+	// adding "translated in full" to the literals changed nothing). So off
+	// English the literals are gone and the judgements are described as meanings.
+	verdict := "Reply with a first line that is exactly one of: 'Verdict: Looks legitimate', " +
+		"'Verdict: Be cautious', or 'Verdict: Likely phishing'"
+	if a.Language() != DefaultLanguage {
+		verdict = "Reply with a first line holding only the verdict, " + a.languagePhrase("email") +
+			": the word for 'verdict', a colon, and one of exactly three judgements — that the email " +
+			"looks legitimate, that the reader should be cautious, or that it is likely phishing"
+	}
 	system := "You are a security assistant helping a user judge whether an email is a phishing, scam, or " +
 		"social-engineering attempt. Weigh signals like a false sense of urgency or threats, requests for " +
 		"passwords, payment, or personal information, mismatched or lookalike sender addresses, suspicious or " +
 		"mismatched links, and unusual requests. You are given the email plus any automated authentication " +
-		"result and warnings. Reply with a first line that is exactly one of: 'Verdict: Looks legitimate', " +
-		"'Verdict: Be cautious', or 'Verdict: Likely phishing'. Then give 2-4 short bullet points (each " +
-		"starting with '- ') explaining why. Be concise and factual; do not invent details."
+		"result and warnings. " + verdict + ". Then give 2-4 short bullet points (each " +
+		"starting with '- ') explaining why. Be concise and factual; do not invent details. " +
+		a.languageClause("verdict and reasons", "email")
 	return a.stream(ctx, system, []Msg{{Role: RoleUser, Content: emailContext}})
 }
 
@@ -788,11 +815,11 @@ func (a *Assistant) Ping(ctx context.Context) error {
 // text (oldest message first). The reply is plain text — a few "- " bullets.
 func (a *Assistant) SummarizeThread(ctx context.Context, threadContext string) (<-chan Chunk, error) {
 	logging.Trace("ai: summarize thread", "op", "SummarizeThread", "provider", a.provider().Name(),
-		"lang", a.SummaryLanguage(), "bytes", len(threadContext), "context", logging.Body(threadContext))
+		"lang", a.Language(), "bytes", len(threadContext), "context", logging.Body(threadContext))
 	system := "You are an email assistant. Summarize the following email thread for someone catching up " +
 		"quickly. Reply with 2-5 short bullet points, one per line, each starting with '- ', covering the key " +
 		"points, decisions, and any open questions or action items awaiting a response. Be concise and " +
-		"factual. " + a.summaryLanguageClause("thread") + "Output " +
+		"factual. " + a.languageClause("summary", "thread") + "Output " +
 		"only the bullet points — no heading, no preamble such as 'Here is', and no code fences."
 	user := "Email thread to summarize:\n\n" + threadContext
 	return a.stream(ctx, system, []Msg{{Role: RoleUser, Content: user}})
@@ -892,12 +919,13 @@ type SnoozeSuggestion struct {
 // with nil error means the email suggests nothing usable.
 func (a *Assistant) SuggestSnooze(ctx context.Context, now time.Time, emailContext string) ([]SnoozeSuggestion, error) {
 	start := time.Now()
-	logging.Trace("ai: suggest snooze", "op", "SuggestSnooze", "provider", a.provider().Name(), "bytes", len(emailContext))
+	logging.Trace("ai: suggest snooze", "op", "SuggestSnooze", "provider", a.provider().Name(),
+		"lang", a.Language(), "bytes", len(emailContext))
 	system := "The user snoozes an email to deal with it at the right moment. Today is " +
 		now.Format("Monday, 2 January 2006, 15:04") + " (local time). " +
 		"If the email implies good times to resurface it, reply with one to three lines, most useful " +
-		"first, each EXACTLY in the form YYYY-MM-DD HH:MM|reason (reason under 8 words, in the email's " +
-		"language). For an event or meeting with a known time, offer BOTH one hour before AND the day " +
+		"first, each EXACTLY in the form YYYY-MM-DD HH:MM|reason (reason under 8 words, " +
+		a.languagePhrase("email") + "). For an event or meeting with a known time, offer BOTH one hour before AND the day " +
 		"before at 09:00. For a deadline, the day before at 09:00. For a delivery or travel date, that " +
 		"morning. Every time must be in the future. If the email suggests no particular time, reply " +
 		"exactly: none"
@@ -947,9 +975,9 @@ func parseSnoozeSuggestions(s string, now time.Time) []SnoozeSuggestion {
 func (a *Assistant) BriefSummary(ctx context.Context, emailContext string) (string, error) {
 	start := time.Now()
 	logging.Trace("ai: brief summary", "op", "BriefSummary", "provider", a.provider().Name(),
-		"lang", a.SummaryLanguage(), "bytes", len(emailContext))
+		"lang", a.Language(), "bytes", len(emailContext))
 	system := "Summarize this email in ONE very short sentence, at most 12 words. " +
-		a.summaryLanguageClause("email") +
+		a.languageClause("summary", "email") +
 		"State the gist (what they want / what happened), not that it is an email. " +
 		"Reply with only that sentence — no preamble, no quotes."
 	ch, err := a.stream(ctx, system, []Msg{{Role: RoleUser, Content: emailContext}})

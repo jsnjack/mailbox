@@ -1732,8 +1732,7 @@ func (w *window) buildReader() *adw.NavigationPage {
 
 	// AI actions (only useful when an assistant is configured).
 	w.translateBtn = gtk.NewButtonFromIconName("translate-symbolic")
-	w.translateBtn.SetTooltipText("Translate conversation to English (t)")
-	a11yLabel(w.translateBtn, "Translate conversation to English")
+	w.refreshTranslateLabels()
 	w.translateBtn.ConnectClicked(w.onTranslate)
 
 	w.summaryBtn = gtk.NewButtonFromIconName("summarize-symbolic")
@@ -3697,7 +3696,10 @@ func (w *window) onTranslate() {
 			todo = append(todo, m)
 		}
 	}
-	logging.Trace("ui: translate", "thread", threadID, "msgs", len(msgs), "todo", len(todo), "account", acctID)
+	// One read per run: a setting changed mid-translation must not leave half the
+	// thread cached under one language and half under another.
+	lang := w.translateTarget()
+	logging.Trace("ui: translate", "thread", threadID, "msgs", len(msgs), "todo", len(todo), "lang", lang, "account", acctID)
 	if len(todo) == 0 { // whole thread already translated → show instantly
 		logging.Trace("ui: translate cache hit (memory)", "thread", threadID)
 		w.showTranslatedConversation(msgs)
@@ -3719,7 +3721,7 @@ func (w *window) onTranslate() {
 		for i, m := range todo {
 			ids[i] = m.GmailID
 		}
-		seeded, err := w.deps.Store.Translations(ctx, acctID, ids, translateLang)
+		seeded, err := w.deps.Store.Translations(ctx, acctID, ids, lang)
 		if err != nil {
 			slog.Warn("ui: load cached translations", "err", err)
 			seeded = map[string]string{}
@@ -3749,7 +3751,7 @@ func (w *window) onTranslate() {
 		var byText map[string]string
 		if firstErr == nil {
 			byText, firstErr = poolTranslations(plans, func(segs []string) ([]string, error) {
-				return w.deps.Assistant.TranslateSegments(ctx, segs, translateLang)
+				return w.deps.Assistant.TranslateSegments(ctx, segs, lang)
 			})
 		}
 
@@ -3764,7 +3766,7 @@ func (w *window) onTranslate() {
 					break
 				}
 				text := stripCodeFence(out)
-				if serr := w.deps.Store.SetTranslation(ctx, acctID, remaining[i].GmailID, translateLang, text); serr != nil {
+				if serr := w.deps.Store.SetTranslation(ctx, acctID, remaining[i].GmailID, lang, text); serr != nil {
 					slog.Warn("ui: persist translation", "err", serr)
 				}
 				results[remaining[i].GmailID] = text
@@ -3799,9 +3801,31 @@ func (w *window) onTranslate() {
 	}()
 }
 
-// translateLang is the single target language the Translate action uses; also
-// the key under which translations are cached/persisted.
-const translateLang = "English"
+// translateTarget is the language the Translate action renders into, and the key
+// its translations are cached and persisted under: the one AI language from
+// Preferences. "Same as the email" is the one value it cannot honour —
+// translating a mail into its own language is a no-op — so that falls back to
+// the default, which is what the action did before the setting existed.
+func (w *window) translateTarget() string {
+	if w.deps.Assistant != nil {
+		if lang := w.deps.Assistant.Language(); lang != ai.LanguageMatch {
+			return lang
+		}
+	}
+	return ai.DefaultLanguage
+}
+
+// refreshTranslateLabels re-labels the translate button for the current AI
+// language, so its tooltip names the language pressing it will actually produce.
+// Called when the reader is built and whenever the setting changes.
+func (w *window) refreshTranslateLabels() {
+	if w.translateBtn == nil {
+		return
+	}
+	lang := w.translateTarget()
+	w.translateBtn.SetTooltipText("Translate conversation to " + lang + " (t)")
+	a11yLabel(w.translateBtn, "Translate conversation to "+lang)
+}
 
 // showTranslatedConversation renders the thread (newest first) from each
 // message's cached translation, like renderConversation but with translated
@@ -3815,8 +3839,9 @@ func (w *window) showTranslatedConversation(msgs []model.Message) {
 	for i := len(msgs) - 1; i >= 0; i-- {
 		m := msgs[i]
 		body := model.MessageBody{HTML: w.translationCache[cacheKey(m.AccountID, m.GmailID)]}
-		// No gist card here: the gist is in the email's original language, which
-		// would clash with the translated bodies this view exists to show.
+		// No gist card here: under "Same as the email" it is in the original's
+		// language, which would clash with the translated bodies this view exists
+		// to show.
 		head, rest, n := w.conversationSection(m, body, w.cleanHTML, false, "")
 		// The translated view is a flat stack: every message is shown in full,
 		// so none of them folds.
@@ -4045,31 +4070,32 @@ func (w *window) hideSummary() {
 	}
 }
 
-// dropSummaryCaches forgets every AI summary the app is holding — in memory and
-// in the store — and repaints the open conversation.
+// dropAINotes forgets everything the AI has written about mail — summaries,
+// gists and phishing analyses, in memory and in the store — and repaints the
+// open conversation.
 //
-// The summary language change calls this. A cached summary is written in the
-// language it was written in, and both caches are deliberately permanent (a body
-// never changes), so without this the new setting would only ever reach mail that
-// has not arrived yet — leaving the inbox the user changed the setting *because
-// of* summarized in the language they just left. Nothing is regenerated here:
-// a gist is re-earned when its conversation is opened, and the background
-// worker's next pass fills the inbox's again.
-func (w *window) dropSummaryCaches() {
-	logging.Trace("ui: drop summary caches", "thread", w.openThreadID)
+// The AI-language change calls this. A cached note is in the language it was
+// written in, and all three caches are deliberately permanent (a body never
+// changes), so without this the new setting would only ever reach mail that has
+// not arrived yet — leaving the inbox the user changed the setting *because of*
+// described in the language they just left. Nothing is regenerated here: a gist
+// is re-earned when its conversation is opened, an analysis when it is asked
+// for, and the background worker's next pass fills the inbox's gists again.
+func (w *window) dropAINotes() {
+	logging.Trace("ui: drop ai notes", "thread", w.openThreadID)
 	w.summaryCache = map[uiCacheKey]string{}
 	w.gistRequested = map[uiCacheKey]bool{}
 	w.appliedGists = map[uiCacheKey]string{}
-	w.hideSummary() // its text is in the old language; re-summarizing is one click
+	w.hideSummary() // its text is in the old language; asking again is one click
 	msgs := w.openThreadMsgs
 	threadID := w.openThreadID
 	go func() {
-		n, err := w.deps.Store.ClearSummaries(context.Background())
+		n, err := w.deps.Store.ClearAINotes(context.Background())
 		if err != nil {
-			slog.Warn("ui: clear summaries", "err", err)
+			slog.Warn("ui: clear ai notes", "err", err)
 			return
 		}
-		logging.Trace("ui: summary caches cleared", "rows", n)
+		logging.Trace("ui: ai notes cleared", "rows", n)
 		// Repaint only once the rows are gone: a render racing the delete would
 		// read a gist straight back out of the store and re-reveal it.
 		dispatch.Main(func() {

@@ -3,6 +3,8 @@ package ui
 import (
 	"testing"
 	"time"
+
+	"github.com/jsnjack/mailbox/internal/ai"
 )
 
 func TestSignInAgePhrase(t *testing.T) {
@@ -24,21 +26,21 @@ func TestSignInAgePhrase(t *testing.T) {
 	}
 }
 
-// TestSummaryLanguages guards the table the Summary language row is built from.
+// TestAILanguages guards the table the Language row is built from.
 // The row preselects by matching the stored pref against these values, so a
 // duplicate or a missing default would leave the dialog showing a language the
 // app is not using.
-func TestSummaryLanguages(t *testing.T) {
-	if len(summaryLanguages) < 2 {
-		t.Fatalf("summaryLanguages = %d entries, want the default plus at least one choice", len(summaryLanguages))
+func TestAILanguages(t *testing.T) {
+	if len(aiLanguages) < 2 {
+		t.Fatalf("aiLanguages = %d entries, want the default plus at least one choice", len(aiLanguages))
 	}
 	// The default (English) is the pref's zero value and leads the list.
-	if summaryLanguages[0].label != "English" || summaryLanguages[0].value != "" {
-		t.Fatalf("first entry = %+v, want {English, \"\"}", summaryLanguages[0])
+	if aiLanguages[0].label != "English" || aiLanguages[0].value != "" {
+		t.Fatalf("first entry = %+v, want {English, \"\"}", aiLanguages[0])
 	}
 	seen := map[string]bool{}
 	labels := map[string]bool{}
-	for _, l := range summaryLanguages {
+	for _, l := range aiLanguages {
 		if l.label == "" {
 			t.Fatalf("entry %+v has no label", l)
 		}
@@ -53,6 +55,31 @@ func TestSummaryLanguages(t *testing.T) {
 	// "Same as the email" must carry the sentinel the ai package understands,
 	// not a language name a model would try to write in.
 	if !seen["match"] {
-		t.Fatalf("summaryLanguages offers no %q entry", "match")
+		t.Fatalf("aiLanguages offers no %q entry", "match")
+	}
+}
+
+// TestTranslateTarget covers the one place the AI language cannot be taken
+// literally: "Same as the email" has no meaning for a translation (a mail into
+// its own language is a no-op), so Translate falls back to the default.
+func TestTranslateTarget(t *testing.T) {
+	for _, tt := range []struct {
+		name, lang, want string
+	}{
+		{"default", "", ai.DefaultLanguage},
+		{"chosen language", "Portuguese", "Portuguese"},
+		{"same as the email falls back", ai.LanguageMatch, ai.DefaultLanguage},
+	} {
+		asst := ai.NewAssistant(nil)
+		asst.SetLanguage(tt.lang)
+		w := &window{deps: Deps{Assistant: asst}}
+		if got := w.translateTarget(); got != tt.want {
+			t.Errorf("%s: translateTarget = %q, want %q", tt.name, got, tt.want)
+		}
+	}
+	// No assistant at all (AI unconfigured): still a usable answer, never "".
+	w := &window{}
+	if got := w.translateTarget(); got != ai.DefaultLanguage {
+		t.Errorf("no assistant: translateTarget = %q, want %q", got, ai.DefaultLanguage)
 	}
 }

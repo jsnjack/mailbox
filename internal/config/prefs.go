@@ -32,11 +32,13 @@ type Prefs struct {
 	DisableTranslate         bool `json:"disable_translate"`
 	DisablePhishingAnalysis  bool `json:"disable_phishing_analysis"`
 	DisableSnoozeSuggestions bool `json:"disable_snooze_suggestions"`
-	// SummaryLanguage is the language AI summaries are written in — the reader's
-	// conversation summary and the one-line per-message gist. "" (the default)
-	// means English; "match" (ai.LanguageMatch) follows each mail's own language,
-	// which is how the gist behaved before this was a choice.
-	SummaryLanguage string `json:"summary_language,omitempty"`
+	// AILanguage is the language the AI addresses the user in — thread summaries,
+	// per-message gists, phishing verdicts, snooze reasons, and the Translate
+	// action's target. "" (the default) means English; "match" (ai.LanguageMatch)
+	// follows each mail's own language, which is how the gist behaved before this
+	// was a choice. Mail written on the user's behalf ignores it and follows the
+	// correspondent.
+	AILanguage string `json:"ai_language,omitempty"`
 	// BodyRetentionDays prunes cached message bodies older than this many days
 	// (metadata is kept forever; a pruned body is re-fetched on open). 0 — the
 	// default — keeps bodies forever.
@@ -81,7 +83,7 @@ func LoadPrefs() (Prefs, error) {
 		"disableProofread", p.DisableProofread, "disableGenerateSubject", p.DisableGenerateSubject,
 		"disableSummarize", p.DisableSummarize, "disableTranslate", p.DisableTranslate,
 		"disablePhishingAnalysis", p.DisablePhishingAnalysis, "disableSnoozeSuggestions", p.DisableSnoozeSuggestions,
-		"summaryLanguage", p.SummaryLanguage)
+		"aiLanguage", p.AILanguage)
 	return p, nil
 }
 
@@ -110,6 +112,6 @@ func SavePrefs(p Prefs) error {
 		"disableProofread", p.DisableProofread, "disableGenerateSubject", p.DisableGenerateSubject,
 		"disableSummarize", p.DisableSummarize, "disableTranslate", p.DisableTranslate,
 		"disablePhishingAnalysis", p.DisablePhishingAnalysis, "disableSnoozeSuggestions", p.DisableSnoozeSuggestions,
-		"summaryLanguage", p.SummaryLanguage)
+		"aiLanguage", p.AILanguage)
 	return nil
 }

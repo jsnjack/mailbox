@@ -70,10 +70,10 @@ func TestDeleteMessageClearsAICaches(t *testing.T) {
 	}
 }
 
-// TestClearSummaries verifies the summary-language reset: both AI summary caches
-// go — thread summaries and per-message gists — while unrelated AI caches (a
-// translation, which is language-explicit already) stay.
-func TestClearSummaries(t *testing.T) {
+// TestClearAINotes verifies the AI-language reset: every cache holding AI prose
+// about mail goes — thread summaries, per-message gists, phishing analyses —
+// while a translation (already keyed by its target language) stays.
+func TestClearAINotes(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 	acc := seedAccount(t, s)
@@ -89,16 +89,19 @@ func TestClearSummaries(t *testing.T) {
 	if err := s.SetMessageGist(ctx, acc, "g1", "a gist"); err != nil {
 		t.Fatalf("SetMessageGist: %v", err)
 	}
+	if err := s.SetAnalysis(ctx, acc, "g1", "Verdict: Be cautious"); err != nil {
+		t.Fatalf("SetAnalysis: %v", err)
+	}
 	if err := s.SetTranslation(ctx, acc, "g1", "English", "<p>hi</p>"); err != nil {
 		t.Fatalf("SetTranslation: %v", err)
 	}
 
-	n, err := s.ClearSummaries(ctx)
+	n, err := s.ClearAINotes(ctx)
 	if err != nil {
-		t.Fatalf("ClearSummaries: %v", err)
+		t.Fatalf("ClearAINotes: %v", err)
 	}
-	if n != 2 {
-		t.Fatalf("rows cleared = %d, want 2", n)
+	if n != 3 {
+		t.Fatalf("rows cleared = %d, want 3", n)
 	}
 	if _, _, ok, _ := s.ThreadSummary(ctx, acc, "th1"); ok {
 		t.Fatalf("thread summary should be gone")
@@ -106,12 +109,15 @@ func TestClearSummaries(t *testing.T) {
 	if g, _ := s.MessageGists(ctx, acc, []string{"g1"}); len(g) != 0 {
 		t.Fatalf("gist should be gone, got %v", g)
 	}
+	if a, ok, _ := s.Analysis(ctx, acc, "g1"); ok {
+		t.Fatalf("analysis should be gone, got %q", a)
+	}
 	if tr, _ := s.Translations(ctx, acc, []string{"g1"}, "English"); len(tr) != 1 {
 		t.Fatalf("translation should survive, got %v", tr)
 	}
 
 	// Idempotent: clearing an empty cache is not an error.
-	if n, err := s.ClearSummaries(ctx); err != nil || n != 0 {
-		t.Fatalf("second ClearSummaries = (%d, %v), want (0, nil)", n, err)
+	if n, err := s.ClearAINotes(ctx); err != nil || n != 0 {
+		t.Fatalf("second ClearAINotes = (%d, %v), want (0, nil)", n, err)
 	}
 }

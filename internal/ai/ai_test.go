@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeProvider records the prompt it was given and replays canned chunks.
@@ -696,40 +697,45 @@ func TestTranslateSegmentsUnusableReplyErrors(t *testing.T) {
 	}
 }
 
-// TestSummaryLanguage covers the Preferences setting end to end at the prompt
-// level: the default forces English regardless of the mail's language, a chosen
-// language replaces it in both summary ops, and LanguageMatch goes back to
-// following the mail. The prompt is the only place the setting exists, so this is
-// where it can break.
-func TestSummaryLanguage(t *testing.T) {
+// TestLanguage covers the Preferences setting end to end at the prompt level,
+// across every op that tells the user something about their mail: the default
+// forces English regardless of the mail's own language, a chosen language
+// replaces it, and LanguageMatch goes back to following the mail. The prompt is
+// the only place the setting exists, so this is where it can break.
+func TestLanguage(t *testing.T) {
+	ops := []struct {
+		name string
+		call func(*Assistant) error
+	}{
+		{"SummarizeThread", func(a *Assistant) error {
+			_, err := a.SummarizeThread(context.Background(), "From: A\n\nOlá.")
+			return err
+		}},
+		{"BriefSummary", func(a *Assistant) error {
+			_, err := a.BriefSummary(context.Background(), "From: A\n\nOlá.")
+			return err
+		}},
+		{"AnalyzeEmail", func(a *Assistant) error {
+			_, err := a.AnalyzeEmail(context.Background(), "From: A\n\nOlá.")
+			return err
+		}},
+	}
 	tests := []struct {
 		name       string
 		lang       string
 		want, dont string
 	}{
-		{name: "default is English", lang: "", want: "summary in English", dont: "same language"},
-		{name: "unset trims to default", lang: "  ", want: "summary in English", dont: "same language"},
-		{name: "chosen language", lang: "Portuguese", want: "summary in Portuguese", dont: "English"},
+		{name: "default is English", lang: "", want: "in English", dont: "same language"},
+		{name: "unset trims to default", lang: "  ", want: "in English", dont: "same language"},
+		{name: "chosen language", lang: "Portuguese", want: "in Portuguese", dont: "English"},
 		{name: "match follows the mail", lang: LanguageMatch, want: "same language as the", dont: "Always write"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			for _, op := range []struct {
-				name string
-				call func(*Assistant) error
-			}{
-				{"SummarizeThread", func(a *Assistant) error {
-					_, err := a.SummarizeThread(context.Background(), "From: A\n\nOlá.")
-					return err
-				}},
-				{"BriefSummary", func(a *Assistant) error {
-					_, err := a.BriefSummary(context.Background(), "From: A\n\nOlá.")
-					return err
-				}},
-			} {
+			for _, op := range ops {
 				fp := &fakeProvider{chunks: []Chunk{{Text: "ok"}}}
 				a := NewAssistant(fp)
-				a.SetSummaryLanguage(tt.lang)
+				a.SetLanguage(tt.lang)
 				if err := op.call(a); err != nil {
 					t.Fatalf("%s: %v", op.name, err)
 				}
@@ -744,19 +750,75 @@ func TestSummaryLanguage(t *testing.T) {
 	}
 }
 
-// TestSummaryLanguageReported is what Preferences reads back to preselect its
-// row: unset reads as the default, not as "".
-func TestSummaryLanguageReported(t *testing.T) {
+// TestLanguageSnoozeReasons covers the one op whose output format leaves no room
+// for a whole sentence: the language rides in the reason's parenthetical, and the
+// machine-readable timestamp is untouched.
+func TestLanguageSnoozeReasons(t *testing.T) {
+	for _, tt := range []struct {
+		lang, want string
+	}{
+		{"", "8 words, in English)"},
+		{"Portuguese", "8 words, in Portuguese)"},
+		{LanguageMatch, "8 words, in the email's language)"},
+	} {
+		fp := &fakeProvider{chunks: []Chunk{{Text: "none"}}}
+		a := NewAssistant(fp)
+		a.SetLanguage(tt.lang)
+		if _, err := a.SuggestSnooze(context.Background(), time.Now(), "From: A\n\nOlá."); err != nil {
+			t.Fatalf("SuggestSnooze(%q): %v", tt.lang, err)
+		}
+		if !strings.Contains(fp.gotSystem, tt.want) {
+			t.Fatalf("lang %q: prompt missing %q: %q", tt.lang, tt.want, fp.gotSystem)
+		}
+		if !strings.Contains(fp.gotSystem, "YYYY-MM-DD HH:MM|reason") {
+			t.Fatalf("lang %q: prompt lost its output format: %q", tt.lang, fp.gotSystem)
+		}
+	}
+}
+
+// TestLanguageReported is what Preferences and the Translate action read back:
+// unset reads as the default, not as "".
+func TestLanguageReported(t *testing.T) {
 	a := NewAssistant(&fakeProvider{})
-	if got := a.SummaryLanguage(); got != DefaultSummaryLanguage {
-		t.Fatalf("unset SummaryLanguage = %q, want %q", got, DefaultSummaryLanguage)
+	if got := a.Language(); got != DefaultLanguage {
+		t.Fatalf("unset Language = %q, want %q", got, DefaultLanguage)
 	}
-	a.SetSummaryLanguage(" Russian ")
-	if got := a.SummaryLanguage(); got != "Russian" {
-		t.Fatalf("SummaryLanguage = %q, want Russian", got)
+	a.SetLanguage(" Russian ")
+	if got := a.Language(); got != "Russian" {
+		t.Fatalf("Language = %q, want Russian", got)
 	}
-	a.SetSummaryLanguage("")
-	if got := a.SummaryLanguage(); got != DefaultSummaryLanguage {
-		t.Fatalf("cleared SummaryLanguage = %q, want %q", got, DefaultSummaryLanguage)
+	a.SetLanguage("")
+	if got := a.Language(); got != DefaultLanguage {
+		t.Fatalf("cleared Language = %q, want %q", got, DefaultLanguage)
+	}
+}
+
+// TestAnalyzeEmailVerdictLanguage pins the verdict line's treatment: in English
+// the three judgements are given as literals, and off English they are described
+// as meanings instead — a model handed English literals copies them, heading a
+// Russian card with an English verdict.
+func TestAnalyzeEmailVerdictLanguage(t *testing.T) {
+	for _, tt := range []struct {
+		lang     string
+		literals bool
+	}{
+		{"", true},
+		{"English", true},
+		{"Russian", false},
+		{LanguageMatch, false},
+	} {
+		fp := &fakeProvider{chunks: []Chunk{{Text: "ok"}}}
+		a := NewAssistant(fp)
+		a.SetLanguage(tt.lang)
+		if _, err := a.AnalyzeEmail(context.Background(), "From: A\n\nOlá."); err != nil {
+			t.Fatalf("AnalyzeEmail(%q): %v", tt.lang, err)
+		}
+		if got := strings.Contains(fp.gotSystem, "'Verdict: Looks legitimate'"); got != tt.literals {
+			t.Fatalf("lang %q: English verdict literals=%v, want %v: %q", tt.lang, got, tt.literals, fp.gotSystem)
+		}
+		// Whatever the language, the reply must still be a verdict line then reasons.
+		if !strings.Contains(fp.gotSystem, "first line") || !strings.Contains(fp.gotSystem, "bullet points") {
+			t.Fatalf("lang %q: prompt lost its reply shape: %q", tt.lang, fp.gotSystem)
+		}
 	}
 }

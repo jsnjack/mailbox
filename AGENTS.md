@@ -206,18 +206,26 @@ cached by the thread's message-id fingerprint (`summaryKey`) so reopening is
 instant and a new reply auto-invalidates it; the summary is also **persisted**
 keyed by thread id + that fingerprint (`store.{SetThreadSummary,ThreadSummary}`,
 `thread_summaries` table), so an unchanged thread isn't re-summarized after a
-restart. Both summaries — the conversation card and the per-message gist — are
-written in the language Preferences → AI Features names (**Summary language**,
-default English, `config.Prefs.SummaryLanguage` → `Assistant.SetSummaryLanguage`,
-applied live like a provider swap; "Same as the email" = `ai.LanguageMatch` keeps
-the older follow-the-mail behaviour). Only these reading aids follow it — a
-draft, refine, or subject stays in the correspondent's language. Because both
-caches are permanent by design (a body never changes), changing the language
-drops them wholesale (`store.ClearSummaries` + the in-memory gist/summary maps,
-`dropSummaryCaches`) and they are re-earned on open and by the worker's next
-pass: otherwise the setting would only reach mail that hasn't arrived yet, and
-the inbox that prompted the change would keep its old-language summaries
-forever. **Snooze**: a conversation can be hidden until a wake time. The local
+restart. **One AI language** (Preferences → AI Features → **Language**, default
+English, `config.Prefs.AILanguage` → `Assistant.SetLanguage`, applied live like a
+provider swap) governs everything the AI says *about* the mail: the conversation
+summary, the per-message gist, the phishing verdict and its reasons, a snooze
+suggestion's reason, and the Translate action's target (`window.translateTarget`,
+also the translations' cache key). "Same as the email" (`ai.LanguageMatch`) keeps
+the older follow-the-mail behaviour, and is the one value Translate can't honour
+— translating a mail into its own language is a no-op — so it falls back to
+`ai.DefaultLanguage` there. The prompts share `Assistant.languageClause` (a
+sentence) and `languagePhrase` (a parenthetical, where a strict output format
+leaves no room). Nothing that writes mail *as* the user follows it — draft,
+refine, proofread, subject, quick replies stay in the correspondent's language,
+the only right answer there — and category tags stay fixed ids. Because the
+summary, gist and analysis caches are permanent by design (a body never changes),
+changing the language drops all three (`store.ClearAINotes` + the in-memory maps,
+`dropAINotes`) and they are re-earned on open, on demand, and by the worker's
+next pass: otherwise the setting would only reach mail that hasn't arrived yet,
+and the inbox that prompted the change would keep its old-language notes forever.
+Translations are exempt — they are keyed by target language already, so a change
+simply misses and translates afresh. **Snooze**: a conversation can be hidden until a wake time. The local
 `snoozes` table drives this machine's UI (instant hide, the Snoozed virtual
 folder, the inbox-query exclusion), and every snooze is **mirrored to the
 provider as label state** (`internal/snooze`): −INBOX (other clients — the
@@ -357,8 +365,8 @@ reply/forward/star/unread target the newest *delivered* message
 `openDraftForEdit` and the engine's `DiscardDraft` select the draft by
 `IsDraft`, never "newest" — after an incoming reply the newest message is
 someone else's mail.
-Translate (`onTranslate`) renders an English translation of the whole open
-conversation in place (markup preserved, "Show original" reverts): every message
+Translate (`onTranslate`) renders a translation of the whole open conversation
+into the configured AI language (English by default) in place (markup preserved, "Show original" reverts): every message
 is translated concurrently and cached per message id in `translationCache`
 (`showTranslatedConversation` rebuilds the stacked sections from the cache), so
 reverting, re-opening, or re-translating reuses cached results and an
@@ -638,7 +646,7 @@ afterward. The `sync` command and the headless packages build without GTK.
 - Default signature: `~/.config/mailbox/signature.txt` (plain text, may be empty); per-account overrides in `~/.config/mailbox/signatures.json` (email → signature).
 - Keyboard shortcut overrides: `~/.config/mailbox/shortcuts.json` (action id → keys).
 - View state (last folder, unread filter, reader zoom): `~/.local/share/mailbox/view.json`.
-- General prefs (automatic remote-image loading, per-feature AI toggles, summary language, body retention window): `~/.config/mailbox/prefs.json`. Body retention (Preferences → Storage, default off) prunes cached bodies older than N days (`store.PruneBodies` — metadata/header search kept, body re-fetched on open, body-derived AI caches + attachment rows pruned too); applied on change and by a daily background pass (`backgroundRetention`), with an auto-`Vacuum` after a large prune.
+- General prefs (automatic remote-image loading, per-feature AI toggles, AI language, body retention window): `~/.config/mailbox/prefs.json`. Body retention (Preferences → Storage, default off) prunes cached bodies older than N days (`store.PruneBodies` — metadata/header search kept, body re-fetched on open, body-derived AI caches + attachment rows pruned too); applied on change and by a daily background pass (`backgroundRetention`), with an auto-`Vacuum` after a large prune.
 - Attachment cache: `~/.cache/mailbox/attachments/` (content-addressed by sha256).
 - Secrets (OAuth refresh tokens, AI API keys): OS keyring via Secret Service.
 - Trace log: `/tmp/mailbox.log` (truncated each start; enabled with `--trace`).

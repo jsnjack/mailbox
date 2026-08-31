@@ -48,29 +48,32 @@ func (s *Store) ThreadSummary(ctx context.Context, accountID int64, threadID str
 	return fingerprint, summary, true, nil
 }
 
-// ClearSummaries drops every cached AI summary — thread summaries and
-// per-message gists, across all accounts — and reports how many rows went.
+// ClearAINotes drops every cached thing the AI has written *about* mail — thread
+// summaries, per-message gists, and phishing analyses, across all accounts — and
+// reports how many rows went.
 //
-// Both caches exist because a body never changes, so a summary written once can
-// be reused forever. The language it is written in is a preference, though: when
-// that changes, this cache is the only thing between the user and summaries in
+// All three are cached because a body never changes, so a note written once can
+// be reused forever. The language they are written in is a preference, though:
+// when that changes, this cache is the only thing between the user and notes in
 // the language they just left, so it is dropped wholesale and re-earned on
-// demand. Both tables go together — the reader's card and the row's one-liner
-// disagreeing about language would look like a bug, not a cache.
-func (s *Store) ClearSummaries(ctx context.Context) (int64, error) {
+// demand. They go together — the summary card, the row's one-liner and the
+// security verdict disagreeing about language would look like a bug, not a
+// cache. Translations are not here: they are keyed by target language already,
+// so a change simply misses and translates afresh.
+func (s *Store) ClearAINotes(ctx context.Context) (int64, error) {
 	begin := time.Now()
-	logging.TraceContext(ctx, "store: clear summaries")
+	logging.TraceContext(ctx, "store: clear ai notes")
 	var total int64
-	for _, table := range []string{"thread_summaries", "message_gists"} {
+	for _, table := range []string{"thread_summaries", "message_gists", "message_analyses"} {
 		res, err := s.writer.ExecContext(ctx, `DELETE FROM `+table) //nolint:gosec // fixed table names
 		if err != nil {
-			logging.TraceContext(ctx, "store: clear summaries", "table", table, "err", err)
+			logging.TraceContext(ctx, "store: clear ai notes", "table", table, "err", err)
 			return total, fmt.Errorf("clear %s: %w", table, err)
 		}
 		if n, aerr := res.RowsAffected(); aerr == nil {
 			total += n
 		}
 	}
-	logging.TraceContext(ctx, "store: clear summaries done", "rows", total, "dur", time.Since(begin))
+	logging.TraceContext(ctx, "store: clear ai notes done", "rows", total, "dur", time.Since(begin))
 	return total, nil
 }
