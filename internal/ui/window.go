@@ -4045,6 +4045,45 @@ func (w *window) hideSummary() {
 	}
 }
 
+// dropSummaryCaches forgets every AI summary the app is holding — in memory and
+// in the store — and repaints the open conversation.
+//
+// The summary language change calls this. A cached summary is written in the
+// language it was written in, and both caches are deliberately permanent (a body
+// never changes), so without this the new setting would only ever reach mail that
+// has not arrived yet — leaving the inbox the user changed the setting *because
+// of* summarized in the language they just left. Nothing is regenerated here:
+// a gist is re-earned when its conversation is opened, and the background
+// worker's next pass fills the inbox's again.
+func (w *window) dropSummaryCaches() {
+	logging.Trace("ui: drop summary caches", "thread", w.openThreadID)
+	w.summaryCache = map[uiCacheKey]string{}
+	w.gistRequested = map[uiCacheKey]bool{}
+	w.appliedGists = map[uiCacheKey]string{}
+	w.hideSummary() // its text is in the old language; re-summarizing is one click
+	msgs := w.openThreadMsgs
+	threadID := w.openThreadID
+	go func() {
+		n, err := w.deps.Store.ClearSummaries(context.Background())
+		if err != nil {
+			slog.Warn("ui: clear summaries", "err", err)
+			return
+		}
+		logging.Trace("ui: summary caches cleared", "rows", n)
+		// Repaint only once the rows are gone: a render racing the delete would
+		// read a gist straight back out of the store and re-reveal it.
+		dispatch.Main(func() {
+			if w.openThreadID != threadID || len(msgs) == 0 {
+				return // moved on while clearing
+			}
+			for _, m := range msgs {
+				w.invalidateSection(m.AccountID, m.GmailID)
+			}
+			w.rerenderOpenThread()
+		})
+	}()
+}
+
 // analyzeMessage runs an on-demand AI phishing/scam analysis of one message —
 // any message of the open thread, via its per-message ⋯ menu — and streams the
 // verdict + reasons into the shared card. It feeds the AI the deterministic

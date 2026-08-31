@@ -32,6 +32,11 @@ type Prefs struct {
 	DisableTranslate         bool `json:"disable_translate"`
 	DisablePhishingAnalysis  bool `json:"disable_phishing_analysis"`
 	DisableSnoozeSuggestions bool `json:"disable_snooze_suggestions"`
+	// SummaryLanguage is the language AI summaries are written in — the reader's
+	// conversation summary and the one-line per-message gist. "" (the default)
+	// means English; "match" (ai.LanguageMatch) follows each mail's own language,
+	// which is how the gist behaved before this was a choice.
+	SummaryLanguage string `json:"summary_language,omitempty"`
 	// BodyRetentionDays prunes cached message bodies older than this many days
 	// (metadata is kept forever; a pruned body is re-fetched on open). 0 — the
 	// default — keeps bodies forever.
@@ -75,7 +80,8 @@ func LoadPrefs() (Prefs, error) {
 		"disableAIDraft", p.DisableAIDraft, "disableSmartReplies", p.DisableSmartReplies,
 		"disableProofread", p.DisableProofread, "disableGenerateSubject", p.DisableGenerateSubject,
 		"disableSummarize", p.DisableSummarize, "disableTranslate", p.DisableTranslate,
-		"disablePhishingAnalysis", p.DisablePhishingAnalysis, "disableSnoozeSuggestions", p.DisableSnoozeSuggestions)
+		"disablePhishingAnalysis", p.DisablePhishingAnalysis, "disableSnoozeSuggestions", p.DisableSnoozeSuggestions,
+		"summaryLanguage", p.SummaryLanguage)
 	return p, nil
 }
 
@@ -103,6 +109,7 @@ func SavePrefs(p Prefs) error {
 		"disableAIDraft", p.DisableAIDraft, "disableSmartReplies", p.DisableSmartReplies,
 		"disableProofread", p.DisableProofread, "disableGenerateSubject", p.DisableGenerateSubject,
 		"disableSummarize", p.DisableSummarize, "disableTranslate", p.DisableTranslate,
-		"disablePhishingAnalysis", p.DisablePhishingAnalysis, "disableSnoozeSuggestions", p.DisableSnoozeSuggestions)
+		"disablePhishingAnalysis", p.DisablePhishingAnalysis, "disableSnoozeSuggestions", p.DisableSnoozeSuggestions,
+		"summaryLanguage", p.SummaryLanguage)
 	return nil
 }

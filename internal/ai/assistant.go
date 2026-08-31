@@ -19,8 +19,9 @@ import (
 // counters (requests, transferred-bytes baseline) so the status bar's numbers
 // survive a provider swap instead of resetting with the new provider object.
 type Assistant struct {
-	mu sync.RWMutex
-	p  Provider
+	mu          sync.RWMutex
+	p           Provider
+	summaryLang string // language summaries are written in ("" = English, LanguageMatch = the mail's own)
 
 	reqs            atomic.Int64 // AI requests issued this session
 	baseIn, baseOut atomic.Int64 // bytes from providers swapped out earlier
@@ -52,6 +53,55 @@ func (a *Assistant) provider() Provider {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.p
+}
+
+const (
+	// DefaultSummaryLanguage is the language summaries are written in unless the
+	// user picks another: an inbox in four languages still reads as one inbox,
+	// and the summary exists to be skimmed, not to be faithful to the original.
+	DefaultSummaryLanguage = "English"
+	// LanguageMatch is the summary-language value meaning "follow the mail's own
+	// language" instead of a fixed one.
+	LanguageMatch = "match"
+)
+
+// SetSummaryLanguage sets the language summaries are written in: a language name
+// as the model should read it ("English", "Portuguese"), "" for the default, or
+// LanguageMatch to follow each mail. Like SetProvider it applies to a live
+// Assistant, so a Preferences change needs no restart.
+//
+// It reaches only the ops that summarize mail *for* the user (SummarizeThread,
+// BriefSummary) — never the ones that write mail *as* the user, where the
+// correspondent's language is the only right answer.
+func (a *Assistant) SetSummaryLanguage(lang string) {
+	lang = strings.TrimSpace(lang)
+	a.mu.Lock()
+	prev := a.summaryLang
+	a.summaryLang = lang
+	a.mu.Unlock()
+	logging.Trace("ai: summary language", "lang", lang, "prev", prev)
+}
+
+// SummaryLanguage reports the language summaries are written in —
+// DefaultSummaryLanguage when unset, or LanguageMatch.
+func (a *Assistant) SummaryLanguage() string {
+	a.mu.RLock()
+	lang := a.summaryLang
+	a.mu.RUnlock()
+	if lang == "" {
+		return DefaultSummaryLanguage
+	}
+	return lang
+}
+
+// summaryLanguageClause is the sentence every summary prompt carries to name the
+// language its answer must be in. subject is what that prompt calls the mail
+// ("email", "thread"), so the instruction reads as one sentence with the rest.
+func (a *Assistant) summaryLanguageClause(subject string) string {
+	if lang := a.SummaryLanguage(); lang != LanguageMatch {
+		return "Always write the summary in " + lang + ", even when the " + subject + " is in another language. "
+	}
+	return "Write the summary in the same language as the " + subject + ". "
 }
 
 // stream is the single gate every Assistant op calls through: it counts the
@@ -738,11 +788,11 @@ func (a *Assistant) Ping(ctx context.Context) error {
 // text (oldest message first). The reply is plain text — a few "- " bullets.
 func (a *Assistant) SummarizeThread(ctx context.Context, threadContext string) (<-chan Chunk, error) {
 	logging.Trace("ai: summarize thread", "op", "SummarizeThread", "provider", a.provider().Name(),
-		"bytes", len(threadContext), "context", logging.Body(threadContext))
+		"lang", a.SummaryLanguage(), "bytes", len(threadContext), "context", logging.Body(threadContext))
 	system := "You are an email assistant. Summarize the following email thread for someone catching up " +
 		"quickly. Reply with 2-5 short bullet points, one per line, each starting with '- ', covering the key " +
 		"points, decisions, and any open questions or action items awaiting a response. Be concise and " +
-		"factual. Always write the summary in English, even when the thread is in another language. Output " +
+		"factual. " + a.summaryLanguageClause("thread") + "Output " +
 		"only the bullet points — no heading, no preamble such as 'Here is', and no code fences."
 	user := "Email thread to summarize:\n\n" + threadContext
 	return a.stream(ctx, system, []Msg{{Role: RoleUser, Content: user}})
@@ -896,9 +946,11 @@ func parseSnoozeSuggestions(s string, now time.Time) []SnoozeSuggestion {
 // notification bubble.
 func (a *Assistant) BriefSummary(ctx context.Context, emailContext string) (string, error) {
 	start := time.Now()
-	logging.Trace("ai: brief summary", "op", "BriefSummary", "provider", a.provider().Name(), "bytes", len(emailContext))
-	system := "Summarize this email in ONE very short sentence, at most 12 words, in the email's " +
-		"language. State the gist (what they want / what happened), not that it is an email. " +
+	logging.Trace("ai: brief summary", "op", "BriefSummary", "provider", a.provider().Name(),
+		"lang", a.SummaryLanguage(), "bytes", len(emailContext))
+	system := "Summarize this email in ONE very short sentence, at most 12 words. " +
+		a.summaryLanguageClause("email") +
+		"State the gist (what they want / what happened), not that it is an email. " +
 		"Reply with only that sentence — no preamble, no quotes."
 	ch, err := a.stream(ctx, system, []Msg{{Role: RoleUser, Content: emailContext}})
 	if err != nil {

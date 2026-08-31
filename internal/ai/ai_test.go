@@ -695,3 +695,68 @@ func TestTranslateSegmentsUnusableReplyErrors(t *testing.T) {
 		t.Fatal("expected an error for a reply with no indexed translations")
 	}
 }
+
+// TestSummaryLanguage covers the Preferences setting end to end at the prompt
+// level: the default forces English regardless of the mail's language, a chosen
+// language replaces it in both summary ops, and LanguageMatch goes back to
+// following the mail. The prompt is the only place the setting exists, so this is
+// where it can break.
+func TestSummaryLanguage(t *testing.T) {
+	tests := []struct {
+		name       string
+		lang       string
+		want, dont string
+	}{
+		{name: "default is English", lang: "", want: "summary in English", dont: "same language"},
+		{name: "unset trims to default", lang: "  ", want: "summary in English", dont: "same language"},
+		{name: "chosen language", lang: "Portuguese", want: "summary in Portuguese", dont: "English"},
+		{name: "match follows the mail", lang: LanguageMatch, want: "same language as the", dont: "Always write"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, op := range []struct {
+				name string
+				call func(*Assistant) error
+			}{
+				{"SummarizeThread", func(a *Assistant) error {
+					_, err := a.SummarizeThread(context.Background(), "From: A\n\nOlá.")
+					return err
+				}},
+				{"BriefSummary", func(a *Assistant) error {
+					_, err := a.BriefSummary(context.Background(), "From: A\n\nOlá.")
+					return err
+				}},
+			} {
+				fp := &fakeProvider{chunks: []Chunk{{Text: "ok"}}}
+				a := NewAssistant(fp)
+				a.SetSummaryLanguage(tt.lang)
+				if err := op.call(a); err != nil {
+					t.Fatalf("%s: %v", op.name, err)
+				}
+				if !strings.Contains(fp.gotSystem, tt.want) {
+					t.Fatalf("%s system prompt missing %q: %q", op.name, tt.want, fp.gotSystem)
+				}
+				if strings.Contains(fp.gotSystem, tt.dont) {
+					t.Fatalf("%s system prompt should not contain %q: %q", op.name, tt.dont, fp.gotSystem)
+				}
+			}
+		})
+	}
+}
+
+// TestSummaryLanguageReported is what Preferences reads back to preselect its
+// row: unset reads as the default, not as "".
+func TestSummaryLanguageReported(t *testing.T) {
+	a := NewAssistant(&fakeProvider{})
+	if got := a.SummaryLanguage(); got != DefaultSummaryLanguage {
+		t.Fatalf("unset SummaryLanguage = %q, want %q", got, DefaultSummaryLanguage)
+	}
+	a.SetSummaryLanguage(" Russian ")
+	if got := a.SummaryLanguage(); got != "Russian" {
+		t.Fatalf("SummaryLanguage = %q, want Russian", got)
+	}
+	a.SetSummaryLanguage("")
+	if got := a.SummaryLanguage(); got != DefaultSummaryLanguage {
+		t.Fatalf("cleared SummaryLanguage = %q, want %q", got, DefaultSummaryLanguage)
+	}
+}

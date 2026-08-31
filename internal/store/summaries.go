@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jsnjack/mailbox/internal/logging"
 )
@@ -45,4 +46,31 @@ func (s *Store) ThreadSummary(ctx context.Context, accountID int64, threadID str
 	}
 	logging.TraceContext(ctx, "store: thread summary", "account", accountID, "id", threadID, "hit", true, "fingerprint", fingerprint)
 	return fingerprint, summary, true, nil
+}
+
+// ClearSummaries drops every cached AI summary — thread summaries and
+// per-message gists, across all accounts — and reports how many rows went.
+//
+// Both caches exist because a body never changes, so a summary written once can
+// be reused forever. The language it is written in is a preference, though: when
+// that changes, this cache is the only thing between the user and summaries in
+// the language they just left, so it is dropped wholesale and re-earned on
+// demand. Both tables go together — the reader's card and the row's one-liner
+// disagreeing about language would look like a bug, not a cache.
+func (s *Store) ClearSummaries(ctx context.Context) (int64, error) {
+	begin := time.Now()
+	logging.TraceContext(ctx, "store: clear summaries")
+	var total int64
+	for _, table := range []string{"thread_summaries", "message_gists"} {
+		res, err := s.writer.ExecContext(ctx, `DELETE FROM `+table) //nolint:gosec // fixed table names
+		if err != nil {
+			logging.TraceContext(ctx, "store: clear summaries", "table", table, "err", err)
+			return total, fmt.Errorf("clear %s: %w", table, err)
+		}
+		if n, aerr := res.RowsAffected(); aerr == nil {
+			total += n
+		}
+	}
+	logging.TraceContext(ctx, "store: clear summaries done", "rows", total, "dur", time.Since(begin))
+	return total, nil
 }

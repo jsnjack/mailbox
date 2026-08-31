@@ -853,6 +853,11 @@ func launchUI(mailto string) error {
 		fmt.Fprintf(os.Stderr, "AI features disabled (%v)\n", err)
 	} else if asst != nil {
 		deps.Assistant = asst
+		// Summaries are written in the user's language, not the mail's (the
+		// Preferences combo re-applies this live via SetSummaryLanguage).
+		if p, perr := config.LoadPrefs(); perr == nil {
+			asst.SetSummaryLanguage(p.SummaryLanguage)
+		}
 		// Any change in the model serving requests — a failover to a backup, a
 		// recovery to the primary, a settings swap — drops its own row into the
 		// activity log, so the current model is visible beyond per-op notes.

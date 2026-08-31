@@ -464,6 +464,40 @@ func (w *window) openSettings() {
 				w.aiSnoozeSuggestions = on
 				savePref(func(p *config.Prefs) { p.DisableSnoozeSuggestions = !on })
 			})
+
+		// Summary language: which language the AI writes *about* the mail in —
+		// the reader's conversation card and the one-line per-message gist. Mail
+		// arrives in whatever language it was written in, and a gist that follows
+		// each one leaves an inbox nobody can skim, so summaries default to
+		// English; "Same as the email" keeps the older behaviour. Only these
+		// reading aids follow the setting — a draft or refined reply stays in the
+		// correspondent's language, which is the only right answer there.
+		langLabels := make([]string, len(summaryLanguages))
+		for i, l := range summaryLanguages {
+			langLabels[i] = l.label
+		}
+		langRow := adw.NewComboRow()
+		langRow.SetTitle("Summary language")
+		langRow.SetSubtitle("Message and thread summaries.")
+		langRow.SetModel(gtk.NewStringList(langLabels))
+		cur, _ := config.LoadPrefs()
+		for i, l := range summaryLanguages {
+			if l.value == cur.SummaryLanguage {
+				langRow.SetSelected(uint(i))
+			}
+		}
+		langRow.Connect("notify::selected", func() {
+			sel := int(langRow.Selected())
+			if sel < 0 || sel >= len(summaryLanguages) {
+				return
+			}
+			lang := summaryLanguages[sel].value
+			logging.Trace("ui: setting changed", "pref", "summary_language", "new", lang)
+			savePref(func(p *config.Prefs) { p.SummaryLanguage = lang })
+			w.deps.Assistant.SetSummaryLanguage(lang) // live, like the provider swap
+			w.dropSummaryCaches()
+		})
+		aiFeaturesGroup.Add(langRow)
 	}
 
 	// Storage: clear re-downloadable attachments and external images.
@@ -752,4 +786,27 @@ func signInAgePhrase(t, now time.Time) string {
 	default:
 		return fmt.Sprintf("%d days ago", days)
 	}
+}
+
+// summaryLanguages are the languages Preferences offers for AI summaries: the
+// label as the row shows it, and the value stored in prefs — the language's
+// English name, which is what the prompt asks the model for. "" is English, kept
+// as the empty value so the default stays the pref's zero value, and
+// ai.LanguageMatch follows each mail. Not every language, just enough of them:
+// the point is reading your own mail in your own language, and anything missing
+// is a one-line addition here.
+var summaryLanguages = []struct{ label, value string }{
+	{"English", ""},
+	{"Same as the email", ai.LanguageMatch},
+	{"Dutch", "Dutch"},
+	{"French", "French"},
+	{"German", "German"},
+	{"Italian", "Italian"},
+	{"Polish", "Polish"},
+	{"Portuguese", "Portuguese"},
+	{"Russian", "Russian"},
+	{"Spanish", "Spanish"},
+	{"Ukrainian", "Ukrainian"},
+	{"Chinese", "Simplified Chinese"},
+	{"Japanese", "Japanese"},
 }

@@ -33,3 +33,32 @@ func TestPrefsRemoteImages(t *testing.T) {
 		})
 	}
 }
+
+func TestPrefsSummaryLanguage(t *testing.T) {
+	tests := []struct {
+		name string
+		save *Prefs
+		want string
+	}{
+		{name: "fresh profile defaults to the zero value (English)", want: ""},
+		{name: "a language round trips", save: &Prefs{SummaryLanguage: "Portuguese"}, want: "Portuguese"},
+		{name: "match round trips", save: &Prefs{SummaryLanguage: "match"}, want: "match"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "cfg"))
+			if tt.save != nil {
+				if err := SavePrefs(*tt.save); err != nil {
+					t.Fatalf("SavePrefs: %v", err)
+				}
+			}
+			got, err := LoadPrefs()
+			if err != nil {
+				t.Fatalf("LoadPrefs: %v", err)
+			}
+			if got.SummaryLanguage != tt.want {
+				t.Fatalf("SummaryLanguage = %q, want %q", got.SummaryLanguage, tt.want)
+			}
+		})
+	}
+}

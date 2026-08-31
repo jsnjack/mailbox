@@ -69,3 +69,49 @@ func TestDeleteMessageClearsAICaches(t *testing.T) {
 		t.Fatalf("thread summary should be gone")
 	}
 }
+
+// TestClearSummaries verifies the summary-language reset: both AI summary caches
+// go — thread summaries and per-message gists — while unrelated AI caches (a
+// translation, which is language-explicit already) stay.
+func TestClearSummaries(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	acc := seedAccount(t, s)
+
+	if _, err := s.UpsertMessage(ctx, model.Message{
+		AccountID: acc, GmailID: "g1", ThreadID: "th1", Subject: "hi", Labels: []string{"INBOX"},
+	}); err != nil {
+		t.Fatalf("UpsertMessage: %v", err)
+	}
+	if err := s.SetThreadSummary(ctx, acc, "th1", "th1|g1", "• summary"); err != nil {
+		t.Fatalf("SetThreadSummary: %v", err)
+	}
+	if err := s.SetMessageGist(ctx, acc, "g1", "a gist"); err != nil {
+		t.Fatalf("SetMessageGist: %v", err)
+	}
+	if err := s.SetTranslation(ctx, acc, "g1", "English", "<p>hi</p>"); err != nil {
+		t.Fatalf("SetTranslation: %v", err)
+	}
+
+	n, err := s.ClearSummaries(ctx)
+	if err != nil {
+		t.Fatalf("ClearSummaries: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("rows cleared = %d, want 2", n)
+	}
+	if _, _, ok, _ := s.ThreadSummary(ctx, acc, "th1"); ok {
+		t.Fatalf("thread summary should be gone")
+	}
+	if g, _ := s.MessageGists(ctx, acc, []string{"g1"}); len(g) != 0 {
+		t.Fatalf("gist should be gone, got %v", g)
+	}
+	if tr, _ := s.Translations(ctx, acc, []string{"g1"}, "English"); len(tr) != 1 {
+		t.Fatalf("translation should survive, got %v", tr)
+	}
+
+	// Idempotent: clearing an empty cache is not an error.
+	if n, err := s.ClearSummaries(ctx); err != nil || n != 0 {
+		t.Fatalf("second ClearSummaries = (%d, %v), want (0, nil)", n, err)
+	}
+}
