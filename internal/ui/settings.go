@@ -801,6 +801,7 @@ func signInAgePhrase(t, now time.Time) string {
 var aiLanguages = []struct{ label, value string }{
 	{"English", ""},
 	{"Same as the email", ai.LanguageMatch},
+	{"Belarusian", "Belarusian"},
 	{"Dutch", "Dutch"},
 	{"French", "French"},
 	{"German", "German"},
