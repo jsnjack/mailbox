@@ -326,7 +326,10 @@ addresses seen in cached mail by frequency+recency) plus the user's own
 registered accounts (`withOwnAccounts`, listed first so you can address another
 of your accounts); a `GtkEntryCompletion` completes the last comma-separated
 token. A sparkle button next to Subject generates it from the body
-(`Assistant.GenerateSubject`). A single labelled AI menu offers Draft, Rewrite, and Proofread. These actions use `previewComposeAI`:
+(`Assistant.GenerateSubject`). Visible AI Draft and Refine buttons provide direct access to compose AI. Refine
+opens a compact panel beneath the toolbar with an instruction field and Fix grammar,
+Shorten, and More natural shortcuts. The panel closes on submission or Escape.
+These actions use `previewComposeAI`:
 generation leaves the editor unchanged, a complete successful result opens for
 review with Apply/Cancel, and Apply is one GTK undo action. An intervening edit
 invalidates the preview. Cancel or compose close cancels the request; partial
@@ -335,8 +338,9 @@ instructions and offers suggested replies. Refine and Proofread use the selected
 span, or the writing above the quote when nothing is selected.
 Compose keeps Save draft and Discard available. A fixed bottom strip shows
 Saving/Saved/Save failed and a deduplicated recipient count. To/Cc/Bcc use
-editable, removable recipient chips with autocomplete and inline validation;
-valid addresses commit on Enter, a trailing comma, or leaving the field. Bcc-only
+compact single-line text fields with autocomplete and inline validation. Long
+recipient lists scroll within the entry instead of increasing its height; empty
+Cc/Bcc fields stay hidden until requested. Bcc-only
 and Cc-only messages are accepted. The reader's primary action is explicitly
 labelled Reply all, with its audience count in the tooltip. Closing saves dirty content and
 closes after the local write succeeds; failures keep the editor open. Discard

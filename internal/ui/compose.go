@@ -376,9 +376,9 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 		ccBccBtn.SetVisible(false)
 	}
 	ccBccBtn.ConnectClicked(func() { showCcBcc() })
-	if strings.TrimSpace(init.Cc) != "" || strings.TrimSpace(init.Bcc) != "" {
-		showCcBcc()
-	}
+	ccField.box.SetVisible(strings.TrimSpace(init.Cc) != "")
+	bccField.box.SetVisible(strings.TrimSpace(init.Bcc) != "")
+	ccBccBtn.SetVisible(!ccField.box.Visible() || !bccField.box.Visible())
 
 	box := gtk.NewBox(gtk.OrientationVertical, 6)
 	setMargins(box, 12, 12, 12, 12)
@@ -1040,23 +1040,34 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 		})
 	}
 
-	aiMenu := gtk.NewMenuButton()
-	aiMenu.SetLabel("AI")
-	aiMenu.SetTooltipText("Draft, rewrite, or proofread")
-	aiActions := gtk.NewBox(gtk.OrientationVertical, 4)
-	setMargins(aiActions, 6, 6, 6, 6)
-	aiPopover := gtk.NewPopover()
-	aiPopover.SetChild(aiActions)
-	aiMenu.SetPopover(aiPopover)
-	if w.deps.Assistant != nil && (w.aiDraft || w.aiProofread || w.aiRefine) {
-		hb.PackEnd(aiMenu)
+	refinePanel := gtk.NewBox(gtk.OrientationVertical, 6)
+	setMargins(refinePanel, 12, 12, 6, 6)
+	refinePanel.SetVisible(false)
+	tv.AddTopBar(refinePanel)
+	refineActions := gtk.NewBox(gtk.OrientationHorizontal, 6)
+	refineEntry := gtk.NewEntry()
+	refineEntry.SetPlaceholderText("How should this change?")
+	a11yLabel(refineEntry, "Refine instruction")
+	refineEntry.SetHExpand(true)
+	closeRefine := func() { refinePanel.SetVisible(false) }
+	if w.deps.Assistant != nil && (w.aiRefine || w.aiProofread) {
+		refineBtn := gtk.NewButtonWithLabel("Refine")
+		refineBtn.SetTooltipText("Improve the selection or your message with AI")
+		refineBtn.ConnectClicked(func() {
+			refinePanel.SetVisible(!refinePanel.Visible())
+			if refinePanel.Visible() && w.aiRefine {
+				refineEntry.GrabFocus()
+			}
+		})
+		hb.PackEnd(refineBtn)
+		refinePanel.Append(refineActions)
 	}
 	var runDraft func(string)
 	if w.deps.Assistant != nil && w.aiDraft {
 		// A reply/forward has thread context; a new message is drafted from the
 		// user's instruction (and the subject) alone.
 		isReply := aiContext != ""
-		aiBtn := gtk.NewButtonWithLabel("Draft…")
+		aiBtn := gtk.NewButtonWithLabel("AI Draft")
 		if isReply {
 			aiBtn.SetTooltipText("Draft this reply with AI")
 		} else {
@@ -1109,18 +1120,18 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 				}, done)
 			})
 		}
-		aiBtn.ConnectClicked(func() { aiPopover.Popdown(); startAIDraft() })
-		aiActions.Append(aiBtn)
+		aiBtn.ConnectClicked(func() { closeRefine(); startAIDraft() })
+		hb.PackEnd(aiBtn)
 	}
 
 	if w.deps.Assistant != nil && w.aiProofread {
 		// AI grammar/spell check: rewrite the body with spelling and grammar fixed
 		// (preserving quotes and signature).
-		grammarBtn := gtk.NewButtonWithLabel("Proofread")
+		grammarBtn := gtk.NewButtonWithLabel("Fix grammar")
 		grammarBtn.SetTooltipText("Check spelling & grammar with AI")
 		a11yLabel(grammarBtn, "Check spelling and grammar with AI")
 		grammarBtn.ConnectClicked(func() {
-			aiPopover.Popdown()
+			closeRefine()
 			// Proofread only the user's own writing: the selection if there is one,
 			// otherwise the text above the signature/quote. The signature and the
 			// quoted history are never sent to the AI or altered.
@@ -1134,7 +1145,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 			full := []rune(bodyText(buf))
 			prefix, suffix := string(full[:startIter.Offset()]), string(full[endIter.Offset():])
 			done := w.aiActivityIn(composeRow, "Checking grammar")
-			previewComposeAI(win, aiCtx, buf, "Review proofreading", func(ctx context.Context) (string, error) {
+			previewComposeAI(win, aiCtx, buf, "Review grammar fixes", func(ctx context.Context) (string, error) {
 				ch, err := w.deps.Assistant.Proofread(ctx, original)
 				if err != nil {
 					return "", fmt.Errorf("proofread message: %w", err)
@@ -1146,62 +1157,27 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 				return prefix + text + suffix, nil
 			}, done)
 		})
-		aiActions.Append(grammarBtn)
+		refineActions.Prepend(grammarBtn)
 	}
 
 	if w.deps.Assistant != nil && w.aiRefine {
-		// Refine with AI: rewrite the selection — or, with nothing selected, the
-		// user's own writing (grammarRange: everything above the signature/quote,
-		// i.e. the whole body of a new message, just the reply text of a reply) —
-		// to a free-text instruction entered in a popover. The instruction is
-		// multiline (a fuller brief refines better than one line); Enter submits,
-		// Shift+Enter inserts a newline.
-		hint := gtk.NewLabel("e.g. shorter, more formal…")
-		hint.AddCSSClass("dim-label")
-		hint.SetXAlign(0)
-		refineView := gtk.NewTextView()
-		refineView.SetWrapMode(gtk.WrapWordChar)
-		refineView.SetAcceptsTab(false) // Tab moves focus to Refine rather than inserting a tab
-		refineView.SetLeftMargin(6)
-		refineView.SetRightMargin(6)
-		refineView.SetTopMargin(6)
-		refineView.SetBottomMargin(6)
-		refineScroller := gtk.NewScrolledWindow()
-		refineScroller.SetPolicy(gtk.PolicyNever, gtk.PolicyAutomatic)
-		refineScroller.SetMinContentHeight(64)
-		refineScroller.SetSizeRequest(280, -1)
-		refineScroller.SetChild(refineView)
-		refineScroller.AddCSSClass("card")
-		refineGo := gtk.NewButtonWithLabel("Refine")
+		refineGo := gtk.NewButtonWithLabel("Preview")
 		refineGo.AddCSSClass("suggested-action")
-		refineGo.SetHAlign(gtk.AlignEnd)
-
-		col := gtk.NewBox(gtk.OrientationVertical, 6)
-		setMargins(col, 6, 6, 6, 6)
-		col.Append(hint)
-		col.Append(refineScroller)
-		col.Append(refineGo)
-		pop := gtk.NewPopover()
-		pop.SetChild(col)
-
-		refineBtn := gtk.NewMenuButton()
-		refineBtn.SetLabel("Rewrite…")
-		refineBtn.SetTooltipText("Refine with AI — rewrites the selection (or your whole text) to your instruction")
-		a11yLabel(refineBtn, "Refine with AI")
-		refineBtn.SetPopover(pop)
-		pop.ConnectShow(func() { refineView.GrabFocus() })
+		entryRow := gtk.NewBox(gtk.OrientationHorizontal, 6)
+		entryRow.Append(refineEntry)
+		entryRow.Append(refineGo)
+		refinePanel.Prepend(entryRow)
 
 		runRefine := func() {
-			instruction := strings.TrimSpace(bodyText(refineView.Buffer()))
+			instruction := strings.TrimSpace(refineEntry.Text())
 			if instruction == "" {
 				return
 			}
-			// The selection survives the popover taking focus (buffer marks move
+			// The selection survives the panel taking focus (buffer marks move
 			// only when the user changes them), so the range is read at submit.
 			startIter, endIter := grammarRange(buf)
 			original := buf.Text(startIter, endIter, false)
-			pop.Popdown()
-			aiPopover.Popdown()
+			closeRefine()
 			if strings.TrimSpace(original) == "" {
 				logging.Trace("ui: ai refine skipped", "reason", "empty")
 				return
@@ -1222,19 +1198,34 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 				return prefix + text + suffix, nil
 			}, done)
 		}
-		// Capture phase: the TextView would otherwise consume Return as a newline.
-		refineKeys := gtk.NewEventControllerKey()
-		refineKeys.SetPropagationPhase(gtk.PhaseCapture)
-		refineKeys.ConnectKeyPressed(func(keyval, _ uint, state gdk.ModifierType) bool {
-			if (keyval == gdk.KEY_Return || keyval == gdk.KEY_KP_Enter) && state&gdk.ShiftMask == 0 {
-				runRefine()
-				return true
-			}
-			return false
-		})
-		refineView.AddController(refineKeys)
+		refineEntry.ConnectActivate(runRefine)
 		refineGo.ConnectClicked(runRefine)
-		aiActions.Append(refineBtn)
+		refineGo.SetSensitive(false)
+		refineEntry.ConnectChanged(func() {
+			refineGo.SetSensitive(strings.TrimSpace(refineEntry.Text()) != "")
+		})
+		for _, preset := range []struct{ label, instruction string }{
+			{"Shorten", "Make this shorter while preserving its meaning."},
+			{"More natural", "Make this sound more natural while preserving its meaning."},
+		} {
+			button := gtk.NewButtonWithLabel(preset.label)
+			button.ConnectClicked(func() {
+				refineEntry.SetText(preset.instruction)
+				runRefine()
+			})
+			refineActions.Append(button)
+		}
+	}
+
+	if w.deps.Assistant != nil && (w.aiRefine || w.aiProofread) {
+		spacer := gtk.NewBox(gtk.OrientationHorizontal, 0)
+		spacer.SetHExpand(true)
+		refineActions.Append(spacer)
+		closeBtn := gtk.NewButtonFromIconName("window-close-symbolic")
+		closeBtn.SetTooltipText("Close refine panel")
+		a11yLabel(closeBtn, "Close refine panel")
+		closeBtn.ConnectClicked(closeRefine)
+		refineActions.Append(closeBtn)
 	}
 
 	// Ctrl+Enter sends, from anywhere in the window. Capture phase so it fires
@@ -1250,6 +1241,10 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 		// Esc closes the window (through the unsaved-changes guard), unless the
 		// focus is a field that wants Esc itself (e.g. dismissing autocomplete).
 		if keyval == gdk.KEY_Escape {
+			if refinePanel.Visible() {
+				closeRefine()
+				return true
+			}
 			if _, ok := win.Focus().(*gtk.Text); ok {
 				return false
 			}
