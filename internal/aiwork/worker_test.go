@@ -232,3 +232,57 @@ func TestGistFailureIsNotRetriedThisSession(t *testing.T) {
 		t.Fatalf("AI calls went %d -> %d; a failed gist must not be retried", first, got)
 	}
 }
+
+type delayedGistProvider struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (p *delayedGistProvider) Name() string { return "review" }
+func (p *delayedGistProvider) Stream(context.Context, string, []ai.Msg) (<-chan ai.Chunk, error) {
+	close(p.started)
+	<-p.release
+	ch := make(chan ai.Chunk, 1)
+	ch <- ai.Chunk{Text: "Old English gist"}
+	close(ch)
+	return ch, nil
+}
+func TestLanguageResetDuringGist(t *testing.T) {
+	s, acct := testStore(t)
+	ctx := context.Background()
+	if err := s.UpsertMessages(ctx, []model.Message{{AccountID: acct, GmailID: "g1", ThreadID: "t1", Snippet: "hello", Labels: []string{model.LabelInbox}}}); err != nil {
+		t.Fatal(err)
+	}
+	p := &delayedGistProvider{make(chan struct{}), make(chan struct{})}
+	asst := ai.NewAssistant(p)
+	w := New(s, asst, syncer.NewHub(), nil, off, on)
+	done := make(chan error, 1)
+	go func() { _, err := w.pass(ctx, acct); done <- err }()
+	<-p.started
+	asst.SetLanguage("French")
+	if _, err := s.ClearAINotes(ctx); err != nil {
+		t.Fatal(err)
+	}
+	close(p.release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	gists, err := s.MessageGists(ctx, acct, []string{"g1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gists["g1"] != "" {
+		t.Fatalf("old-language request repopulated cleared cache: %q", gists["g1"])
+	}
+	asst.SetProvider(&fakeProvider{reply: "Résumé français"})
+	if _, err := w.pass(ctx, acct); err != nil {
+		t.Fatal(err)
+	}
+	gists, err = s.MessageGists(ctx, acct, []string{"g1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gists["g1"] != "Résumé français" {
+		t.Fatalf("replacement gist = %q", gists["g1"])
+	}
+}

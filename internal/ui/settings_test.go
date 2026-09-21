@@ -1,10 +1,12 @@
 package ui
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"github.com/jsnjack/mailbox/internal/ai"
+	"github.com/jsnjack/mailbox/internal/model"
 )
 
 func TestSignInAgePhrase(t *testing.T) {
@@ -81,5 +83,63 @@ func TestTranslateTarget(t *testing.T) {
 	w := &window{}
 	if got := w.translateTarget(); got != ai.DefaultLanguage {
 		t.Errorf("no assistant: translateTarget = %q, want %q", got, ai.DefaultLanguage)
+	}
+}
+
+func TestLanguageChangeTranslationCache(t *testing.T) {
+	m := model.Message{AccountID: 1, GmailID: "m1"}
+	other := model.Message{AccountID: 2, GmailID: "m1"}
+	w := &window{translationCache: map[translationCacheKey]string{
+		{cacheKey(1, "m1"), "English"}: "English text",
+	}}
+	for _, tt := range []struct {
+		name, lang string
+		msg        model.Message
+		want       int
+	}{
+		{"reuse English", "English", m, 0},
+		{"new language", "French", m, 1},
+		{"other account", "English", other, 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := w.messagesNeedingTranslation([]model.Message{tt.msg}, tt.lang); len(got) != tt.want {
+				t.Fatalf("missing = %v, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFinishAINoteReset(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	calls := 0
+	w := &window{
+		deps: Deps{RecategorizeInbox: func(accountID int64) {
+			if accountID != 0 {
+				t.Errorf("refresh account = %d, want all accounts", accountID)
+			}
+			calls++
+		}},
+		renderCancel: cancel,
+		sectionCache: map[uiCacheKey]cachedSection{
+			cacheKey(1, "open"):   {body: "English gist"},
+			cacheKey(2, "closed"): {body: "English gist"},
+		},
+		summaryCache:  map[uiCacheKey]string{cacheKey(1, "thread"): "English summary"},
+		appliedGists:  map[uiCacheKey]string{cacheKey(2, "closed"): "English gist"},
+		gistRequested: map[uiCacheKey]bool{cacheKey(2, "closed"): true},
+	}
+	w.finishAINoteReset()
+	if ctx.Err() == nil {
+		t.Fatal("old render was not cancelled")
+	}
+	if len(w.sectionCache) != 0 || len(w.summaryCache) != 0 || len(w.appliedGists) != 0 || len(w.gistRequested) != 0 {
+		t.Fatal("old notes remain cached")
+	}
+	if calls != 1 {
+		t.Fatalf("worker triggers = %d, want 1 even with no open conversation", calls)
+	}
+	if w.aiNotesGen == 0 {
+		t.Fatal("pending UI callbacks were not invalidated")
 	}
 }

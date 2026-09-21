@@ -48,6 +48,29 @@ func (s *Store) ThreadSummary(ctx context.Context, accountID int64, threadID str
 	return fingerprint, summary, true, nil
 }
 
+// AINotesGeneration identifies requests whose results still belong in the cache.
+func (s *Store) AINotesGeneration() uint64 {
+	s.aiNotesMu.RLock()
+	defer s.aiNotesMu.RUnlock()
+	return s.aiNotesGeneration
+}
+
+// SaveAINote runs save only if generation still matches the cache. The check and
+// write are serialized with ClearAINotes so a reset cannot be overtaken by a
+// request that started before it. save must not call another generation method.
+func (s *Store) SaveAINote(generation uint64, save func() error) (bool, error) {
+	s.aiNotesMu.RLock()
+	defer s.aiNotesMu.RUnlock()
+	if generation != s.aiNotesGeneration {
+		logging.Trace("store: discard stale ai note", "generation", generation)
+		return false, nil
+	}
+	if err := save(); err != nil {
+		return false, fmt.Errorf("save ai note: %w", err)
+	}
+	return true, nil
+}
+
 // ClearAINotes drops every cached thing the AI has written *about* mail — thread
 // summaries, per-message gists, and phishing analyses, across all accounts — and
 // reports how many rows went.
@@ -61,6 +84,9 @@ func (s *Store) ThreadSummary(ctx context.Context, accountID int64, threadID str
 // cache. Translations are not here: they are keyed by target language already,
 // so a change simply misses and translates afresh.
 func (s *Store) ClearAINotes(ctx context.Context) (int64, error) {
+	s.aiNotesMu.Lock()
+	defer s.aiNotesMu.Unlock()
+	s.aiNotesGeneration++
 	begin := time.Now()
 	logging.TraceContext(ctx, "store: clear ai notes")
 	var total int64

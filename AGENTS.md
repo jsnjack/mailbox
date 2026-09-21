@@ -95,8 +95,8 @@ from one batched `store.UnreadCountByLabelForAccounts` query (`refreshAccountUnr
 account syncs. `loadLabels` only rebuilds the sidebar widgets when its structure or
 the inbox badge actually changed (`sidebarSignature`), so an idle 60s sync touches
 nothing. UI memory caches use `uiCacheKey{accountID,id}` for rendered sections,
-translations, categories, gists, analyses, and summaries; provider message and
-thread ids are never treated as globally unique.
+categories, gists, analyses, and summaries; translations wrap that key with their
+target language. Provider message and thread ids are never treated as globally unique.
 
 Colour follows GNOME's HIG (monochrome symbolic icons, one accent reserved for
 state): a small application stylesheet (`internal/ui/theme.go`, registered on
@@ -224,8 +224,14 @@ changing the language drops all three (`store.ClearAINotes` + the in-memory maps
 `dropAINotes`) and they are re-earned on open, on demand, and by the worker's
 next pass: otherwise the setting would only reach mail that hasn't arrived yet,
 and the inbox that prompted the change would keep its old-language notes forever.
-Translations are exempt — they are keyed by target language already, so a change
-simply misses and translates afresh. **Snooze**: a conversation can be hidden until a wake time. The local
+Every AI-note writer captures `store.AINotesGeneration` before requesting AI and
+persists through `SaveAINote`, which serializes the generation check and write
+with `ClearAINotes`; an older request cannot restore a cleared note. UI callbacks
+and rendered sections are also guarded by a note generation. The reset clears
+all section caches and explicitly wakes the background worker for every account.
+Translations are exempt from deletion: both the memory and database caches are
+keyed by account, message and target language, so a change misses and translates
+afresh while switching back reuses the earlier translation. **Snooze**: a conversation can be hidden until a wake time. The local
 `snoozes` table drives this machine's UI (instant hide, the Snoozed virtual
 folder, the inbox-query exclusion), and every snooze is **mirrored to the
 provider as label state** (`internal/snooze`): −INBOX (other clients — the
@@ -322,12 +328,12 @@ of your accounts); a `GtkEntryCompletion` completes the last comma-separated
 token. A sparkle button next to Subject generates it from the body
 (`Assistant.GenerateSubject`). The compose window has an AI-draft button (streams a drafted reply via
 `DraftReply` for a reply/forward, or a from-scratch body via `DraftNew` for a
-new message — both prompted by `askAIIntent`, which also offers an on-demand "Suggest quick replies" button for a reply via `SmartReplies`), an AI grammar-check button
+new message — both prompted by `askAIIntent`, which also loads suggested replies below the instruction editor via `SmartReplies`), an AI grammar-check button
 (`Proofread`), a Refine-with-AI button (a popover takes a free-text
 instruction — "shorter", "more formal" — and `Assistant.Refine` rewrites the
 selection, or with none the same own-writing region grammar-check uses:
 everything above the quote, so a reply refines only the new text; the span is
-mark-anchored and replaced in place), a Save-draft button, and a visible Discard-draft action while editing. A draft is bound to its account: From locks after the first successful local save, and both the store and outbox reject a cross-account draft id. Send runs pre-send guards (`preSendWarning`: empty
+mark-anchored and replaced in place), a Save-draft button, and a visible Discard-draft action while editing. Resumed drafts stay bound to their account. In a fresh compose, From remains selectable after autosave: switching saves a new draft under the destination account before deleting the source draft, serializes against pending saves, and clears provider-specific IDs. Both the store and outbox reject a cross-account draft id. Send runs pre-send guards (`preSendWarning`: empty
 subject, "attachment" mentioned but none attached → confirm), and closing an
 unsent message offers Save-as-draft alongside Discard. A configurable signature
 is appended to every composed body below the cursor area and above any quote
@@ -367,7 +373,7 @@ reply/forward/star/unread target the newest *delivered* message
 someone else's mail.
 Translate (`onTranslate`) renders a translation of the whole open conversation
 into the configured AI language (English by default) in place (markup preserved, "Show original" reverts): every message
-is translated concurrently and cached per message id in `translationCache`
+is translated concurrently and cached per account, message id and target language in `translationCache`
 (`showTranslatedConversation` rebuilds the stacked sections from the cache), so
 reverting, re-opening, or re-translating reuses cached results and an
 already-translated message isn't redone. Translations are also **persisted** per
@@ -535,8 +541,19 @@ otherwise drain one 6s toast at a time for minutes; a single change names its
 conversation ("Archived “subject…”", `undoTitle`). Switching accounts blanks
 the thread list immediately (the reload is async last-request-wins; under
 heavy churn the old account's threads would otherwise linger for seconds) and
-traces the click→content latency ("switch account content visible"). The AI-draft dialog offers on-demand quick replies
-(`SmartReplies`, behind a "Suggest quick replies" button).
+traces the click→content latency ("switch account content visible"). The reader's AI-reply popover contains only fixed presets and **Custom reply…**;
+it never starts suggestion requests or resizes as results arrive. Custom reply
+opens `askAIIntent` before creating a compose. Its fixed-size dialog has a
+header with Cancel/Create draft, an instruction editor, and
+generated replies directly underneath it, without tabs or preset buttons.
+Suggestions load when the dialog opens, use a compact native boxed list in a
+reserved scrollable area, and
+open an editable compose immediately when selected, closing the dialog.
+Create draft applies only to the custom instruction. Try again regenerates; closing cancels pending requests. A bounded
+session cache keyed by the full conversation context hash reuses suggestions on
+reopen and misses when the conversation changes. Smart-replies-only settings
+show only the generated replies. `TestReplyDialogGTK` runs under Xvfb with
+`MAILBOX_TEST_GTK=1` to verify sizing and the asynchronous interaction.
 Compose supports attachments (the file picker accepts multiple files and shows
 them as wrapping, width-bounded chips; decoded payloads are capped at 18 MiB total before reading, and `BuildMIME` emits multipart/mixed with streaming line-wrapped base64 encoding). Sending uses Undo Send: the compose closes
 and the message is held ~5s behind an "Undo" toast (`deferSend`) before it goes

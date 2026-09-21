@@ -200,10 +200,10 @@ type Deps struct {
 	// TestAISettings validates the given AI settings (with the keys as entered in
 	// the dialog) via a tiny live request; nil result means the connection works.
 	TestAISettings func(ctx context.Context, entries []AIModelEntry) error
-	// RecategorizeInbox kicks the background AI worker's categorization pass for
+	// RecategorizeInbox kicks the background AI worker's categorization and gist pass for
 	// an account (0 = every account), lifting its failure cooldown. Wired when
 	// the assistant is configured; used by "Re-categorize inbox" and when the
-	// categorization preference is switched on.
+	// categorization preference is switched on or the AI language changes.
 	RecategorizeInbox func(accountID int64)
 
 	// IMAP account management, for the add-account dialog. TestIMAPAccount

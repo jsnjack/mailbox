@@ -221,6 +221,7 @@ func (w *Worker) pass(ctx context.Context, accountID int64) (remaining int, err 
 // result persisted as it lands.
 func (w *Worker) gists(ctx context.Context, accountID int64, threads []model.ThreadSummary) (remaining int, err error) {
 	begin := time.Now()
+	generation := w.st.AINotesGeneration()
 	ids := make([]string, len(threads))
 	for i, t := range threads {
 		ids[i] = t.Latest.GmailID
@@ -309,11 +310,16 @@ func (w *Worker) gists(ctx context.Context, accountID int64, threads []model.Thr
 			w.markGistFailed(accountID, r.c.msgID)
 			continue
 		}
-		if serr := w.st.SetMessageGist(ctx, accountID, r.c.msgID, r.gist); serr != nil {
+		saved, serr := w.st.SaveAINote(generation, func() error {
+			return w.st.SetMessageGist(ctx, accountID, r.c.msgID, r.gist)
+		})
+		if serr != nil {
 			logging.Trace("aiwork: persist gist", "id", r.c.msgID, "err", serr)
 			continue
 		}
-		written++
+		if saved {
+			written++
+		}
 	}
 	logging.Trace("aiwork: gist pass done", "account", accountID, "written", written,
 		"failed", failed, "remaining", remaining, "dur", time.Since(begin), "err", firstErr)

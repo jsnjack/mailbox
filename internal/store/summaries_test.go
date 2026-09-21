@@ -121,3 +121,42 @@ func TestClearAINotes(t *testing.T) {
 		t.Fatalf("second ClearAINotes = (%d, %v), want (0, nil)", n, err)
 	}
 }
+
+func TestAINoteGeneration(t *testing.T) {
+	for _, kind := range []string{"gist", "summary", "analysis"} {
+		t.Run(kind, func(t *testing.T) {
+			s := openTestStore(t)
+			ctx := context.Background()
+			acct := seedAccount(t, s)
+			if _, err := s.UpsertMessage(ctx, model.Message{AccountID: acct, GmailID: "g1", ThreadID: "t1"}); err != nil {
+				t.Fatal(err)
+			}
+			save := func() error {
+				switch kind {
+				case "gist":
+					return s.SetMessageGist(ctx, acct, "g1", "old")
+				case "summary":
+					return s.SetThreadSummary(ctx, acct, "t1", "fp", "old")
+				default:
+					return s.SetAnalysis(ctx, acct, "g1", "old")
+				}
+			}
+			generation := s.AINotesGeneration()
+			if saved, err := s.SaveAINote(generation, save); err != nil || !saved {
+				t.Fatalf("initial save = %v, %v", saved, err)
+			}
+			if _, err := s.ClearAINotes(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if saved, err := s.SaveAINote(generation, save); err != nil || saved {
+				t.Fatalf("stale save = %v, %v", saved, err)
+			}
+			if n, err := s.ClearAINotes(ctx); err != nil || n != 0 {
+				t.Fatalf("stale request restored %d notes: %v", n, err)
+			}
+			if saved, err := s.SaveAINote(s.AINotesGeneration(), save); err != nil || !saved {
+				t.Fatalf("new save = %v, %v", saved, err)
+			}
+		})
+	}
+}

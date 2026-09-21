@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jsnjack/mailbox/internal/logging"
@@ -26,8 +27,10 @@ const pragmas = "_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=fo
 
 // Store holds the database handles for the local cache.
 type Store struct {
-	writer *sql.DB
-	reader *sql.DB
+	writer            *sql.DB
+	reader            *sql.DB
+	aiNotesMu         sync.RWMutex
+	aiNotesGeneration uint64
 }
 
 // Open opens (creating if needed) the SQLite database at path and applies the

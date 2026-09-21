@@ -29,6 +29,7 @@ import (
 // thread as stacked sections in the reader.
 func (w *window) renderConversation(msgs []model.Message) {
 	latest := msgs[len(msgs)-1]
+	noteGen := w.aiNotesGen
 	threadID := w.openThreadID // guard against a newer thread being opened mid-render
 	// Show a loading placeholder immediately when bodies need fetching (not all
 	// cached), so the user sees their click registered instead of staring at the
@@ -305,6 +306,9 @@ func (w *window) renderConversation(msgs []model.Message) {
 			if rgen == w.renderGen {
 				w.renderFetching = nil
 			}
+			if w.aiNotesGen != noteGen {
+				return
+			}
 			w.mergeSectionCache(latest.AccountID, fresh) // cache newly-rendered sections (main thread)
 			// Merge the goroutine-local inline-refetch marks back into the main-thread
 			// map (even for a discarded render — the re-fetch already happened, so it
@@ -459,6 +463,8 @@ func (w *window) generateGists(threadID string, msgs []model.Message) {
 		label = fmt.Sprintf("Summarizing %d messages", len(todo))
 	}
 	done := w.aiActivity(label)
+	noteGen := w.aiNotesGen
+	generation := w.deps.Store.AINotesGeneration()
 	go func() {
 		var lastErr error
 		for _, m := range todo {
@@ -471,13 +477,24 @@ func (w *window) generateGists(threadID string, msgs []model.Message) {
 					lastErr = err
 				}
 				// Clear the mark so a later open retries this message.
-				dispatch.Main(func() { delete(w.gistRequested, cacheKey(m.AccountID, m.GmailID)) })
+				dispatch.Main(func() {
+					if w.aiNotesGen == noteGen {
+						delete(w.gistRequested, cacheKey(m.AccountID, m.GmailID))
+					}
+				})
 				continue
 			}
-			if serr := w.deps.Store.SetMessageGist(context.Background(), m.AccountID, m.GmailID, gist); serr != nil {
+			saved, serr := w.deps.Store.SaveAINote(generation, func() error { return w.deps.Store.SetMessageGist(context.Background(), m.AccountID, m.GmailID, gist) })
+			if serr != nil {
 				slog.Warn("ui: persist gist", "id", m.GmailID, "err", serr)
 			}
-			dispatch.Main(func() { w.applyGist(m.AccountID, m.GmailID, m.ThreadID, gist) })
+			if saved {
+				dispatch.Main(func() {
+					if w.aiNotesGen == noteGen {
+						w.applyGist(m.AccountID, m.GmailID, m.ThreadID, gist)
+					}
+				})
+			}
 		}
 		done(doneErr(lastErr))
 	}()
@@ -521,7 +538,7 @@ func composeSection(head, rest string, collapsed bool) string {
 
 // capCache evicts arbitrary entries until m holds at most max. Main-thread only
 // (all session caches are main-thread confined).
-func capCache(m map[uiCacheKey]string, max int) {
+func capCache[K comparable](m map[K]string, max int) {
 	for len(m) > max {
 		for k := range m {
 			delete(m, k)

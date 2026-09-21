@@ -55,6 +55,11 @@ type threadCategory struct {
 	failed         bool
 }
 
+type translationCacheKey struct {
+	message  uiCacheKey
+	language string
+}
+
 // uiCacheKey keeps provider-scoped identifiers isolated between accounts.
 // Gmail and IMAP ids are unique only within their owning account.
 type uiCacheKey struct {
@@ -304,7 +309,9 @@ type window struct {
 	// store and snapshotted the section cache before the persist, so its swap
 	// would otherwise replace the revealed card with the hidden placeholder —
 	// the card would blink. Entries drop once a render's store query has them.
-	appliedGists map[uiCacheKey]string
+	appliedGists     map[uiCacheKey]string
+	aiNotesGen       uint64
+	replySuggestions map[[32]byte][]string
 	// inlineByCID maps the open thread's inline-image Content-IDs to the
 	// attachment behind each one, served (and downloaded on first request) by the
 	// cid: URI-scheme handler — so a big inline image loads as a streamed
@@ -351,7 +358,7 @@ type window struct {
 
 	// in-place translation: a banner offers reverting to the original; the cancel
 	// func aborts an in-flight translation when the user reverts or switches mail;
-	// translationCache memoizes results per message id so re-showing is instant.
+	// translationCache memoizes by account, message and target language.
 	// translationShown records that the reader currently displays translated
 	// bodies, so a background re-render (a synced reply, the images toggle)
 	// re-applies the translation instead of silently reverting to the original
@@ -359,7 +366,7 @@ type window struct {
 	translationBanner *adw.Banner
 	remoteImageBanner *adw.Banner // explains blocked/expired images instead of showing unexplained broken glyphs
 	translateCancel   context.CancelFunc
-	translationCache  map[uiCacheKey]string
+	translationCache  map[translationCacheKey]string
 	translationShown  bool
 }
 
@@ -370,7 +377,7 @@ func newWindow(app *adw.Application, deps Deps) *window {
 		current:          model.LabelInbox,
 		startTime:        time.Now(),
 		sanitizer:        emailPolicy(),
-		translationCache: map[uiCacheKey]string{},
+		translationCache: map[translationCacheKey]string{},
 		summaryCache:     map[uiCacheKey]string{},
 		accountBadges:    map[int64]*gtk.Label{},
 		readerZoom:       1.0,
@@ -1740,8 +1747,8 @@ func (w *window) buildReader() *adw.NavigationPage {
 	a11yLabel(w.summaryBtn, "Summarize conversation with AI")
 	w.summaryBtn.ConnectClicked(w.onSummarize)
 
-	// AI reply: a popover of AI-suggested quick replies plus reply intents. The
-	// popover is rebuilt per open (fresh suggestions for the current message).
+	// AI reply: fixed reply intents and a custom reply dialog. The
+	// popover is rebuilt per open to reflect the available actions.
 	w.aiReplyBtn = gtk.NewMenuButton()
 	w.aiReplyBtn.SetIconName("sparkle-symbolic")
 	w.aiReplyBtn.SetTooltipText("AI reply")
@@ -2031,96 +2038,59 @@ func (w *window) aiReply(auto composeAutoAI) {
 		return
 	}
 	logging.Trace("ui: ai reply", "id", w.openMsg.GmailID, "thread", w.openThreadID,
-		"quickReply", auto.quickReply != "", "instruction", logging.Body(auto.instruction), "openDialog", auto.openDialog, "account", w.activeID)
+		"quickReply", auto.quickReply != "", "instruction", logging.Body(auto.instruction), "account", w.activeID)
 	w.openCompose(init, aiContext, "Reply", auto)
 }
 
-// buildAIReplyPopover builds the reader's AI-reply popover: reply intents
-// first (tap → AI drafts a full reply in that direction), then AI-suggested
-// quick replies below (fetched async; tap → compose prefilled with that
-// reply). The async section trails the fixed intents so its streaming-in
-// results grow the popover downward instead of shoving the intents down
-// while the user is picking one. Rebuilt on each open so suggestions match
-// the current message.
+// openCustomAIReply snapshots the reply before showing the dialog, so cancel
+// leaves no empty compose and changing the reader cannot retarget the draft.
+func (w *window) openCustomAIReply() {
+	init, aiContext, ok := w.replyAllInit()
+	if !ok {
+		return
+	}
+	opts := composeOpts{addSignature: true, fromAccountID: w.activeID}
+	var draft func(string)
+	if w.aiDraft {
+		draft = func(instruction string) {
+			w.openComposeOpts(init, aiContext, "Reply", opts, composeAutoAI{instruction: instruction})
+		}
+	}
+	w.askAIIntent(w.win, true, aiContext, draft, func(text string) {
+		w.openComposeOpts(init, aiContext, "Reply", opts, composeAutoAI{quickReply: text})
+	})
+}
+
+// buildAIReplyPopover contains only fixed actions; suggestions load in the
+// custom reply dialog, where they cannot move a menu under the pointer.
 func (w *window) buildAIReplyPopover() *gtk.Popover {
 	pop := gtk.NewPopover()
 	box := gtk.NewBox(gtk.OrientationVertical, 4)
 	box.SetSizeRequest(300, -1)
 	setMargins(box, 8, 8, 8, 8)
-
-	_, threadContext, ok := w.replyAllInit()
+	_, _, ok := w.replyAllInit()
 	if !ok || w.deps.Assistant == nil || (!w.aiSmartReplies && !w.aiDraft) {
 		box.Append(aiPopLabel("Open a message to reply."))
 		pop.SetChild(box)
 		return pop
 	}
-
 	if w.aiDraft {
 		box.Append(aiPopLabel("Write a reply that…"))
 		for _, p := range replyPresets() {
 			instr := p.instruction
-			row := aiPopRow("↳ "+p.label, false)
-			row.ConnectClicked(func() {
-				pop.Popdown()
-				w.aiReply(composeAutoAI{instruction: instr})
-			})
+			row := aiPopRow(p.label, false)
+			row.ConnectClicked(func() { pop.Popdown(); w.aiReply(composeAutoAI{instruction: instr}) })
 			box.Append(row)
 		}
-		custom := aiPopRow("✎ Custom instruction…", false)
-		custom.ConnectClicked(func() {
-			pop.Popdown()
-			w.aiReply(composeAutoAI{openDialog: true})
-		})
-		box.Append(custom)
+		box.Append(gtk.NewSeparator(gtk.OrientationHorizontal))
 	}
-
-	if w.aiSmartReplies {
-		if w.aiDraft {
-			box.Append(gtk.NewSeparator(gtk.OrientationHorizontal))
-		}
-		// AI-suggested quick replies (one call per open; results stream in).
-		box.Append(aiPopLabel("Suggested replies"))
-		sug := gtk.NewBox(gtk.OrientationVertical, 4)
-		box.Append(sug)
-		spinner := adw.NewSpinner()
-		spinner.SetHAlign(gtk.AlignStart)
-		spinner.SetSizeRequest(20, 20)
-		sug.Append(spinner)
-		done := w.aiActivity("Suggesting replies")
-		logging.Trace("ui: suggest quick replies", "thread", w.openThreadID, "account", w.activeID)
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			replies, err := w.deps.Assistant.SmartReplies(ctx, threadContext)
-			logging.Trace("ui: suggest quick replies result", "n", len(replies), "err", err)
-			dispatch.Main(func() {
-				done(doneErr(err))
-				for c := sug.FirstChild(); c != nil; c = sug.FirstChild() {
-					sug.Remove(c)
-				}
-				if err != nil {
-					slog.Warn("ui: ai-reply suggestions", "err", err)
-				}
-				if err != nil || len(replies) == 0 {
-					sug.Append(aiPopLabel("No suggestions"))
-					return
-				}
-				for _, r := range replies {
-					text := strings.TrimSpace(r)
-					if text == "" {
-						continue
-					}
-					row := aiPopRow(text, true)
-					row.ConnectClicked(func() {
-						pop.Popdown()
-						w.aiReply(composeAutoAI{quickReply: text})
-					})
-					sug.Append(row)
-				}
-			})
-		}()
+	label := "Custom reply…"
+	if !w.aiDraft {
+		label = "Suggested replies…"
 	}
-
+	custom := aiPopRow(label, false)
+	custom.ConnectClicked(func() { pop.Popdown(); w.openCustomAIReply() })
+	box.Append(custom)
 	pop.SetChild(box)
 	return pop
 }
@@ -3672,9 +3642,9 @@ func (w *window) addressActionsDialog(addr string, build func(item func(label st
 	dialog.Present(w.win)
 }
 
-// onTranslate shows an English translation of the whole open conversation in
+// onTranslate shows a translation of the whole open conversation in
 // place, preserving each message's markup. Every message is translated and
-// cached per message id, so re-opening, reverting, or re-translating reuses the
+// cached per message and language, so re-opening or re-translating reuses the
 // cached result (and an already-translated message in the thread isn't redone).
 func (w *window) onTranslate() {
 	if w.deps.Assistant == nil || !w.aiTranslate || len(w.openThreadMsgs) == 0 {
@@ -3690,19 +3660,13 @@ func (w *window) onTranslate() {
 
 	// Which messages still need translating? (in-memory cache read on the main
 	// thread; the persisted cache is consulted in the goroutine before any AI).
-	var todo []model.Message
-	for _, m := range msgs {
-		if _, ok := w.translationCache[cacheKey(m.AccountID, m.GmailID)]; !ok {
-			todo = append(todo, m)
-		}
-	}
-	// One read per run: a setting changed mid-translation must not leave half the
-	// thread cached under one language and half under another.
+	// Snapshot the language for the request and every cache access.
 	lang := w.translateTarget()
+	todo := w.messagesNeedingTranslation(msgs, lang)
 	logging.Trace("ui: translate", "thread", threadID, "msgs", len(msgs), "todo", len(todo), "lang", lang, "account", acctID)
 	if len(todo) == 0 { // whole thread already translated → show instantly
 		logging.Trace("ui: translate cache hit (memory)", "thread", threadID)
-		w.showTranslatedConversation(msgs)
+		w.showTranslatedConversation(msgs, lang)
 		return
 	}
 
@@ -3716,7 +3680,7 @@ func (w *window) onTranslate() {
 
 	go func() {
 		// 1) Seed from the persisted per-message cache (no AI cost). A message body
-		// is immutable, so a stored English translation is always valid.
+		// is immutable, so a stored translation in this language is always valid.
 		ids := make([]string, len(todo))
 		for i, m := range todo {
 			ids[i] = m.GmailID
@@ -3776,7 +3740,7 @@ func (w *window) onTranslate() {
 		logging.Trace("ui: translate done", "thread", threadID, "translated", len(results), "err", firstErr)
 		dispatch.Main(func() {
 			done(doneErrCtx(ctx, firstErr)) // a user cancel is neutral for AI health
-			if w.openThreadID != threadID || ctx.Err() != nil {
+			if w.activeID != acctID || w.openThreadID != threadID || ctx.Err() != nil || w.translateTarget() != lang {
 				logging.Trace("ui: translate discarded", "thread", threadID, "openThread", w.openThreadID, "cancelled", ctx.Err() != nil)
 				return // user switched conversations or reverted
 			}
@@ -3790,15 +3754,25 @@ func (w *window) onTranslate() {
 				return
 			}
 			for id, out := range seeded {
-				w.translationCache[cacheKey(acctID, id)] = out
+				w.translationCache[translationCacheKey{cacheKey(acctID, id), lang}] = out
 			}
 			for id, out := range results {
-				w.translationCache[cacheKey(acctID, id)] = out
+				w.translationCache[translationCacheKey{cacheKey(acctID, id), lang}] = out
 			}
 			capCache(w.translationCache, aiCacheCap)
-			w.showTranslatedConversation(msgs)
+			w.showTranslatedConversation(msgs, lang)
 		})
 	}()
+}
+
+func (w *window) messagesNeedingTranslation(msgs []model.Message, lang string) []model.Message {
+	var todo []model.Message
+	for _, m := range msgs {
+		if _, ok := w.translationCache[translationCacheKey{cacheKey(m.AccountID, m.GmailID), lang}]; !ok {
+			todo = append(todo, m)
+		}
+	}
+	return todo
 }
 
 // translateTarget is the language the Translate action renders into, and the key
@@ -3830,7 +3804,7 @@ func (w *window) refreshTranslateLabels() {
 // showTranslatedConversation renders the thread (newest first) from each
 // message's cached translation, like renderConversation but with translated
 // bodies. Main thread only.
-func (w *window) showTranslatedConversation(msgs []model.Message) {
+func (w *window) showTranslatedConversation(msgs []model.Message, lang string) {
 	w.translationBanner.SetTitle("Showing translation")
 	w.translationBanner.SetRevealed(true)
 	w.translationShown = true
@@ -3838,7 +3812,7 @@ func (w *window) showTranslatedConversation(msgs []model.Message) {
 	blocked := 0
 	for i := len(msgs) - 1; i >= 0; i-- {
 		m := msgs[i]
-		body := model.MessageBody{HTML: w.translationCache[cacheKey(m.AccountID, m.GmailID)]}
+		body := model.MessageBody{HTML: w.translationCache[translationCacheKey{cacheKey(m.AccountID, m.GmailID), lang}]}
 		// No gist card here: under "Same as the email" it is in the original's
 		// language, which would clash with the translated bodies this view exists
 		// to show.
@@ -4007,6 +3981,8 @@ func (w *window) onSummarize() {
 	w.summaryCancel = cancel
 	threadID := w.openThreadID
 	acctID := w.activeID
+	noteGen := w.aiNotesGen
+	generation := w.deps.Store.AINotesGeneration()
 	contextText := w.threadContextAll()
 	done := w.aiActivity("Summarizing thread")
 
@@ -4016,14 +3992,14 @@ func (w *window) onSummarize() {
 			msg := err.Error()
 			dispatch.Main(func() {
 				done(doneErrCtx(ctx, err)) // a user cancel is neutral for AI health
-				if w.openThreadID == threadID && ctx.Err() == nil {
+				if w.openThreadID == threadID && ctx.Err() == nil && w.aiNotesGen == noteGen {
 					w.summaryLabel.SetText("Summary failed: " + msg)
 				}
 			})
 			return
 		}
 		text, serr := streamCoalesced(ch, func(text string) {
-			if w.openThreadID != threadID || ctx.Err() != nil {
+			if w.openThreadID != threadID || ctx.Err() != nil || w.aiNotesGen != noteGen {
 				return
 			}
 			w.summaryLabel.SetMarkup(markdownToPango(text))
@@ -4036,14 +4012,14 @@ func (w *window) onSummarize() {
 			// summary persisted today still renders if the rendering changes.
 			final = strings.TrimSpace(text)
 			if final != "" {
-				if perr := w.deps.Store.SetThreadSummary(context.Background(), acctID, threadID, key, final); perr != nil {
+				if _, perr := w.deps.Store.SaveAINote(generation, func() error { return w.deps.Store.SetThreadSummary(context.Background(), acctID, threadID, key, final) }); perr != nil {
 					slog.Warn("ui: persist summary", "err", perr)
 				}
 			}
 		}
 		dispatch.Main(func() {
 			done(doneErrCtx(ctx, serr)) // a user cancel is neutral for AI health
-			if w.openThreadID != threadID || ctx.Err() != nil {
+			if w.openThreadID != threadID || ctx.Err() != nil || w.aiNotesGen != noteGen {
 				return
 			}
 			if serr != nil {
@@ -4070,25 +4046,30 @@ func (w *window) hideSummary() {
 	}
 }
 
-// dropAINotes forgets everything the AI has written about mail — summaries,
-// gists and phishing analyses, in memory and in the store — and repaints the
-// open conversation.
-//
-// The AI-language change calls this. A cached note is in the language it was
-// written in, and all three caches are deliberately permanent (a body never
-// changes), so without this the new setting would only ever reach mail that has
-// not arrived yet — leaving the inbox the user changed the setting *because of*
-// described in the language they just left. Nothing is regenerated here: a gist
-// is re-earned when its conversation is opened, an analysis when it is asked
-// for, and the background worker's next pass fills the inbox's gists again.
-func (w *window) dropAINotes() {
-	logging.Trace("ui: drop ai notes", "thread", w.openThreadID)
+func (w *window) resetAINoteCaches() {
+	w.aiNotesGen++
 	w.summaryCache = map[uiCacheKey]string{}
 	w.gistRequested = map[uiCacheKey]bool{}
 	w.appliedGists = map[uiCacheKey]string{}
-	w.hideSummary() // its text is in the old language; asking again is one click
-	msgs := w.openThreadMsgs
-	threadID := w.openThreadID
+	w.sectionCache = map[uiCacheKey]cachedSection{}
+	if w.renderCancel != nil {
+		w.renderCancel()
+	}
+	w.hideSummary()
+}
+
+// dropAINotes clears language-dependent notes and rendered sections before
+// scheduling fresh gists. Database deletion runs off the GTK thread.
+func (w *window) dropAINotes() {
+	logging.Trace("ui: drop ai notes", "thread", w.openThreadID)
+	w.resetAINoteCaches()
+	if w.translateCancel != nil {
+		w.translateCancel()
+		w.translateCancel = nil
+	}
+	if !w.translationShown && w.translationBanner != nil {
+		w.translationBanner.SetRevealed(false)
+	}
 	go func() {
 		n, err := w.deps.Store.ClearAINotes(context.Background())
 		if err != nil {
@@ -4096,18 +4077,20 @@ func (w *window) dropAINotes() {
 			return
 		}
 		logging.Trace("ui: ai notes cleared", "rows", n)
-		// Repaint only once the rows are gone: a render racing the delete would
-		// read a gist straight back out of the store and re-reveal it.
-		dispatch.Main(func() {
-			if w.openThreadID != threadID || len(msgs) == 0 {
-				return // moved on while clearing
-			}
-			for _, m := range msgs {
-				w.invalidateSection(m.AccountID, m.GmailID)
-			}
-			w.rerenderOpenThread()
-		})
+		dispatch.Main(w.finishAINoteReset)
 	}()
+}
+
+// finishAINoteReset also runs for overlapping resets: each completed deletion
+// must invalidate reads made while it ran and schedule replacement notes.
+func (w *window) finishAINoteReset() {
+	w.resetAINoteCaches()
+	if w.deps.RecategorizeInbox != nil {
+		w.deps.RecategorizeInbox(0)
+	}
+	if len(w.openThreadMsgs) > 0 {
+		w.rerenderOpenThread()
+	}
 }
 
 // analyzeMessage runs an on-demand AI phishing/scam analysis of one message —
@@ -4159,6 +4142,8 @@ func (w *window) analyzeMessage(m model.Message) {
 	w.summaryCancel = cancel
 	threadID := w.openThreadID
 	acctID := w.activeID
+	noteGen := w.aiNotesGen
+	generation := w.deps.Store.AINotesGeneration()
 	gmailID := m.GmailID
 	done := w.aiActivity("Checking for phishing")
 
@@ -4171,14 +4156,14 @@ func (w *window) analyzeMessage(m model.Message) {
 			msg := err.Error()
 			dispatch.Main(func() {
 				done(doneErrCtx(ctx, err)) // a user cancel is neutral for AI health
-				if w.openThreadID == threadID && ctx.Err() == nil {
+				if w.openThreadID == threadID && ctx.Err() == nil && w.aiNotesGen == noteGen {
 					w.summaryLabel.SetText("Analysis failed: " + msg)
 				}
 			})
 			return
 		}
 		text, serr := streamCoalesced(ch, func(text string) {
-			if w.openThreadID != threadID || ctx.Err() != nil {
+			if w.openThreadID != threadID || ctx.Err() != nil || w.aiNotesGen != noteGen {
 				return
 			}
 			w.summaryLabel.SetMarkup(markdownToPango(text))
@@ -4191,14 +4176,14 @@ func (w *window) analyzeMessage(m model.Message) {
 			// summary persisted today still renders if the rendering changes.
 			final = strings.TrimSpace(text)
 			if final != "" {
-				if perr := w.deps.Store.SetAnalysis(context.Background(), acctID, gmailID, final); perr != nil {
+				if _, perr := w.deps.Store.SaveAINote(generation, func() error { return w.deps.Store.SetAnalysis(context.Background(), acctID, gmailID, final) }); perr != nil {
 					slog.Warn("ui: persist analysis", "err", perr)
 				}
 			}
 		}
 		dispatch.Main(func() {
 			done(doneErrCtx(ctx, serr)) // a user cancel is neutral for AI health
-			if w.openThreadID != threadID || ctx.Err() != nil {
+			if w.openThreadID != threadID || ctx.Err() != nil || w.aiNotesGen != noteGen {
 				return
 			}
 			if serr != nil {

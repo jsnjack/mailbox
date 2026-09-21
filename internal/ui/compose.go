@@ -79,19 +79,17 @@ func (w *window) composeFromMailto(uri string) {
 
 // composeAutoAI optionally drives the AI on a freshly opened compose, used by the
 // reader's AI-reply popover: prefill the body with a chosen quick reply, auto-run
-// a draft for an instruction, or open the AI-draft dialog. At most one applies.
+// a draft for an instruction. At most one applies.
 type composeAutoAI struct {
 	quickReply  string // prefill the body with this ready reply (above the quote)
 	instruction string // auto-run an AI draft guided by this instruction
-	openDialog  bool   // open the AI-draft dialog immediately
 }
 
 // aiPreset is a one-tap reply/compose direction: a short label and the
 // instruction handed to the AI to draft a full message.
 type aiPreset struct{ label, instruction string }
 
-// replyPresets / newMsgPresets are the canned AI directions, shared by the
-// AI-draft dialog and the reader's AI-reply popover so they stay in step.
+// replyPresets are the fixed directions in the reader's AI-reply popover.
 func replyPresets() []aiPreset {
 	return []aiPreset{
 		{"Accept / agree", "Accept and agree."},
@@ -100,15 +98,6 @@ func replyPresets() []aiPreset {
 		{"Ask for more details", "Ask for more details or clarification."},
 		{"Propose a new time", "Propose a different time."},
 		{"I'll follow up later", "Say I will follow up later."},
-	}
-}
-
-func newMsgPresets() []aiPreset {
-	return []aiPreset{
-		{"Request a meeting", "Request a meeting and propose a couple of times."},
-		{"Introduce myself", "Introduce myself and explain why I'm reaching out."},
-		{"Follow up", "Write a polite follow-up."},
-		{"Make a request", "Politely ask for something."},
 	}
 }
 
@@ -215,6 +204,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 	// Assigned after gather/save state exists. Attachment callbacks are built
 	// earlier, so this placeholder lets them join the same autosave path.
 	scheduleAutosave := func() {}
+	changeFrom := func() {}
 	attachRow := gtk.NewFlowBox()
 	attachRow.SetSelectionMode(gtk.SelectionNone)
 	attachRow.SetColumnSpacing(6)
@@ -470,7 +460,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 		if init.LocalDraftID != "" || init.SourceMessageID != "" || init.DraftID != "" {
 			accountDD.SetSensitive(false)
 		} else {
-			accountDD.Connect("notify::selected", func() { scheduleAutosave() })
+			accountDD.Connect("notify::selected", func() { changeFrom() })
 		}
 		fromRow := gtk.NewBox(gtk.OrientationHorizontal, 8)
 		fromRow.Append(gtk.NewLabel("From"))
@@ -541,6 +531,10 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 	finished := false
 	var draftStateMu sync.Mutex
 	localDraftID := init.LocalDraftID
+	draftAccountID := selectedAccount().ID
+	var accountGeneration uint64
+	switchingFrom := false
+	restoringFrom := false
 	savedFingerprint := ""
 	startDirtyPending := opts.startDirty
 	closed := false
@@ -641,10 +635,18 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 	// saveSnapshot serializes saves from this window. A second edit can be
 	// captured while the first DB write is finishing, but it reuses the stable id
 	// and updates the saved fingerprint only for its own exact snapshot.
-	saveSnapshot := func(msg model.OutgoingMessage, accountID int64, done func(error)) {
+	saveSnapshot := func(msg model.OutgoingMessage, accountID int64, generation uint64, done func(error)) {
 		go func() {
 			saveSerial.Lock()
 			draftStateMu.Lock()
+			if generation != accountGeneration || accountID != draftAccountID {
+				draftStateMu.Unlock()
+				saveSerial.Unlock()
+				if done != nil {
+					dispatch.Main(func() { done(fmt.Errorf("sender changed before draft was saved")) })
+				}
+				return
+			}
 			msg.LocalDraftID = localDraftID
 			draftStateMu.Unlock()
 			id, err := w.deps.SaveDraft(context.Background(), accountID, msg)
@@ -662,16 +664,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 				isClosed := closed
 				draftStateMu.Unlock()
 				if !isClosed {
-					if err == nil && accountDD != nil {
-						for i, a := range accounts {
-							if a.ID == accountID {
-								accountDD.SetSelected(uint(i))
-								break
-							}
-						}
-						accountDD.SetSensitive(false)
-						accountDD.SetTooltipText("From is fixed after the draft is saved")
-					}
+
 					// Only a failure is worth saying here. Announcing every
 					// autosave was the loudest thing in the window — it fires
 					// 1.5s after each burst of typing, so the line was rewritten
@@ -691,9 +684,10 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 
 	const autosaveDelay = 1500 * time.Millisecond
 	scheduleAutosave = func() {
-		if w.deps.SaveDraft == nil {
+		if w.deps.SaveDraft == nil || switchingFrom {
 			return
 		}
+		generation := accountGeneration
 		msg := gather() // GTK values are captured on the main thread.
 		accountID := selectedAccount().ID
 		autosaveMu.Lock()
@@ -705,10 +699,81 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 			isClosed := closed
 			draftStateMu.Unlock()
 			if !isClosed {
-				saveSnapshot(msg, accountID, nil)
+				saveSnapshot(msg, accountID, generation, nil)
 			}
 		})
 		autosaveMu.Unlock()
+	}
+	changeFrom = func() {
+		if restoringFrom || switchingFrom {
+			return
+		}
+		next := selectedAccount()
+		previous := draftAccountID
+		if next.ID == previous {
+			return
+		}
+		stopAutosave()
+		switchingFrom = true
+		accountDD.SetSensitive(false)
+		send.SetSensitive(false)
+		if draftBtn != nil {
+			draftBtn.SetSensitive(false)
+		}
+		draftStateMu.Lock()
+		accountGeneration++ // Invalidate queued snapshots, including a switch back.
+		draftAccountID = next.ID
+		draftStateMu.Unlock()
+		msg := gather()
+		go func() {
+			saveSerial.Lock()
+			draftStateMu.Lock()
+			oldID := localDraftID
+			draftStateMu.Unlock()
+			moved, err := moveComposeDraft(context.Background(), w.deps.SaveDraft, w.deps.DeleteDraft, previous, next.ID, oldID, msg)
+			succeeded := err == nil || moved.LocalDraftID != ""
+			draftStateMu.Lock()
+			if succeeded {
+				localDraftID = moved.LocalDraftID
+				if w.deps.SaveDraft != nil {
+					savedFingerprint = draftContentFingerprint(moved)
+					startDirtyPending = false
+				}
+			} else {
+				draftAccountID = previous
+			}
+			draftStateMu.Unlock()
+			saveSerial.Unlock()
+			dispatch.Main(func() {
+				if succeeded {
+					init.ThreadID = ""
+					init.DraftID = ""
+					init.SourceMessageID = ""
+				} else {
+					restoringFrom = true
+					for i, a := range accounts {
+						if a.ID == previous {
+							accountDD.SetSelected(uint(i))
+							break
+						}
+					}
+					restoringFrom = false
+				}
+				switchingFrom = false
+				accountDD.SetSensitive(true)
+				send.SetSensitive(true)
+				if draftBtn != nil {
+					draftBtn.SetSensitive(true)
+				}
+				status.SetVisible(err != nil)
+				if err != nil {
+					status.SetText(err.Error())
+				}
+				if dirty() {
+					scheduleAutosave()
+				}
+			})
+		}()
 	}
 	for _, entry := range []*gtk.Entry{toEntry, ccEntry, bccEntry, subjEntry} {
 		entry.Connect("changed", scheduleAutosave)
@@ -716,6 +781,9 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 	buf.Connect("changed", scheduleAutosave)
 
 	win.ConnectCloseRequest(func() bool {
+		if switchingFrom {
+			return true
+		}
 		if finished || !dirty() {
 			draftStateMu.Lock()
 			closed = true
@@ -755,7 +823,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 				// Save before closing: only dismiss the window once the draft is
 				// safely stored. If the save fails the window stays open with the
 				// content intact, so a transient failure can't silently drop it.
-				saveSnapshot(msg, acctID, func(err error) {
+				saveSnapshot(msg, acctID, accountGeneration, func(err error) {
 					if err != nil {
 						slog.Warn("ui: save draft on close", "err", err)
 						logging.Trace("ui: compose save draft on close failed", "err", err)
@@ -819,6 +887,9 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 	win.AddController(drop)
 
 	doSend := func() {
+		if switchingFrom {
+			return
+		}
 		msg := gather() // reads the selected account on the main thread
 		acctID := selectedAccount().ID
 		logging.Trace("ui: compose send (deferred)", "account", acctID, "to", msg.To, "cc", msg.Cc, "bcc", msg.Bcc,
@@ -899,6 +970,9 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 
 	if draftBtn != nil {
 		draftBtn.ConnectClicked(func() {
+			if switchingFrom {
+				return
+			}
 			stopAutosave()
 			msg := gather()
 			acctID := selectedAccount().ID
@@ -908,8 +982,8 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 			// row narrates it; saveSnapshot itself surfaces a failure in the
 			// form, where it persists until they do something about it.
 			saveDone := composeRow.begin("Saving draft locally")
-			saveSnapshot(msg, acctID, func(err error) {
-				draftBtn.SetSensitive(true)
+			saveSnapshot(msg, acctID, accountGeneration, func(err error) {
+				draftBtn.SetSensitive(!switchingFrom)
 				saveDone(doneErr(err))
 				if err != nil {
 					slog.Warn("ui: save draft", "err", err)
@@ -921,7 +995,6 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 		})
 	}
 
-	var startAIDraft func()
 	var runDraft func(string)
 	if w.deps.Assistant != nil && w.aiDraft {
 		// A reply/forward has thread context; a new message is drafted from the
@@ -983,7 +1056,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 		// The button (and auto-draft) open the AI dialog: quick replies + presets.
 		// A quick reply is used as-is (above the signature/quote); a preset/free
 		// text generates a full draft.
-		startAIDraft = func() {
+		startAIDraft := func() {
 			w.askAIIntent(win, isReply, aiContext, runDraft, func(text string) {
 				buf.SetText(text + init.Body)
 				bodyView.GrabFocus()
@@ -1212,7 +1285,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 	}
 
 	// AI-reply popover entry points: prefill a chosen quick reply, auto-draft from
-	// an instruction, or open the AI-draft dialog — once the window is up.
+	// an instruction once the window is up.
 	if len(auto) > 0 {
 		a := auto[0]
 		switch {
@@ -1223,157 +1296,8 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 		case a.instruction != "" && runDraft != nil:
 			logging.Trace("ui: compose auto draft", "instruction", a.instruction)
 			runDraft(a.instruction)
-		case a.openDialog && startAIDraft != nil:
-			logging.Trace("ui: compose auto open ai dialog")
-			startAIDraft()
 		}
 	}
-}
-
-// askAIIntent presents AI reply assistance in one place: ready-to-send quick
-// replies (for a reply, loaded from the thread), tone presets, and a free-text
-// field. Picking a quick reply calls onQuickReply with its text (used directly);
-// a preset or free text calls onInstruction to generate a full draft.
-func (w *window) askAIIntent(parent gtk.Widgetter, isReply bool, threadContext string, onInstruction, onQuickReply func(string)) {
-	logging.Trace("ui: ai intent dialog", "is_reply", isReply, "has_context", strings.TrimSpace(threadContext) != "")
-	dialog := adw.NewDialog()
-	dialog.SetContentWidth(440)
-	dialog.SetFollowsContentSize(true)
-
-	presets := replyPresets()
-	title := "Draft reply with AI"
-	hintText := "Pick a tone or describe what to say; the AI drafts the reply."
-	if !isReply {
-		presets = newMsgPresets()
-		title = "Draft email with AI"
-		hintText = "Describe what the email should say; the AI writes it."
-	}
-	dialog.SetTitle(title)
-
-	box := gtk.NewBox(gtk.OrientationVertical, 8)
-	setMargins(box, 16, 16, 16, 16)
-
-	hint := gtk.NewLabel(hintText)
-	hint.SetXAlign(0)
-	hint.SetWrap(true)
-	hint.AddCSSClass("dim-label")
-	box.Append(hint)
-
-	choose := func(instruction string) {
-		dialog.Close()
-		onInstruction(instruction)
-	}
-
-	for _, q := range presets {
-		instr := q.instruction
-		b := gtk.NewButton()
-		l := gtk.NewLabel(q.label)
-		l.SetXAlign(0)
-		l.SetHExpand(true)
-		b.SetChild(l)
-		b.AddCSSClass("flat")
-		b.ConnectClicked(func() { choose(instr) })
-		box.Append(b)
-	}
-
-	box.Append(gtk.NewSeparator(gtk.OrientationHorizontal))
-
-	// Multiline free-text instruction: a longer brief ("decline but offer next
-	// week, keep it warm") drafts a better reply than a single line allows.
-	entry := gtk.NewTextView()
-	entry.SetWrapMode(gtk.WrapWordChar)
-	entry.SetAcceptsTab(false) // Tab moves focus to Generate rather than inserting a tab
-	entry.SetLeftMargin(6)
-	entry.SetRightMargin(6)
-	entry.SetTopMargin(6)
-	entry.SetBottomMargin(6)
-	entryScroller := gtk.NewScrolledWindow()
-	entryScroller.SetPolicy(gtk.PolicyNever, gtk.PolicyAutomatic)
-	entryScroller.SetMinContentHeight(64)
-	entryScroller.SetChild(entry)
-	entryScroller.AddCSSClass("card")
-	box.Append(entryScroller)
-
-	gen := gtk.NewButtonWithLabel("Generate")
-	gen.AddCSSClass("suggested-action")
-	gen.SetHAlign(gtk.AlignEnd)
-	gen.ConnectClicked(func() { choose(strings.TrimSpace(bodyText(entry.Buffer()))) })
-	box.Append(gen)
-
-	// Ready-to-send quick replies (for a reply) — gated behind a button so they
-	// are only generated (and tokens spent) when the user asks. Placed last so
-	// that generating replies grows the dialog downward instead of shoving the
-	// presets/entry/Generate button (already visible above) further down.
-	if isReply && strings.TrimSpace(threadContext) != "" && onQuickReply != nil && w.deps.Assistant != nil && w.aiSmartReplies {
-		box.Append(gtk.NewSeparator(gtk.OrientationHorizontal))
-		quick := gtk.NewBox(gtk.OrientationVertical, 4)
-		box.Append(quick)
-		clearQuick := func() {
-			for c := quick.FirstChild(); c != nil; c = quick.FirstChild() {
-				quick.Remove(c)
-			}
-		}
-		var showSuggestButton func()
-		showSuggestButton = func() {
-			clearQuick()
-			bl := gtk.NewLabel("Suggest quick replies")
-			bl.SetXAlign(0)
-			bl.SetHExpand(true)
-			btn := gtk.NewButton()
-			btn.SetChild(bl)
-			btn.AddCSSClass("flat")
-			btn.ConnectClicked(func() {
-				clearQuick()
-				busy := gtk.NewLabel("Loading quick replies…")
-				busy.SetXAlign(0)
-				busy.AddCSSClass("dim-label")
-				busy.AddCSSClass("caption")
-				quick.Append(busy)
-				logging.Trace("ui: ai smart replies begin")
-				done := w.aiActivity("Suggesting replies")
-				go func() {
-					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-					defer cancel()
-					replies, err := w.deps.Assistant.SmartReplies(ctx, threadContext)
-					dispatch.Main(func() {
-						done(doneErr(err))
-						clearQuick()
-						logging.Trace("ui: ai smart replies done", "n", len(replies), "err", err)
-						if err != nil || len(replies) == 0 {
-							if err != nil {
-								slog.Warn("ui: smart replies", "err", err)
-							}
-							showSuggestButton() // restore so the user can retry
-							return
-						}
-						for _, r := range replies {
-							text := strings.TrimSpace(r)
-							if text == "" {
-								continue
-							}
-							rl := gtk.NewLabel(text)
-							rl.SetXAlign(0)
-							rl.SetWrap(true)
-							rl.SetHExpand(true)
-							rb := gtk.NewButton()
-							rb.SetChild(rl)
-							rb.AddCSSClass("flat")
-							rb.ConnectClicked(func() {
-								dialog.Close()
-								onQuickReply(text)
-							})
-							quick.Append(rb)
-						}
-					})
-				}()
-			})
-			quick.Append(btn)
-		}
-		showSuggestButton()
-	}
-
-	dialog.SetChild(box)
-	dialog.Present(parent)
 }
 
 // composeBodyWithSignature inserts the default signature into a compose body.
