@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/jsnjack/mailbox/internal/model"
 )
@@ -31,4 +32,36 @@ func moveComposeDraft(ctx context.Context, save DraftSaver, remove DraftDeleter,
 		}
 	}
 	return msg, nil
+}
+
+// switchComposeSignature replaces only the exact sign-off still at the end of
+// the user's writing; a manually edited sign-off is left alone.
+func switchComposeSignature(body, previous, next string) string {
+	previous = strings.TrimSpace(previous)
+	next = strings.TrimSpace(next)
+	if previous == next {
+		return body
+	}
+	boundary := quoteBoundary(body)
+	own, quote := body[:boundary], body[boundary:]
+	trimmed := strings.TrimRight(own, " \t\r\n")
+	if previous != "" {
+		if !strings.HasSuffix(trimmed, previous) {
+			return body
+		}
+		at := len(trimmed) - len(previous)
+		if at > 0 && trimmed[at-1] != '\n' {
+			return body
+		}
+		own = strings.TrimRight(trimmed[:at], " \t\r\n")
+	} else {
+		own = trimmed
+	}
+	if next != "" {
+		own += "\n\n" + next
+	}
+	if quote != "" {
+		own += "\n\n" + quote
+	}
+	return own
 }

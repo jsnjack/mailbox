@@ -811,6 +811,8 @@ func launchUI(mailto string) error {
 	}
 	// Discarding needs no Gmail client, so a stuck send can be cleared even
 	// when the account currently has no working connection.
+	deps.RecoverOutbox = engine.RecoverOutboxDraft
+	deps.RestoreOutbox = engine.RestoreOutbox
 	deps.DiscardOutbox = func(ctx context.Context, accountID, id int64) (bool, error) {
 		done := act.Begin("send", emailOf(accountID), "Discarding queued message")
 		ok, err := engine.DiscardOutbox(ctx, accountID, id)

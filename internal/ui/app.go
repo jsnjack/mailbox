@@ -171,6 +171,10 @@ type Deps struct {
 	SweepOutbox   OutboxSweeper
 	RetryOutbox   OutboxAction
 	DiscardOutbox OutboxDiscard
+	// RecoverOutbox cancels delivery and creates a draft in one transaction.
+	RecoverOutbox func(context.Context, model.OutboxItem) (model.OutgoingMessage, bool, error)
+	// RestoreOutbox reverses explicit discard, preserving uncertain delivery.
+	RestoreOutbox func(context.Context, model.OutboxItem) error
 	DeleteForever PermanentDeleter
 	EmptyFolder   FolderEmptier
 	Assistant     *ai.Assistant

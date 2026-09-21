@@ -1521,3 +1521,47 @@ func (e *Engine) fetchMetadataBatched(ctx context.Context, bf backend.BatchMetad
 	}
 	return msgs, fetchedIDs, failedIDs
 }
+
+// RecoverOutboxDraft cancels a queued send and persists its exact MIME content as
+// an editable draft. A false result means sending has already claimed the item.
+func (e *Engine) RecoverOutboxDraft(ctx context.Context, item model.OutboxItem) (model.OutgoingMessage, bool, error) {
+	msg, err := backend.ParseOutgoingMessage(item.RFC822)
+	if err != nil {
+		return msg, false, err
+	}
+	if item.LocalDraftID != "" {
+		previous, loadErr := e.Store.LocalDraft(ctx, item.LocalDraftID)
+		if loadErr != nil && !errors.Is(loadErr, store.ErrNotFound) {
+			return msg, false, fmt.Errorf("load outbox source draft: %w", loadErr)
+		}
+		if loadErr == nil {
+			if previous.AccountID != item.AccountID {
+				return msg, false, fmt.Errorf("recover outbox source: %w", store.ErrDraftAccountMismatch)
+			}
+			if strings.ReplaceAll(previous.Message.Body, "\r\n", "\n") == strings.ReplaceAll(msg.Body, "\r\n", "\n") {
+				msg.QuoteHTML = previous.Message.QuoteHTML
+				msg.SkipSignature = previous.Message.SkipSignature
+				msg.SourceMessageID = previous.Message.SourceMessageID
+			}
+		}
+	}
+	id, ok, err := e.Store.RecoverOutboxDraft(ctx, item, msg)
+	if err != nil || !ok {
+		return msg, ok, err
+	}
+	msg.LocalDraftID = id
+	msg.ThreadID = item.ThreadID
+	msg.DraftID = item.DraftID
+	e.publish(Change{Kind: SendStateChanged, AccountID: item.AccountID})
+	e.publish(Change{Kind: MessageUpserted, AccountID: item.AccountID, GmailID: id, ThreadID: id})
+	return msg, true, nil
+}
+
+// RestoreOutbox reinstates a discarded send without resetting uncertain delivery.
+func (e *Engine) RestoreOutbox(ctx context.Context, item model.OutboxItem) error {
+	if err := e.Store.RestoreOutbox(ctx, item); err != nil {
+		return err
+	}
+	e.publish(Change{Kind: SendStateChanged, AccountID: item.AccountID})
+	return nil
+}

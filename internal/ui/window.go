@@ -4543,6 +4543,10 @@ func (w *window) showSendUndoToast(accountID, outboxID int64, msg model.Outgoing
 				slog.Warn("ui: undo send discard", "id", outboxID, "err", err)
 			}
 			dispatch.Main(func() {
+				if err != nil {
+					w.toast("Could not undo send — check the outbox before trying again")
+					return
+				}
 				// A sweep (the 45s background ticker, or an Outbox "send now")
 				// can claim the row while the toast is still up. When the cancel
 				// lost that race, say so — reopening the compose would present
@@ -4554,9 +4558,7 @@ func (w *window) showSendUndoToast(accountID, outboxID int64, msg model.Outgoing
 				}
 				// Reopen the message exactly as it was (no second signature),
 				// from the account it was being sent from, and already "dirty" —
-				// its content is user-authored, so closing it must prompt rather
-				// than silently discard. On a discard error the row is still
-				// queued; reopening keeps the content in front of the user.
+				// its content is user-authored, so closing it must save it.
 				w.openComposeOpts(msg, "", "Message", composeOpts{fromAccountID: accountID, startDirty: true})
 			})
 		}()

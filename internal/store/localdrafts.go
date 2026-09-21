@@ -52,7 +52,16 @@ func (s *Store) SaveLocalDraft(ctx context.Context, accountID int64, msg model.O
 	}
 	now := time.Now()
 	err = s.withTx(ctx, func(tx *sql.Tx) error {
-		res, err := tx.ExecContext(ctx, `
+		return saveLocalDraftTx(ctx, tx, accountID, msg, localID, payload, now)
+	})
+	if err != nil {
+		return "", err
+	}
+	return localID, nil
+}
+
+func saveLocalDraftTx(ctx context.Context, tx *sql.Tx, accountID int64, msg model.OutgoingMessage, localID string, payload []byte, now time.Time) error {
+	res, err := tx.ExecContext(ctx, `
 			INSERT INTO local_drafts (
 				local_id, account_id, source_message_id, provider_draft_id,
 				payload, state, revision, attempts, last_error, updated_at)
@@ -63,56 +72,51 @@ func (s *Store) SaveLocalDraft(ctx context.Context, accountID int64, msg model.O
 				payload=excluded.payload, state=?, revision=local_drafts.revision+1,
 				attempts=0, last_error='', updated_at=excluded.updated_at
 			WHERE local_drafts.account_id = excluded.account_id`,
-			localID, accountID, msg.SourceMessageID, msg.DraftID, payload,
-			LocalDraftQueued, now.Unix(), LocalDraftQueued)
-		if err != nil {
-			return fmt.Errorf("save local draft: %w", err)
-		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return fmt.Errorf("save local draft: affected rows: %w", err)
-		}
-		if n == 0 {
-			return fmt.Errorf("save local draft %q: %w", localID, ErrDraftAccountMismatch)
-		}
+		localID, accountID, msg.SourceMessageID, msg.DraftID, payload,
+		LocalDraftQueued, now.Unix(), LocalDraftQueued)
+	if err != nil {
+		return fmt.Errorf("save local draft: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("save local draft: affected rows: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("save local draft %q: %w", localID, ErrDraftAccountMismatch)
+	}
 
-		synthetic := model.Message{
-			AccountID:      accountID,
-			GmailID:        localID,
-			ThreadID:       localID,
-			InternalDate:   now,
-			FromAddr:       msg.From,
-			ToAddrs:        msg.To,
-			CcAddrs:        msg.Cc,
-			BccAddrs:       msg.Bcc,
-			Subject:        msg.Subject,
-			Snippet:        localDraftSnippet(msg.Body),
-			InReplyTo:      msg.InReplyTo,
-			References:     msg.References,
-			HasAttachments: len(msg.Attachments) > 0,
-			Labels:         []string{model.LabelDraft},
-		}
-		rowID, err := upsertMessageTx(ctx, tx, synthetic)
-		if err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `
+	synthetic := model.Message{
+		AccountID:      accountID,
+		GmailID:        localID,
+		ThreadID:       localID,
+		InternalDate:   now,
+		FromAddr:       msg.From,
+		ToAddrs:        msg.To,
+		CcAddrs:        msg.Cc,
+		BccAddrs:       msg.Bcc,
+		Subject:        msg.Subject,
+		Snippet:        localDraftSnippet(msg.Body),
+		InReplyTo:      msg.InReplyTo,
+		References:     msg.References,
+		HasAttachments: len(msg.Attachments) > 0,
+		Labels:         []string{model.LabelDraft},
+	}
+	rowID, err := upsertMessageTx(ctx, tx, synthetic)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
 			INSERT INTO message_bodies (message_rowid, body_text, body_html, raw_headers)
 			VALUES (?, ?, ?, '')
 			ON CONFLICT(message_rowid) DO UPDATE SET
 				body_text=excluded.body_text, body_html=excluded.body_html`,
-			rowID, msg.Body, msg.HTMLBody); err != nil {
-			return fmt.Errorf("save local draft body: %w", err)
-		}
-		if _, err := tx.ExecContext(ctx, `UPDATE messages SET body_fetched = 2 WHERE rowid = ?`, rowID); err != nil {
-			return fmt.Errorf("mark local draft body fetched: %w", err)
-		}
-		return reindexFTS(ctx, tx, rowID)
-	})
-	if err != nil {
-		return "", err
+		rowID, msg.Body, msg.HTMLBody); err != nil {
+		return fmt.Errorf("save local draft body: %w", err)
 	}
-	return localID, nil
+	if _, err := tx.ExecContext(ctx, `UPDATE messages SET body_fetched = 2 WHERE rowid = ?`, rowID); err != nil {
+		return fmt.Errorf("mark local draft body fetched: %w", err)
+	}
+	return reindexFTS(ctx, tx, rowID)
 }
 
 func localDraftSnippet(body string) string {

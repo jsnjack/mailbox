@@ -117,6 +117,17 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 		logging.Trace("ui: open compose skipped", "has_sender", w.deps.Send != nil, "accounts", len(w.deps.Accounts))
 		return
 	}
+	signatureEmail := w.activeEmail
+	for _, account := range w.deps.Accounts {
+		if account.ID == opts.fromAccountID {
+			signatureEmail = account.Email
+			break
+		}
+	}
+	signature, signatureErr := config.SignatureFor(signatureEmail)
+	if signatureErr != nil {
+		slog.Warn("ui: load compose signature", "err", signatureErr)
+	}
 	addSignature := opts.addSignature && !init.SkipSignature
 	logging.Trace("ui: open compose", "title", title, "to", init.To, "subject", init.Subject,
 		"draft_id", init.DraftID, "in_reply_to", init.InReplyTo, "thread_id", init.ThreadID,
@@ -126,8 +137,8 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 	// Append the configured default signature: below the cursor area for a new
 	// message, between the reply area and the quoted history for a reply/forward.
 	if addSignature {
-		logging.Trace("ui: compose signature resolved", "sig_len", len(w.signature))
-		init.Body = composeBodyWithSignature(init.Body, w.signature)
+		logging.Trace("ui: compose signature resolved", "sig_len", len(signature))
+		init.Body = composeBodyWithSignature(init.Body, signature)
 	}
 
 	// Snapshot the prefilled quote region: buildHTMLBody swaps in the original's
@@ -172,6 +183,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 	bodyView.SetTopMargin(8)
 	buf := bodyView.Buffer()
 	buf.SetText(init.Body)
+	buf.SetEnableUndo(true)
 
 	scroller := gtk.NewScrolledWindow()
 	scroller.SetVExpand(true)
@@ -454,14 +466,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 		accountDD = gtk.NewDropDownFromStrings(emails)
 		accountDD.SetSelected(uint(active))
 		accountDD.SetHExpand(true)
-		// A provider/local draft is account-scoped and cannot safely be moved by
-		// changing From; a fresh compose remains selectable and autosaves under
-		// whichever account is chosen.
-		if init.LocalDraftID != "" || init.SourceMessageID != "" || init.DraftID != "" {
-			accountDD.SetSensitive(false)
-		} else {
-			accountDD.Connect("notify::selected", func() { changeFrom() })
-		}
+		accountDD.Connect("notify::selected", func() { changeFrom() })
 		fromRow := gtk.NewBox(gtk.OrientationHorizontal, 8)
 		fromRow.Append(gtk.NewLabel("From"))
 		fromRow.Append(accountDD)
@@ -480,13 +485,8 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 		hb.PackStart(draftBtn)
 	}
 	var discardDraftBtn *gtk.Button
-	discardTarget := init.LocalDraftID
-	if discardTarget == "" && (init.SourceMessageID != "" || init.DraftID != "") {
-		discardTarget = init.ThreadID
-	}
-	if discardTarget != "" && w.deps.DeleteDraft != nil {
-		discardDraftBtn = gtk.NewButtonWithLabel("Discard draft")
-		discardDraftBtn.AddCSSClass("destructive-action")
+	if w.deps.DeleteDraft != nil && w.deps.SaveDraft != nil {
+		discardDraftBtn = gtk.NewButtonWithLabel("Discard")
 		hb.PackEnd(discardDraftBtn)
 	}
 
@@ -563,7 +563,9 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 			SourceMessageID: init.SourceMessageID,
 			QuoteHTML:       init.QuoteHTML,
 			SkipSignature:   init.SkipSignature,
-			Attachments:     attachments,
+			Attachments:     append([]model.OutgoingAttachment(nil), attachments...),
+			Calendar:        init.Calendar,
+			CalendarMethod:  init.CalendarMethod,
 		}
 	}
 	savedFingerprint = draftContentFingerprint(gather())
@@ -592,43 +594,48 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 
 	if discardDraftBtn != nil {
 		discardDraftBtn.ConnectClicked(func() {
-			confirm := adw.NewAlertDialog("Discard draft?", "This removes the draft from this device and your mail provider. This cannot be undone.")
-			confirm.AddResponse("cancel", "Cancel")
-			confirm.AddResponse("discard", "Discard")
-			confirm.SetResponseAppearance("discard", adw.ResponseDestructive)
-			confirm.SetDefaultResponse("cancel")
-			confirm.SetCloseResponse("cancel")
-			confirm.ConnectResponse(func(response string) {
-				if response != "discard" {
-					return
+			if switchingFrom {
+				return
+			}
+			stopAutosave()
+			switchingFrom = true
+			box.SetSensitive(false)
+			discardDraftBtn.SetSensitive(false)
+			draftStateMu.Lock()
+			accountGeneration++
+			draftStateMu.Unlock()
+			msg, account := gather(), selectedAccount().ID
+			go func() {
+				saveSerial.Lock()
+				draftStateMu.Lock()
+				msg.LocalDraftID = localDraftID
+				draftStateMu.Unlock()
+				// Persist a provider-only draft first so deletion targets this exact
+				// draft rather than another draft in the same conversation.
+				id, err := w.deps.SaveDraft(context.Background(), account, msg)
+				if err == nil {
+					err = w.deps.DeleteDraft(context.Background(), account, id)
 				}
-				discardDraftBtn.SetSensitive(false)
-				discardDone := composeRow.begin("Discarding draft")
-				acctID := selectedAccount().ID
-				go func() {
-					err := w.deps.DeleteDraft(context.Background(), acctID, discardTarget)
-					dispatch.Main(func() {
-						discardDone(doneErr(err))
-						if err != nil {
-							discardDraftBtn.SetSensitive(true)
-							status.SetVisible(true)
-							status.SetText("Could not discard draft: " + err.Error())
-							return
-						}
-						finished = true
-						draftStateMu.Lock()
-						closed = true
-						draftStateMu.Unlock()
-						stopAutosave()
-						cancelAI()
-						w.toast("Draft discarded")
-						w.refreshList(w.searchEntry.Text())
-						w.loadLabels()
-						win.Close()
-					})
-				}()
-			})
-			confirm.Present(win)
+				if id != "" {
+					draftStateMu.Lock()
+					localDraftID = id
+					draftStateMu.Unlock()
+				}
+				saveSerial.Unlock()
+				dispatch.Main(func() {
+					switchingFrom = false
+					box.SetSensitive(true)
+					discardDraftBtn.SetSensitive(true)
+					if err != nil {
+						status.SetText("Could not discard draft: " + err.Error())
+						status.SetVisible(true)
+						return
+					}
+					finished = true
+					w.offerDraftUndo(account, msg)
+					win.Close()
+				})
+			}()
 		})
 	}
 
@@ -725,12 +732,47 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 		draftAccountID = next.ID
 		draftStateMu.Unlock()
 		msg := gather()
+		sourceSnapshot := msg
+		box.SetSensitive(false)
+		nextSignature, sigErr := config.SignatureFor(next.Email)
+		if sigErr != nil {
+			slog.Warn("ui: load sender signature", "err", sigErr)
+			nextSignature = signature
+		}
+		if !init.SkipSignature {
+			msg.Body = switchComposeSignature(msg.Body, signature, nextSignature)
+			msg.HTMLBody = buildHTMLBody(msg.Body, initQuote, init.QuoteHTML)
+		}
 		go func() {
 			saveSerial.Lock()
 			draftStateMu.Lock()
 			oldID := localDraftID
 			draftStateMu.Unlock()
-			moved, err := moveComposeDraft(context.Background(), w.deps.SaveDraft, w.deps.DeleteDraft, previous, next.ID, oldID, msg)
+			// Convert provider-only drafts to an exact local identity before moving.
+			var sourceErr error
+			if oldID == "" && (init.DraftID != "" || init.SourceMessageID != "") {
+				source := sourceSnapshot
+				for _, account := range accounts {
+					if account.ID == previous {
+						source.From = account.Email
+					}
+				}
+				if w.deps.SaveDraft == nil {
+					sourceErr = fmt.Errorf("draft storage is unavailable")
+				} else {
+					oldID, sourceErr = w.deps.SaveDraft(context.Background(), previous, source)
+					if sourceErr == nil {
+						draftStateMu.Lock()
+						localDraftID = oldID
+						draftStateMu.Unlock()
+					}
+				}
+			}
+			var moved model.OutgoingMessage
+			err := sourceErr
+			if err == nil {
+				moved, err = moveComposeDraft(context.Background(), w.deps.SaveDraft, w.deps.DeleteDraft, previous, next.ID, oldID, msg)
+			}
 			succeeded := err == nil || moved.LocalDraftID != ""
 			draftStateMu.Lock()
 			if succeeded {
@@ -746,6 +788,8 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 			saveSerial.Unlock()
 			dispatch.Main(func() {
 				if succeeded {
+					replaceComposeText(buf, moved.Body)
+					signature = nextSignature
 					init.ThreadID = ""
 					init.DraftID = ""
 					init.SourceMessageID = ""
@@ -760,6 +804,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 					restoringFrom = false
 				}
 				switchingFrom = false
+				box.SetSensitive(true)
 				accountDD.SetSensitive(true)
 				send.SetSensitive(true)
 				if draftBtn != nil {
@@ -790,62 +835,36 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 			draftStateMu.Unlock()
 			stopAutosave()
 			cancelAI()
-			composeRow.destroy() // its timers outlive the window otherwise
+			composeRow.destroy()
 			saveComposeSize()
-			return false // allow the close
+			return false
 		}
-		confirm := adw.NewAlertDialog("Discard message?", "This message has not been sent.")
-		confirm.AddResponse("cancel", "Cancel")
-		if w.deps.SaveDraft != nil {
-			confirm.AddResponse("save", "Save as draft")
-			confirm.SetResponseAppearance("save", adw.ResponseSuggested)
+		if w.deps.SaveDraft == nil {
+			status.SetText("Cannot close yet: draft storage is unavailable.")
+			status.SetVisible(true)
+			return true
 		}
-		confirm.AddResponse("discard", "Discard")
-		confirm.SetResponseAppearance("discard", adw.ResponseDestructive)
-		confirm.SetDefaultResponse("cancel")
-		confirm.SetCloseResponse("cancel")
-		confirm.ConnectResponse(func(response string) {
-			switch response {
-			case "discard":
-				logging.Trace("ui: compose discard on close")
-				finished = true // bypass the guard on the programmatic close below
-				draftStateMu.Lock()
-				closed = true
-				draftStateMu.Unlock()
-				stopAutosave()
-				cancelAI()
-				win.Close()
-			case "save":
-				stopAutosave()
-				msg := gather()
-				acctID := selectedAccount().ID
-				logging.Trace("ui: compose save draft on close", "account", acctID, "to", msg.To, "subject", msg.Subject)
-				// Save before closing: only dismiss the window once the draft is
-				// safely stored. If the save fails the window stays open with the
-				// content intact, so a transient failure can't silently drop it.
-				saveSnapshot(msg, acctID, accountGeneration, func(err error) {
-					if err != nil {
-						slog.Warn("ui: save draft on close", "err", err)
-						logging.Trace("ui: compose save draft on close failed", "err", err)
-						alert := adw.NewAlertDialog("Couldn't save draft",
-							"Saving the draft failed: "+err.Error()+"\n\nThe message is still open, so you can try again.")
-						alert.AddResponse("ok", "OK")
-						alert.SetDefaultResponse("ok")
-						alert.SetCloseResponse("ok")
-						alert.Present(win)
-						return
-					}
-					finished = true // bypass the close guard for the programmatic close
-					draftStateMu.Lock()
-					closed = true
-					draftStateMu.Unlock()
-					cancelAI()
-					win.Close()
-				})
+		stopAutosave()
+		draftStateMu.Lock()
+		accountGeneration++
+		draftStateMu.Unlock()
+		msg, account := gather(), selectedAccount().ID
+		switchingFrom = true
+		box.SetSensitive(false)
+		saveSnapshot(msg, account, accountGeneration, func(err error) {
+			switchingFrom = false
+			box.SetSensitive(true)
+			if err != nil {
+				alert := adw.NewAlertDialog("Couldn't save draft", "Your message is still open. Try closing again to retry saving.\n\n"+err.Error())
+				alert.AddResponse("ok", "Keep editing")
+				alert.SetCloseResponse("ok")
+				alert.Present(win)
+				return
 			}
+			finished = true
+			win.Close()
 		})
-		confirm.Present(win)
-		return true // block this close; the dialog drives the actual close
+		return true
 	})
 
 	attachBtn.ConnectClicked(func() {
@@ -890,20 +909,33 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 		if switchingFrom {
 			return
 		}
-		msg := gather() // reads the selected account on the main thread
-		acctID := selectedAccount().ID
-		logging.Trace("ui: compose send (deferred)", "account", acctID, "to", msg.To, "cc", msg.Cc, "bcc", msg.Bcc,
-			"subject", msg.Subject, "attachments", len(msg.Attachments), "draft_id", msg.DraftID, "thread_id", msg.ThreadID)
-		// Close immediately and hand off to the delayed-send queue, which shows an
-		// "Undo" toast for a few seconds before the message actually goes out.
-		finished = true
-		draftStateMu.Lock()
-		closed = true
-		draftStateMu.Unlock()
 		stopAutosave()
-		w.deferSend(acctID, msg)
-		win.Close()
+		switchingFrom = true
+		box.SetSensitive(false)
+		draftStateMu.Lock()
+		accountGeneration++
+		draftStateMu.Unlock()
+		msg, account := gather(), selectedAccount().ID
+		go func() {
+			// Let an already-running save finish, then carry its durable id into
+			// the send. Queued older saves are invalidated above.
+			saveSerial.Lock()
+			draftStateMu.Lock()
+			msg.LocalDraftID = localDraftID
+			draftStateMu.Unlock()
+			saveSerial.Unlock()
+			dispatch.Main(func() {
+				switchingFrom = false
+				finished = true
+				draftStateMu.Lock()
+				closed = true
+				draftStateMu.Unlock()
+				w.deferSend(account, msg)
+				win.Close()
+			})
+		}()
 	}
+
 	// preSendWarning returns the first reason to double-check before sending, or
 	// "" when the message looks ready.
 	preSendWarning := func() string {
@@ -1006,60 +1038,51 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 		} else {
 			aiBtn.SetTooltipText("Draft this email with AI")
 		}
-		// runDraft streams a draft guided by instruction (may be empty) into the
-		// body, above whatever was already there (quote/signature), which is kept.
 		runDraft = func(instruction string) {
-			logging.Trace("ui: ai draft begin", "is_reply", isReply, "instruction", instruction)
-			aiBtn.SetSensitive(false)
-			quote := init.Body
+			current := bodyText(buf)
+			boundary := editableBoundary(current)
+			tail := current[boundary:]
+			if addSignature && strings.TrimSpace(signature) != "" {
+				tail = composeBodyWithSignature(tail, signature)
+			}
 			subject := strings.TrimSpace(subjEntry.Text())
-			buf.SetText(quote)
-			// The body already carries the configured signature; tell the AI not to
-			// add its own sign-off so the reply isn't double-signed.
-			omitSig := addSignature && strings.TrimSpace(w.signature) != ""
+			omitSig := addSignature && strings.TrimSpace(signature) != ""
 			done := w.aiActivityIn(composeRow, "Drafting message")
-			go func() {
+			previewComposeAI(win, aiCtx, buf, "Review AI draft", func(ctx context.Context) (string, error) {
 				var ch <-chan ai.Chunk
 				var err error
 				if isReply {
-					ch, err = w.deps.Assistant.DraftReply(aiCtx, aiContext, instruction, omitSig)
+					ch, err = w.deps.Assistant.DraftReply(ctx, aiContext, instruction, omitSig)
 				} else {
-					ch, err = w.deps.Assistant.DraftNew(aiCtx, subject, instruction, omitSig)
+					ch, err = w.deps.Assistant.DraftNew(ctx, subject, instruction, omitSig)
 				}
 				if err != nil {
-					msg := err.Error()
-					dispatch.Main(func() {
-						done(doneErr(err))
-						logging.Trace("ui: ai draft failed", "is_reply", isReply, "err", err)
-						buf.SetText("AI error: " + msg + "\n" + quote)
-						aiBtn.SetSensitive(true)
-					})
-					return
+					return "", fmt.Errorf("draft message: %w", err)
 				}
-				final, _ := streamCoalesced(ch, func(text string) {
-					buf.SetText(text + quote)
-				})
-				dispatch.Main(func() {
-					done("")
-					logging.Trace("ui: ai draft done", "is_reply", isReply, "body_len", len(final), "omit_sig", omitSig)
-					// Models often add a sign-off despite being told not to; when a
-					// signature already follows, strip the model's so the reply isn't
-					// double-signed. (Done on the final text only, not mid-stream.)
-					if omitSig {
-						final = stripTrailingSignoff(final)
-					}
-					buf.SetText(final + quote)
-					aiBtn.SetSensitive(true)
-				})
-			}()
+				text, err := collectComposeAI(ctx, ch)
+				if err != nil {
+					return "", err
+				}
+				if omitSig {
+					text = stripTrailingSignoff(text)
+				}
+				if tail != "" {
+					text += "\n\n" + strings.TrimLeft(tail, "\n")
+				}
+				return text, nil
+			}, done)
 		}
-		// The button (and auto-draft) open the AI dialog: quick replies + presets.
-		// A quick reply is used as-is (above the signature/quote); a preset/free
-		// text generates a full draft.
 		startAIDraft := func() {
 			w.askAIIntent(win, isReply, aiContext, runDraft, func(text string) {
-				buf.SetText(text + init.Body)
-				bodyView.GrabFocus()
+				done := w.aiActivityIn(composeRow, "Preparing reply")
+				current := bodyText(buf)
+				tail := current[editableBoundary(current):]
+				if addSignature {
+					tail = composeBodyWithSignature(tail, signature)
+				}
+				previewComposeAI(win, aiCtx, buf, "Review suggested reply", func(context.Context) (string, error) {
+					return text + "\n\n" + strings.TrimLeft(tail, "\n"), nil
+				}, done)
 			})
 		}
 		aiBtn.ConnectClicked(func() { startAIDraft() })
@@ -1083,43 +1106,20 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 				return
 			}
 			logging.Trace("ui: ai proofread begin", "len", len(original))
-			// Anchor the range with marks so the exact span is replaced even if it
-			// streams back after an edit (left/right gravity keeps it bracketing the
-			// text). Other text — signature, quote — is left untouched.
-			startMark := buf.CreateMark("", startIter, true)
-			endMark := buf.CreateMark("", endIter, false)
-			grammarBtn.SetSensitive(false)
+			full := []rune(bodyText(buf))
+			prefix, suffix := string(full[:startIter.Offset()]), string(full[endIter.Offset():])
 			done := w.aiActivityIn(composeRow, "Checking grammar")
-			go func() {
-				ch, err := w.deps.Assistant.Proofread(aiCtx, original)
-				var acc strings.Builder
-				if err == nil {
-					for c := range ch {
-						if c.Err == nil {
-							acc.WriteString(c.Text)
-						}
-					}
+			previewComposeAI(win, aiCtx, buf, "Review proofreading", func(ctx context.Context) (string, error) {
+				ch, err := w.deps.Assistant.Proofread(ctx, original)
+				if err != nil {
+					return "", fmt.Errorf("proofread message: %w", err)
 				}
-				corrected := strings.TrimRight(acc.String(), " \t\r\n")
-				dispatch.Main(func() {
-					note := doneErr(err)
-					if note == "" && strings.TrimSpace(corrected) == "" {
-						note = "error: the model returned nothing"
-					}
-					done(note)
-					grammarBtn.SetSensitive(true)
-					logging.Trace("ui: ai proofread done", "corrected_len", len(corrected), "err", err, "note", note)
-					defer func() { buf.DeleteMark(startMark); buf.DeleteMark(endMark) }()
-					if note != "" {
-						return
-					}
-					si := buf.IterAtMark(startMark)
-					ei := buf.IterAtMark(endMark)
-					buf.Delete(si, ei)
-					buf.Insert(buf.IterAtMark(startMark), corrected)
-					status.SetVisible(false)
-				})
-			}()
+				text, err := collectComposeAI(ctx, ch)
+				if err != nil {
+					return "", err
+				}
+				return prefix + text + suffix, nil
+			}, done)
 		})
 		hb.PackEnd(grammarBtn)
 	}
@@ -1181,42 +1181,20 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 				return
 			}
 			logging.Trace("ui: ai refine begin", "len", len(original), "instruction", instruction)
-			// Anchor the range with marks so the exact span is replaced even if it
-			// streams back after an edit (gravity keeps them bracketing the text).
-			startMark := buf.CreateMark("", startIter, true)
-			endMark := buf.CreateMark("", endIter, false)
-			refineBtn.SetSensitive(false)
+			full := []rune(bodyText(buf))
+			prefix, suffix := string(full[:startIter.Offset()]), string(full[endIter.Offset():])
 			done := w.aiActivityIn(composeRow, "Refining text")
-			go func() {
-				ch, err := w.deps.Assistant.Refine(aiCtx, original, instruction)
-				var acc strings.Builder
-				if err == nil {
-					for c := range ch {
-						if c.Err == nil {
-							acc.WriteString(c.Text)
-						}
-					}
+			previewComposeAI(win, aiCtx, buf, "Review rewrite", func(ctx context.Context) (string, error) {
+				ch, err := w.deps.Assistant.Refine(ctx, original, instruction)
+				if err != nil {
+					return "", fmt.Errorf("refine message: %w", err)
 				}
-				refined := strings.TrimRight(acc.String(), " \t\r\n")
-				dispatch.Main(func() {
-					note := doneErr(err)
-					if note == "" && strings.TrimSpace(refined) == "" {
-						note = "error: the model returned nothing"
-					}
-					done(note)
-					refineBtn.SetSensitive(true)
-					logging.Trace("ui: ai refine done", "refined_len", len(refined), "err", err, "note", note)
-					defer func() { buf.DeleteMark(startMark); buf.DeleteMark(endMark) }()
-					if note != "" {
-						return
-					}
-					si := buf.IterAtMark(startMark)
-					ei := buf.IterAtMark(endMark)
-					buf.Delete(si, ei)
-					buf.Insert(buf.IterAtMark(startMark), refined)
-					status.SetVisible(false)
-				})
-			}()
+				text, err := collectComposeAI(ctx, ch)
+				if err != nil {
+					return "", err
+				}
+				return prefix + text + suffix, nil
+			}, done)
 		}
 		// Capture phase: the TextView would otherwise consume Return as a newline.
 		refineKeys := gtk.NewEventControllerKey()

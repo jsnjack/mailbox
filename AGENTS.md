@@ -326,16 +326,25 @@ addresses seen in cached mail by frequency+recency) plus the user's own
 registered accounts (`withOwnAccounts`, listed first so you can address another
 of your accounts); a `GtkEntryCompletion` completes the last comma-separated
 token. A sparkle button next to Subject generates it from the body
-(`Assistant.GenerateSubject`). The compose window has an AI-draft button (streams a drafted reply via
-`DraftReply` for a reply/forward, or a from-scratch body via `DraftNew` for a
-new message — both prompted by `askAIIntent`, which also loads suggested replies below the instruction editor via `SmartReplies`), an AI grammar-check button
-(`Proofread`), a Refine-with-AI button (a popover takes a free-text
-instruction — "shorter", "more formal" — and `Assistant.Refine` rewrites the
-selection, or with none the same own-writing region grammar-check uses:
-everything above the quote, so a reply refines only the new text; the span is
-mark-anchored and replaced in place), a Save-draft button, and a visible Discard-draft action while editing. Resumed drafts stay bound to their account. In a fresh compose, From remains selectable after autosave: switching saves a new draft under the destination account before deleting the source draft, serializes against pending saves, and clears provider-specific IDs. Both the store and outbox reject a cross-account draft id. Send runs pre-send guards (`preSendWarning`: empty
-subject, "attachment" mentioned but none attached → confirm), and closing an
-unsent message offers Save-as-draft alongside Discard. A configurable signature
+(`Assistant.GenerateSubject`). Draft, Proofread, and Refine use `previewComposeAI`:
+generation leaves the editor unchanged, a complete successful result opens for
+review with Apply/Cancel, and Apply is one GTK undo action. An intervening edit
+invalidates the preview. Cancel or compose close cancels the request; partial
+stream failures never become outgoing text. `askAIIntent` collects drafting
+instructions and offers suggested replies. Refine and Proofread use the selected
+span, or the writing above the quote when nothing is selected.
+Compose keeps Save draft and Discard available. Closing saves dirty content and
+closes after the local write succeeds; failures keep the editor open. Discard
+serializes against pending saves, deletes the exact local draft, and offers Undo
+that restores the captured content as a new draft. Send also waits for any active
+save and invalidates stale queued snapshots.
+From remains selectable in fresh and resumed drafts. Switching saves a new draft
+under the destination account before deleting the source, clears provider IDs,
+and replaces only an unchanged trailing account signature. Edited signatures are
+preserved. Provider-only drafts first gain a local identity so cleanup targets the
+exact draft. The store and outbox reject cross-account draft IDs.
+Send runs pre-send guards (`preSendWarning`: empty subject or a mentioned but
+missing attachment requires confirmation). A configurable signature
 is appended to every composed body below the cursor area and above any quote
 (`composeBodyWithSignature`) as a plain sign-off — no RFC 3676 "-- " delimiter
 (Gmail/Outlook don't honor it, so for a short sign-off it just shows a stray
@@ -559,8 +568,12 @@ them as wrapping, width-bounded chips; decoded payloads are capped at 18 MiB tot
 and the message is held ~5s behind an "Undo" toast (`deferSend`) before it goes
 out; a failed send is queued to the `outbox` table and retried by a background
 sweeper (`SweepOutbox`, ~45s); pending/failed sends are surfaced by an
-`adw.Banner` over the thread list and an Outbox dialog (per-item retry/discard
-plus "send now"); its queries run off the GTK thread and actions disable while showing progress. A bottom status bar shows what the app is doing — the current
+`adw.Banner` over the thread list and an Outbox dialog (retry, Edit as draft,
+discard with Undo, and Send now). `RecoverOutboxDraft` parses the queued MIME and
+atomically cancels an unclaimed send and saves its editable local draft; failure
+rolls back both. Restoring a discarded outbox item preserves its UUID, attempt
+count, and uncertain-delivery state, so Undo does not turn uncertainty into an
+automatic retry. Undo Send opens compose only after successful cancellation; its queries run off the GTK thread and actions disable while showing progress. A bottom status bar shows what the app is doing — the current
 operation with a spinner/progress bar (left) and live cumulative metrics (right:
 bytes transferred, Gmail API requests + quota units, AI requests + AI bytes
 (`Assistant.Requests`/`Transferred` — counted in the Assistant so they survive a

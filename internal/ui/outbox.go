@@ -295,6 +295,35 @@ func (w *window) outboxRow(acct AccountInfo, it model.OutboxItem, showAccount bo
 		})
 		row.Append(retry)
 	}
+	if w.deps.RecoverOutbox != nil {
+		edit := gtk.NewButtonWithLabel("Edit as draft")
+		edit.SetVAlign(gtk.AlignCenter)
+		edit.ConnectClicked(func() {
+			if busy {
+				return
+			}
+			busy = true
+			row.SetSensitive(false)
+			go func() {
+				msg, ok, err := w.deps.RecoverOutbox(context.Background(), it)
+				dispatch.Main(func() {
+					if err != nil {
+						w.toast("Could not open draft: " + err.Error())
+					} else if !ok {
+						w.toast("Cannot edit — the message is already being sent")
+					} else {
+						w.openComposeOpts(msg, "", "Recovered draft", composeOpts{fromAccountID: acctID})
+						if it.State == "uncertain" {
+							w.toast("Delivery was unconfirmed. Check Sent before sending this draft again.")
+						}
+					}
+					rebuild()
+					w.refreshOutbox()
+				})
+			}()
+		})
+		row.Append(edit)
+	}
 	if w.deps.DiscardOutbox != nil {
 		discard := gtk.NewButtonFromIconName("user-trash-symbolic")
 		discard.SetTooltipText("Discard")
@@ -317,6 +346,8 @@ func (w *window) outboxRow(acct AccountInfo, it model.OutboxItem, showAccount bo
 						w.toast("Couldn't discard message")
 					} else if !ok {
 						w.toast("Too late to discard — the message is already being sent")
+					} else {
+						w.offerOutboxUndo(it, rebuild)
 					}
 					logging.Trace("ui: outbox discard item done", "account", acctID, "id", id, "cancelled", ok, "err", err)
 					rebuild()
@@ -353,4 +384,33 @@ func outboxStatus(it model.OutboxItem) string {
 		return fmt.Sprintf("Failed (attempt %d)", it.Attempts)
 	}
 	return "Queued"
+}
+
+func (w *window) offerOutboxUndo(item model.OutboxItem, rebuild func()) {
+	if w.deps.RestoreOutbox == nil {
+		w.toast("Queued message discarded")
+		return
+	}
+	toast := newToast("Queued message discarded")
+	toast.SetButtonLabel("Undo")
+	used := false
+	toast.ConnectButtonClicked(func() {
+		if used {
+			return
+		}
+		used = true
+		go func() {
+			err := w.deps.RestoreOutbox(context.Background(), item)
+			dispatch.Main(func() {
+				if err != nil {
+					w.toast("Could not restore queued message: " + err.Error())
+					// Keep another recovery action available after a transient failure.
+					w.offerOutboxUndo(item, rebuild)
+				}
+				rebuild()
+				w.refreshOutbox()
+			})
+		}()
+	})
+	w.toastOverlay.AddToast(toast)
 }
