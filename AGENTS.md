@@ -326,14 +326,19 @@ addresses seen in cached mail by frequency+recency) plus the user's own
 registered accounts (`withOwnAccounts`, listed first so you can address another
 of your accounts); a `GtkEntryCompletion` completes the last comma-separated
 token. A sparkle button next to Subject generates it from the body
-(`Assistant.GenerateSubject`). Draft, Proofread, and Refine use `previewComposeAI`:
+(`Assistant.GenerateSubject`). A single labelled AI menu offers Draft, Rewrite, and Proofread. These actions use `previewComposeAI`:
 generation leaves the editor unchanged, a complete successful result opens for
 review with Apply/Cancel, and Apply is one GTK undo action. An intervening edit
 invalidates the preview. Cancel or compose close cancels the request; partial
 stream failures never become outgoing text. `askAIIntent` collects drafting
 instructions and offers suggested replies. Refine and Proofread use the selected
 span, or the writing above the quote when nothing is selected.
-Compose keeps Save draft and Discard available. Closing saves dirty content and
+Compose keeps Save draft and Discard available. A fixed bottom strip shows
+Saving/Saved/Save failed and a deduplicated recipient count. To/Cc/Bcc use
+editable, removable recipient chips with autocomplete and inline validation;
+valid addresses commit on Enter, a trailing comma, or leaving the field. Bcc-only
+and Cc-only messages are accepted. The reader's primary action is explicitly
+labelled Reply all, with its audience count in the tooltip. Closing saves dirty content and
 closes after the local write succeeds; failures keep the editor open. Discard
 serializes against pending saves, deletes the exact local draft, and offers Undo
 that restores the captured content as a new draft. Send also waits for any active
@@ -508,8 +513,12 @@ returns to the current label. Its entry runs instant local FTS5 search
 (`store.SearchPage`, sanitized into a quoted prefix MATCH) whose hits are
 grouped into threads. The temporary search surface names the current scope and
 loaded result count; a Relevant/Newest selector defaults to the FTS/provider
-relevance order, while Search all (or Enter) switches from the cache to the
-paged provider search. Conversation lists load in bounded
+relevance order. Explicit Account and Cached mail/All mail on server selectors
+control the scope; Enter keeps the chosen scope. Expanding Filters offers sender,
+after/before dates, unread, and attachments, and reads any existing operators
+from the query. Local search implements those operators; IMAP maps date/unread
+filters to SEARCH criteria and preserves quoted sender names. IMAP attachment
+filtering is explicitly cache-only because it has no server SEARCH mapping. Conversation lists load in bounded
 100-item pages as the user approaches the bottom: label and All Mail views use
 stable `(internal_date,rowid)` keyset cursors, local FTS advances by raw-hit
 offset (several hits may belong to one conversation), and provider search keeps
@@ -555,8 +564,8 @@ it never starts suggestion requests or resizes as results arrive. Custom reply
 opens `askAIIntent` before creating a compose. Its fixed-size dialog has a
 header with Cancel/Create draft, an instruction editor, and
 generated replies directly underneath it, without tabs or preset buttons.
-Suggestions load when the dialog opens, use a compact native boxed list in a
-reserved scrollable area, and
+Suggestions load when the dialog opens, use actionable native boxed rows with
+forward arrows in a reserved scrollable area, and
 open an editable compose immediately when selected, closing the dialog.
 Create draft applies only to the custom instruction. Try again regenerates; closing cancels pending requests. A bounded
 session cache keyed by the full conversation context hash reuses suggestions on
@@ -620,7 +629,9 @@ with `SetShowContent` driving navigation when collapsed. Single-key shortcuts
 threads, r reply, a/e archive, c compose, / focus search, and more ("?" shows
 the cheat sheet) — all user-rebindable (Preferences → Keyboard; the
 `shortcutDefs` table drives the handler, the cheat sheet, and the editor;
-overrides in `~/.config/mailbox/shortcuts.json`). Test hooks:
+overrides in `~/.config/mailbox/shortcuts.json`). Rebinding rejects conflicts,
+names the existing action, and reserves `?` for the shortcuts window; failed
+writes do not report success. Test hooks:
 `MAILBOX_OPEN_FIRST=1` opens the newest message on launch; `MAILBOX_OPEN_PREFS=1`
 opens the Preferences dialog on launch; `MAILBOX_WIN_SIZE=WxH`
 overrides the initial window size; `MAILBOX_APP_ID` overrides the GApplication id

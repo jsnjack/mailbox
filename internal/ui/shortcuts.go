@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"log/slog"
 	"strings"
 
@@ -72,6 +73,21 @@ func effectiveKeys(overrides map[string]string, def shortcutDef) string {
 		return sanitizeKeys(v)
 	}
 	return def.defaultKeys
+}
+
+// shortcutConflict identifies an existing binding before accepting an override.
+func shortcutConflict(overrides map[string]string, id, keys string) string {
+	for _, r := range keys {
+		if r == '?' {
+			return "? is reserved for Keyboard Shortcuts"
+		}
+		for _, def := range shortcutDefs {
+			if def.id != id && strings.ContainsRune(effectiveKeys(overrides, def), r) {
+				return fmt.Sprintf("%c is already assigned to %s", r, def.label)
+			}
+		}
+	}
+	return ""
 }
 
 // rebuildKeymap compiles the single-key shortcut table (user overrides over
@@ -157,9 +173,19 @@ func (w *window) showShortcuts() {
 			keys := sanitizeKeys(e.Text())
 			e.SetText(keys)
 			m, _ := config.LoadShortcuts()
+			if conflict := shortcutConflict(m, def.id, keys); conflict != "" {
+				e.AddCSSClass("error")
+				e.SetTooltipText(conflict)
+				w.toast(conflict)
+				return
+			}
+			e.RemoveCSSClass("error")
+			e.SetTooltipText("Type keys, press Enter")
 			m[def.id] = keys
 			if err := config.SaveShortcuts(m); err != nil {
 				slog.Warn("ui: save shortcuts", "err", err)
+				w.toast("Could not save shortcut")
+				return
 			}
 			logging.Trace("ui: shortcut rebound", "action", def.id, "keys", keys)
 			w.rebuildKeymap()

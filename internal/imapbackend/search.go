@@ -3,6 +3,7 @@ package imapbackend
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/emersion/go-imap/v2"
 	"github.com/jsnjack/mailbox/internal/logging"
@@ -40,6 +41,30 @@ var rejectedOperators = map[string]bool{
 	"category": true, "deliveredto": true, "size": true, "larger": true, "smaller": true,
 }
 
+func searchTokens(query string) []string {
+	var tokens []string
+	var token strings.Builder
+	quoted := false
+	for _, r := range query {
+		if r == '"' {
+			quoted = !quoted
+			continue
+		}
+		if !quoted && (r == ' ' || r == '\t' || r == '\n') {
+			if token.Len() > 0 {
+				tokens = append(tokens, token.String())
+				token.Reset()
+			}
+		} else {
+			token.WriteRune(r)
+		}
+	}
+	if token.Len() > 0 {
+		tokens = append(tokens, token.String())
+	}
+	return tokens
+}
+
 // parseSearchQuery turns a Gmail-flavoured query into a searchQuery. Supported:
 // `in:<label>` scopes the search to the folder(s) mapped to that label;
 // `from:`/`to:`/`cc:`/`bcc:`/`subject:` become IMAP `SEARCH HEADER` terms; any
@@ -51,10 +76,22 @@ var rejectedOperators = map[string]bool{
 // comes back).
 func parseSearchQuery(query string) (searchQuery, error) {
 	var q searchQuery
-	for _, tok := range strings.Fields(query) {
+	for _, tok := range searchTokens(query) {
 		key, val, hasKey := strings.Cut(tok, ":")
 		lkey := strings.ToLower(key)
 		switch {
+		case hasKey && (lkey == "after" || lkey == "before"):
+			date, err := time.Parse("2006-01-02", strings.ReplaceAll(val, "/", "-"))
+			if err != nil {
+				return searchQuery{}, fmt.Errorf("imap: invalid %s date %q", lkey, val)
+			}
+			if lkey == "after" {
+				q.criteria.Since = date
+			} else {
+				q.criteria.Before = date
+			}
+		case hasKey && lkey == "is" && strings.EqualFold(val, "unread"):
+			q.criteria.NotFlag = append(q.criteria.NotFlag, imap.FlagSeen)
 		case hasKey && lkey == "in":
 			if q.label != "" {
 				return searchQuery{}, fmt.Errorf("imap: multiple in: operators in query %q", query)

@@ -104,10 +104,10 @@ func TestReplyDialogGTK(t *testing.T) {
 		})
 		return entry
 	}
-	choices := func(d *adw.Dialog) []*gtk.CheckButton {
-		var rows []*gtk.CheckButton
+	choices := func(d *adw.Dialog) []*adw.ActionRow {
+		var rows []*adw.ActionRow
 		visit(d.Child(), func(widget *gtk.Widget) {
-			if row, ok := widget.Cast().(*gtk.CheckButton); ok {
+			if row, ok := widget.Cast().(*adw.ActionRow); ok {
 				rows = append(rows, row)
 			}
 		})
@@ -146,12 +146,11 @@ func TestReplyDialogGTK(t *testing.T) {
 	closed := false
 	d.ConnectClosed(func() { closed = true })
 	row := choices(d)[0]
-	row.SetActive(true)
+	row.Emit("activated")
 	if chosen != "Thanks for the update." || selections != 1 {
 		t.Fatalf("selection did not immediately open reply: %q, calls=%d", chosen, selections)
 	}
-	row.SetActive(false)
-	row.SetActive(true)
+	row.Emit("activated")
 	if selections != 1 {
 		t.Fatal("closing dialog opened a second compose")
 	}

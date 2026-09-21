@@ -2,6 +2,7 @@ package store
 
 import (
 	"strings"
+	"time"
 
 	"github.com/jsnjack/mailbox/internal/model"
 )
@@ -9,12 +10,13 @@ import (
 // searchFilter is a parsed local-search query: zero or more field operators plus
 // the free-text remainder that still goes through FTS.
 type searchFilter struct {
-	from      []string // from:  → matched against from_addr/from_name (AND across values)
-	to        []string // to:    → matched against to_addrs/cc_addrs
-	subject   []string // subject: → matched against subject
-	inLabels  []string // in:    → label token (system alias or user-label name)
-	hasAttach bool     // has:attachment
-	freeText  string   // everything else, for FTS MATCH
+	from          []string // from:  → matched against from_addr/from_name (AND across values)
+	to            []string // to:    → matched against to_addrs/cc_addrs
+	subject       []string // subject: → matched against subject
+	inLabels      []string // in:    → label token (system alias or user-label name)
+	after, before int64
+	hasAttach     bool   // has:attachment
+	freeText      string // everything else, for FTS MATCH
 }
 
 // systemLabelAliases maps the words users type in `in:` to Gmail system label
@@ -53,6 +55,21 @@ func parseSearch(raw string) searchFilter {
 			f.to = append(f.to, val)
 		case "subject":
 			f.subject = append(f.subject, val)
+		case "after", "before":
+			d, err := time.Parse("2006-01-02", strings.ReplaceAll(val, "/", "-"))
+			if err != nil {
+				free = append(free, tok)
+			} else if key == "after" {
+				f.after = d.Unix()
+			} else {
+				f.before = d.Unix()
+			}
+		case "is":
+			if strings.EqualFold(val, "unread") {
+				f.inLabels = append(f.inLabels, "unread")
+			} else {
+				free = append(free, tok)
+			}
 		case "in":
 			f.inLabels = append(f.inLabels, val)
 		case "has":
@@ -79,7 +96,7 @@ func splitOperator(tok string) (key, val string, isPair bool) {
 	}
 	key = strings.ToLower(tok[:i])
 	switch key {
-	case "from", "to", "subject", "in", "has":
+	case "from", "to", "subject", "in", "has", "after", "before", "is":
 	default:
 		return "", "", false
 	}
@@ -121,6 +138,14 @@ func splitSearchTokens(raw string) []string {
 // messages alias `m`) and their bound args. Free text is handled separately via
 // FTS by the caller.
 func (f searchFilter) buildFilterPredicates() (preds []string, args []any) {
+	if f.after != 0 {
+		preds = append(preds, "m.internal_date >= ?")
+		args = append(args, f.after)
+	}
+	if f.before != 0 {
+		preds = append(preds, "m.internal_date < ?")
+		args = append(args, f.before)
+	}
 	like := func(v string) string { return "%" + escapeLike(v) + "%" }
 	for _, v := range f.from {
 		preds = append(preds, "(m.from_addr LIKE ? ESCAPE '\\' OR m.from_name LIKE ? ESCAPE '\\')")

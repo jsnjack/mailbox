@@ -166,30 +166,34 @@ type window struct {
 	unreadOnly        bool
 	// multi-select triage: a selection mode with per-row checkboxes and a bulk
 	// action bar.
-	selectBtn         *gtk.ToggleButton
-	selectMode        bool
-	selected          map[string]bool // selected thread ids
-	selectionBar      *gtk.Box
-	selectionLabel    *gtk.Label
-	readOnlyBanner    *adw.Banner    // revealed when no provider backend (live features off)
-	outboxBanner      *adw.Banner    // revealed when sends are queued/failed
-	emptyFolderBanner *adw.Banner    // revealed in Trash/Spam to empty them permanently
-	authBanner        *adw.Banner    // revealed when an account's sign-in expired/was revoked
-	authExpiredID     int64          // the account the auth banner's Reconnect targets (0 = none/unknown)
-	authReported      map[int64]bool // accounts whose expiry already got an activity-log row (AuthExpired repeats every failed sync pass)
-	searchEntry       *gtk.SearchEntry
-	searchBar         *gtk.SearchBar
-	searchBtn         *gtk.ToggleButton
-	searchControls    *gtk.Box
-	searchStatus      *gtk.Label
-	searchSort        *gtk.DropDown // Relevant (provider/FTS rank) or Newest
-	searchAllBtn      *gtk.Button   // explicit provider search, available while cached results are shown
-	suppressSearch    bool          // guards SetText from firing a search during label switch
-	serverSearch      bool          // current search is a provider-side search, not local FTS
-	serverQuery       string        // the active server-search query (guards the debounced change signal)
-	threadByID        map[string]model.ThreadSummary
-	threadIDs         []string          // displayed thread ids, in order (for incremental diffing)
-	rowSig            map[string]string // last-rendered signature per row, to detect in-place changes
+	selectBtn              *gtk.ToggleButton
+	selectMode             bool
+	selected               map[string]bool // selected thread ids
+	selectionBar           *gtk.Box
+	selectionLabel         *gtk.Label
+	readOnlyBanner         *adw.Banner    // revealed when no provider backend (live features off)
+	outboxBanner           *adw.Banner    // revealed when sends are queued/failed
+	emptyFolderBanner      *adw.Banner    // revealed in Trash/Spam to empty them permanently
+	authBanner             *adw.Banner    // revealed when an account's sign-in expired/was revoked
+	authExpiredID          int64          // the account the auth banner's Reconnect targets (0 = none/unknown)
+	authReported           map[int64]bool // accounts whose expiry already got an activity-log row (AuthExpired repeats every failed sync pass)
+	searchEntry            *gtk.SearchEntry
+	searchBar              *gtk.SearchBar
+	searchBtn              *gtk.ToggleButton
+	searchControls         *gtk.Box
+	searchStatus           *gtk.Label
+	searchAccount          *gtk.DropDown
+	searchScope            *gtk.DropDown
+	updatingSearchOptions  bool
+	searchAccountSignature string
+	searchSort             *gtk.DropDown // Relevant (provider/FTS rank) or Newest
+	searchAllBtn           *gtk.Button   // explicit provider search, available while cached results are shown
+	suppressSearch         bool          // guards SetText from firing a search during label switch
+	serverSearch           bool          // current search is a provider-side search, not local FTS
+	serverQuery            string        // the active server-search query (guards the debounced change signal)
+	threadByID             map[string]model.ThreadSummary
+	threadIDs              []string          // displayed thread ids, in order (for incremental diffing)
+	rowSig                 map[string]string // last-rendered signature per row, to detect in-place changes
 
 	// coalesce refreshes triggered by bursts of sync change events.
 	refreshPending       bool
@@ -1726,7 +1730,7 @@ func (w *window) buildReader() *adw.NavigationPage {
 	replyMenu.Append("Forward", "win.reader-forward")
 
 	w.replyBtn = adw.NewSplitButton()
-	w.replyBtn.SetIconName("mail-reply-all-symbolic")
+	w.replyBtn.SetLabel("Reply all")
 	w.replyBtn.SetTooltipText("Reply all to conversation (r) — dropdown: Reply, Forward")
 	a11yLabel(w.replyBtn, "Reply all to conversation")
 	w.replyBtn.ConnectClicked(w.onReplyAll)
@@ -1805,6 +1809,11 @@ func (w *window) setActionsSensitive(on bool) {
 	canModify := on && w.deps.ModifyLabels != nil
 	w.archiveBtn.SetSensitive(canModify)
 	w.replyBtn.SetSensitive(on && w.deps.Send != nil)
+	w.replyBtn.SetLabel("Reply all")
+	if on {
+		to, cc := replyAllRecipients(w.openMsg, w.activeEmail)
+		w.replyBtn.SetTooltipText("Reply all — " + recipientSummary(to, cc))
+	}
 	canAI := on && w.deps.Assistant != nil
 	w.translateBtn.SetSensitive(canAI)
 	if w.summaryBtn != nil {

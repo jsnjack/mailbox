@@ -210,11 +210,7 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 	w.searchEntry.SetHExpand(true)
 	w.searchEntry.ConnectSearchChanged(w.onSearchChanged)
 	w.searchEntry.ConnectStopSearch(w.closeSearch)
-	w.searchEntry.ConnectActivate(func() {
-		if w.canSearchServer() && strings.TrimSpace(w.searchEntry.Text()) != "" && !w.serverSearch {
-			w.onSearchAllMail()
-		}
-	})
+	w.searchEntry.ConnectActivate(w.onSearchChanged)
 	w.searchSort = gtk.NewDropDownFromStrings([]string{"Relevant", "Newest"})
 	w.searchSort.SetTooltipText("Search result order")
 	w.searchSort.Connect("notify::selected", func() {
@@ -222,7 +218,7 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 			w.loadThreadsFor(w.searchEntry.Text())
 		}
 	})
-	w.searchAllBtn = gtk.NewButtonWithLabel("Search all")
+	w.searchAllBtn = gtk.NewButtonWithLabel("Search server")
 	w.searchAllBtn.SetTooltipText("Search the provider for messages outside the local cache (Enter)")
 	a11yLabel(w.searchAllBtn, "Search all mail on the provider")
 	w.searchAllBtn.AddCSSClass("flat")
@@ -241,6 +237,7 @@ func (w *window) buildThreadList() *adw.NavigationPage {
 	w.searchControls.SetVisible(false)
 	searchContent := gtk.NewBox(gtk.OrientationVertical, 4)
 	searchContent.Append(w.searchEntry)
+	searchContent.Append(w.buildSearchOptions())
 	searchContent.Append(w.searchControls)
 	w.searchBar = gtk.NewSearchBar()
 	w.searchBar.SetChild(searchContent)
@@ -776,6 +773,7 @@ func (w *window) onSearchAllMail() {
 	}
 	logging.Trace("ui: search all mail", "query", q, "account", w.activeID)
 	w.serverSearch = true // stay in server-search mode across refreshes
+	w.syncSearchOptions()
 	w.updateSearchControls(q, true)
 	w.runServerSearch(q)
 }
@@ -866,10 +864,9 @@ func (w *window) onSearchChanged() {
 	}
 	q := strings.TrimSpace(w.searchEntry.Text())
 	logging.Trace("ui: search changed", "query", q, "serverQuery", w.serverQuery)
-	// The search-changed signal is debounced, so a programmatic SetText (e.g.
-	// "Find emails from sender") arrives here after suppressSearch was cleared.
-	// Only a genuinely different query exits server-search mode back to local.
-	if q != w.serverQuery {
+	if w.searchScope != nil {
+		w.serverSearch = w.searchScope.Selected() == 1
+	} else if q != w.serverQuery {
 		w.searchAllBtn.SetSensitive(true)
 		w.serverSearch = false
 	}
@@ -918,6 +915,7 @@ func (w *window) clearSearch() {
 }
 
 func (w *window) updateSearchControls(query string, server bool) {
+	w.syncSearchOptions()
 	active := strings.TrimSpace(query) != ""
 	w.searchControls.SetVisible(active)
 	w.searchAllBtn.SetVisible(active && w.canSearchServer() && !server)

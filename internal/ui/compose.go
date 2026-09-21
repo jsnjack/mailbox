@@ -10,7 +10,6 @@ import (
 	"io"
 	"log/slog"
 	"mime"
-	"net/mail"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -159,18 +158,10 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 		return AccountInfo{ID: w.activeID, Email: w.activeEmail}
 	}
 
-	toEntry := gtk.NewEntry()
-	toEntry.SetPlaceholderText("To")
-	toEntry.SetText(init.To)
-	toEntry.SetHExpand(true)
-
-	ccEntry := gtk.NewEntry()
-	ccEntry.SetPlaceholderText("Cc")
-	ccEntry.SetText(init.Cc)
-
-	bccEntry := gtk.NewEntry()
-	bccEntry.SetPlaceholderText("Bcc")
-	bccEntry.SetText(init.Bcc)
+	toField := newRecipientField("To", init.To)
+	ccField := newRecipientField("Cc", init.Cc)
+	bccField := newRecipientField("Bcc", init.Bcc)
+	toEntry, ccEntry, bccEntry := toField.entry, ccField.entry, bccField.entry
 
 	subjEntry := gtk.NewEntry()
 	subjEntry.SetPlaceholderText("Subject")
@@ -374,14 +365,14 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 	ccBccBtn.AddCSSClass("flat")
 	ccBccBtn.SetVAlign(gtk.AlignCenter)
 	toRow := gtk.NewBox(gtk.OrientationHorizontal, 6)
-	toRow.Append(toEntry)
+	toRow.Append(toField.box)
 	toRow.Append(ccBccBtn)
 
-	ccEntry.SetVisible(false)
-	bccEntry.SetVisible(false)
+	ccField.box.SetVisible(false)
+	bccField.box.SetVisible(false)
 	showCcBcc := func() {
-		ccEntry.SetVisible(true)
-		bccEntry.SetVisible(true)
+		ccField.box.SetVisible(true)
+		bccField.box.SetVisible(true)
 		ccBccBtn.SetVisible(false)
 	}
 	ccBccBtn.ConnectClicked(func() { showCcBcc() })
@@ -392,8 +383,8 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 	box := gtk.NewBox(gtk.OrientationVertical, 6)
 	setMargins(box, 12, 12, 12, 12)
 	box.Append(toRow)
-	box.Append(ccEntry)
-	box.Append(bccEntry)
+	box.Append(ccField.box)
+	box.Append(bccField.box)
 	// Subject row: the entry, plus an AI button that fills the subject in from the
 	// body (the user's own text, not the signature/quote).
 	if w.deps.Assistant != nil && w.aiGenerateSubject {
@@ -506,6 +497,26 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 	composeRow = newActivityRow(nil)
 	composeRow.mount(tv, true)
 
+	saveState := gtk.NewLabel("New message")
+	saveState.AddCSSClass("dim-label")
+	saveState.AddCSSClass("caption")
+	saveState.SetXAlign(0)
+	saveState.SetHExpand(true)
+	if init.LocalDraftID != "" || init.DraftID != "" || init.SourceMessageID != "" {
+		saveState.SetText("Saved")
+	}
+	if opts.startDirty {
+		saveState.SetText("Unsaved changes")
+	}
+	recipientCount := gtk.NewLabel(recipientSummary(toField.text(), ccField.text(), bccField.text()))
+	recipientCount.AddCSSClass("dim-label")
+	recipientCount.AddCSSClass("caption")
+	saveStrip := gtk.NewBox(gtk.OrientationHorizontal, 12)
+	setMargins(saveStrip, 12, 12, 6, 6)
+	saveStrip.Append(saveState)
+	saveStrip.Append(recipientCount)
+	tv.AddBottomBar(saveStrip)
+
 	win := adw.NewWindow()
 	win.SetTitle(title)
 	cw, ch := 640, 560
@@ -549,9 +560,9 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 		draftStateMu.Unlock()
 		return model.OutgoingMessage{
 			From:            selectedAccount().Email,
-			To:              strings.TrimSpace(toEntry.Text()),
-			Cc:              strings.TrimSpace(ccEntry.Text()),
-			Bcc:             strings.TrimSpace(bccEntry.Text()),
+			To:              strings.TrimSpace(toField.text()),
+			Cc:              strings.TrimSpace(ccField.text()),
+			Bcc:             strings.TrimSpace(bccField.text()),
 			Subject:         subjEntry.Text(),
 			Body:            body,
 			HTMLBody:        buildHTMLBody(body, initQuote, init.QuoteHTML),
@@ -643,6 +654,11 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 	// captured while the first DB write is finishing, but it reuses the stable id
 	// and updates the saved fingerprint only for its own exact snapshot.
 	saveSnapshot := func(msg model.OutgoingMessage, accountID int64, generation uint64, done func(error)) {
+		dispatch.Main(func() {
+			if generation == accountGeneration {
+				saveState.SetText("Saving…")
+			}
+		})
 		go func() {
 			saveSerial.Lock()
 			draftStateMu.Lock()
@@ -670,8 +686,14 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 				draftStateMu.Lock()
 				isClosed := closed
 				draftStateMu.Unlock()
-				if !isClosed {
-
+				if !isClosed && generation == accountGeneration {
+					if err != nil {
+						saveState.SetText("Save failed")
+					} else if dirty() {
+						saveState.SetText("Unsaved changes")
+					} else {
+						saveState.SetText("Saved")
+					}
 					// Only a failure is worth saying here. Announcing every
 					// autosave was the loudest thing in the window — it fires
 					// 1.5s after each burst of typing, so the line was rewritten
@@ -680,6 +702,8 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 					if err != nil {
 						status.SetVisible(true)
 						status.SetText("Could not save draft locally: " + err.Error())
+					} else if strings.HasPrefix(status.Text(), "Could not save draft locally:") {
+						status.SetVisible(false)
 					}
 				}
 				if done != nil {
@@ -694,6 +718,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 		if w.deps.SaveDraft == nil || switchingFrom {
 			return
 		}
+		saveState.SetText("Unsaved changes")
 		generation := accountGeneration
 		msg := gather() // GTK values are captured on the main thread.
 		accountID := selectedAccount().ID
@@ -805,6 +830,11 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 				}
 				switchingFrom = false
 				box.SetSensitive(true)
+				if succeeded {
+					saveState.SetText("Saved")
+				} else {
+					saveState.SetText("Save failed")
+				}
 				accountDD.SetSensitive(true)
 				send.SetSensitive(true)
 				if draftBtn != nil {
@@ -820,9 +850,13 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 			})
 		}()
 	}
-	for _, entry := range []*gtk.Entry{toEntry, ccEntry, bccEntry, subjEntry} {
-		entry.Connect("changed", scheduleAutosave)
+	for _, field := range []*recipientField{toField, ccField, bccField} {
+		field.changed = func() {
+			recipientCount.SetText(recipientSummary(toField.text(), ccField.text(), bccField.text()))
+			scheduleAutosave()
+		}
 	}
+	subjEntry.Connect("changed", scheduleAutosave)
 	buf.Connect("changed", scheduleAutosave)
 
 	win.ConnectCloseRequest(func() bool {
@@ -947,29 +981,8 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 		}
 		return ""
 	}
-	// recipientsError blocks the send outright (unlike preSendWarning, which only
-	// asks for confirmation): with no valid To the engine fails before its outbox
-	// enqueue, so the message would be silently lost after the window closed.
 	recipientsError := func() string {
-		to := strings.TrimSpace(toEntry.Text())
-		if to == "" {
-			return "Add at least one recipient in the To field."
-		}
-		for _, f := range []struct{ name, val string }{
-			{"To", to},
-			{"Cc", strings.TrimSpace(ccEntry.Text())},
-			{"Bcc", strings.TrimSpace(bccEntry.Text())},
-		} {
-			// A trailing comma (autocomplete inserts "addr, ") is not an error.
-			val := strings.Trim(f.val, ", ")
-			if val == "" {
-				continue
-			}
-			if _, err := mail.ParseAddressList(val); err != nil {
-				return fmt.Sprintf("The %s field has an invalid address (%q).", f.name, val)
-			}
-		}
-		return ""
+		return validateRecipientFields(toField.text(), ccField.text(), bccField.text())
 	}
 	send.ConnectClicked(func() {
 		if reason := recipientsError(); reason != "" {
@@ -1027,12 +1040,23 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 		})
 	}
 
+	aiMenu := gtk.NewMenuButton()
+	aiMenu.SetLabel("AI")
+	aiMenu.SetTooltipText("Draft, rewrite, or proofread")
+	aiActions := gtk.NewBox(gtk.OrientationVertical, 4)
+	setMargins(aiActions, 6, 6, 6, 6)
+	aiPopover := gtk.NewPopover()
+	aiPopover.SetChild(aiActions)
+	aiMenu.SetPopover(aiPopover)
+	if w.deps.Assistant != nil && (w.aiDraft || w.aiProofread || w.aiRefine) {
+		hb.PackEnd(aiMenu)
+	}
 	var runDraft func(string)
 	if w.deps.Assistant != nil && w.aiDraft {
 		// A reply/forward has thread context; a new message is drafted from the
 		// user's instruction (and the subject) alone.
 		isReply := aiContext != ""
-		aiBtn := gtk.NewButtonWithLabel("AI draft")
+		aiBtn := gtk.NewButtonWithLabel("Draft…")
 		if isReply {
 			aiBtn.SetTooltipText("Draft this reply with AI")
 		} else {
@@ -1085,17 +1109,18 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 				}, done)
 			})
 		}
-		aiBtn.ConnectClicked(func() { startAIDraft() })
-		hb.PackEnd(aiBtn)
+		aiBtn.ConnectClicked(func() { aiPopover.Popdown(); startAIDraft() })
+		aiActions.Append(aiBtn)
 	}
 
 	if w.deps.Assistant != nil && w.aiProofread {
 		// AI grammar/spell check: rewrite the body with spelling and grammar fixed
 		// (preserving quotes and signature).
-		grammarBtn := gtk.NewButtonFromIconName("tools-check-spelling-symbolic")
+		grammarBtn := gtk.NewButtonWithLabel("Proofread")
 		grammarBtn.SetTooltipText("Check spelling & grammar with AI")
 		a11yLabel(grammarBtn, "Check spelling and grammar with AI")
 		grammarBtn.ConnectClicked(func() {
+			aiPopover.Popdown()
 			// Proofread only the user's own writing: the selection if there is one,
 			// otherwise the text above the signature/quote. The signature and the
 			// quoted history are never sent to the AI or altered.
@@ -1121,7 +1146,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 				return prefix + text + suffix, nil
 			}, done)
 		})
-		hb.PackEnd(grammarBtn)
+		aiActions.Append(grammarBtn)
 	}
 
 	if w.deps.Assistant != nil && w.aiRefine {
@@ -1160,7 +1185,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 		pop.SetChild(col)
 
 		refineBtn := gtk.NewMenuButton()
-		refineBtn.SetIconName("document-edit-symbolic")
+		refineBtn.SetLabel("Rewrite…")
 		refineBtn.SetTooltipText("Refine with AI — rewrites the selection (or your whole text) to your instruction")
 		a11yLabel(refineBtn, "Refine with AI")
 		refineBtn.SetPopover(pop)
@@ -1176,6 +1201,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 			startIter, endIter := grammarRange(buf)
 			original := buf.Text(startIter, endIter, false)
 			pop.Popdown()
+			aiPopover.Popdown()
 			if strings.TrimSpace(original) == "" {
 				logging.Trace("ui: ai refine skipped", "reason", "empty")
 				return
@@ -1208,7 +1234,7 @@ func (w *window) openComposeOpts(init model.OutgoingMessage, aiContext, title st
 		})
 		refineView.AddController(refineKeys)
 		refineGo.ConnectClicked(runRefine)
-		hb.PackEnd(refineBtn)
+		aiActions.Append(refineBtn)
 	}
 
 	// Ctrl+Enter sends, from anywhere in the window. Capture phase so it fires

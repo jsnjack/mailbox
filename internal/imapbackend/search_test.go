@@ -35,7 +35,7 @@ func TestParseSearchQuery(t *testing.T) {
 		{query: "quarterly report", wantText: 2},
 		{query: "in:Work budget", wantLabel: "Work", wantText: 1},
 		{query: "http://example.com/x", wantText: 1}, // colon but not an operator → free text
-		{query: "is:unread", wantErr: true},
+		{query: "is:unread"},
 		{query: "newer_than:7d", wantErr: true},
 		{query: "in:trash in:spam", wantErr: true}, // conflicting scopes
 		{query: "in:", wantErr: true},
@@ -133,8 +133,8 @@ func TestSearchIDsScopedByLabel(t *testing.T) {
 	}
 
 	// An unsupported operator must error, not degrade to all messages.
-	if ids, err := b.SearchIDs(ctx, "is:unread", 0); err == nil {
-		t.Fatalf("SearchIDs(is:unread) = %v, want error", ids)
+	if ids, err := b.SearchIDs(ctx, "has:attachment", 0); err == nil {
+		t.Fatalf("SearchIDs(has:attachment) = %v, want error", ids)
 	}
 }
 
@@ -202,5 +202,21 @@ func TestSearchIDsPriorityOrderINBOXFirst(t *testing.T) {
 		if !strings.HasSuffix(id, ":INBOX") {
 			t.Fatalf("capped backfill returned non-INBOX id %q first (ids=%v); INBOX must have priority", id, ids)
 		}
+	}
+}
+
+func TestSearchFilterCriteria(t *testing.T) {
+	q, err := parseSearchQuery(`from:"Jane Doe" after:2026-01-01 before:2026-02-01 is:unread`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(q.criteria.Header) != 1 || q.criteria.Header[0].Value != "Jane Doe" {
+		t.Fatalf("sender = %#v", q.criteria.Header)
+	}
+	if q.criteria.Since.Format("2006-01-02") != "2026-01-01" || q.criteria.Before.Format("2006-01-02") != "2026-02-01" {
+		t.Fatalf("dates = %#v", q.criteria)
+	}
+	if len(q.criteria.NotFlag) != 1 || q.criteria.NotFlag[0] != imap.FlagSeen {
+		t.Fatalf("unread flag = %v", q.criteria.NotFlag)
 	}
 }

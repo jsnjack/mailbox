@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/diamondburned/gotk4-adwaita/pkg/adw"
+	"github.com/diamondburned/gotk4/pkg/glib/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
-	"github.com/diamondburned/gotk4/pkg/pango"
 	"github.com/jsnjack/mailbox/internal/dispatch"
 	"github.com/jsnjack/mailbox/internal/logging"
 )
@@ -132,30 +132,19 @@ func (w *window) askAIIntent(parent gtk.Widgetter, isReply bool, threadContext s
 			list.AddCSSClass("boxed-list")
 			list.SetVAlign(gtk.AlignStart)
 			quick.Append(list)
-			var group *gtk.CheckButton
 			for _, reply := range replies {
-				row := gtk.NewCheckButton()
-				if group == nil {
-					group = row
-				} else {
-					row.SetGroup(group)
-				}
-				text := gtk.NewLabel(reply)
-				text.SetXAlign(0)
-				text.SetWrap(true)
-				text.SetWrapMode(pango.WrapWordChar)
-				text.SetMaxWidthChars(44)
-				text.SetHExpand(true)
-				setMargins(text, 8, 0, 2, 2)
-				row.SetChild(text)
-				setMargins(row, 12, 12, 4, 4)
-				row.ConnectToggled(func() {
-					if row.Active() && ctx.Err() == nil {
-						logging.Trace("ui: quick reply chosen", "bytes", len(reply))
-						cancel()
-						dialog.Close()
-						onQuickReply(reply)
+				row := adw.NewActionRow()
+				row.SetTitle(glib.MarkupEscapeText(reply))
+				row.SetTitleLines(0)
+				row.SetActivatable(true)
+				row.AddSuffix(gtk.NewImageFromIconName("go-next-symbolic"))
+				row.ConnectActivated(func() {
+					if ctx.Err() != nil {
+						return
 					}
+					cancel()
+					dialog.Close()
+					onQuickReply(reply)
 				})
 				list.Append(row)
 			}
