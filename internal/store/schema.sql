@@ -16,6 +16,11 @@ CREATE TABLE IF NOT EXISTS accounts (
   created_at      INTEGER NOT NULL DEFAULT (unixepoch())
 );
 
+CREATE TABLE IF NOT EXISTS sync_batches (
+  account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+  payload TEXT NOT NULL
+);
+
 -- Removing an account crosses SQLite, the OS keyring, and several config
 -- files. The account row and this cleanup intent are committed atomically;
 -- external artifacts are then removed and retried on later launches until all

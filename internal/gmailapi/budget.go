@@ -16,14 +16,21 @@ const gmailPerUserUnitsPerMin = 6000
 
 // Quota unit costs for the API methods we call (from Gmail's published costs).
 const (
-	costHistoryList  = 2
-	costMessageList  = 5
-	costMessageGet   = 5 // metadata or full
-	costThreadGet    = 10
-	costLabelsList   = 1
-	costLabelsGet    = 1
-	costLabelsMutate = 5 // labels.create / labels.delete
-	costSend         = 100
+	costHistoryList   = 2
+	costMessageList   = 5
+	costMessageGet    = 20 // metadata or full
+	costThreadGet     = 40
+	costProfileGet    = 1
+	costDraftCreate   = 10
+	costDraftUpdate   = 15
+	costDraftDelete   = 10
+	costAttachmentGet = 20
+	costBatchMutate   = 50
+	costMessageModify = 5
+	costLabelsList    = 1
+	costLabelsGet     = 1
+	costLabelsMutate  = 5 // labels.create / labels.delete
+	costSend          = 100
 )
 
 // RateBudget is a token bucket over Gmail quota units.
@@ -37,9 +44,13 @@ type RateBudget struct {
 	sleep    func(context.Context, time.Duration) error
 }
 
-// NewRateBudget returns a budget sized to Gmail's per-user quota.
+// NewRateBudget leaves headroom below Gmail's per-user quota and limits bursts
+// to one send, rather than allowing a full minute's quota immediately at launch.
 func NewRateBudget() *RateBudget {
-	return newRateBudget(gmailPerUserUnitsPerMin, time.Now, sleepCtx)
+	b := newRateBudget(gmailPerUserUnitsPerMin*4/5, time.Now, sleepCtx)
+	b.capacity = costSend
+	b.tokens = costSend
+	return b
 }
 
 func newRateBudget(unitsPerMin int, now func() time.Time, sleep func(context.Context, time.Duration) error) *RateBudget {

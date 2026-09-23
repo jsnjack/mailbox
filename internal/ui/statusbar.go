@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/diamondburned/gotk4-adwaita/pkg/adw"
 	"github.com/diamondburned/gotk4/pkg/glib/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 	"github.com/diamondburned/gotk4/pkg/pango"
@@ -31,6 +32,7 @@ type logRow struct {
 	lbl     *gtk.Label // the operation, re-worded to past tense once it is done
 	dur     *gtk.Label // live progress ("3/10") while running, duration when done
 	note    *gtk.Label // result note (counts, errors); empty until Done
+	details *gtk.Button
 	started time.Time
 }
 
@@ -443,6 +445,7 @@ func (w *window) onActivity(e activity.Event) {
 		}
 		if e.Note != "" {
 			row.note.SetText("· " + e.Note)
+			row.details.SetVisible(true)
 		}
 		// A quiet mail check repeats every minute per account — keep only the
 		// newest such row so the log records real events, not wallpaper.
@@ -515,7 +518,7 @@ func (w *window) refreshStatusStats() {
 //	15:04:05 SYNC Work ✓ Mail checked · up to date              1.2s
 //
 // The note rides inline after the label, dim (error-tinted on failure), with
-// the full text in a tooltip only when ellipsized.
+// the full text available through the Details button.
 func (w *window) newLogRow(op, account, label string) *logRow {
 	r := &logRow{started: time.Now()}
 
@@ -554,6 +557,14 @@ func (w *window) newLogRow(op, account, label string) *logRow {
 	r.dur.AddCSSClass("log-time")
 	r.dur.SetXAlign(1)
 
+	r.details = gtk.NewButtonWithLabel("Details")
+	r.details.AddCSSClass("flat")
+	r.details.SetVisible(false)
+	r.details.ConnectClicked(func() {
+		dialog := newActivityDetails(barText(account, r.lbl.Text()), strings.TrimPrefix(r.note.Text(), "· "))
+		dialog.Present(w.win)
+	})
+
 	box := gtk.NewBox(gtk.OrientationHorizontal, 6)
 	box.AddCSSClass("caption")
 	box.Append(tim)
@@ -565,6 +576,7 @@ func (w *window) newLogRow(op, account, label string) *logRow {
 	box.Append(r.lbl)
 	box.Append(r.note)
 	box.Append(r.dur)
+	box.Append(r.details)
 	r.box = box
 
 	w.statusLogEmpty.SetVisible(false)
@@ -579,6 +591,38 @@ func (w *window) newLogRow(op, account, label string) *logRow {
 		}
 	}
 	return r
+}
+
+func newActivityDetails(title, note string) *adw.Dialog {
+	dialog := adw.NewDialog()
+	dialog.SetTitle(title)
+	dialog.SetContentWidth(600)
+	dialog.SetContentHeight(400)
+	dialog.SetFollowsContentSize(false)
+
+	view := gtk.NewTextView()
+	view.SetEditable(false)
+	view.SetWrapMode(gtk.WrapWordChar)
+	view.SetLeftMargin(16)
+	view.SetRightMargin(16)
+	view.SetTopMargin(16)
+	view.SetBottomMargin(16)
+	view.Buffer().SetText(note)
+	a11yLabel(view, "Activity details")
+	scroll := gtk.NewScrolledWindow()
+	scroll.SetPolicy(gtk.PolicyNever, gtk.PolicyAutomatic)
+	scroll.SetVExpand(true)
+	scroll.SetChild(view)
+
+	copyButton := gtk.NewButtonWithLabel("Copy")
+	copyButton.ConnectClicked(func() { view.Clipboard().SetText(note) })
+	header := adw.NewHeaderBar()
+	header.PackStart(copyButton)
+	toolbar := adw.NewToolbarView()
+	toolbar.AddTopBar(header)
+	toolbar.SetContent(scroll)
+	dialog.SetChild(toolbar)
+	return dialog
 }
 
 // tooltipWhenTruncated gives a label a tooltip only while its text is actually

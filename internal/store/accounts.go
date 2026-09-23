@@ -130,12 +130,15 @@ func (s *Store) ListAccounts(ctx context.Context) ([]model.Account, error) {
 // SetSyncCursor updates the opaque incremental-sync cursor for an account.
 func (s *Store) SetSyncCursor(ctx context.Context, accountID int64, cursor string) error {
 	logging.TraceContext(ctx, "store: set sync cursor", "account", accountID, "cursor", cursor)
-	if _, err := s.writer.ExecContext(ctx,
-		`UPDATE accounts SET sync_cursor = ? WHERE id = ?`, cursor, accountID); err != nil {
-		logging.TraceContext(ctx, "store: set sync cursor", "account", accountID, "err", err)
-		return fmt.Errorf("set sync_cursor: %w", err)
-	}
-	return nil
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `UPDATE accounts SET sync_cursor = ? WHERE id = ?`, cursor, accountID); err != nil {
+			return fmt.Errorf("set sync_cursor: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM sync_batches WHERE account_id=?`, accountID); err != nil {
+			return fmt.Errorf("clear sync batch: %w", err)
+		}
+		return nil
+	})
 }
 
 // DeleteAccount removes an account and all of its cached data. Messages (with

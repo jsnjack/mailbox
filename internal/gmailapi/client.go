@@ -141,7 +141,7 @@ func (c *Client) doRetry(ctx context.Context, cost int, retryable func(error) bo
 func (c *Client) GetProfile(ctx context.Context) (*gmail.Profile, error) {
 	logging.TraceContext(ctx, "gmailapi: getProfile")
 	var p *gmail.Profile
-	err := c.do(ctx, costMessageGet, func() error {
+	err := c.do(ctx, costProfileGet, func() error {
 		r, e := c.srv.Users.GetProfile("me").Context(ctx).Do()
 		p = r
 		return e
@@ -358,7 +358,7 @@ func (c *Client) Send(ctx context.Context, raw []byte, threadID string) (string,
 func (c *Client) SaveDraft(ctx context.Context, raw []byte, threadID string) (model.DraftRef, error) {
 	logging.TraceContext(ctx, "gmailapi: drafts.create", "bytes", len(raw), "thread_id", threadID)
 	var draft *gmail.Draft
-	err := c.do(ctx, costMessageGet, func() error {
+	err := c.do(ctx, costDraftCreate, func() error {
 		msg := &gmail.Message{Raw: base64.URLEncoding.EncodeToString(raw)}
 		if threadID != "" {
 			msg.ThreadId = threadID
@@ -379,7 +379,7 @@ func (c *Client) SaveDraft(ctx context.Context, raw []byte, threadID string) (mo
 func (c *Client) UpdateDraft(ctx context.Context, draftID string, raw []byte, threadID string) (model.DraftRef, error) {
 	logging.TraceContext(ctx, "gmailapi: drafts.update", "id", draftID, "bytes", len(raw), "thread_id", threadID)
 	var draft *gmail.Draft
-	err := c.do(ctx, costMessageGet, func() error {
+	err := c.do(ctx, costDraftUpdate, func() error {
 		msg := &gmail.Message{Raw: base64.URLEncoding.EncodeToString(raw)}
 		if threadID != "" {
 			msg.ThreadId = threadID
@@ -412,7 +412,7 @@ func gmailDraftRef(d *gmail.Draft) model.DraftRef {
 // been sent as a normal message).
 func (c *Client) DeleteDraft(ctx context.Context, draftID string) error {
 	logging.TraceContext(ctx, "gmailapi: drafts.delete", "id", draftID)
-	err := c.do(ctx, costMessageGet, func() error {
+	err := c.do(ctx, costDraftDelete, func() error {
 		return c.srv.Users.Drafts.Delete("me", draftID).Context(ctx).Do()
 	})
 	if err != nil {
@@ -463,7 +463,7 @@ func (c *Client) FindDraftID(ctx context.Context, messageID string) (string, err
 func (c *Client) GetAttachment(ctx context.Context, messageID, attachmentID string) ([]byte, error) {
 	logging.TraceContext(ctx, "gmailapi: attachments.get", "id", messageID, "attachment_id", attachmentID)
 	var body *gmail.MessagePartBody
-	err := c.do(ctx, costMessageGet, func() error {
+	err := c.do(ctx, costAttachmentGet, func() error {
 		r, e := c.srv.Users.Messages.Attachments.Get("me", messageID, attachmentID).Context(ctx).Do()
 		body = r
 		return e
@@ -497,7 +497,7 @@ func (c *Client) BatchModify(ctx context.Context, ids []string, add, remove []st
 		}
 		chunk := ids[start:end]
 		logging.TraceContext(ctx, "gmailapi: messages.batchModify chunk", "count", len(chunk), "offset", start)
-		err := c.do(ctx, costMessageList, func() error {
+		err := c.do(ctx, costBatchMutate, func() error {
 			return c.srv.Users.Messages.BatchModify("me", &gmail.BatchModifyMessagesRequest{
 				Ids:            chunk,
 				AddLabelIds:    add,
@@ -522,7 +522,7 @@ func (c *Client) BatchDelete(ctx context.Context, ids []string) error {
 		}
 		chunk := ids[start:end]
 		logging.TraceContext(ctx, "gmailapi: messages.batchDelete chunk", "count", len(chunk), "offset", start)
-		err := c.do(ctx, costMessageList, func() error {
+		err := c.do(ctx, costBatchMutate, func() error {
 			return c.srv.Users.Messages.BatchDelete("me", &gmail.BatchDeleteMessagesRequest{Ids: chunk}).Context(ctx).Do()
 		})
 		if err != nil {
@@ -536,7 +536,7 @@ func (c *Client) BatchDelete(ctx context.Context, ids []string) error {
 // to mark read, remove INBOX to archive, add/remove STARRED).
 func (c *Client) ModifyLabels(ctx context.Context, id string, add, remove []string) error {
 	logging.TraceContext(ctx, "gmailapi: messages.modify", "id", id, "add", add, "remove", remove)
-	return c.do(ctx, costMessageGet, func() error {
+	return c.do(ctx, costMessageModify, func() error {
 		_, e := c.srv.Users.Messages.Modify("me", id, &gmail.ModifyMessageRequest{
 			AddLabelIds:    add,
 			RemoveLabelIds: remove,

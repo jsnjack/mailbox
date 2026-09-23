@@ -43,6 +43,10 @@ type Engine struct {
 	Store *store.Store
 	Hub   *Hub
 
+	// Manual and background sync must not overwrite each other's checkpoints.
+	syncMuMu sync.Mutex
+	syncMus  map[int64]*sync.Mutex
+
 	// sweepMus serializes SweepOutbox per account so overlapping sweeps (the
 	// background timer, the user's "Send now", and per-item "retry" all trigger
 	// one) can't both claim and send the same queued item — which would deliver
@@ -69,8 +73,8 @@ type Engine struct {
 	// fetchFails counts, per account and message id, how many consecutive
 	// incremental passes failed to fetch that message's metadata. Incremental
 	// holds the sync cursor on a transient fetch failure so the next pass
-	// retries — but one permanently unfetchable message would then pin the
-	// cursor and re-walk the same history range every pass forever. After
+	// retries unfinished checkpoint IDs — but one permanently unfetchable
+	// message would then pin the cursor forever. After
 	// maxFetchFailPasses the id stops holding the cursor (fetches are still
 	// attempted; a later success clears the count, and a skipped message
 	// remains recoverable by Resync). In-memory: a restart just retries.
@@ -1238,6 +1242,9 @@ func (e *Engine) MarkLabelRead(ctx context.Context, b backend.Backend, accountID
 // additions and label changes are re-fetched and upserted, deletions removed.
 // It returns ErrHistoryExpired if the cursor is too old to use.
 func (e *Engine) Incremental(ctx context.Context, b backend.Backend, accountID int64) (int, error) {
+	mu := e.syncMuFor(accountID)
+	mu.Lock()
+	defer mu.Unlock()
 	defer func(start time.Time) {
 		slog.Default().Debug("engine: Incremental", "account", accountID, "dur", time.Since(start))
 	}(time.Now())
@@ -1251,18 +1258,30 @@ func (e *Engine) Incremental(ctx context.Context, b backend.Backend, accountID i
 		return 0, fmt.Errorf("account %d has no sync cursor; backfill first", accountID)
 	}
 
-	upserts, deletes, next, err := b.Changes(ctx, acc.SyncCursor)
+	batch, err := e.Store.LoadSyncBatch(ctx, accountID)
 	if err != nil {
-		if errors.Is(err, backend.ErrCursorExpired) {
-			// Cursor fell out of the provider's history window: signal the caller to
-			// self-heal via Resync (a full re-backfill) rather than retry incremental.
-			logging.TraceContext(ctx, "syncer: Incremental cursor expired -> resync required", "account", accountID, "cursor", acc.SyncCursor, "err", err)
-			return 0, ErrHistoryExpired
-		}
-		logging.TraceContext(ctx, "syncer: Incremental changes failed", "account", accountID, "cursor", acc.SyncCursor, "err", err)
 		return 0, err
 	}
-	logging.TraceContext(ctx, "syncer: Incremental changes", "account", accountID, "cursor", acc.SyncCursor, "next", next, "upserts", len(upserts), "deletes", len(deletes))
+	resumed := batch != nil
+	if batch == nil || batch.Cursor != acc.SyncCursor {
+		upserts, deletes, next, err := b.Changes(ctx, acc.SyncCursor)
+		if err != nil {
+			if errors.Is(err, backend.ErrCursorExpired) {
+				logging.TraceContext(ctx, "syncer: Incremental cursor expired -> resync required", "account", accountID, "cursor", acc.SyncCursor, "err", err)
+				return 0, ErrHistoryExpired
+			}
+			logging.TraceContext(ctx, "syncer: Incremental changes failed", "account", accountID, "cursor", acc.SyncCursor, "err", err)
+			return 0, fmt.Errorf("incremental changes: %w", err)
+		}
+		batch = &store.SyncBatch{Cursor: acc.SyncCursor, Next: next, Upserts: upserts, Deletes: deletes}
+		if len(upserts) > 0 || len(deletes) > 0 {
+			if err := e.Store.SaveSyncBatch(ctx, accountID, *batch, nil); err != nil {
+				return 0, err
+			}
+		}
+	}
+	upserts, deletes, next := batch.Upserts, batch.Deletes, batch.Next
+	logging.TraceContext(ctx, "syncer: Incremental pending", "account", accountID, "resumed", resumed, "cursor", acc.SyncCursor, "next", next, "upserts", len(upserts), "deletes", len(deletes))
 
 	changed := 0
 	if len(deletes) > 0 {
@@ -1279,46 +1298,40 @@ func (e *Engine) Incremental(ctx context.Context, b backend.Backend, accountID i
 		changed += len(deletes)
 	}
 
-	// Fetch all changed messages concurrently, write them in one transaction,
-	// then publish a per-id event so new-mail notifications (which need the id)
-	// still fire. Concurrency makes catching up a burst of external changes
-	// (e.g. a bulk archive done on another device) N/workers round-trips, not N.
-	msgs, fetchedIDs, failedIDs := e.fetchMetadataConcurrent(ctx, b, upserts)
-	if len(msgs) > 0 {
-		ustart := time.Now()
-		if err := e.Store.UpsertMessages(ctx, msgs); err != nil {
+	batch.Deletes = nil
+	// Keep the provider range fixed until all of its work is applied. A later
+	// Changes call may include newer edits to ids already saved in this range.
+	var failedIDs []string
+	const incrementalBatch = 20
+	for start := 0; start < len(upserts); start += incrementalBatch {
+		if err := ctx.Err(); err != nil {
+			return changed, fmt.Errorf("incremental interrupted: %w", err)
+		}
+		end := min(start+incrementalBatch, len(upserts))
+		msgs, fetchedIDs, failed := e.fetchMetadataConcurrent(ctx, b, upserts[start:end])
+		if err := ctx.Err(); err != nil {
+			return changed, fmt.Errorf("incremental fetch interrupted: %w", err)
+		}
+		failedIDs = append(failedIDs, failed...)
+		batch.Upserts = append(append([]string(nil), failedIDs...), upserts[end:]...)
+		if err := e.Store.SaveSyncBatch(ctx, accountID, *batch, msgs); err != nil {
 			return changed, err
 		}
-		logging.TraceContext(ctx, "syncer: Incremental upserted", "account", accountID, "count", len(msgs), "dur", time.Since(ustart))
-		for i, id := range fetchedIDs {
-			tid := ""
-			if i < len(msgs) {
-				tid = msgs[i].ThreadID // msgs and fetchedIDs are parallel
-			}
-			e.publish(Change{Kind: MessageUpserted, AccountID: accountID, GmailID: id, ThreadID: tid})
+		e.clearFetchFailures(accountID, fetchedIDs)
+		for _, m := range msgs {
+			e.publish(Change{Kind: MessageUpserted, AccountID: accountID, GmailID: m.GmailID, ThreadID: m.ThreadID})
 		}
 		changed += len(msgs)
+		logging.TraceContext(ctx, "syncer: Incremental checkpoint", "account", accountID, "saved", len(msgs), "remaining", len(batch.Upserts))
 	}
-
-	// Only advance the cursor once every changed message has been durably applied
-	// (or is genuinely gone). If a fetch failed transiently — a network blip or a
-	// sustained outage that outlasted the client's own retries — advancing past it
-	// would skip that message forever (its history record is behind the new
-	// cursor). Holding the cursor makes the next incremental re-walk the same
-	// range and retry; the deletes and successful upserts already applied are
-	// idempotent, so re-processing is harmless. A vanished message (ErrNotFound)
-	// is not a transient failure, so it doesn't stall the cursor — and a message
-	// that keeps failing pass after pass stops holding it too (see fetchFails),
-	// so one poisoned message can't pin the cursor forever.
-	e.clearFetchFailures(accountID, fetchedIDs)
 	if len(failedIDs) > 0 && e.noteFetchFailures(accountID, failedIDs) {
-		logging.TraceContext(ctx, "syncer: Incremental holding cursor (transient fetch failure)", "account", accountID, "cursor", acc.SyncCursor, "fetched", len(fetchedIDs), "failed", len(failedIDs), "wanted", len(upserts))
+		logging.TraceContext(ctx, "syncer: Incremental holding cursor (transient fetch failure)", "account", accountID, "failed", len(failedIDs))
 		return changed, nil
 	}
 
 	// An idle tick usually produces an identical cursor (IMAP cursors carry the
 	// full per-folder UID sets — tens of KB); skip the WAL write + fsync then.
-	if next != acc.SyncCursor {
+	if resumed || next != acc.SyncCursor || len(upserts) > 0 || len(deletes) > 0 {
 		if err := e.Store.SetSyncCursor(ctx, accountID, next); err != nil {
 			return changed, err
 		}
@@ -1348,6 +1361,9 @@ func (e *Engine) Incremental(ctx context.Context, b backend.Backend, accountID i
 // ids the backfill stored: seeding from the pre-backfill Profile snapshot would
 // mark every UID the cap skipped as already-seen, hiding them forever.
 func (e *Engine) Resync(ctx context.Context, b backend.Backend, accountID int64, max int) (int, error) {
+	mu := e.syncMuFor(accountID)
+	mu.Lock()
+	defer mu.Unlock()
 	start := time.Now()
 	logging.TraceContext(ctx, "syncer: Resync start", "account", accountID, "max", max)
 	prof, err := b.Profile(ctx)

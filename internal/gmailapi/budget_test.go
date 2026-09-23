@@ -60,3 +60,25 @@ func TestRateBudgetReserveCancel(t *testing.T) {
 		t.Fatalf("got %v, want context.Canceled", err)
 	}
 }
+
+func TestProductionBudgetPacesMessageReads(t *testing.T) {
+	t.Run("first minute including startup burst stays below quota", func(t *testing.T) {
+		clock := time.Unix(0, 0)
+		b := NewRateBudget()
+		b.last = clock
+		b.now = func() time.Time { return clock }
+		b.sleep = func(_ context.Context, d time.Duration) error {
+			clock = clock.Add(d)
+			return nil
+		}
+		for range 300 {
+			if err := b.Reserve(context.Background(), costMessageGet); err != nil {
+				t.Fatal(err)
+			}
+		}
+		// Google charges 20 units per read: 300 reads consume the full minute.
+		if elapsed := clock.Sub(time.Unix(0, 0)); elapsed < time.Minute {
+			t.Fatalf("300 reads consumed a minute's quota in %v", elapsed)
+		}
+	})
+}
