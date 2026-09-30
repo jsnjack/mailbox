@@ -2468,6 +2468,8 @@ func (w *window) signatureForActive() string {
 
 // setActiveAccount switches the displayed account, reloading its labels and inbox.
 func (w *window) setActiveAccount(a AccountInfo) {
+	// Notifications and search can switch accounts without a sidebar click.
+	w.selectAccountRow(a.ID)
 	if a.ID == w.activeID {
 		return
 	}
