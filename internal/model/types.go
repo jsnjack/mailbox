@@ -129,8 +129,8 @@ type ThreadSummary struct {
 	Latest      Message
 	Count       int
 	UnreadCount int
-	// RepliedByMe is true when the thread's most recent message (any label) was
-	// sent by this account — i.e. you had the last word, so it needs no reply.
+	// RepliedByMe is true when the newest non-draft message carries SENT and
+	// follows a received message without SENT or DRAFT in this account's thread.
 	RepliedByMe bool
 	// WokeFromSnooze is true when this thread's snooze already fired (it
 	// returned to the inbox on schedule), so the list can show where it came

@@ -350,6 +350,134 @@ func TestRepliedByMe(t *testing.T) {
 	}
 }
 
+func TestRepliedByMeRequiresReceivedHistory(t *testing.T) {
+	tests := []struct {
+		name     string
+		messages []model.Message
+		want     bool
+	}{
+		{
+			name: "single appointment notification in inbox and sent",
+			messages: []model.Message{
+				{GmailID: "notification", InternalDate: time.Unix(100, 0), FromAddr: "me@example.com", Labels: []string{"INBOX", "SENT"}},
+			},
+		},
+		{
+			name: "outgoing messages only",
+			messages: []model.Message{
+				{GmailID: "first", InternalDate: time.Unix(100, 0), Labels: []string{"SENT"}},
+				{GmailID: "followup", InternalDate: time.Unix(200, 0), Labels: []string{"INBOX", "SENT"}},
+			},
+		},
+		{
+			name: "reply to archived incoming message",
+			messages: []model.Message{
+				{GmailID: "received", InternalDate: time.Unix(100, 0)},
+				{GmailID: "reply", InternalDate: time.Unix(200, 0), Labels: []string{"SENT"}},
+			},
+			want: true,
+		},
+		{
+			name: "new incoming reply clears replied",
+			messages: []model.Message{
+				{GmailID: "received", InternalDate: time.Unix(100, 0), Labels: []string{"INBOX"}},
+				{GmailID: "reply", InternalDate: time.Unix(200, 0), Labels: []string{"SENT"}},
+				{GmailID: "new-reply", InternalDate: time.Unix(300, 0), Labels: []string{"INBOX"}},
+			},
+		},
+		{
+			name: "draft is not received history",
+			messages: []model.Message{
+				{GmailID: "draft", InternalDate: time.Unix(100, 0), Labels: []string{"DRAFT"}},
+				{GmailID: "sent", InternalDate: time.Unix(200, 0), Labels: []string{"SENT"}},
+			},
+		},
+		{
+			name: "newer draft does not clear a genuine reply",
+			messages: []model.Message{
+				{GmailID: "received", InternalDate: time.Unix(100, 0), Labels: []string{"INBOX"}},
+				{GmailID: "reply", InternalDate: time.Unix(200, 0), Labels: []string{"SENT"}},
+				{GmailID: "draft", InternalDate: time.Unix(300, 0), Labels: []string{"DRAFT"}},
+			},
+			want: true,
+		},
+		{
+			name: "draft carrying sent is not a reply",
+			messages: []model.Message{
+				{GmailID: "received", InternalDate: time.Unix(100, 0), Labels: []string{"INBOX"}},
+				{GmailID: "draft", InternalDate: time.Unix(200, 0), Labels: []string{"DRAFT", "SENT"}},
+			},
+		},
+		{
+			name: "equal dates use insertion order for a reply",
+			messages: []model.Message{
+				{GmailID: "received", InternalDate: time.Unix(100, 0), Labels: []string{"INBOX"}},
+				{GmailID: "reply", InternalDate: time.Unix(100, 0), Labels: []string{"SENT"}},
+			},
+			want: true,
+		},
+		{
+			name: "equal dates use insertion order for new incoming mail",
+			messages: []model.Message{
+				{GmailID: "sent", InternalDate: time.Unix(100, 0), Labels: []string{"SENT"}},
+				{GmailID: "received", InternalDate: time.Unix(100, 0), Labels: []string{"INBOX"}},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := openTestStore(t)
+			ctx := context.Background()
+			acc := seedAccount(t, s)
+			for _, m := range tt.messages {
+				m.AccountID = acc
+				m.ThreadID = "thread"
+				if _, err := s.UpsertMessage(ctx, m); err != nil {
+					t.Fatalf("upsert %s: %v", m.GmailID, err)
+				}
+			}
+			summaries, err := s.GetThreadSummaries(ctx, acc, []string{"thread"})
+			if err != nil {
+				t.Fatalf("GetThreadSummaries: %v", err)
+			}
+			if len(summaries) != 1 {
+				t.Fatalf("got %d summaries, want 1", len(summaries))
+			}
+			if summaries[0].RepliedByMe != tt.want {
+				t.Errorf("RepliedByMe = %v, want %v", summaries[0].RepliedByMe, tt.want)
+			}
+		})
+	}
+}
+
+func TestRepliedByMeKeepsAccountsSeparate(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	acc := seedAccount(t, s)
+	other, err := s.UpsertAccount(ctx, model.Account{Email: "other@example.com"})
+	if err != nil {
+		t.Fatalf("seed other account: %v", err)
+	}
+	for _, m := range []model.Message{
+		{AccountID: other, GmailID: "received", ThreadID: "shared", InternalDate: time.Unix(100, 0), Labels: []string{"INBOX"}},
+		{AccountID: acc, GmailID: "sent", ThreadID: "shared", InternalDate: time.Unix(200, 0), Labels: []string{"INBOX", "SENT"}},
+	} {
+		if _, err := s.UpsertMessage(ctx, m); err != nil {
+			t.Fatalf("upsert %s: %v", m.GmailID, err)
+		}
+	}
+	threads, err := s.ListThreadsByLabel(ctx, acc, model.LabelInbox, 50, 0)
+	if err != nil {
+		t.Fatalf("ListThreadsByLabel: %v", err)
+	}
+	if len(threads) != 1 {
+		t.Fatalf("got %d threads, want 1", len(threads))
+	}
+	if threads[0].RepliedByMe {
+		t.Error("received history in another account must not mark this thread replied")
+	}
+}
+
 func TestDraftFlags(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()

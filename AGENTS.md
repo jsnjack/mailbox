@@ -461,6 +461,11 @@ category-prompt change won't re-classify existing mail on its own; the
 thread-list overflow menu's "Re-categorize inbox" (`onRecategorize` →
 `store.ClearCategories` + `Worker.Trigger`, which also lifts the cooldown)
 forces a re-run.
+The automatic "Replied" tag requires the newest non-draft message to carry
+SENT and an earlier message in the same account and thread without SENT or
+DRAFT. A single message labelled both INBOX and SENT, such as an appointment
+notification sent from the account's own address, does not qualify. Drafts
+neither establish received history nor change which delivered message is newest.
 The list is grouped by conversation: a virtualized `gtk.ListView` over a
 `gtk.StringList` of thread ids (looked up in a `threadByID` map of
 `model.ThreadSummary`); rows show the newest message + a count. Refreshes are

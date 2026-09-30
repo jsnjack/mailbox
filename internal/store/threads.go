@@ -548,8 +548,8 @@ func (s *Store) threadCountsForIDs(ctx context.Context, accountID int64, ids []s
 	return out, nil
 }
 
-// markRepliedByMe sets RepliedByMe on each summary whose thread's most recent
-// message was sent by this account (its newest message carries SENT).
+// markRepliedByMe flags summaries whose newest non-draft message was sent by
+// this account after an earlier received message.
 func (s *Store) markRepliedByMe(ctx context.Context, accountID int64, sums []model.ThreadSummary) error {
 	if len(sums) == 0 {
 		return nil
@@ -568,8 +568,8 @@ func (s *Store) markRepliedByMe(ctx context.Context, accountID int64, sums []mod
 	return nil
 }
 
-// threadsRepliedByMe returns the subset of threadIDs whose most recent message
-// (any label) carries the SENT label — i.e. this account had the last word.
+// threadsRepliedByMe returns threads whose newest non-draft message carries SENT
+// and follows a received message without SENT or DRAFT.
 func (s *Store) threadsRepliedByMe(ctx context.Context, accountID int64, ids []string) (map[string]bool, error) {
 	out := make(map[string]bool, len(ids))
 	const chunk = 500
@@ -579,11 +579,12 @@ func (s *Store) threadsRepliedByMe(ctx context.Context, accountID int64, ids []s
 			end = len(ids)
 		}
 		batch := ids[start:end]
-		args := make([]any, 0, len(batch)+2)
+		args := make([]any, 0, len(batch)+5)
 		args = append(args, model.LabelSent, accountID)
 		for _, id := range batch {
 			args = append(args, id)
 		}
+		args = append(args, model.LabelDraft, model.LabelSent, model.LabelDraft)
 		rows, err := s.reader.QueryContext(ctx, `
 			SELECT m.thread_id
 			FROM messages m
@@ -592,7 +593,20 @@ func (s *Store) threadsRepliedByMe(ctx context.Context, accountID int64, ids []s
 			  AND m.rowid = (
 				SELECT m2.rowid FROM messages m2
 				WHERE m2.account_id = m.account_id AND m2.thread_id = m.thread_id
+				  AND NOT EXISTS (
+					SELECT 1 FROM message_labels draft
+					WHERE draft.message_rowid = m2.rowid AND draft.label_id = ?
+				  )
 				ORDER BY m2.internal_date DESC, m2.rowid DESC LIMIT 1
+			  )
+			  AND EXISTS (
+				SELECT 1 FROM messages received
+				WHERE received.account_id = m.account_id AND received.thread_id = m.thread_id
+				  AND (received.internal_date, received.rowid) < (m.internal_date, m.rowid)
+				  AND NOT EXISTS (
+					SELECT 1 FROM message_labels outgoing
+					WHERE outgoing.message_rowid = received.rowid AND outgoing.label_id IN (?, ?)
+				  )
 			  )`, args...)
 		if err != nil {
 			return nil, fmt.Errorf("threads replied-by-me: %w", err)
