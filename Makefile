@@ -17,6 +17,10 @@ export PATH := $(PATH):$(shell go env GOPATH)/bin
 # This is a cgo/GTK app: it links against system GTK4/WebKit via pkg-config and
 # cannot cross-compile trivially. Build Linux-only with cgo enabled.
 export CGO_ENABLED := 1
+# WebKitGTK 2.54 gates this public header on its private feature macro, even
+# though the GTK library exports the API required by gotk4-webkitgtk.
+CGO_CPPFLAGS := $(shell go env CGO_CPPFLAGS)
+export CGO_CPPFLAGS += -DENABLE_POINTER_LOCK=1
 
 version:
 ifdef MONOVA
