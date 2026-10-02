@@ -128,8 +128,8 @@ func syncBackoff(n int) time.Duration {
 	return d
 }
 
-// acctRuntime tracks a live account's background goroutines (sync, outbox sweep,
-// IMAP IDLE watch) so stopAccount can cancel them and wait for them to exit
+// acctRuntime tracks a live account's background goroutines (sync, body prefetch,
+// outbox sweep, IMAP IDLE watch) so stopAccount can cancel and wait for them to exit
 // before the account is torn down.
 type acctRuntime struct {
 	cancel context.CancelFunc
@@ -395,7 +395,7 @@ func launchUI(mailto string) error {
 				})
 			}()
 		}
-		rt.wg.Add(2)
+		rt.wg.Add(3)
 		reconcileSnoozes := func(pctx context.Context) {
 			changed, err := snoozeMgr.Reconcile(pctx, a.ID)
 			if err != nil {
@@ -411,6 +411,19 @@ func launchUI(mailto string) error {
 			backgroundSync(actx, engine, act, b, a.ID, a.Email, wake, reconcileSnoozes)
 		}()
 		go func() { defer rt.wg.Done(); backgroundSweep(actx, engine, act, b, a.ID, a.Email) }()
+		go func() {
+			defer rt.wg.Done()
+			engine.RunBodyPrefetch(actx, b, act, a.ID, a.Email, func() (int64, error) {
+				prefs, err := config.LoadPrefs()
+				if err != nil {
+					return 0, fmt.Errorf("load body retention for prefetch: %w", err)
+				}
+				if prefs.BodyRetentionDays <= 0 {
+					return 0, nil
+				}
+				return time.Now().AddDate(0, 0, -prefs.BodyRetentionDays).Unix(), nil
+			})
+		}()
 		// One-time recovery: re-fetch Gmail messages cached text-only by an older
 		// build that dropped externalized (attachment-id-served) HTML bodies. IMAP
 		// fetches whole bodies, so its text-only mail is genuinely text-only — skip it.

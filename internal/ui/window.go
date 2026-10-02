@@ -4697,15 +4697,14 @@ func (w *window) subscribe() {
 func (w *window) onChange(c syncer.Change) {
 	logging.Trace("ui: sync change", "kind", c.Kind, "account", c.AccountID, "id", c.GmailID, "thread", c.ThreadID, "active", w.activeID)
 	switch c.Kind {
-	case syncer.MessageUpserted, syncer.MessageBodyFetched, syncer.MessageDeleted:
-		w.invalidateSection(c.AccountID, c.GmailID) // a re-synced message must re-render
-		if w.ownBodyFetch(c) {
-			// The render that asked for this body reads it directly, and the row
-			// it belongs to is unchanged (bodies aren't listed). Acting on the
-			// echo would cancel that render and reload the list for nothing.
-			logging.Trace("ui: own body fetch echo ignored", "id", c.GmailID, "thread", c.ThreadID)
-			return
+	case syncer.MessageBodyFetched:
+		w.invalidateSection(c.AccountID, c.GmailID)
+		if !w.ownBodyFetch(c) && c.AccountID == w.activeID && c.ThreadID != "" && c.ThreadID == w.openThreadID {
+			w.refreshThreadPending = true
+			w.scheduleRefresh(false)
 		}
+	case syncer.MessageUpserted, syncer.MessageDeleted:
+		w.invalidateSection(c.AccountID, c.GmailID) // a re-synced message must re-render
 		if c.AccountID == w.activeID {
 			// A change to the open conversation (a reply you sent, or a synced
 			// message) re-renders it so the new message shows without re-opening.

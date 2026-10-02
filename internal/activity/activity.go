@@ -33,6 +33,7 @@ var pastLabels = []struct{ gerund, past string }{
 	{"Checking grammar", "Grammar checked"},
 	{"Checking for phishing", "Phishing check finished"},
 	{"Re-fetching HTML bodies", "HTML bodies re-fetched"},
+	{"Prefetching message bodies", "Message bodies prefetched"},
 	{"Fetching message", "Message fetched"},
 	{"Sending queued mail", "Queued mail sent"},
 	{"Sending message", "Message sent"},

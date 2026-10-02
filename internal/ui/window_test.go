@@ -455,6 +455,39 @@ func TestOwnBodyFetchIgnoresOnlyTheRunningRenderFetches(t *testing.T) {
 	}
 }
 
+func TestBodyPrefetchRefreshesOnlyTheOpenConversation(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		accountID int64
+		threadID  string
+		ownFetch  bool
+		want      bool
+	}{
+		{"open conversation", 1, "open", false, true},
+		{"another conversation", 1, "other", false, false},
+		{"another account", 2, "open", false, false},
+		{"render's own fetch", 1, "open", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			key := cacheKey(tc.accountID, "m")
+			w := &window{
+				activeID:       1,
+				openThreadID:   "open",
+				refreshPending: true,
+				sectionCache:   map[uiCacheKey]cachedSection{key: {}},
+				renderFetching: map[uiCacheKey]bool{key: tc.ownFetch},
+			}
+			w.onChange(syncer.Change{Kind: syncer.MessageBodyFetched, AccountID: tc.accountID, GmailID: "m", ThreadID: tc.threadID})
+			if w.refreshThreadPending != tc.want || w.refreshListPending {
+				t.Fatalf("refresh conversation = %v, list = %v", w.refreshThreadPending, w.refreshListPending)
+			}
+			if _, cached := w.sectionCache[key]; cached {
+				t.Fatal("body fetch left a stale reader section cached")
+			}
+		})
+	}
+}
+
 // The reader may only keep what is on screen while a render runs when that is
 // the same conversation being repainted. Showing another one — an equal thread
 // id on the other account included — puts its body, attachments and gists under

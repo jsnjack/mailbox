@@ -1,5 +1,5 @@
 // Package syncer keeps the local SQLite cache in step with Gmail: initial
-// backfill, incremental history sync, and lazy body fetches. It publishes
+// backfill, incremental history sync, and background/on-demand body fetches. It publishes
 // id-only change events over a Hub that the UI subscribes to (marshalling each
 // onto the GTK main loop). It imports no GTK code.
 package syncer

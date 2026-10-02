@@ -80,6 +80,9 @@ type Engine struct {
 	// remains recoverable by Resync). In-memory: a restart just retries.
 	fetchFailMu sync.Mutex
 	fetchFails  map[int64]map[string]int
+
+	bodyFetchMu sync.Mutex
+	bodyFetches map[bodyFetchKey]*bodyFetch
 }
 
 // maxFetchFailPasses is how many consecutive failed passes a message may hold
@@ -525,11 +528,12 @@ func (e *Engine) EmptyLabel(ctx context.Context, b backend.Backend, accountID in
 
 // FetchBody downloads a message's full body and caches it, marking it fetched.
 func (e *Engine) FetchBody(ctx context.Context, b backend.Backend, accountID int64, gmailID string) error {
+	return e.fetchBody(ctx, b, accountID, gmailID, false)
+}
+
+func (e *Engine) downloadBody(ctx context.Context, b backend.Backend, m model.Message) error {
 	start := time.Now()
-	m, err := e.Store.GetMessage(ctx, accountID, gmailID)
-	if err != nil {
-		return err
-	}
+	gmailID := m.GmailID
 	netStart := time.Now()
 	body, atts, err := b.FetchBody(ctx, gmailID)
 	if err != nil {
@@ -546,7 +550,7 @@ func (e *Engine) FetchBody(ctx context.Context, b backend.Backend, accountID int
 	if err := e.Store.ReplaceAttachments(ctx, m.RowID, atts, model.ReferencedCIDs(body.HTML)); err != nil {
 		slog.Default().Warn("store attachments", "id", gmailID, "err", err)
 	}
-	e.publish(Change{Kind: MessageBodyFetched, AccountID: accountID, GmailID: gmailID, ThreadID: m.ThreadID})
+	e.publish(Change{Kind: MessageBodyFetched, AccountID: m.AccountID, GmailID: gmailID, ThreadID: m.ThreadID})
 	return nil
 }
 
