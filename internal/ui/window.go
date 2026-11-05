@@ -230,7 +230,8 @@ type window struct {
 	authIcon     *gtk.Image   // compact sender-auth (SPF/DKIM/DMARC) status; details on hover
 	cautionLabel *gtk.Label   // anti-phishing heuristic warnings
 	webview      *webkit.WebView
-	readerZoom   float64 // reader message zoom (Ctrl +/-/0), persisted
+	readerZoom   float64 // reader message zoom (Ctrl +/-/0, pinch), persisted
+	pinchZoom    float64 // readerZoom when the current pinch began
 	sanitizer    *bluemonday.Policy
 	// Last pointer position over the WebView (widget coords), tracked by a
 	// motion controller: an in-page click reaches Go as a navigation with no
@@ -288,6 +289,7 @@ type window struct {
 	archiveBtn      *gtk.Button
 	translateBtn    *gtk.Button
 	overflowBtn     *gtk.MenuButton   // secondary reader actions (native menu model)
+	zoomBtn         *gtk.Button       // reader zoom level ("110%"), shown only off 100%; click resets
 	starAction      *gio.SimpleAction // stateful: the open message's Starred toggle
 	unreadAction    *gio.SimpleAction // stateful: the thread-list "show unread only" filter
 	imagesEnabled   bool              // whether remote images are loaded in the reader
@@ -921,6 +923,7 @@ func (w *window) present() {
 			w.readerZoom = vs.Zoom
 		}
 	}
+	w.refreshZoomBadge()
 	// The persisted zoom is applied when the reader shell reports ready (the
 	// shell page owns zoom now, and it hasn't finished loading here).
 	w.selectLabel(w.current)
@@ -1557,6 +1560,7 @@ func (w *window) buildReader() *adw.NavigationPage {
 	motion.SetPropagationPhase(gtk.PhaseCapture)
 	motion.ConnectMotion(func(x, y float64) { w.readerPtrX, w.readerPtrY = x, y })
 	w.webview.AddController(motion)
+	w.buildReaderPinch()
 	w.sectionCache = make(map[uiCacheKey]cachedSection)
 	// The view background is what WebKit paints where no content is (resize
 	// gutters, overscroll, the instant before the shell's first paint). Pin it
@@ -1780,9 +1784,23 @@ func (w *window) buildReader() *adw.NavigationPage {
 	hb.PackStart(w.replyBtn)
 	hb.PackStart(w.aiReplyBtn)
 	hb.PackStart(w.archiveBtn)
+	// The reader zoom level, only while it is off 100%: a magnified reader
+	// explains itself, and one click puts it back. Hidden until present()
+	// restores the persisted zoom.
+	w.zoomBtn = gtk.NewButtonWithLabel("100%")
+	// Flat like every other header-bar control; tabular digits so the width
+	// holds still while a pinch runs the number up and down.
+	w.zoomBtn.AddCSSClass("flat")
+	w.zoomBtn.AddCSSClass("numeric")
+	w.zoomBtn.SetTooltipText("Reset zoom (Ctrl+0)")
+	a11yLabel(w.zoomBtn, "Reset zoom")
+	w.zoomBtn.SetVisible(false)
+	w.zoomBtn.ConnectClicked(func() { w.setZoom(1.0) })
+
 	hb.PackEnd(w.overflowBtn)
 	hb.PackEnd(w.translateBtn)
 	hb.PackEnd(w.summaryBtn)
+	hb.PackEnd(w.zoomBtn)
 	w.refreshAIVisibility()
 	w.setActionsSensitive(false)
 
@@ -2598,6 +2616,15 @@ func (w *window) saveViewState() {
 func (w *window) adjustZoom(delta float64) { w.setZoom(w.readerZoom + delta) }
 
 func (w *window) setZoom(z float64) {
+	z = w.applyZoom(z)
+	logging.Trace("ui: set zoom", "zoom", z)
+	w.saveViewState()
+}
+
+// applyZoom clamps z, shows it in the reader and the header-bar badge, and
+// returns the value applied — without persisting, so a pinch can drive it
+// every frame and save once when the fingers lift.
+func (w *window) applyZoom(z float64) float64 {
 	switch {
 	case z < 0.5:
 		z = 0.5
@@ -2609,10 +2636,63 @@ func (w *window) setZoom(z float64) {
 	if math.Abs(z-1) < 0.001 {
 		z = 1
 	}
-	logging.Trace("ui: set zoom", "zoom", z)
 	w.readerZoom = z
 	evalJS(w.webview, readerZoomScript(z))
-	w.saveViewState()
+	w.refreshZoomBadge()
+	return z
+}
+
+// refreshZoomBadge shows the reader zoom level in the header bar whenever it
+// is anything but 100%, so a magnified reader says so; at 100% it is hidden.
+func (w *window) refreshZoomBadge() {
+	if w.zoomBtn == nil {
+		return
+	}
+	pct := int(math.Round(w.readerZoom * 100))
+	w.zoomBtn.SetLabel(fmt.Sprintf("%d%%", pct))
+	w.zoomBtn.SetVisible(pct != 100)
+}
+
+// buildReaderPinch makes a touchpad (or touchscreen) pinch over the reader
+// drive the reader zoom — the same zoom as Ctrl +/−/0, so it scales only the
+// email bodies, re-wraps them, shows in the header-bar badge, and Ctrl+0 resets
+// it. WebKit's own pinch is switched off: it magnifies the whole page, the
+// app's chrome included, without laying it out again, so the right edge falls
+// off the pane behind a horizontal scrollbar. Because the reader never
+// navigates, that magnification also outlived every conversation swap, and
+// Ctrl+0 could not reach it. A pinch applies live and settles on the nearest
+// 10% when the fingers lift, the grid Ctrl +/− steps on (and 100% exactly).
+func (w *window) buildReaderPinch() {
+	disabled := 0
+	controllers := w.webview.ObserveControllers()
+	for i := uint(0); i < controllers.NItems(); i++ {
+		if zg, ok := controllers.Item(i).Cast().(*gtk.GestureZoom); ok {
+			zg.SetPropagationPhase(gtk.PhaseNone)
+			disabled++
+		}
+	}
+	logging.Trace("ui: reader pinch setup", "webkit_pinch_disabled", disabled)
+	// Capture phase plus a claimed sequence: even if a WebKit version adds its
+	// pinch some other way, it never sees one this gesture took.
+	pinch := gtk.NewGestureZoom()
+	pinch.SetPropagationPhase(gtk.PhaseCapture)
+	pinch.ConnectBegin(func(*gdk.EventSequence) {
+		pinch.SetState(gtk.EventSequenceClaimed)
+		w.pinchZoom = w.readerZoom
+		logging.Trace("ui: reader pinch begin", "zoom", w.pinchZoom)
+	})
+	pinch.ConnectScaleChanged(func(scale float64) {
+		w.applyZoom(w.pinchZoom * scale)
+	})
+	pinch.ConnectEnd(func(*gdk.EventSequence) {
+		settled := math.Round(w.readerZoom*10) / 10
+		logging.Trace("ui: reader pinch end", "from", w.pinchZoom, "to", w.readerZoom, "settled", settled)
+		if settled == w.pinchZoom && w.readerZoom == w.pinchZoom {
+			return // fingers touched and lifted; nothing to save
+		}
+		w.setZoom(settled)
+	})
+	w.webview.AddController(pinch)
 }
 
 // showThread opens a conversation: it loads all its messages, renders them

@@ -280,7 +280,14 @@ always-visible scrollbar sits at the reader viewport's bottom edge (a
 per-body scroller put it at the bottom of the message, screens away on a
 tall email) — the browser bargain, chosen over a "cap at the pane" rule
 under which zoom silently did nothing on exactly those emails — never
-`WebView.SetZoomLevel`, whose page zoom scales the app chrome too);
+`WebView.SetZoomLevel`, whose page zoom scales the app chrome too). A touchpad
+pinch drives the same zoom (`buildReaderPinch`: live while pinching, settled on
+the nearest 10% when the fingers lift) and WebKit's own `GtkGestureZoom` is set
+to `PhaseNone`: its magnification scaled the whole page, chrome included,
+without re-laying it out, so the right edge fell off the pane behind a
+horizontal scrollbar, and since the reader never navigates it survived every
+conversation and Ctrl+0. Off 100%, a flat "110%" header-bar button
+(`zoomBtn`, `refreshZoomBadge`) shows the level and resets it on click;
 a 60s background incremental sync (each pass under a `syncPassTimeout` backstop; consecutive failures back off exponentially to `syncBackoffCap` instead of re-running a heavy resync every tick) updates label counts through `dispatch`→`Hub`,
 and new inbox mail (arriving after launch) raises an immediate desktop notification via
 `gio.Notification`. Notifications are account-qualified and deduplicated for the session, require a real SENT label before suppressing own-address mail, and ignore body-hydration events. A persisted AI gist is used when already available but AI never delays delivery. The background sync self-heals an expired history watermark
