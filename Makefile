@@ -33,6 +33,21 @@ endif
 test:
 	go test $(PKG)
 
+# The GTK tests (MAILBOX_TEST_GTK=1) on a private virtual screen, bus and
+# runtime directory, so nothing they open reaches the desktop. Run every other
+# GUI command through scripts/headless-gui.sh too.
+# Each test runs in a process of its own: WebKit's default network session
+# keeps the XDG directories of the first test that made a WebView, and once
+# that test removed them, the next test's web process cannot start.
+test-ui:
+	@dir=$$(mktemp -d) && go test -c -o "$$dir/ui.test" ./internal/ui && \
+	cd internal/ui && status=0 && \
+	for t in $$("$$dir/ui.test" -test.list 'GTK$$'); do \
+	  echo "==> $$t"; \
+	  MAILBOX_TEST_GTK=1 ../../scripts/headless-gui.sh "$$dir/ui.test" -test.run "^$$t$$" || { status=1; break; }; \
+	done; \
+	rm -f "$$dir/ui.test"; rmdir "$$dir"; exit $$status
+
 vet:
 	go vet $(PKG)
 
@@ -104,4 +119,4 @@ release: release-artifacts
 clean:
 	rm -rf bin/ rpmbuild/ $(DIST) $(BINARY)
 
-.PHONY: version build run rpm test vet fmt lint check standards release release-artifacts clean
+.PHONY: version build run rpm test test-ui vet fmt lint check standards release release-artifacts clean

@@ -8,7 +8,11 @@ description: Drive the mailbox GTK app in a throwaway sandbox to verify a change
 The app is verified in a sandbox (per AGENTS.md): a copy of the live DB +
 config under temp XDG dirs, a fresh Xvfb display, and a distinct app id so it
 never touches a running real instance. It shares the session DBus, so keyring
-tokens and the AI key still resolve — real Gmail fetches work.
+tokens and the AI key still resolve — real Gmail fetches work. Never wrap it in
+`dbus-run-session`: a second bus on the shared `/run/user/$UID` starts a second
+document portal, which unmounts the desktop's `/run/user/$UID/doc`, and every
+Flatpak app then fails to start. For GTK tests use `make test-ui`, and for any
+GUI command that needs no keyring use `scripts/headless-gui.sh`.
 
 ## Recipe
 
@@ -21,6 +25,12 @@ cp -r ~/.config/mailbox   $SB/config/mailbox
 Xvfb :77 -screen 0 1400x900x24 &   # pick a free display
 sbx_stop                           # ALWAYS, before every launch — see Gotchas
 
+mkdir -p $SB/stubs   # a clicked link or attachment must not open on the desktop
+for c in xdg-open gio gnome-www-browser x-www-browser sensible-browser firefox epiphany; do
+  printf '#!/bin/sh\necho "%s $*" >>"%s/opened.log"\n' "$c" "$SB" > $SB/stubs/$c; chmod +x $SB/stubs/$c
+done
+
+env -u WAYLAND_DISPLAY PATH=$SB/stubs:$PATH BROWSER=$SB/stubs/xdg-open \
 XDG_DATA_HOME=$SB/data XDG_CONFIG_HOME=$SB/config XDG_CACHE_HOME=$SB/cache \
 DISPLAY=:77 GDK_BACKEND=x11 GSK_RENDERER=cairo \
 MAILBOX_APP_ID=com.jsnjack.mailbox.sandbox MAILBOX_DEMO=1 \

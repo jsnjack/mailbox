@@ -38,7 +38,7 @@ func (p *replyDialogProvider) Stream(ctx context.Context, _ string, _ []ai.Msg) 
 	return ch, nil
 }
 
-// Run under Xvfb with MAILBOX_TEST_GTK=1. Ordinary headless checks skip native
+// Run with `make test-ui` (MAILBOX_TEST_GTK=1). Ordinary headless checks skip native
 // widgets; this exercises allocations and asynchronous state on the GTK thread.
 func TestReplyDialogGTK(t *testing.T) {
 	if os.Getenv("MAILBOX_TEST_GTK") != "1" {

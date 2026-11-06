@@ -586,8 +586,8 @@ open an editable compose immediately when selected, closing the dialog.
 Create draft applies only to the custom instruction. Try again regenerates; closing cancels pending requests. A bounded
 session cache keyed by the full conversation context hash reuses suggestions on
 reopen and misses when the conversation changes. Smart-replies-only settings
-show only the generated replies. `TestReplyDialogGTK` runs under Xvfb with
-`MAILBOX_TEST_GTK=1` to verify sizing and the asynchronous interaction.
+show only the generated replies. `TestReplyDialogGTK` verifies sizing and the
+asynchronous interaction; `make test-ui` runs it with the other GTK tests.
 Compose supports attachments (the file picker accepts multiple files and shows
 them as wrapping, width-bounded chips; decoded payloads are capped at 18 MiB total before reading, and `BuildMIME` emits multipart/mixed with streaming line-wrapped base64 encoding). Sending uses Undo Send: the compose closes
 and the message is held ~5s behind an "Undo" toast (`deferSend`) before it goes
@@ -662,6 +662,11 @@ there, and run under Xvfb (`GDK_BACKEND=x11 GSK_RENDERER=cairo`) with a distinct
 `MAILBOX_APP_ID`. It shares the real session bus (so the keyring still resolves
 OAuth tokens + the AI key) but starts a fresh instance, so it never disturbs a
 running app. `MAILBOX_DEMO=1` hides the "read-only" banner for clean screenshots.
+This sandbox is the only GUI run allowed on the desktop's bus, and it starts no
+bus of its own. Run GTK tests with `make test-ui` and every other GUI command
+through `scripts/headless-gui.sh`, never a hand-written `dbus-run-session`: a
+bus that starts the document portal while sharing `/run/user/$UID` unmounts the
+desktop's `doc` filesystem, and Flatpak apps then fail to start.
 
 Dependency rule: `store`/`backend`/`gmailapi`/`gmailbackend`/`imapbackend`/`sync`/`auth`/`ai`
 MUST NOT import any GTK package (they are headless and unit-testable without a
@@ -676,6 +681,7 @@ in without touching the engine.
 
 ```
 make check    # fmt → vet → build → test → lint (gate after every change)
+make test-ui  # the GTK tests on a private virtual screen (scripts/headless-gui.sh)
 make build    # compile the dynamically-linked binary into bin/
 make run      # build and launch the GTK app
 make rpm      # build the RPM (packaging/mailbox.spec)
