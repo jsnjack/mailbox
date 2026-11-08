@@ -14,6 +14,29 @@ AI features (draft reply, translate email). Multi-account; Linux-only for now.
 
 ---
 
+## Where the details are
+
+This file holds what every session needs: the data flow, the package map, the
+rules that cross packages, the commands, and the traps. The full design of
+each area is in `docs/`. Read the file for the area before changing it:
+
+| Working on | Read |
+|---|---|
+| a package or file you have not seen before; the design decisions in full | [docs/architecture.md](docs/architecture.md) |
+| accounts and providers, `cmd/mailbox/launch.go`, `internal/syncer`, `internal/snooze`, `internal/auth`, the backends, notifications, `mailto:` | [docs/accounts.md](docs/accounts.md) |
+| the reader: body rendering, the sanitizer and email CSS, the WebKit shell page, remote images, links, phishing, invites, unsubscribe, zoom | [docs/reader.md](docs/reader.md) |
+| the thread list, search, paging, bulk actions, Undo toasts | [docs/threadlist.md](docs/threadlist.md) |
+| compose, drafts, signatures, the AI-reply popover, Undo Send, the outbox | [docs/compose.md](docs/compose.md) |
+| `internal/ai`, `internal/aiwork`: summaries, the AI language, translation, categories | [docs/ai.md](docs/ai.md) |
+| colour, the status bar and activity log, the responsive layout, shortcuts, test hooks | [docs/window.md](docs/window.md) |
+| `config.toml`, the AI chain and keys, where every file lives | [docs/configuration.md](docs/configuration.md) |
+| building and connecting an account, as a user does it | [docs/SETUP.md](docs/SETUP.md) |
+| choosing a local AI model, `bench/` | [docs/BENCHMARK.md](docs/BENCHMARK.md) |
+
+This file stays under 30,000 bytes, and `make check` fails when it is over (AGENTS.universal.md, "AGENTS.md size"). When a change alters a flow, update that flow's file in `docs/`, not this one.
+
+---
+
 ## Architecture
 
 One-way data flow: the local SQLite cache is the single source of truth. Background
@@ -28,645 +51,42 @@ Gmail REST API → sync engine (goroutines) → SQLite (source of truth)
                 dispatch.Main (glib.IdleAdd) → GTK UI (main thread)
 ```
 
+One line per package; [docs/architecture.md](docs/architecture.md) lists
+every file.
+
 ```
-cmd/mailbox/         thin cobra entry point (flags, logger wiring, launches the app)
-internal/
-  model/             plain domain structs (Account, Thread, Message, Label) — no GTK
-  config/            XDG paths + config.toml load/save
-  dispatch/          THE main-thread bridge: Main(fn) → glib.IdleAdd
-  store/             SQLite layer (schema, FTS5, queries) — modernc.org/sqlite
-  auth/              OAuth2 installed-app loopback + keyring-backed token source (auto-refresh, rotated-token write-back, IsAuthError detects a revoked/expired refresh token). A failed `xdg-open` reports the consent URL back to the add-account dialog for copying while the loopback server keeps waiting. The refresh POST runs on a dedicated 30s-timeout HTTP client (refreshContext): oauth2.Transport calls Token() before the request context exists and ReuseTokenSource serializes all callers behind one mutex, so an unbounded refresh on a half-open connection would wedge every request for the account.
-  backend/           the provider-agnostic Backend interface the engine drives (domain-typed: model.Message/Label, opaque sync cursor) + BuildMIME (RFC 5322). No protocol specifics — Gmail today, IMAP planned.
-  gmailapi/          wrapper over google.golang.org/api/gmail/v1 (semaphore, per-attempt quota budget using the May 2026 method costs, paced at 80% of the 6,000-unit per-user limit with a 100-unit burst, backoff honoring Retry-After; network errors retried for idempotent calls but not sends). The budget serves waiting requests most urgent first by `backend.PriorityOf(ctx)` — user (the default: opening, searching, sending, archiving) > inbox (inbox catch-up, body prefetch) > background (bulk catch-up, HTML backfill), FIFO within a priority — because at 20 units a read the whole account gets ~4 reads a second, and without it a catch-up's twenty fetchers won the race for nearly every token while a reader waited. `history.list` asks for 500 records a page (the default 100 made a week of history ~130 requests before anything was fetched).
-  gmailbackend/      implements backend.Backend over gmailapi.Client (owns the Gmail↔domain conversions + the history-walk → per-message changes). Every history record carries the message's full label set after that change (verified live: 4,867/4,867 label records, 2,372/2,379 added records — Gmail omits an empty set), so `ChangeLog` (`backend.ChangeLogger`) returns one change per message, most recently changed first, with its last record's labels and an Inbox hint. `ListInbox` (`backend.InboxLister`) lists INBOX and INBOX∧UNREAD ids by label id (exact, unlike `q=`).
-  imapbackend/       implements backend.Backend over IMAP (emersion/go-imap v2): connect/LOGIN, LIST folders→labels (special-use mapped), multi-folder backfill (skips \All/\Flagged/\Important virtuals), FETCH envelope/flags + body (go-message), and incremental sync. Message id = "imap:<uidvalidity>:<uid>:<mailbox>". Incremental (`Changes`) diffs a per-folder UID-set cursor (JSON in sync_cursor): new = current\stored, vanished = stored\current, UIDVALIDITY change re-syncs the folder; CONDSTORE `CHANGEDSINCE` adds flag-change detection when the server supports it (QRESYNC isn't exposed in go-imap beta.8, so deletions use the UID-set diff). Profile seeds the initial cursor. Mutations map every selectable user folder to a real IMAP MOVE destination; Gmail-style multi-label toggles stay hidden for IMAP. Provider search implements `SearchPager`: the first page searches once, fetches dates for global newest ordering, and retains an opaque bounded session cursor for later pages. Delete, SMTP send + Sent APPEND, drafts, attachments, threading (References root), and XOAUTH2 (Gmail-mail/Outlook) are implemented. A small connection pool (`poolSize`, `withConn`) serves the engine's fan-out concurrently — each pooled op is bounded by a watchdog that force-closes the connection on ctx cancel or `pooledOpTimeout` (a socket deadline can't do it: go-imap re-arms the read deadline around every response and parks between responses with none, so a half-open connection would otherwise block until TCP gives up), and `acquire` waits for a slot ctx-aware; `Watch` (optional `backend.Watcher`) holds a dedicated IDLE connection on INBOX and nudges the per-account sync loop's `wake` channel for near-real-time updates (falls back to the 60s poll when the server lacks IDLE). Connection setup uses a dial timeout + a login deadline (cleared afterward so pooled/IDLE reads aren't affected) so a wrong/unreachable host fails fast; a login credential rejection is classified (`AUTHENTICATIONFAILED` code + text fallback) and wrapped with `backend.ErrAuth` so the launcher surfaces the reconnect banner instead of retrying forever.
-  sync/              per-account sync workers (backfill ↔ incremental) + notify.Hub; the engine takes a backend.Backend, never a concrete client. A pass puts the visible inbox first. After a gap (the first pass in the process, or none completed for `inboxRefreshAfter` — launch, a suspended laptop, an outage) `refreshInbox` lists the provider's inbox before anything else and `store.ReconcileInbox` corrects membership and read state in one transaction (removals only from a complete listing), then the newest uncached inbox messages are fetched (`inboxFetchMax`) — a week of Gmail history is ~27 pages, ~11s, so reading it first kept the inbox stale. The change log follows: cached messages take their labels straight from it (`store.ApplyLabelSets`; a provider message never changes after delivery, so labels are the whole update and need no 20-unit fetch), messages with a queued `pending_label_ops` mirror are left alone (fetched last instead, so the provider's older state can't undo what the user just did), new inbox mail is fetched next at inbox priority, and everything else last at background priority, newest first. A long background phase re-checks the inbox every `inboxCheckEvery`, since it holds the account's sync loop. Resync (expired cursor) refreshes the inbox the same way before its backfill — reusing the refresh the failed incremental just did — so archived/read-elsewhere state is right even past the 500-message backfill, and backfill commits every `backfillFlushEvery` as well as per 200. IMAP implements `ChangeLog` for the order only (INBOX first, newest UID first; no label sets). `syncer.Progress` shows a pass in the activity hub with one row open at a time: "Checking mail" (with a percentage while a multi-page change log is read), then "Syncing other mail"/"Syncing recent mail" with "120 of 815 messages" for a catch-up's bulk; small passes stay a plain spinner (`progressRowMin`). Incremental sync persists a fixed change range in `sync_batches` and atomically saves metadata plus the remaining IDs every 20 messages; the batch's `Inbox` count keeps the inbox-first order across restarts (a build without it fetches every id in order, still complete). Restart resumes that range without fetching committed IDs again; later provider changes are read after it finishes. Setting a sync cursor clears the checkpoint, including after resync. Manual/background incremental and resync passes share a per-account lock. Each live account also runs `RunBodyPrefetch` (at inbox priority): startup catch-up and sync events fetch missing Inbox bodies within the configured retention window, four at a time in bounded batches. Only messages carrying INBOX qualify; the worker rechecks membership before downloading so queued messages archived in the meantime are skipped. A periodic store scan retries failures and recovers missed events. `EnsureBody` and reader `FetchBody` share in-flight downloads by account and message; `FetchBody` still permits explicit refreshes of cached bodies. Account shutdown cancels and waits for prefetch alongside sync. Body-cache events invalidate reader sections and refresh the open conversation without reloading the thread list; remote images and attachment bytes remain fetched on open.
-  snooze/            snooze mirroring: local snoozes rows + their provider label mirror ("Snoozed" + hidden "Snoozed/<wake time>" stamps), the wake sweeper, and the post-sync reconciler that makes snoozes hold and wake across machines
-  ai/                provider abstraction (OpenAI-compatible + Anthropic), streaming; a failover provider chains the configured models in priority order — each chain entry may carry its own provider/endpoint/key ([[ai.chain]]), so a VPN-only proxy falls back to a local model. It switches on request failure or a stream error before any content, and a circuit breaker skips a failed entry for ~60s (probing after; ignored when every entry is cooling) with a 5s dial timeout so a blackholed endpoint can't stall every request. Classification runs at temperature 0 with tolerant reply parsing — MatchCategory.
-`TranslateSegments` names each snippet by index (a JSON object, not an array) and
-returns one translation per input, empty where the model gave none: a positional
-reply can't be trusted at length — models quietly merge snippets on a longer body
-(71 sent, 57 back, measured) and a reply short by one shifts every later
-translation onto the wrong paragraph, reading as fluent prose on the wrong text.
-An array reply is still parsed, for a model that answers in the older shape.
-  aiwork/            headless background AI worker: categorizes every account's inbox (launch catch-up + sync-event driven, debounced, capped per pass, cooldown on provider failure), persists to the store, publishes AIUpdated
-  activity/          headless pub/sub of transient "what is the app doing" events (status bar)
-  ui/                all GTK/adw/webkit widget code (3-pane shell, list, reader, actions).
-                     `threadlist.go` owns the middle pane (paged loading, row
-                     diffing, selection mode), `reader.go` the conversation
-                     render (bodies, sections, inline images, gists), and
-                     `window.go` the shell, sidebar, and everything else.
+cmd/mailbox/             cobra entry point: flags, logger wiring, the GTK app (launch.go starts each
+                         account's backend and sync loops), the headless `sync` and `set-ai-key` commands
+internal/model/          plain domain structs (Account, Thread, Message, Label); no GTK
+internal/config/         XDG paths, config.toml, and the small state files (prefs, view, signatures,
+                         shortcuts, account names, IMAP accounts)
+internal/dispatch/       THE main-thread bridge: Main(fn) → glib.IdleAdd
+internal/store/          SQLite (modernc.org/sqlite): schema, FTS5, queries, outbox, local drafts, the
+                         AI caches (summaries, gists, analyses, categories, translations)
+internal/auth/           OAuth2 loopback login, the keyring-backed token source, IMAP credentials
+internal/backend/        the provider-agnostic Backend interface the sync engine drives, and BuildMIME
+internal/gmailapi/       Gmail REST client: quota budget and pacing, retries, request/byte counters
+internal/gmailbackend/   backend.Backend over gmailapi
+internal/imapbackend/    backend.Backend over IMAP + SMTP: connection pool, IDLE, UID-set sync cursor
+internal/syncer/         the per-account sync engine, `sync` in the dependency rule below: backfill,
+                         incremental, body prefetch, outbox, label mirroring; notify.Hub's ID-only events
+internal/snooze/         snoozes mirrored to provider labels, the wake sweeper, the reconciler
+internal/ai/             AI providers (OpenAI-compatible, Anthropic), the failover chain, the
+                         Assistant and its prompts
+internal/aiwork/         headless worker that categorizes every account's inbox
+internal/activity/       headless pub/sub of "what is the app doing" events for the status bar
+internal/ics/            minimal iCalendar reader and iTIP REPLY writer for invite cards
+internal/remotecache/    email images downloaded through a privacy-safe client, content-addressed
+internal/httpclient/     the User-Agent and resilient dialer of every outbound request;
+                         PublicTransport, which refuses private addresses, for URLs from email content
+internal/logging/        slog setup and the Trace helpers (see "Tracing")
+internal/ui/             all GTK/adw/webkit code: window.go (shell, sidebar, most actions),
+                         threadlist.go (middle pane), reader.go (conversation render), compose.go,
+                         settings.go (Preferences)
+scripts/headless-gui.sh  the private X server, bus and runtime directory every GTK test runs under
+packaging/               RPM spec, desktop entry (the `mailto:` handler) and icon
+bench/                   the local-model benchmark (docs/BENCHMARK.md)
 ```
-
-Multi-account, multi-provider: `accounts.account_type` ('gmail'|'imap') selects
-the backend; the launcher's `buildBackendForAccount` builds the Gmail REST
-backend (first-class — `history.list`, server threads/search) or an IMAP backend
-(`imapbackend` over emersion/go-imap, with a password or XOAUTH2 credential) per
-account, and the engine drives whichever via `backend.Backend`. The UI tracks an
-active account (a switcher appears in the sidebar when more than one is
-connected) and routes every operation by account id. The app launches even with
-**zero accounts** — it opens to a welcome empty state whose **Add account…**
-button connects the first one. Accounts are added via the
-primary menu's **Add account…** dialog (`openAddAccount`: provider presets →
-email + app password or OAuth sign-in → Test & Add; persists via
-`config.{SaveIMAPAccount}` + `auth.SaveIMAPSecret` + `store.UpsertAccount`) and,
-for Gmail REST, via `mailbox sync --account`. Add/remove/reconnect are all live
-— no restart: the launcher keeps a per-account `context.CancelFunc`, and
-`startAccount` (used at launch, add, and reconnect) stops any existing runtime
-for that id before starting, so a backend can be torn down or swapped cleanly. A
-freshly added account has no sync cursor, so `backgroundSync` does an initial
-labels+backfill (via `engine.Resync`) immediately before switching to
-incremental. An account is **removed** from Preferences → Accounts
-(`deps.RemoveAccount` → `stopAccount` + `store.DeleteAccount`, which clears the
-FTS rows then drops the account row so its messages/labels/threads cascade, +
-keyring secret + per-account config cleanup); the switcher collapses live and the
-active account falls back to a survivor or the welcome state. A revoked/expired
-credential (Gmail OAuth `invalid_grant`, or a rejected IMAP password classified
-as `backend.ErrAuth`) reveals the auth banner whose **Reconnect** button reopens
-the dialog prefilled for that account (`reconnectAccount`) — re-adding the same
-email keeps its cursor (cache preserved) and restarts its sync. Each switcher row shows the
-account's display name (email as a caption when named) and an unread-INBOX
-count pill;
-names are user-assigned in Preferences → Accounts (`config.{Load,Save}AccountName`,
-stored in `<data>/accounts.json` keyed by email — when set, the name is primary
-and the email becomes a caption). Per-account pills and the window title come
-from one batched `store.UnreadCountByLabelForAccounts` query (`refreshAccountUnread`
-/ `applyAccountUnread`), refreshed on any sidebar reload and whenever a non-active
-account syncs. `loadLabels` only rebuilds the sidebar widgets when its structure or
-the inbox badge actually changed (`sidebarSignature`), so an idle 60s sync touches
-nothing. UI memory caches use `uiCacheKey{accountID,id}` for rendered sections,
-categories, gists, analyses, and summaries; translations wrap that key with their
-target language. Provider message and thread ids are never treated as globally unique.
-
-Colour follows GNOME's HIG (monochrome symbolic icons, one accent reserved for
-state): a small application stylesheet (`internal/ui/theme.go`, registered on
-the default display in `build`) tints only three things, all from the system
-`@accent_color` family so they track the accent and light/dark — count pills
-(`countBadge`/`.badge-pill`), the small unread dot on a conversation, and the
-soft accent-tinted AI summary card. Folder icons stay the theme foreground and
-the account switcher is plain text (no avatars).
-
-UI state (implemented): 3-pane shell renders the cached account live; opening a
-conversation renders what is cached immediately and completes itself around
-that. A Gmail conversation's full server-side message membership is hydrated
-once in the background (`hydrateThread`, persisted in `thread_hydrations`, so a
-capped backfill cannot leave older messages and their attachments invisible);
-when it adds any, the resulting `MessageUpserted` re-renders the open
-conversation through the ordinary change path. Only a conversation with nothing
-cached waits for that lookup, since there it is the only way to open it at all.
-The reader lazily fetches + sanitizes +
-renders its bodies (WebKit; remote images load through a hardened local cache,
-with a global privacy opt-out). A render fetches the thread's missing bodies
-concurrently and claims them (`renderFetching`), so the `MessageBodyFetched`
-events it causes are recognised as its own echo: acting on them would re-enter
-`renderConversation`, whose cancel of the previous render would abort the
-sibling fetches still in flight and turn one parallel pass into a round trip per
-message. A body fetched by anything else, or after the render finished, still
-re-renders the open conversation. The reader sanitizes with an email-tuned bluemonday policy
-(`emailPolicy`, keeps inline styles + tables so HTML mail isn't broken). The
-sanitizer drops `<style>`, so each block's CSS is re-added scoped to that
-message (`scopeEmailStyleBlocks` → `scopeEmailCSS`), and everything about that
-path is built for CSS that is malformed, because email CSS is: blocks are
-scoped **one at a time** so an unbalanced brace in one costs only that block;
-a stylesheet douceur cannot parse is retried **rule by rule**
-(`parseRulesIndividually`, over `splitTopLevelRules`) so only the bad rule is
-lost, the way a browser recovers; and every parse goes through the one hardened
-door (`parseStylesheet`), which is also the only reason the app cannot be hung
-by an email. douceur has exactly one input it makes no progress on — a `;` where
-a selector belongs, which `parseQualifiedRule` and `parsePrelude` hand back and
-forth forever — so `stripPreludeSemicolons` removes precisely that token
-(keeping the ones declarations and `@import` need). It arrives via an
-HTML-escaped `<style>`, where character references are not decoded and every
-`&gt;` in a child selector leaves a `;` behind: a Ryanair itinerary shipped one
-and pinned the render goroutine at 100% of a core for the life of the process,
-with the conversation never appearing. `cssParseTimeout` is the backstop for a
-pathology we have not seen, and `FuzzScopeEmailCSS` is what should find the next
-one instead of a user. The
-WebView loads **one persistent shell page** (`readerShellHTML`: styles, CSP, and
-a fit-to-width script that scales each over-wide message body — its `.mbfit`
-wrapper — to the pane individually, so a fixed-width signature table shrinks
-only that email's body, never the app-owned header bands, gist cards, or the
-thread's other messages) and every
-conversation is swapped into it via script (`setReaderHTML` → `__mbSet`, an
-innerHTML swap through a small cgo `evalJS` shim) — **never a navigation**, so
-WebKit never tears down its composited surface and the reader cannot flash
-black between messages (the failure mode of the earlier per-render `LoadHtml` +
-white-cover approaches). JavaScript is enabled **only** for the shell script: a
-strict CSP (`script-src` pinned to the shell's nonce, `default-src 'none'`)
-plus the sanitizer (inserted innerHTML never executes scripts) mean no
-email-supplied script can run or reach the network. Remote images load by default, but tracking pixels are stripped before
-render (`cleanEmailHTML`/`scopeEmailCSS`: tiny or hidden images and backgrounds,
-hidden ancestors, and known open/read/pixel URL patterns across HTML and CSS) and
-the count is surfaced as a "🛡 N trackers blocked" indicator. No image is
-downloaded before the conversation is on screen: `resolveRemoteImages` rewrites
-each reference to `mbcache:<key>` without a request (the key is
-`remotecache.Key`, a hash of the normalized URL, so a document can name an image
-the cache does not hold yet), and `serveRemoteImage` downloads it when WebKit
-asks, finishing the scheme request when it lands — images fill in as they arrive
-the way a browser loads a page, and a slow or dead image host delays only itself.
-Inline `cid:` attachments work the same way (`inlineImageIndex` reads the
-attachment rows, `serveCID` downloads on request), as does the calendar invite
-behind a conversation (`detectInviteLater`). Both handlers share a six-slot
-fetch semaphore, since our downloads bypass WebKit's own connection limits.
-An image that can't be fetched is answered with a transparent pixel rather than
-an error, so the reader never draws a broken-image glyph; the failure is traced
-and nothing is said in the UI, because an expired campaign URL is not something
-the reader can act on. The banner is therefore only ever an offer to load images
-that were deliberately withheld — "Show images" behind the privacy opt-out, and
-nothing else: there is no count at which the reader stops asking for pictures,
-since one image already tells the sender the message was opened, so an
-image-heavy newsletter loads like any other page. The image collector
-parses CSS declarations and names only image-bearing properties; remote
-`@import`, fonts, cursors, and other CSS resources are removed without a request.
-A plain-text body (and the snippet fallback) is HTML-escaped into a `<pre>` with
-bare http(s) URLs auto-linkified (`linkifyText` — explicit-scheme match only, so
-no false positives or non-http schemes), so links in text-only mail (CI/cron/
-monitoring notifications) are clickable and open externally like any other link.
-Before a reader link is handed to the browser, `cleanExternalLink` silently strips
-well-known non-functional campaign parameters and bypasses an obvious redirect
-wrapper only when it carries one unambiguous absolute HTTP(S) destination. The
-pass is local-only (it never resolves a redirect), unwraps at most three levels,
-and leaves opaque, ambiguous, same-site application, and non-HTTP links alone;
-left-click and the WebKit **Open Link in New Window** action share this path.
-A sender-authentication badge shows Gmail's SPF/DKIM/DMARC verdict
-(`ToBody` captures `Authentication-Results` into `raw_headers`; `parseAuthResults`
-→ green verified / amber partial / red possible-spoof), plus deterministic
-anti-phishing heuristics (`phishing.go`: display-name spoofing and deceptive
-link text, compared at the registrable-domain level — no AI/network) surfaced as
-an amber caution line; each message's ⋯ menu's "Check for phishing" additionally
-runs an on-demand AI phishing analysis of that message (`analyzeMessage` →
-`AnalyzeEmail` — verdict + reasons, fed the auth/heuristic signals, shown in the
-shared AI card, titled with the sender when it isn't the newest message),
-**persisted** per message
-(`store.{SetAnalysis,Analysis}`, `message_analyses` table — the message + its
-signals are immutable, so it's reused on re-open without re-running the AI). A thread is rendered newest-message-first, with quoted reply history collapsed
-behind a native <details> "Show quoted text" toggle (`cleanEmailHTML`, same single HTML pass as tracker stripping, no JS). An AI-summary button reveals the **Conversation summary** card
-pinned above the conversation that streams a bullet summary (`SummarizeThread`),
-cached by the thread's message-id fingerprint (`summaryKey`) so reopening is
-instant and a new reply auto-invalidates it; the summary is also **persisted**
-keyed by thread id + that fingerprint (`store.{SetThreadSummary,ThreadSummary}`,
-`thread_summaries` table), so an unchanged thread isn't re-summarized after a
-restart. **One AI language** (Preferences → AI Features → **Language**, default
-English, `config.Prefs.AILanguage` → `Assistant.SetLanguage`, applied live like a
-provider swap) governs everything the AI says *about* the mail: the conversation
-summary, the per-message gist, the phishing verdict and its reasons, a snooze
-suggestion's reason, and the Translate action's target (`window.translateTarget`,
-also the translations' cache key). "Same as the email" (`ai.LanguageMatch`) keeps
-the older follow-the-mail behaviour, and is the one value Translate can't honour
-— translating a mail into its own language is a no-op — so it falls back to
-`ai.DefaultLanguage` there. The prompts share `Assistant.languageClause` (a
-sentence) and `languagePhrase` (a parenthetical, where a strict output format
-leaves no room). Nothing that writes mail *as* the user follows it — draft,
-refine, proofread, subject, quick replies stay in the correspondent's language,
-the only right answer there — and category tags stay fixed ids. Because the
-summary, gist and analysis caches are permanent by design (a body never changes),
-changing the language drops all three (`store.ClearAINotes` + the in-memory maps,
-`dropAINotes`) and they are re-earned on open, on demand, and by the worker's
-next pass: otherwise the setting would only reach mail that hasn't arrived yet,
-and the inbox that prompted the change would keep its old-language notes forever.
-Every AI-note writer captures `store.AINotesGeneration` before requesting AI and
-persists through `SaveAINote`, which serializes the generation check and write
-with `ClearAINotes`; an older request cannot restore a cleared note. UI callbacks
-and rendered sections are also guarded by a note generation. The reset clears
-all section caches and explicitly wakes the background worker for every account.
-Translations are exempt from deletion: both the memory and database caches are
-keyed by account, message and target language, so a change misses and translates
-afresh while switching back reuses the earlier translation. **Snooze**: a conversation can be hidden until a wake time. The local
-`snoozes` table drives this machine's UI (instant hide, the Snoozed virtual
-folder, the inbox-query exclusion), and every snooze is **mirrored to the
-provider as label state** (`internal/snooze`): −INBOX (other clients — the
-Gmail phone app included — stop showing it), +`Snoozed` (stable membership,
-browsable elsewhere), and a hidden `Snoozed/<local time + offset>` child
-(`labelListVisibility=labelHide`) carrying the exact wake moment — so a snooze
-made on one machine holds and **wakes everywhere**. `Manager.Reconcile` (after
-every sync pass) converges rows ↔ labels both ways: adopts snoozes made
-elsewhere (exact time parsed from the stamp), cancels a snooze whose thread is
-back in INBOX (woken/unsnoozed on another machine, dragged to inbox on the
-phone, or re-inboxed by a new reply — matching Gmail's own wake-on-reply),
-retimes on a remote re-snooze, and pushes rows the provider doesn't know
-(pre-mirror snoozes migrate themselves). The row menu's Snooze flyout offers
-presets, AI-suggested moments read from the email itself
-(`Assistant.SuggestSnooze` — up to three "YYYY-MM-DD HH:MM|reason" lines: an
-hour before a meeting, the day before a deadline), and a "Pick date…" calendar
-dialog (`openSnoozeDialog`); a Snoozed virtual folder (`snoozedID`, neutral
-grey count pill) lists pending rows; the per-minute sweeper
-(`backgroundSnoozeWake` → `Manager.WakeDue`) marks a due row notified,
-restores INBOX and strips the snooze labels through the engine's ordered
-mirror queue, deletes an emptied wake-time label (`DeleteLabelIfUnused`, via
-`Engine.MirrorOp` so it can't overtake the modify), and publishes `SnoozeWoke`
-(list refresh + "Reminder" notification). Mirror labels are hidden from the
-sidebar and label pickers (`model.IsSnoozeLabel`); an account whose backend
-lacks `backend.LabelManager` (IMAP) keeps explicitly device-only snoozes and cancels one when a message newer than its snooze snapshot enters the thread. **Calendar invites**: an `.ics` attachment
-(parsed by the dependency-free `internal/ics`) renders an event card above the
-conversation with Accept/Maybe/Decline that email the iTIP REPLY to the
-organizer via the normal outbox path; CANCEL shows a note. **Unsubscribe**:
-`List-Unsubscribe(-Post)` headers are captured at metadata fetch (both
-backends, `messages.list_unsubscribe` columns); the reader overflow offers
-Unsubscribe (RFC 8058 one-click POST > mailto via outbox > browser URL) and
-the thread-list menu's "Subscriptions…" dialog (`store.Subscriptions`) groups
-list senders by volume with per-sender unsubscribe. Message headers show the sender's
-full address ("Name <addr>"), not just the display name. Reader actions archive /
-mark-unread / star / move-to-inbox / report-spam (or not-spam in the Spam
-folder), plus "Delete forever" in Trash/Spam and an "Empty now" banner that empties
-the whole folder (`DeletePermanently`/`EmptyLabel` → `messages.batchDelete`), via
-optimistic `ModifyLabels` + Gmail mirror; opening an unread message marks it read;
-Ctrl +/-/0 zoom the email bodies (persisted; implemented inside the shell's
-fit pass — `__mbZoom` lays each body out at avail/zoom and scales it by
-exactly zoom× its fit-to-width size, so every email's text grows while the
-reader's own header bands and gist cards keep their size; reflowing mail
-re-wraps and never overflows, while a width-locked body grows past the pane
-and the page pans horizontally — the html clip flips to auto and a styled
-always-visible scrollbar sits at the reader viewport's bottom edge (a
-per-body scroller put it at the bottom of the message, screens away on a
-tall email) — the browser bargain, chosen over a "cap at the pane" rule
-under which zoom silently did nothing on exactly those emails — never
-`WebView.SetZoomLevel`, whose page zoom scales the app chrome too). A touchpad
-pinch drives the same zoom (`buildReaderPinch`: live while pinching, settled on
-the nearest 10% when the fingers lift) and WebKit's own `GtkGestureZoom` is set
-to `PhaseNone`: its magnification scaled the whole page, chrome included,
-without re-laying it out, so the right edge fell off the pane behind a
-horizontal scrollbar, and since the reader never navigates it survived every
-conversation and Ctrl+0. Off 100%, a flat "110%" header-bar button
-(`zoomBtn`, `refreshZoomBadge`) shows the level and resets it on click;
-a 60s background incremental sync (`syncPass`, shared with the manual refresh; each pass under a `syncPassTimeout` backstop; consecutive failures back off exponentially to `syncBackoffCap` instead of re-running a heavy resync every tick) updates label counts through `dispatch`→`Hub`,
-and new inbox mail (arriving after launch) raises an immediate desktop notification via
-`gio.Notification`. Notifications are account-qualified and deduplicated for the session, require a real SENT label before suppressing own-address mail, and ignore body-hydration events. A persisted AI gist is used when already available but AI never delays delivery. The background sync self-heals an expired history watermark
-(an account offline past Gmail's history window) by re-backfilling and resetting
-the watermark (`engine.Resync` on `ErrHistoryExpired`); a revoked/expired refresh
-token (`auth.IsAuthError`) instead publishes `AuthExpired`, which reveals a
-"reconnect" banner (it can't recover without re-login). (GNOME routes a notification only when it can resolve the
-GApplication app-id `com.jsnjack.mailbox` to an installed `*.desktop` entry; the
-RPM ships `com.jsnjack.mailbox.desktop` under `/usr/share/applications`.
-Development binaries do not install a user-level entry because it would shadow
-the packaged application.)
-The desktop entry registers `MimeType=x-scheme-handler/mailto;` with
-`Exec=/usr/bin/mailbox %u`, so it always launches the RPM-owned binary rather
-than another `mailbox` earlier on `PATH`. The app appears under GNOME's Default
-Apps → Mail and can be set as the default mail client. The GApplication uses
-`ApplicationHandlesOpen`: a clicked
-`mailto:` URI is delivered to the `open` handler (and routed to an
-already-running instance), which opens a prefilled compose (`parseMailto` →
-`composeFromMailto`, handling both the plain `mailto:` and GIO's normalised
-`mailto:///` forms). `main` strips the `mailto:` arg before cobra parses (the
-root command has subcommands) — `SetArgs` with a non-nil empty slice, since
-`SetArgs(nil)` falls back to `os.Args`. The RPM's `%post` runs
-`update-desktop-database` so the registration takes effect on install.
-Reply / reply-all / forward / new compose in a separate window. Compose is a
-plain-text editor, but outgoing mail is multipart/alternative (text +
-quoted-printable HTML via `backend.BuildMIME`; nested in multipart/mixed with
-attachments): `buildHTMLBody` renders the user's text escaped+linkified, and —
-while the prefilled quote region is unedited (`quoteBoundary` vs the snapshot)
-— embeds the original's sanitized HTML (`bodyHTMLFor` → `QuoteHTML`) as a
-left-rule blockquote for replies or unquoted under the header block for
-forwards, so recipients see the original's real formatting; an edited quote
-falls back to rendering the whole text so the alternatives never disagree.
-Replies quote with the conventional "On <date>, Name <addr> wrote:" attribution
-+ "> " markers; forwards use the standard "---------- Forwarded message
----------" From/Date/Subject/To block with the body unquoted. `htmlToText`
-(quote/AI text source) walks the HTML tree and preserves link targets as
-"text (url)". (Send: `messages.send`, threading headers + threadId on replies;
-replies target the sender's `Reply-To` header when present — captured into
-`model.Message.ReplyTo` / the `reply_to` column — else the From address, via
-`replyTarget`);
-To/Cc/Bcc autocomplete from past correspondents (`store.Contacts` ranks
-addresses seen in cached mail by frequency+recency) plus the user's own
-registered accounts (`withOwnAccounts`, listed first so you can address another
-of your accounts); a `GtkEntryCompletion` completes the last comma-separated
-token. A sparkle button next to Subject generates it from the body
-(`Assistant.GenerateSubject`). Visible AI Draft and Refine buttons provide direct access to compose AI. Refine
-opens a compact panel beneath the toolbar with an instruction field and Fix grammar,
-Shorten, and More natural shortcuts. The panel closes on submission or Escape.
-These actions use `previewComposeAI`:
-generation leaves the editor unchanged, a complete successful result opens for
-review with Apply/Cancel, and Apply is one GTK undo action. An intervening edit
-invalidates the preview. Cancel or compose close cancels the request; partial
-stream failures never become outgoing text. `askAIIntent` collects drafting
-instructions and offers suggested replies. Refine and Proofread use the selected
-span, or the writing above the quote when nothing is selected.
-Compose keeps Save draft and Discard available. A fixed bottom strip shows
-Saving/Saved/Save failed and a deduplicated recipient count. To/Cc/Bcc use
-compact single-line text fields with autocomplete and inline validation. Long
-recipient lists scroll within the entry instead of increasing its height; empty
-Cc/Bcc fields stay hidden until requested. Bcc-only
-and Cc-only messages are accepted. The reader's primary action is explicitly
-labelled Reply all, with its audience count in the tooltip. Closing saves dirty content and
-closes after the local write succeeds; failures keep the editor open. Discard
-serializes against pending saves, deletes the exact local draft, and offers Undo
-that restores the captured content as a new draft. Send also waits for any active
-save and invalidates stale queued snapshots.
-From remains selectable in fresh and resumed drafts. Switching saves a new draft
-under the destination account before deleting the source, clears provider IDs,
-and replaces only an unchanged trailing account signature. Edited signatures are
-preserved. Provider-only drafts first gain a local identity so cleanup targets the
-exact draft. The store and outbox reject cross-account draft IDs.
-Send runs pre-send guards (`preSendWarning`: empty subject or a mentioned but
-missing attachment requires confirmation). A configurable signature
-is appended to every composed body below the cursor area and above any quote
-(`composeBodyWithSignature`) as a plain sign-off — no RFC 3676 "-- " delimiter
-(Gmail/Outlook don't honor it, so for a short sign-off it just shows a stray
-"--" line); it is not re-added when editing an existing draft. Signatures have a **global default**
-(`config.{Load,Save}Signature`, `<config>/signature.txt`) plus optional
-**per-account overrides** (`signatures.json` keyed by email,
-`config.{Load,Save}AccountSignature`; a blank override is removed so the account
-falls back to the default — "blank means use the default"). `signatureForActive`
-resolves which a compose appends: the global default for a single account, else
-`config.SignatureFor(activeEmail)` (override-or-default); `w.signature` is
-refreshed on account switch. Preferences always shows an editable Default
-signature, plus one override editor per account when more than one is connected.
-Clicking a conversation in the Drafts
-folder resumes editing it in compose (`openDraftForEdit`) instead of rendering
-it read-only: the body/recipients are prefilled and the draft's Gmail resource
-id is resolved (`Client.FindDraftID`) so Save updates that draft
-(`Drafts.Update`) and Send sends then removes it (`Drafts.Delete`) — never a
-duplicate; a resumed draft never re-appends the signature, even when the
-resource id couldn't be resolved offline. **Drafts inside conversations**: a
-draft reply is autosaved by Gmail into the real thread, so without a mark it
-renders as delivered mail. `model.Message.IsDraft` is hydrated on every store
-read (an indexed EXISTS on the DRAFT label in `msgCols` — cheaper than label
-slices, which only writers populate) and `ThreadSummary.HasDraft`
-(`markHasDraft`) flags threads holding one: the list row shows a red "Draft"
-tag (`.cat-draft`, skipped in Sent/Drafts where it's redundant), and the
-reader's draft section carries a red "Draft" chip on its sender line plus an
-"Edit draft" link (`mbaction:editdraft` → `openDraftForEditMsg`, the
-message-targeted resume). A draft's ⋯ menu offers Edit/Discard instead of
-Reply/Forward, draft sections are excluded from the immutable-section cache
-(their bodies mutate between saves), and the header bar's
-reply/forward/star/unread target the newest *delivered* message
-(`newestActionable`) so answering a thread can't quote your own unsent draft.
-`openDraftForEdit` and the engine's `DiscardDraft` select the draft by
-`IsDraft`, never "newest" — after an incoming reply the newest message is
-someone else's mail.
-Translate (`onTranslate`) renders a translation of the whole open conversation
-into the configured AI language (English by default) in place (markup preserved, "Show original" reverts): every message
-is translated concurrently and cached per account, message id and target language in `translationCache`
-(`showTranslatedConversation` rebuilds the stacked sections from the cache), so
-reverting, re-opening, or re-translating reuses cached results and an
-already-translated message isn't redone. Translations are also **persisted** per
-message (`store.{SetTranslation,Translations}`, `message_translations` table,
-keyed by gmail id + target lang — a body is immutable so they never go stale), so
-`onTranslate` seeds from the cache for free before calling the AI for the rest.
-Only the text travels, and the conversation's text travels **pooled**:
-`planTranslation` extracts each body's visible text into a `translationPlan`,
-`poolTranslations` translates the union of every body's segments, and
-`plan.render` writes the answers back into the original markup, so the model
-never sees a tag. Extraction and reassembly are separate phases precisely so the
-pool can span messages — each message quotes the ones before it, so the same
-paragraph appears in several bodies (314 segments, 85 distinct, on a real
-five-message thread), and pooling asks for it once and renders every copy
-identically instead of re-wording it per message. The pool goes out in bounded
-batches (`translateBatch` 40, `translateWorkers` 4): one request for a whole
-thread cannot overlap with itself and measured 67s where parallel batches of the
-same text measured 7.6s. Preformatted text is segmented **per paragraph**, not
-per node: a plain-text body is one `<pre>`, so the whole email is a single text
-node, and a whole email offered as one snippet reads to the model like several —
-it answers with one element per paragraph, and only the first would be kept
-(which silently dropped everything after the greeting). Flowed HTML is never
-split, where a blank line is insignificant whitespace inside a sentence.
-Translations are looked up by source text, so a segment the model skipped keeps
-its own original wording and nothing after it moves; a reply with *more* elements
-than segments still can't be paired up positionally, so a single segment re-joins
-them (`zipTranslations`) and anything else fails the batch rather than mixing one
-paragraph's translation into another's. A failed translation keeps the
-conversation on screen (the translation is only swapped in once ready) and says
-so in a toast, and persists nothing, so translating again retries.
-(Both AI caches, like categories, are dropped for a message when it is deleted —
-see `deleteMessageTx`.) Draft-reply streams into a compose
-window via the `ai` provider. Incoming
-attachments are extracted on body fetch (`ReplaceAttachments`) and shown as chips
-in the reader. A part is treated as an inline image — rendered in the body, no
-chip, no paperclip — only when the body actually references its Content-ID
-(`model.ReferencedCIDs`/`IsInlineAttachment`, shared by the store and the
-reader): forwarding makes Gmail stamp a Content-ID on every part, so keying on
-its presence alone hid a forwarded PDF completely; clicking one downloads it (content-addressed under the cache dir)
-and opens it with `xdg-open`.
-
-Every AI answer is written in markdown whether or not it was asked for, so it is
-rendered rather than shown raw (`internal/ui/markdown.go`: bold, inline code,
-italics, bullets and headings, into Pango markup for GTK labels and HTML for the
-reader). Only balanced markers produce tags — a half-streamed `**` stays literal
-instead of yielding markup Pango would refuse, which blanks a label. ✦ marks
-AI-written text everywhere (the card's title, the reader's inline note), and the
-words carry the scope: the panel is the "Conversation summary" with the message
-count beside it, each message's own line is "In short".
-
-Inbox mail is auto-categorized by AI into action tags (Needs reply / Calendar /
-Travel / Receipt / Finance / Security / Discount / Newsletter / Notification; no
-match = no tag) shown on rows — category definitions live in the prompt — and
-**persisted per email** keyed by the latest message's id
-(`store.{SetMessageCategory,MessageCategories}`, `message_categories` table).
-Classification runs in a **headless background worker** (`internal/aiwork`) for
-**every connected account** — not just the active one — so tags are ready before
-an account is switched to: the worker does a catch-up sweep at launch, then
-reacts to `MessageUpserted` sync events (debounced so it never competes with an
-active sync), one request per email through a small pool, capped per pass with
-the rest chained, and a failing provider pauses it for a cooldown. Each stored
-pass publishes an `AIUpdated` hub change; the UI's `categorizeInbox` is
-seed-only (two batched cache queries, re-binding rows only when a tag actually
-changed) — each email is classified once, not every launch. Gated by a
-Preferences toggle (read per pass). Because results are cached, a
-category-prompt change won't re-classify existing mail on its own; the
-thread-list overflow menu's "Re-categorize inbox" (`onRecategorize` →
-`store.ClearCategories` + `Worker.Trigger`, which also lifts the cooldown)
-forces a re-run.
-The automatic "Replied" tag requires the newest non-draft message to carry
-SENT and an earlier message in the same account and thread without SENT or
-DRAFT. A single message labelled both INBOX and SENT, such as an appointment
-notification sent from the account's own address, does not qualify. Drafts
-neither establish received history nor change which delivered message is newest.
-The list is grouped by conversation: a virtualized `gtk.ListView` over a
-`gtk.StringList` of thread ids (looked up in a `threadByID` map of
-`model.ThreadSummary`); rows show the newest message + a count. Refreshes are
-incremental (`diffThreadModel`): an unchanged list (the common idle-sync case)
-does no work, an in-place change (mark-read, star, a new AI category tag) re-
-binds only the affected rows via a per-row signature (`renderSig`), and only a
-changed set/order triggers a full splice — so the list keeps its scroll position
-instead of rebuilding on every event. `store`
-provides `ListThreadsByLabel`/`ListThreadMessages`/`GetThreadSummaries`. Opening a
-thread renders all its messages stacked in the reader (bodies fetched lazily,
-each a sanitized section). A message is one header plus its body: the header
-(`.mbhead` — space above it, a hairline, and the sender's name in full-ink
-semibold; no fill, since a stack of tinted headers reads as slabs and no email
-footer ever puts a bold name straight under a rule — the per-message AI gist
-keeps its tinted card, margined to the same width as the body's content box so
-it can't overhang the email or reach under the scrollbar) doubles as the `<details>`
-summary for every
-message but the newest, so folding one shows the same header rather than a
-second one introducing it — folded it shows sender + snippet, open it shows
-sender + address + recipients (`composeSection`). The band must stay inside the
-content width: the fit-to-width pass only rescues message bodies (`.mbfit`), so
-app chrome bled past the pane edges is simply clipped by `overflow-x:hidden`.
-The whole reader pane sits on one text
-column at 16px: filled surfaces (the thread-summary and invite cards outside the
-WebView, the header band and gist inside it) are inset 6px and pad 10px — 9px
-where a 1px border makes up the difference — while plain rows (subject,
-attachment chips, the phishing caution) are simply margined 16px, and the body
-(`.mbbody`) pads to the same column with the disclosure arrow hanging in the
-band's padding. Change one of those numbers and the pane grows a second left
-edge. Links inside a summary follow without toggling the
-disclosure (WebKit skips activation for interactive descendants), so the
-per-message ⋯ works on a folded message too; the `toggle` event refits, since
-folding changes the height the scaled layout baked in. Archive/trash apply to the whole thread, the header
-reply button (a SplitButton defaulting to **Reply all** — sender-only Reply and
-Forward in its dropdown, `r` = reply all) and star to its newest message, and
-each stacked message carries an always-visible dim ⋯ in its header
-(`msgMenuIcon`, an inline Adwaita SVG; the `mbaction:menu/<id>` link is
-intercepted by `onDecidePolicy` → `showMessageMenu`, a native popover — the
-rowmenu pattern — anchored at the pointer via a motion controller on the
-WebView) offering Reply all / Reply / Forward / View headers / Check for
-phishing targeting that specific message
-(`replyToMessage`/`forwardMessage`/`viewMessageHeaders`/`analyzeMessage`), so
-any message in the thread can be answered, forwarded, or inspected, not just
-the last. **Action-surface scope model**: the reader header bar and its
-overflow ⋯ act on the conversation (reply-all = continue the conversation via
-its newest message; the overflow holds star/unread/move/spam/trash, Labels…,
-Unsubscribe, Print…, remote-images — never message- or sender-scoped items),
-each message's ⋯ acts on that message, and clicking a sender name opens the
-canonical sender surface (`showSenderActions`: copy address, find emails, and
-trust images — the link underlines on hover so it reads as
-clickable). The thread-list header's search toggle, Ctrl+F, and `/` reveal a
-native `GtkSearchBar`; Escape or the toggle hides it, clears the query, and
-returns to the current label. Its entry runs instant local FTS5 search
-(`store.SearchPage`, sanitized into a quoted prefix MATCH) whose hits are
-grouped into threads. The temporary search surface names the current scope and
-loaded result count; a Relevant/Newest selector defaults to the FTS/provider
-relevance order. Explicit Account and Cached mail/All mail on server selectors
-control the scope; Enter keeps the chosen scope. Expanding Filters offers sender,
-after/before dates, unread, and attachments, and reads any existing operators
-from the query. Local search implements those operators; IMAP maps date/unread
-filters to SEARCH criteria and preserves quoted sender names. IMAP attachment
-filtering is explicitly cache-only because it has no server SEARCH mapping. Conversation lists load in bounded
-100-item pages as the user approaches the bottom: label and All Mail views use
-stable `(internal_date,rowid)` keyset cursors, local FTS advances by raw-hit
-offset (several hits may belong to one conversation), and provider search keeps
-the provider's continuation token opaque (`SearchPager` → Gmail's
-`nextPageToken`; backends without it get a bounded compatibility cursor).
-Every page query runs off the GTK thread and is guarded by `refreshGen` so a slow
-result cannot overwrite a newer account/folder/query (last request wins); an
-in-flight query is context-cancelled only by the replacement that supersedes it
-(`startThreadLoad`), and a cancelled result is discarded rather than reported as
-a failure. A refresh arriving while the identical query is already running is
-neither dropped nor allowed to cancel it (`coalesceThreadLoad`): its answer
-predates the change that asked for it — an archive's optimistic label edit would
-still be listed — so the load is re-run when the in-flight one lands, and
-`afterPopulate` (advancing the selection past an archived conversation) waits for
-that re-run. Appending a normal
-date-ordered page splices only the new `gtk.StringList` tail, preserving realized
-rows, selection, scroll position, and date headers. A failed continuation leaves
-the loaded rows intact and reveals a small Retry footer. Live sync refreshes
-re-query the depth the user already reached rather than collapsing the list back
-to its first page; a server-search refresh rehydrates only its already-loaded
-ids and does not restart the provider cursor. Search hits become summaries with
-one batched `store.GetThreadSummaries` read (server ids first map through
-`store.ThreadIDsForMessages`) rather than a query per hit. When a search has no
-local matches, "Search all mail" starts the paged provider search and caches only
-each requested page; a reader action "Find emails from sender" uses the same path
-with a `from:` query. Server-search results persist a
-`serverSearch`/`serverQuery` mode so the debounced search-changed signal and 60s
-background refreshes don't clobber them with local FTS results. A selection-mode toggle
-turns rows into checkboxes with a bulk-action bar (Archive / Trash / Mark read),
-applying the change to every selected conversation in one batched `ModifyLabels`
-call (`bulkApply`). Label changes from the bulk bar and the right-click row menu
-(`threadModifyAll`) show the same reversing "Undo" toast (`showUndoToast`) as the
-reader's archive/trash, so every archive/trash is recoverable. Undo toasts
-coalesce: a burst of same-kind changes (rapid j/a triage) replaces the pending
-toast with one cumulative "Archived N conversations" whose Undo reverses the
-whole burst — ToastOverlay queues toasts, so 80 individual archives would
-otherwise drain one 6s toast at a time for minutes; a single change names its
-conversation ("Archived “subject…”", `undoTitle`). Switching accounts blanks
-the thread list immediately (the reload is async last-request-wins; under
-heavy churn the old account's threads would otherwise linger for seconds) and
-traces the click→content latency ("switch account content visible"). The reader's AI-reply popover contains only fixed presets and **Custom reply…**;
-it never starts suggestion requests or resizes as results arrive. Custom reply
-opens `askAIIntent` before creating a compose. Its fixed-size dialog has a
-header with Cancel/Create draft, an instruction editor, and
-generated replies directly underneath it, without tabs or preset buttons.
-Suggestions load when the dialog opens, use actionable native boxed rows with
-forward arrows in a reserved scrollable area, and
-open an editable compose immediately when selected, closing the dialog.
-Create draft applies only to the custom instruction. Try again regenerates; closing cancels pending requests. A bounded
-session cache keyed by the full conversation context hash reuses suggestions on
-reopen and misses when the conversation changes. Smart-replies-only settings
-show only the generated replies. `TestReplyDialogGTK` verifies sizing and the
-asynchronous interaction; `make test-ui` runs it with the other GTK tests.
-Compose supports attachments (the file picker accepts multiple files and shows
-them as wrapping, width-bounded chips; decoded payloads are capped at 18 MiB total before reading, and `BuildMIME` emits multipart/mixed with streaming line-wrapped base64 encoding). Sending uses Undo Send: the compose closes
-and the message is held ~5s behind an "Undo" toast (`deferSend`) before it goes
-out; a failed send is queued to the `outbox` table and retried by a background
-sweeper (`SweepOutbox`, ~45s); pending/failed sends are surfaced by an
-`adw.Banner` over the thread list and an Outbox dialog (retry, Edit as draft,
-discard with Undo, and Send now). `RecoverOutboxDraft` parses the queued MIME and
-atomically cancels an unclaimed send and saves its editable local draft; failure
-rolls back both. Restoring a discarded outbox item preserves its UUID, attempt
-count, and uncertain-delivery state, so Undo does not turn uncertainty into an
-automatic retry. Undo Send opens compose only after successful cancellation; its queries run off the GTK thread and actions disable while showing progress. A bottom status bar shows what the app is doing — the current
-operation with a spinner/progress bar (left) and live cumulative metrics (right:
-bytes transferred, Gmail API requests + quota units, AI requests + AI bytes
-(`Assistant.Requests`/`Transferred` — counted in the Assistant so they survive a
-live provider swap), DB size, cached-message count) — plus an expandable
-structured activity log: one dense line per operation (monospace clock, a
-neutral kind chip — SYNC/AI/FETCH/SEND/SEARCH/ATTACH/DRAFT/MAIL — an account
-chip, the label, the result note inline and dim, right-aligned duration),
-inserted at Start and finished in place (✓/✗/–, error-tinted note on failure;
-capped at 200 rows). Completed notes have a Details button that opens the full
-text in a wrapping, scrollable dialog with selection and a Copy button, so long
-provider errors and URLs remain accessible even when tooltips are clipped.
-Every account-scoped event carries `Event.Account` (the
-email — `activity.Hub.Begin/Report` take it; app-wide work passes ""); the UI
-renders it as the account's display name when one is set. Labels speak in
-consistent human phrases, never raw ids or fragments: live operations are
-gerunds ("Checking mail", "Summarizing thread" — right both while running in
-the bar and as a completed ✓ row), instant reports are past tense ("Archived",
-"Snoozed until Jul 20 09:00", "Returned from snooze"), label mutations render
-as the action taken with friendly label names (`labelChangeText`: "Archived",
-"Marked read", "Filed to Receipts" — user-label ids resolved via
-`store.LabelName`), and counts are properly pluralized (`activity.Plural`).
-Quiet mail checks ("up to date", every minute per account) keep only their
-newest row (`statusQuietRows`), so the log records events rather than
-wallpaper. The bottom bar, which has no chips, shows the label plus the
-account (`barText`: "Checking mail · Work").
-AI notes are suffixed with the model that served the request
-(`Assistant.ActiveModel` — with a failover chain, the entry the request
-committed to, so a silent fallback is visible; rendered via `ai.ShortModel`,
-the bare name shortened to first-10…last-5 runes — the full "model @ host"
-stays in traces). A change in the serving model — a failover, a recovery, a
-live settings swap — additionally logs its own row
-(`Assistant.SetOnModelChange` → "AI model · <new> (was <old>)"), and the
-popover's Session section names the current model (`Assistant.ModelStatus`,
-marked "(fallback)" when a non-primary chain entry served last).
-Every AI op
-is bracketed into it via `aiActivity` (including the background categorizer);
-label mutations, outbox sweeps that delivered,
-retention prunes, and woken snoozes log as instant completed rows via
-`activity.Hub.Report`. Background layers report
-transient activity to a headless `activity.Hub` (`deps.Activity`) that the bar
-drains via `dispatch`; the AI ops the UI brackets directly; metrics come from
-per-account `gmailapi.Stats` (a byte-counting transport + request/quota counters)
-aggregated by `deps.Stats`. The window collapses responsively via
-`adw.Breakpoint` (3 panes → list+reader below ~860sp → single pane below ~520sp),
-with `SetShowContent` driving navigation when collapsed. Single-key shortcuts
-(bubble-phase key controller, so text entries keep their input): j/k navigate
-threads, r reply, a/e archive, c compose, / focus search, and more ("?" shows
-the cheat sheet) — all user-rebindable (Preferences → Keyboard; the
-`shortcutDefs` table drives the handler, the cheat sheet, and the editor;
-overrides in `~/.config/mailbox/shortcuts.json`). Rebinding rejects conflicts,
-names the existing action, and reserves `?` for the shortcuts window; failed
-writes do not report success. Test hooks:
-`MAILBOX_OPEN_FIRST=1` opens the newest message on launch; `MAILBOX_OPEN_PREFS=1`
-opens the Preferences dialog on launch; `MAILBOX_WIN_SIZE=WxH`
-overrides the initial window size; `MAILBOX_APP_ID` overrides the GApplication id
-so a sandbox instance runs alongside a real one instead of activating it.
-
-Verify GUI changes in a throwaway sandbox rather than launching the installed
-app: copy the live DB + config into a temp dir, point `XDG_{DATA,CONFIG,CACHE}_HOME`
-there, and run under Xvfb (`GDK_BACKEND=x11 GSK_RENDERER=cairo`) with a distinct
-`MAILBOX_APP_ID`. It shares the real session bus (so the keyring still resolves
-OAuth tokens + the AI key) but starts a fresh instance, so it never disturbs a
-running app. `MAILBOX_DEMO=1` hides the "read-only" banner for clean screenshots.
-This sandbox is the only GUI run allowed on the desktop's bus, and it starts no
-bus of its own. Run GTK tests with `make test-ui` and every other GUI command
-through `scripts/headless-gui.sh`, never a hand-written `dbus-run-session`: a
-bus that starts the document portal while sharing `/run/user/$UID` unmounts the
-desktop's `doc` filesystem, and Flatpak apps then fail to start.
 
 Dependency rule: `store`/`backend`/`gmailapi`/`gmailbackend`/`imapbackend`/`sync`/`auth`/`ai`
 MUST NOT import any GTK package (they are headless and unit-testable without a
@@ -674,6 +94,60 @@ display). `ui` MUST NOT import `sync`/`gmailapi`/`ai` directly — inject interf
 and communicate via channels + `dispatch`. The sync engine MUST depend only on
 `backend.Backend`, never a concrete provider client, so new providers (IMAP) drop
 in without touching the engine.
+
+---
+
+## Key Flows
+
+The short form. The file named in each item has the whole text.
+
+- **Accounts and sync** (docs/accounts.md). `accounts.account_type`
+  ('gmail'|'imap') picks each account's backend. The launcher keeps a cancel
+  function per account, so adding, removing or reconnecting an account never
+  needs a restart. A 60s incremental sync (and IMAP IDLE where the server has
+  it) writes SQLite and publishes ID-only events. After a gap (launch, or no
+  pass completed for 10 minutes) a pass corrects the inbox before it reads the
+  change log, and fetches new inbox mail before anything else. Gmail requests
+  wait for quota most urgent first by `backend.PriorityOf(ctx)`, and a context
+  without a priority counts as a user action, so background work must mark its
+  context with `backend.WithPriority`. An expired history
+  watermark triggers a resync; a revoked credential shows the Reconnect
+  banner. Provider message and thread ids are not globally unique, so UI
+  caches key on `uiCacheKey{accountID,id}`. Snoozes are mirrored to Gmail
+  labels, so they hold and wake on every machine; an IMAP account's snoozes
+  stay on the device.
+- **The reader** (docs/reader.md). Opening a conversation renders what is
+  cached at once and fills in the rest. Every email-CSS parse goes through
+  `parseStylesheet`, the one hardened door that keeps a malformed email from
+  hanging the app. The WebView loads one persistent shell page and swaps
+  conversations in by script, never by navigation. JavaScript runs only for
+  that shell script, behind a nonce CSP with `default-src 'none'`. Tracking
+  pixels are stripped, and no remote image is downloaded before the
+  conversation is on screen.
+- **The thread list** (docs/threadlist.md). A virtualized `gtk.ListView` of
+  thread ids, refreshed by diffing (`diffThreadModel`), so an idle sync does
+  no work and the scroll position survives. Every page query runs off the GTK
+  thread under `refreshGen`, so the last request wins. Search is local FTS5
+  first, then paged provider search.
+- **Compose and sending** (docs/compose.md). Compose is plain text, but mail
+  goes out as multipart/alternative, with the original's HTML quoted while
+  the quote is unedited. AI Draft and Refine show a preview that changes the
+  editor only on Apply. Drafts are found by `IsDraft`, never by "newest".
+  Send holds a message about 5s behind an Undo toast; a failed send goes to
+  the `outbox` table and is retried.
+- **AI** (docs/ai.md). Everything the AI says about mail follows one AI
+  language setting; whatever it writes as the user stays in the
+  correspondent's language. Changing the language clears the cached
+  summaries, gists and analyses, and every AI-note writer persists through
+  `store.SaveAINote` with the generation it captured, so an older request
+  cannot restore a cleared note. Translation sends only text, pooled across
+  the conversation, never a tag. A headless worker (`internal/aiwork`)
+  categorizes every account's inbox.
+- **The window** (docs/window.md). Colour follows GNOME's HIG: one accent,
+  used only for state. The status bar shows the current operation and live
+  metrics, its activity log keeps one line per operation, and every AI call
+  is bracketed into it via `aiActivity`. Single-key shortcuts are
+  user-rebindable from one `shortcutDefs` table.
 
 ---
 
@@ -701,30 +175,51 @@ Requires GTK4/WebKit dev libraries for the GUI — see "Gotchas". The first cgo
 build of the gotk4 bindings is heavy (~10-15 min) but cached in `GOCACHE`
 afterward. The `sync` command and the headless packages build without GTK.
 
+Verify GUI changes in a throwaway sandbox rather than launching the installed
+app: copy the live DB + config into a temp dir, point `XDG_{DATA,CONFIG,CACHE}_HOME`
+there, and run under Xvfb (`GDK_BACKEND=x11 GSK_RENDERER=cairo`) with a distinct
+`MAILBOX_APP_ID`. It shares the real session bus (so the keyring still resolves
+OAuth tokens + the AI key) but starts a fresh instance, so it never disturbs a
+running app. `MAILBOX_DEMO=1` hides the "read-only" banner for clean screenshots.
+This sandbox is the only GUI run allowed on the desktop's bus, and it starts no
+bus of its own. Run GTK tests with `make test-ui` and every other GUI command
+through `scripts/headless-gui.sh`, never a hand-written `dbus-run-session`: a
+bus that starts the document portal while sharing `/run/user/$UID` unmounts the
+desktop's `doc` filesystem, and Flatpak apps then fail to start.
+
+The test hooks (`MAILBOX_OPEN_FIRST`, `MAILBOX_OPEN_PREFS`, `MAILBOX_WIN_SIZE`,
+`MAILBOX_APP_ID`) are listed in [docs/window.md](docs/window.md), and the
+`verify` skill (`.claude/skills/verify/SKILL.md`) has the whole sandbox recipe.
+
 ---
 
 ## Configuration
 
-- Config file: `~/.config/mailbox/config.toml`, `[ai]` table: `provider` (`openai`|`litellm`|`anthropic`), `endpoint` (base URL incl. `/v1`), and the failover chain — either `models` (priority list on the shared endpoint) or `[[ai.chain]]` blocks (each `model` optionally with its own `provider`/`endpoint`, inheriting the top level when blank — the fullest form, for a VPN-only proxy chained to a local model). The first entry is primary; the rest take over when it fails before producing content. Legacy single `model` still reads; on save the primary is mirrored into the top-level fields for downgrade compatibility and an all-same-endpoint chain collapses back to `models`. Editable in-app via Preferences → AI (an expander per model with add/remove/reorder and a per-row Test button that live-checks just that entry — a chain-wide test couldn't say which model answered), which applies changes to the running app by swapping the rebuilt provider into the live Assistant (`SetProvider`); only enabling AI for the very first time needs a restart (the AI widgets aren't built). Env overrides: `MAILBOX_AI_{PROVIDER,ENDPOINT,MODEL,KEY}` (`MAILBOX_AI_MODEL` pins a single model, no fallbacks).
-- AI API key: keyring service `mailbox-ai`, one entry per endpoint (user = endpoint; a legacy user = provider entry — what `mailbox set-ai-key` writes — is read as fallback) or `MAILBOX_AI_KEY`; never in the config file. Editable per chain entry in Preferences → AI (each key row mirrors the keyring: typed → stored, cleared → removed).
-- Persistent state (SQLite DB): `~/.local/share/mailbox/mailbox.db`. Preferences → Storage can clear the attachment cache (`config.ClearAttachmentsCache`) and compact the DB (`store.Vacuum` — `VACUUM` + WAL-truncate, reclaiming pages freed by deleted mail; WAL keeps that space otherwise).
-- Account display names: `~/.local/share/mailbox/accounts.json` (email → name).
-- Default signature: `~/.config/mailbox/signature.txt` (plain text, may be empty); per-account overrides in `~/.config/mailbox/signatures.json` (email → signature).
-- Keyboard shortcut overrides: `~/.config/mailbox/shortcuts.json` (action id → keys).
-- View state (last folder, unread filter, reader zoom): `~/.local/share/mailbox/view.json`.
-- General prefs (automatic remote-image loading, per-feature AI toggles, AI language, body retention window): `~/.config/mailbox/prefs.json`. Body retention (Preferences → Storage, default off) prunes cached bodies older than N days (`store.PruneBodies` — metadata/header search kept, body re-fetched on open, body-derived AI caches + attachment rows pruned too); applied on change and by a daily background pass (`backgroundRetention`), with an auto-`Vacuum` after a large prune.
-- Attachment cache: `~/.cache/mailbox/attachments/` (content-addressed by sha256).
-- Secrets (OAuth refresh tokens, AI API keys): OS keyring via Secret Service.
-- Trace log: `/tmp/mailbox.log` (truncated each start; enabled with `--trace`).
+Every file and setting is in [docs/configuration.md](docs/configuration.md).
+
+- `~/.config/mailbox/config.toml`, `[ai]` table: `provider`
+  (`openai`|`litellm`|`anthropic`), `endpoint`, and the failover chain, either
+  `models` or `[[ai.chain]]` blocks. The first entry is primary; the rest take
+  over when it fails before producing content. Preferences → AI edits it and
+  swaps the rebuilt provider into the running app (`SetProvider`).
+- Env overrides: `MAILBOX_AI_{PROVIDER,ENDPOINT,MODEL,KEY}` (`MAILBOX_AI_MODEL`
+  pins a single model, no fallbacks).
+- Secrets (OAuth refresh tokens, AI API keys) live in the OS keyring via
+  Secret Service, AI keys under service `mailbox-ai`, one entry per endpoint;
+  never in the config file.
+- The SQLite DB is `~/.local/share/mailbox/mailbox.db`; the trace log is
+  `/tmp/mailbox.log` (truncated each start; enabled with `--trace`).
 
 ---
 
 ## Design Decisions
 
+The full text of each is in [docs/architecture.md](docs/architecture.md#design-decisions).
+
 - Gmail REST API, not IMAP — native labels/threads, `history.list` incremental sync, server-side search.
 - Local SQLite + FTS5 as source of truth; metadata separate from bodies; bodies lazy-loaded.
-- Desktop polls `history.list` (no public endpoint for Pub/Sub push). Backfill fetches metadata concurrently (`backfillWorkers`) but commits in `store.UpsertMessages` batches of `backfillBatch` (200) — one transaction/fsync and FTS reindex per batch, not per message; incremental sync likewise batches its deletes (`store.DeleteMessages`), label sets (`store.ApplyLabelSets`) and upserts into one transaction each, then publishes a per-id `MessageUpserted` so new-mail notifications still fire.
-- HTML email rendered in a locked-down WebKitGTK view: email-tuned sanitizer (keeps styling), remote images loaded through the local cache with tracker stripping and a global opt-out, links open externally. One persistent shell page; conversations are swapped in by script, never by navigation (kills WebKit's black content-swap flash). Its per-body fit-to-width pass also implements reader zoom (lay out at avail/zoom, scale by zoom× the fit size; width-locked bodies pan at the page level rather than ignoring the zoom), so zoom touches only email bodies and every zoom change is just a refit — no stale scaled dimensions to retain. JavaScript is enabled only to run the trusted shell script, fenced off by a nonce CSP with `default-src 'none'` so no email script can run or phone home. AI translate renders in place (markup-preserving) with a revert toggle.
+- Desktop polls `history.list` (no public endpoint for Pub/Sub push); backfill and incremental sync commit in batches, one transaction per batch rather than per message.
+- HTML email rendered in a locked-down WebKitGTK view: one persistent shell page, conversations swapped in by script, never by navigation; JavaScript only for the trusted shell script, behind a nonce CSP.
 - AI provider is user-configurable behind one `Provider` interface (OpenAI-compatible covers the LiteLLM proxy + OpenAI; Anthropic direct).
 - Distribution is RPM (GTK4/WebKit cannot be statically linked into a single binary).
 
