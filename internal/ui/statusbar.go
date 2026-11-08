@@ -400,7 +400,9 @@ func (w *window) onActivity(e activity.Event) {
 		logging.Trace("ui: activity start", "op", e.Op, "label", e.Label)
 	case activity.Progress:
 		if e.Total > 0 {
-			p := fmt.Sprintf("%d/%d", e.Done, e.Total)
+			// The log's duration column is narrow: a count reads "120/815", a
+			// position without one "37%".
+			p := activity.ProgressShort(e.Done, e.Total, e.Unit)
 			if rows := w.statusLogRows[key]; len(rows) > 0 {
 				rows[0].dur.SetText(p)
 			}

@@ -839,6 +839,43 @@ func (b *Backend) Changes(ctx context.Context, cur string) (upserts, deletes []s
 	return upserts, deletes, nextCur.encode(), nil
 }
 
+// ChangeLog is Changes ordered for the engine (see backend.ChangeLogger): INBOX
+// messages first, newest UID first, each marked Inbox. IMAP reports no label
+// sets — flags and folder live in different places — so every change is still
+// fetched; only the order changes. progress is not reported.
+func (b *Backend) ChangeLog(ctx context.Context, cur string, _ func(done, total int)) ([]backend.MessageChange, []string, string, error) {
+	upserts, deletes, next, err := b.Changes(ctx, cur)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	return inboxFirst(upserts), deletes, next, nil
+}
+
+// inboxFirst turns ids into changes with INBOX messages first, newest UID
+// first; the rest keep their order after them.
+func inboxFirst(ids []string) []backend.MessageChange {
+	type inboxID struct {
+		id  string
+		uid imap.UID
+	}
+	var inbox []inboxID
+	var rest []backend.MessageChange
+	for _, id := range ids {
+		mailbox, _, uid, err := parseMsgID(id)
+		if err == nil && strings.EqualFold(mailbox, "INBOX") {
+			inbox = append(inbox, inboxID{id, uid})
+			continue
+		}
+		rest = append(rest, backend.MessageChange{ID: id})
+	}
+	sort.SliceStable(inbox, func(i, j int) bool { return inbox[i].uid > inbox[j].uid })
+	out := make([]backend.MessageChange, 0, len(ids))
+	for _, m := range inbox {
+		out = append(out, backend.MessageChange{ID: m.id, Inbox: true})
+	}
+	return append(out, rest...)
+}
+
 // --- conversions / helpers ---
 
 // toMessage converts a fetched message into the domain model. Caller holds mu

@@ -30,6 +30,8 @@ func Plural(n int, one, many string) string {
 // overlapping phrasings must come first.
 var pastLabels = []struct{ gerund, past string }{
 	{"Checking mail", "Mail checked"},
+	{"Syncing other mail", "Other mail synced"},
+	{"Syncing recent mail", "Recent mail synced"},
 	{"Checking grammar", "Grammar checked"},
 	{"Checking for phishing", "Phishing check finished"},
 	{"Re-fetching HTML bodies", "HTML bodies re-fetched"},
@@ -110,7 +112,35 @@ type Event struct {
 	Label   string // terse object, e.g. "categorize 3" or "body" ("" when the account says it all)
 	Done    int    // progress numerator (Progress phase); 0 otherwise
 	Total   int    // progress denominator; 0 means indeterminate
-	Note    string // extra detail for the log (counts, timing, errors)
+	// Unit names what Done and Total count ("messages"), so progress reads as
+	// "120 of 815 messages"; empty when they are not countable things (how far
+	// through a change log), which reads as a percentage.
+	Unit string
+	Note string // extra detail for the log (counts, timing, errors)
+}
+
+// ProgressShort is ProgressText for a narrow column: "120/815" or "37%".
+func ProgressShort(done, total int, unit string) string {
+	if total <= 0 {
+		return ""
+	}
+	if unit == "" {
+		return ProgressText(done, total, "")
+	}
+	return fmt.Sprintf("%d/%d", max(0, min(done, total)), total)
+}
+
+// ProgressText renders a Progress event's position for people: "120 of 815
+// messages" when it counts things, "37%" otherwise, "" when indeterminate.
+func ProgressText(done, total int, unit string) string {
+	if total <= 0 {
+		return ""
+	}
+	done = max(0, min(done, total))
+	if unit == "" {
+		return fmt.Sprintf("%d%%", done*100/total)
+	}
+	return fmt.Sprintf("%d of %d %s", done, total, unit)
 }
 
 // Hub fans out activity events to all subscribers. The zero value is unusable;
@@ -119,6 +149,23 @@ type Hub struct {
 	mu   sync.Mutex
 	subs map[int]chan Event
 	next int
+	// running holds every operation started and not yet done, with its latest
+	// progress, so a subscriber that arrives late still sees it. The UI
+	// subscribes after the accounts start syncing, and the first pass after
+	// launch is the long one: without this the status bar missed it entirely.
+	running []runningOp
+}
+
+// maxRunning bounds the remembered operations. Real concurrency is a handful
+// (a sync, a prefetch and an AI request per account).
+const maxRunning = 64
+
+type runningOp struct {
+	start, progress Event
+}
+
+func sameOp(a, b Event) bool {
+	return a.Op == b.Op && a.Account == b.Account && a.Label == b.Label
 }
 
 // NewHub returns a ready hub.
@@ -133,10 +180,37 @@ func (h *Hub) Publish(e Event) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	logging.Trace("activity: publish", "op", e.Op, "phase", e.Phase, "label", e.Label, "done", e.Done, "total", e.Total, "note", logging.Body(e.Note), "subs", len(h.subs))
+	h.trackLocked(e)
 	for _, ch := range h.subs {
 		select {
 		case ch <- e:
 		default:
+		}
+	}
+}
+
+// trackLocked keeps running in step with e: a Start adds an operation, a
+// Progress updates the oldest matching one, a Done removes it (FIFO, the way
+// the UI pairs them). A Done without a Start (a Report) changes nothing.
+func (h *Hub) trackLocked(e Event) {
+	switch e.Phase {
+	case Start:
+		if len(h.running) >= maxRunning {
+			// A Start whose Done never came; forget the oldest rather than grow.
+			h.running = h.running[1:]
+		}
+		h.running = append(h.running, runningOp{start: e})
+	case Progress, Done:
+		for i := range h.running {
+			if !sameOp(h.running[i].start, e) {
+				continue
+			}
+			if e.Phase == Progress {
+				h.running[i].progress = e
+			} else {
+				h.running = append(h.running[:i], h.running[i+1:]...)
+			}
+			return
 		}
 	}
 }
@@ -171,7 +245,21 @@ func (h *Hub) Subscribe() (<-chan Event, func()) {
 	h.next++
 	ch := make(chan Event, 64)
 	h.subs[id] = ch
-	logging.Trace("activity: subscribe", "id", id, "subs", len(h.subs))
+	// Replay what is already running, oldest first, as if it had just begun.
+	replayed := 0
+	for _, r := range h.running {
+		for _, e := range []Event{r.start, r.progress} {
+			if e.Op == "" {
+				continue
+			}
+			select {
+			case ch <- e:
+				replayed++
+			default:
+			}
+		}
+	}
+	logging.Trace("activity: subscribe", "id", id, "subs", len(h.subs), "replayed", replayed)
 	return ch, func() {
 		h.mu.Lock()
 		defer h.mu.Unlock()

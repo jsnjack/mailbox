@@ -1,18 +1,21 @@
 // Package gmailbackend implements backend.Backend over the Gmail REST client. It
 // owns the Gmail↔domain conversions and the history-walk that turns Gmail's
-// history records into a flat upsert/delete id set, keeping the sync engine free
-// of any Gmail-specific concept.
+// history records into per-message changes (with each message's current labels)
+// and deletions, keeping the sync engine free of any Gmail-specific concept.
 package gmailbackend
 
 import (
 	"context"
 	"fmt"
+	"slices"
+	"sort"
 	"time"
 
 	"github.com/jsnjack/mailbox/internal/backend"
 	"github.com/jsnjack/mailbox/internal/gmailapi"
 	"github.com/jsnjack/mailbox/internal/logging"
 	"github.com/jsnjack/mailbox/internal/model"
+	gmail "google.golang.org/api/gmail/v1"
 )
 
 // Backend adapts a per-account *gmailapi.Client to backend.Backend.
@@ -266,54 +269,115 @@ func (b *Backend) Delete(ctx context.Context, ids []string) error {
 // Changes walks Gmail history since cursor and returns the ids to re-fetch and to
 // delete, plus the newest historyId. It maps a too-old cursor to ErrCursorExpired.
 func (b *Backend) Changes(ctx context.Context, cursor string) (upserts, deletes []string, next string, err error) {
-	start := time.Now()
-	logging.TraceContext(ctx, "gmailbackend: Changes", "account", b.accountID, "cursor", cursor)
-	records, newest, err := b.c.ListHistory(ctx, cursor)
+	changes, deletes, next, err := b.ChangeLog(ctx, cursor, nil)
 	if err != nil {
-		if gmailapi.IsHistoryExpired(err) {
-			logging.TraceContext(ctx, "gmailbackend: Changes history expired", "account", b.accountID, "cursor", cursor, "dur", time.Since(start), "err", err)
-			return nil, nil, "", backend.ErrCursorExpired
-		}
-		logging.TraceContext(ctx, "gmailbackend: Changes failed", "account", b.accountID, "cursor", cursor, "dur", time.Since(start), "err", err)
 		return nil, nil, "", err
 	}
-	refetch := make(map[string]bool)
-	del := make(map[string]bool)
+	upserts = make([]string, len(changes))
+	for i, c := range changes {
+		upserts[i] = c.ID
+	}
+	return upserts, deletes, next, nil
+}
+
+// ChangeLog walks Gmail history since cursor (see backend.ChangeLogger). Every
+// history record carries the message's full label set after that change, so
+// the last record about a message says what its labels are now.
+func (b *Backend) ChangeLog(ctx context.Context, cursor string, progress func(done, total int)) (changes []backend.MessageChange, deletes []string, next string, err error) {
+	start := time.Now()
+	logging.TraceContext(ctx, "gmailbackend: ChangeLog", "account", b.accountID, "cursor", cursor)
+	records, newest, err := b.c.ListHistory(ctx, cursor, progress)
+	if err != nil {
+		if gmailapi.IsHistoryExpired(err) {
+			logging.TraceContext(ctx, "gmailbackend: ChangeLog history expired", "account", b.accountID, "cursor", cursor, "dur", time.Since(start), "err", err)
+			return nil, nil, "", backend.ErrCursorExpired
+		}
+		logging.TraceContext(ctx, "gmailbackend: ChangeLog failed", "account", b.accountID, "cursor", cursor, "dur", time.Since(start), "err", err)
+		return nil, nil, "", err
+	}
+	changes, deletes = historyChanges(records)
+	logging.TraceContext(ctx, "gmailbackend: ChangeLog ok",
+		"account", b.accountID, "cursor", cursor, "next", newest,
+		"records", len(records), "changes", len(changes), "deletes", len(deletes), "dur", time.Since(start))
+	return changes, deletes, newest, nil
+}
+
+// historyChanges folds history records (oldest first) into one change per
+// message, most recently changed first, carrying the labels from the message's
+// last record, plus the ids deleted in the range.
+func historyChanges(records []*gmail.History) (changes []backend.MessageChange, deletes []string) {
+	type state struct {
+		labels []string
+		last   int // order of the message's latest record
+	}
+	seen := make(map[string]*state)
+	deleted := make(map[string]bool)
+	order := 0
+	note := func(m *gmail.Message) {
+		if m == nil || m.Id == "" {
+			return
+		}
+		order++
+		st := seen[m.Id]
+		if st == nil {
+			st = &state{}
+			seen[m.Id] = st
+		}
+		st.last = order
+		// A record without labels doesn't erase what an earlier one said; Gmail
+		// omits an empty set too, so "none" reads as "unknown" and is fetched.
+		if m.LabelIds != nil {
+			st.labels = m.LabelIds
+		}
+		delete(deleted, m.Id) // a later record means it exists again
+	}
 	for _, r := range records {
 		for _, x := range r.MessagesAdded {
-			if x.Message != nil {
-				refetch[x.Message.Id] = true
-			}
+			note(x.Message)
 		}
 		for _, x := range r.LabelsAdded {
-			if x.Message != nil {
-				refetch[x.Message.Id] = true
-			}
+			note(x.Message)
 		}
 		for _, x := range r.LabelsRemoved {
-			if x.Message != nil {
-				refetch[x.Message.Id] = true
-			}
+			note(x.Message)
 		}
 		for _, x := range r.MessagesDeleted {
-			if x.Message != nil {
-				del[x.Message.Id] = true
-				delete(refetch, x.Message.Id)
+			if x.Message != nil && x.Message.Id != "" {
+				deleted[x.Message.Id] = true
+				delete(seen, x.Message.Id)
 			}
 		}
 	}
-	upserts = make([]string, 0, len(refetch))
-	for id := range refetch {
-		upserts = append(upserts, id)
+	changes = make([]backend.MessageChange, 0, len(seen))
+	for id, st := range seen {
+		changes = append(changes, backend.MessageChange{ID: id, Labels: st.labels, Inbox: slices.Contains(st.labels, model.LabelInbox)})
 	}
-	deletes = make([]string, 0, len(del))
-	for id := range del {
+	sort.Slice(changes, func(i, j int) bool { return seen[changes[i].ID].last > seen[changes[j].ID].last })
+	deletes = make([]string, 0, len(deleted))
+	for id := range deleted {
 		deletes = append(deletes, id)
 	}
-	logging.TraceContext(ctx, "gmailbackend: Changes ok",
-		"account", b.accountID, "cursor", cursor, "next", newest,
-		"records", len(records), "upserts", len(upserts), "deletes", len(deletes), "dur", time.Since(start))
-	return upserts, deletes, newest, nil
+	sort.Strings(deletes)
+	return changes, deletes
+}
+
+// ListInbox lists the inbox and its unread subset (see backend.InboxLister).
+func (b *Backend) ListInbox(ctx context.Context, max int) (backend.InboxSnapshot, error) {
+	start := time.Now()
+	logging.TraceContext(ctx, "gmailbackend: ListInbox", "account", b.accountID, "max", max)
+	ids, idsComplete, err := b.c.ListMessageIDsByLabels(ctx, []string{model.LabelInbox}, max)
+	if err != nil {
+		logging.TraceContext(ctx, "gmailbackend: ListInbox failed", "account", b.accountID, "dur", time.Since(start), "err", err)
+		return backend.InboxSnapshot{}, err
+	}
+	unread, unreadComplete, err := b.c.ListMessageIDsByLabels(ctx, []string{model.LabelInbox, model.LabelUnread}, max)
+	if err != nil {
+		logging.TraceContext(ctx, "gmailbackend: ListInbox unread failed", "account", b.accountID, "dur", time.Since(start), "err", err)
+		return backend.InboxSnapshot{}, err
+	}
+	snap := backend.InboxSnapshot{IDs: ids, Unread: unread, Complete: idsComplete && unreadComplete}
+	logging.TraceContext(ctx, "gmailbackend: ListInbox ok", "account", b.accountID, "inbox", len(ids), "unread", len(unread), "complete", snap.Complete, "dur", time.Since(start))
+	return snap, nil
 }
 
 // Send transmits raw via Gmail and returns the new message id.

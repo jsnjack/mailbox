@@ -87,11 +87,59 @@ func TestEveryPublishedLabelHasAPast(t *testing.T) {
 		"Unsubscribing from Bol", "Testing granite-4.1", "Testing the AI connection",
 		"Archiving", "Moving to Trash", "Marking as spam", "Starring", "Unstarring",
 		"Filing to Receipts", "Changing labels", "Marking unread", "Moving to Inbox",
+		"Syncing other mail", "Syncing recent mail",
 	}
 	for _, l := range labels {
 		if got := PastTense(l); got == l {
 			t.Errorf("no past-tense pairing for %q", l)
 		}
+	}
+}
+
+func TestProgressText(t *testing.T) {
+	for _, c := range []struct {
+		done, total int
+		unit, want  string
+	}{
+		{120, 815, "messages", "120 of 815 messages"},
+		{37, 100, "", "37%"},
+		{5, 0, "messages", ""},
+		{900, 815, "messages", "815 of 815 messages"},
+		{-1, 10, "", "0%"},
+	} {
+		if got := ProgressText(c.done, c.total, c.unit); got != c.want {
+			t.Errorf("ProgressText(%d, %d, %q) = %q, want %q", c.done, c.total, c.unit, got, c.want)
+		}
+	}
+}
+
+// A subscriber that arrives while an operation runs still sees it, with its
+// latest progress; finished operations and instant reports are not replayed.
+func TestProgressShort(t *testing.T) {
+	if got := ProgressShort(160, 1785, "messages"); got != "160/1785" {
+		t.Errorf("count = %q", got)
+	}
+	if got := ProgressShort(37, 100, ""); got != "37%" {
+		t.Errorf("position = %q", got)
+	}
+}
+
+func TestSubscribeReplaysRunningOperations(t *testing.T) {
+	h := NewHub()
+	doneEarly := h.Begin("sync", "a@x", "Checking mail")
+	h.Begin("sync", "b@x", "Checking mail")
+	h.Publish(Event{Op: "sync", Phase: Progress, Account: "b@x", Label: "Checking mail", Done: 3, Total: 10, Unit: "messages"})
+	doneEarly("up to date")
+	h.Report("mail", "a@x", "Archived", "")
+	ch, unsubscribe := h.Subscribe()
+	defer unsubscribe()
+	var got []Event
+	for len(ch) > 0 {
+		got = append(got, <-ch)
+	}
+	if len(got) != 2 || got[0].Phase != Start || got[0].Account != "b@x" ||
+		got[1].Phase != Progress || got[1].Done != 3 || got[1].Unit != "messages" {
+		t.Fatalf("replayed %+v, want b@x's Start and its progress", got)
 	}
 }
 

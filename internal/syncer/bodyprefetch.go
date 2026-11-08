@@ -25,7 +25,10 @@ const (
 // RunBodyPrefetch caches unfetched Inbox bodies until ctx is canceled. Store queries
 // recover dropped sync events and unfinished work after restart. cutoff is read
 // for every batch so retention changes apply live; nil keeps all Inbox bodies.
+// Its requests run at inbox priority: ahead of a catch-up's background
+// fetches, behind anything the user is waiting for.
 func (e *Engine) RunBodyPrefetch(ctx context.Context, b backend.Backend, act *activity.Hub, accountID int64, email string, cutoff func() (int64, error)) {
+	ctx = backend.WithPriority(ctx, backend.PriorityInbox)
 	var changes <-chan Change
 	if e.Hub != nil {
 		var unsubscribe func()

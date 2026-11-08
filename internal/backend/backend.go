@@ -111,6 +111,50 @@ type LabelManager interface {
 	DeleteLabelIfUnused(ctx context.Context, id string) error
 }
 
+// MessageChange is one message a provider's change log touched since a cursor.
+type MessageChange struct {
+	ID string
+	// Labels is the message's complete label set after its latest change in the
+	// range, or nil when the log does not say. A provider message's content never
+	// changes, so for a message already cached these labels are the whole update.
+	Labels []string
+	// Inbox reports that the message is in the inbox now. It only orders the
+	// work: inbox mail is fetched first, at inbox priority.
+	Inbox bool
+}
+
+// ChangeLogger is an optional Backend capability for providers whose change log
+// reports each changed message's resulting labels (Gmail history). It replaces
+// Changes for the engine, which then updates cached messages without fetching
+// them and fetches new inbox mail before anything else. Changes are ordered
+// most important first (newest first), which is also the order they are
+// fetched in. A backend without label sets (IMAP) implements it for the order.
+type ChangeLogger interface {
+	// ChangeLog is Changes with labels. progress, when non-nil, is called as the
+	// log is read with how far it has got (done of total, in provider units); it
+	// is advisory and may never reach total.
+	ChangeLog(ctx context.Context, cursor string, progress func(done, total int)) (changes []MessageChange, deletes []string, next string, err error)
+}
+
+// InboxSnapshot is which messages are in the inbox right now.
+type InboxSnapshot struct {
+	IDs    []string // newest first
+	Unread []string // the unread subset of IDs
+	// Complete reports whether IDs and Unread list every inbox (and unread inbox)
+	// message. When false the listing stopped at the caller's cap, so a message
+	// missing from it may still be in the inbox, or still unread.
+	Complete bool
+}
+
+// InboxLister is an optional Backend capability: a provider that can list its
+// inbox cheaply lets a sync after a long gap correct the visible inbox first,
+// before it reads the whole change log (a week of Gmail history is tens of
+// requests).
+type InboxLister interface {
+	// ListInbox lists up to max inbox ids, and the unread ones among them.
+	ListInbox(ctx context.Context, max int) (InboxSnapshot, error)
+}
+
 // Watcher is an optional Backend capability: a provider that can push change
 // notifications (IMAP IDLE) implements it so the app reacts in near-real-time
 // instead of waiting for the next poll. Providers without it (Gmail REST) are

@@ -338,16 +338,15 @@ func (s *Store) ModifyLabelsBatch(ctx context.Context, accountID int64, gmailIDs
 // its derived unread/starred flags. It returns ErrNotFound when the message isn't
 // cached. Shared by ModifyLabels and ModifyLabelsBatch.
 func modifyLabelsTx(ctx context.Context, tx *sql.Tx, accountID int64, gmailID string, add, remove []string) error {
-	var rowID int64
-	err := tx.QueryRowContext(ctx,
-		`SELECT rowid FROM messages WHERE account_id = ? AND gmail_id = ?`,
-		accountID, gmailID).Scan(&rowID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return ErrNotFound
-	}
+	rowID, _, err := lookupMessageTx(ctx, tx, accountID, gmailID)
 	if err != nil {
-		return fmt.Errorf("find message: %w", err)
+		return err
 	}
+	return modifyLabelsRowTx(ctx, tx, accountID, rowID, add, remove)
+}
+
+// modifyLabelsRowTx is modifyLabelsTx for a message already looked up.
+func modifyLabelsRowTx(ctx context.Context, tx *sql.Tx, accountID, rowID int64, add, remove []string) error {
 	for _, l := range remove {
 		if _, err := tx.ExecContext(ctx,
 			`DELETE FROM message_labels WHERE message_rowid = ? AND label_id = ?`, rowID, l); err != nil {
@@ -361,6 +360,11 @@ func modifyLabelsTx(ctx context.Context, tx *sql.Tx, accountID int64, gmailID st
 			return fmt.Errorf("add label %q: %w", l, err)
 		}
 	}
+	return recomputeFlagsTx(ctx, tx, rowID)
+}
+
+// recomputeFlagsTx re-derives a message's unread/starred flags from its labels.
+func recomputeFlagsTx(ctx context.Context, tx *sql.Tx, rowID int64) error {
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE messages SET
 			is_unread  = (SELECT COUNT(*) FROM message_labels WHERE message_rowid = ? AND label_id = ?),

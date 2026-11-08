@@ -736,21 +736,7 @@ func launchUI(mailto string) error {
 		if err != nil {
 			return err
 		}
-		done := act.Begin("sync", emailOf(accountID), "Checking mail")
-		n, err := engine.Incremental(ctx, c, accountID)
-		if errors.Is(err, syncer.ErrHistoryExpired) {
-			n, err = engine.Resync(ctx, c, accountID, resyncBackfillLimit)
-		}
-		switch {
-		case err != nil:
-			done(doneNote(err))
-		case n == 0:
-			// Same note as the background pass: a check that found nothing is not
-			// an event, and the activity row keys on this to stay quiet.
-			done(activity.NoteUpToDate)
-		default:
-			done(activity.Plural(n, "change", "changes"))
-		}
+		_, err = syncPass(ctx, engine, act, c, accountID, emailOf(accountID))
 		return err
 	}
 	deps.SearchServer = func(ctx context.Context, accountID int64, query string, max int) ([]string, error) {
@@ -1251,6 +1237,50 @@ func backgroundSnoozeWake(ctx context.Context, mgr *snooze.Manager, act *activit
 	}
 }
 
+// syncPass runs one sync pass for an account and shows it in the activity hub:
+// the initial labels + backfill for an account never synced, else an
+// incremental catch-up that falls back to a resync when the provider's change
+// log no longer reaches the stored cursor. A long catch-up shows its phases
+// (see syncer.Progress) rather than one "Checking mail" spinner.
+func syncPass(ctx context.Context, engine *syncer.Engine, act *activity.Hub, b backend.Backend, accountID int64, email string) (int, error) {
+	p := syncer.NewProgress(act, email)
+	var (
+		n   int
+		err error
+	)
+	if acc, aerr := engine.Store.GetAccountByID(ctx, accountID); aerr == nil && acc.SyncCursor == "" {
+		// Never backfilled (a freshly added IMAP account, or a Gmail account
+		// connected without the headless `sync`): do the initial labels +
+		// backfill, which seeds the cursor.
+		if _, lerr := engine.SyncLabels(ctx, b, accountID); lerr != nil {
+			fmt.Fprintf(os.Stderr, "initial label sync for %s: %v\n", email, lerr)
+		}
+		n, err = engine.ResyncWithProgress(ctx, b, accountID, resyncBackfillLimit, p)
+		if err == nil {
+			_ = engine.Store.SetBackfilledAt(ctx, accountID, time.Now())
+		}
+	} else {
+		n, err = engine.IncrementalWithProgress(ctx, b, accountID, p)
+		if errors.Is(err, syncer.ErrHistoryExpired) {
+			// Cursor too old (offline past the provider's change window). Recover
+			// by re-backfilling and resetting it, else incremental fails forever.
+			fmt.Fprintf(os.Stderr, "sync: cursor expired for %s, resyncing\n", email)
+			var rn int
+			rn, err = engine.ResyncWithProgress(ctx, b, accountID, resyncBackfillLimit, p)
+			n += rn
+		}
+	}
+	// A check that found nothing is not an event: the activity row keys on this
+	// note to stay quiet.
+	note := activity.NoteUpToDate
+	if n > 0 {
+		note = activity.Plural(n, "change", "changes")
+	}
+	p.Finish(err, note)
+	logging.Trace("launch: sync pass done", "account", accountID, "changed", n, "err", err)
+	return n, err
+}
+
 // backgroundSync runs an incremental sync immediately and then on a timer,
 // reporting each pass to the activity hub for the status bar.
 // reconcile, when non-nil, runs after every successful pass — it converges
@@ -1260,33 +1290,9 @@ func backgroundSync(ctx context.Context, engine *syncer.Engine, act *activity.Hu
 	defer ticker.Stop()
 	consecFails := 0
 	for {
-		done := act.Begin("sync", email, "Checking mail")
-		var (
-			n   int
-			err error
-		)
 		// Per-pass backstop deadline — see syncPassTimeout.
 		passCtx, cancelPass := context.WithTimeout(ctx, syncPassTimeout)
-		if acc, aerr := engine.Store.GetAccountByID(passCtx, accountID); aerr == nil && acc.SyncCursor == "" {
-			// Never backfilled (a freshly added IMAP account, or a Gmail account
-			// connected without the headless `sync`): do the initial labels +
-			// backfill, which seeds the cursor.
-			if _, lerr := engine.SyncLabels(passCtx, b, accountID); lerr != nil {
-				fmt.Fprintf(os.Stderr, "initial label sync for %s: %v\n", email, lerr)
-			}
-			n, err = engine.Resync(passCtx, b, accountID, resyncBackfillLimit)
-			if err == nil {
-				_ = engine.Store.SetBackfilledAt(passCtx, accountID, time.Now())
-			}
-		} else {
-			n, err = engine.Incremental(passCtx, b, accountID)
-			if errors.Is(err, syncer.ErrHistoryExpired) {
-				// Cursor too old (offline past the provider's change window). Recover
-				// by re-backfilling and resetting it, else incremental fails forever.
-				fmt.Fprintf(os.Stderr, "background sync: cursor expired for %s, resyncing\n", email)
-				n, err = engine.Resync(passCtx, b, accountID, resyncBackfillLimit)
-			}
-		}
+		_, err := syncPass(passCtx, engine, act, b, accountID, email)
 		cancelPass()
 		if err != nil {
 			if auth.IsAuthError(err) || errors.Is(err, backend.ErrAuth) {
@@ -1294,7 +1300,6 @@ func backgroundSync(ctx context.Context, engine *syncer.Engine, act *activity.Hu
 				// recover without re-auth; tell the UI to prompt a reconnect.
 				engine.NotifyAuthExpired(accountID)
 			}
-			done("error: " + err.Error())
 			fmt.Fprintf(os.Stderr, "background sync: %v\n", err)
 			// Back off on repeated failures instead of re-running a possibly heavy
 			// pass every tick; IDLE nudges are ignored while backing off (the wake
@@ -1312,11 +1317,6 @@ func backgroundSync(ctx context.Context, engine *syncer.Engine, act *activity.Hu
 		consecFails = 0
 		if reconcile != nil {
 			reconcile(ctx)
-		}
-		if n > 0 {
-			done(activity.Plural(n, "change", "changes"))
-		} else {
-			done(activity.NoteUpToDate)
 		}
 		select {
 		case <-ctx.Done():

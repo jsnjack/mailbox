@@ -545,9 +545,16 @@ func (c *Client) ModifyLabels(ctx context.Context, id string, add, remove []stri
 	})
 }
 
+// historyPageSize is the most records Gmail returns per history.list page. The
+// default (100) made a week-long catch-up walk ~130 pages before it could fetch
+// anything; at 500 the same week is ~27.
+const historyPageSize = 500
+
 // ListHistory returns history records since startHistoryID and the newest
-// historyId observed. IsHistoryExpired reports whether startHistoryID was too old.
-func (c *Client) ListHistory(ctx context.Context, startHistoryID string) ([]*gmail.History, string, error) {
+// historyId. progress, when non-nil, is called after each page with how far the
+// walk has got: history ids read past startHistoryID, of the span up to the
+// mailbox's current historyId (which every page reports).
+func (c *Client) ListHistory(ctx context.Context, startHistoryID string, progress func(done, total int)) ([]*gmail.History, string, error) {
 	logging.TraceContext(ctx, "gmailapi: history.list", "start_history_id", startHistoryID)
 	start, err := strconv.ParseUint(startHistoryID, 10, 64)
 	if err != nil {
@@ -561,7 +568,7 @@ func (c *Client) ListHistory(ctx context.Context, startHistoryID string) ([]*gma
 	for {
 		var resp *gmail.ListHistoryResponse
 		err := c.do(ctx, costHistoryList, func() error {
-			call := c.srv.Users.History.List("me").StartHistoryId(start).Context(ctx)
+			call := c.srv.Users.History.List("me").StartHistoryId(start).MaxResults(historyPageSize).Context(ctx)
 			if pageToken != "" {
 				call = call.PageToken(pageToken)
 			}
@@ -579,6 +586,16 @@ func (c *Client) ListHistory(ctx context.Context, startHistoryID string) ([]*gma
 		}
 		page++
 		logging.TraceContext(ctx, "gmailapi: history.list page", "page", page, "page_records", len(resp.History), "total_records", len(records), "more", resp.NextPageToken != "")
+		if progress != nil && resp.HistoryId > start {
+			total := resp.HistoryId - start
+			done := total
+			if resp.NextPageToken != "" && len(resp.History) > 0 {
+				if last := resp.History[len(resp.History)-1].Id; last > start && last < resp.HistoryId {
+					done = last - start
+				}
+			}
+			progress(int(done), int(total))
+		}
 		if resp.NextPageToken == "" {
 			break
 		}
@@ -586,6 +603,50 @@ func (c *Client) ListHistory(ctx context.Context, startHistoryID string) ([]*gma
 	}
 	logging.TraceContext(ctx, "gmailapi: history.list done", "start_history_id", startHistoryID, "newest", newest, "records", len(records), "pages", page)
 	return records, newest, nil
+}
+
+// ListMessageIDsByLabels lists the ids of messages carrying every one of
+// labelIDs, newest first, up to max (0 = no cap). Unlike a q= search it reads
+// the label index directly, so mail delivered a moment ago is already listed.
+// complete is false when max cut the listing short.
+func (c *Client) ListMessageIDsByLabels(ctx context.Context, labelIDs []string, max int) (ids []string, complete bool, err error) {
+	logging.TraceContext(ctx, "gmailapi: messages.list by labels", "labels", labelIDs, "max", max)
+	pageToken := ""
+	page := 0
+	for {
+		pageSize := int64(500)
+		if max > 0 && int64(max-len(ids)) < pageSize {
+			pageSize = int64(max - len(ids))
+		}
+		var resp *gmail.ListMessagesResponse
+		err := c.do(ctx, costMessageList, func() error {
+			call := c.srv.Users.Messages.List("me").LabelIds(labelIDs...).MaxResults(pageSize).Context(ctx)
+			if pageToken != "" {
+				call = call.PageToken(pageToken)
+			}
+			r, e := call.Do()
+			resp = r
+			return e
+		})
+		if err != nil {
+			logging.TraceContext(ctx, "gmailapi: messages.list by labels failed", "labels", labelIDs, "page", page, "err", err)
+			return nil, false, fmt.Errorf("list messages by labels: %w", err)
+		}
+		for _, m := range resp.Messages {
+			ids = append(ids, m.Id)
+		}
+		page++
+		if resp.NextPageToken == "" {
+			complete = true
+			break
+		}
+		if max > 0 && len(ids) >= max {
+			break
+		}
+		pageToken = resp.NextPageToken
+	}
+	logging.TraceContext(ctx, "gmailapi: messages.list by labels done", "labels", labelIDs, "count", len(ids), "pages", page, "complete", complete)
+	return ids, complete, nil
 }
 
 // IsHistoryExpired reports whether err indicates the startHistoryId is older than

@@ -16,6 +16,10 @@ type SyncBatch struct {
 	Next    string
 	Upserts []string
 	Deletes []string
+	// Inbox is how many leading Upserts are inbox mail, fetched before the rest.
+	// Only an ordering hint: a build that predates it fetches every Upsert in
+	// order, which is still complete.
+	Inbox int `json:",omitempty"`
 }
 
 // LoadSyncBatch returns a saved change range, or nil when none is pending.

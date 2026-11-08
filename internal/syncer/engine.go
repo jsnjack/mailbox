@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jsnjack/mailbox/internal/activity"
 	"github.com/jsnjack/mailbox/internal/backend"
 	"github.com/jsnjack/mailbox/internal/config"
 	"github.com/jsnjack/mailbox/internal/logging"
@@ -83,6 +84,21 @@ type Engine struct {
 
 	bodyFetchMu sync.Mutex
 	bodyFetches map[bodyFetchKey]*bodyFetch
+
+	// syncedAt records each account's last completed sync pass in this process,
+	// so a pass after a long gap (launch, a suspended laptop, an outage) knows to
+	// bring the inbox up to date before it reads the whole change log.
+	syncedMu sync.Mutex
+	syncedAt map[int64]time.Time
+	// inboxDone remembers each account's last inbox refresh, so a Resync that
+	// follows an Incremental which just found the cursor expired neither lists
+	// the inbox again nor re-downloads the messages it fetched.
+	inboxDone map[int64]inboxRefresh
+}
+
+type inboxRefresh struct {
+	at      time.Time
+	fetched []string
 }
 
 // maxFetchFailPasses is how many consecutive failed passes a message may hold
@@ -180,21 +196,36 @@ func (e *Engine) SyncLabels(ctx context.Context, b backend.Backend, accountID in
 // max (0 = all), fetches each message's metadata concurrently, and upserts it.
 // Individual fetch failures are logged and skipped; it returns the number stored.
 func (e *Engine) Backfill(ctx context.Context, b backend.Backend, accountID int64, query string, max int) (int, error) {
-	stored, err := e.backfill(ctx, b, accountID, query, max)
+	stored, err := e.backfill(ctx, b, accountID, query, max, nil, nil)
 	return len(stored), err
 }
 
+// backfillFlushEvery commits a partial backfill batch once it has waited this
+// long. At Gmail's pace a full batch takes most of a minute to fetch, and the
+// mail it holds should not stay invisible for that long.
+const backfillFlushEvery = 2 * time.Second
+
 // backfill is Backfill's body; it returns the ids actually committed so Resync
-// can seed an honest cursor (see backend.CursorSeeder).
-func (e *Engine) backfill(ctx context.Context, b backend.Backend, accountID int64, query string, max int) ([]string, error) {
+// can seed an honest cursor (see backend.CursorSeeder). Ids in skip were just
+// stored by the caller and are not fetched again; p shows the progress.
+func (e *Engine) backfill(ctx context.Context, b backend.Backend, accountID int64, query string, max int, skip map[string]bool, p *Progress) ([]string, error) {
 	start := time.Now()
 	logging.TraceContext(ctx, "syncer: Backfill start", "account", accountID, "query", query, "max", max, "workers", backfillWorkers)
-	ids, err := b.SearchIDs(ctx, query, max)
+	listed, err := b.SearchIDs(ctx, query, max)
 	if err != nil {
 		logging.TraceContext(ctx, "syncer: Backfill list ids failed", "account", accountID, "query", query, "err", err)
 		return nil, fmt.Errorf("list message ids: %w", err)
 	}
-	logging.TraceContext(ctx, "syncer: Backfill listed ids", "account", accountID, "count", len(ids))
+	ids := listed
+	if len(skip) > 0 {
+		ids = make([]string, 0, len(listed))
+		for _, id := range listed {
+			if !skip[id] {
+				ids = append(ids, id)
+			}
+		}
+	}
+	logging.TraceContext(ctx, "syncer: Backfill listed ids", "account", accountID, "count", len(listed), "skipped", len(listed)-len(ids))
 
 	// Fetch metadata concurrently, but write in batches: each worker only does
 	// network work and hands the converted message to a single collector that
@@ -251,7 +282,9 @@ func (e *Engine) backfill(ctx context.Context, b backend.Backend, accountID int6
 
 	var stored []string
 	batch := make([]model.Message, 0, backfillBatch)
+	lastFlush := time.Now()
 	flush := func() error {
+		lastFlush = time.Now()
 		if len(batch) == 0 {
 			return nil
 		}
@@ -273,11 +306,12 @@ func (e *Engine) backfill(ctx context.Context, b backend.Backend, accountID int6
 			continue // keep draining so workers and the feeder can finish
 		}
 		batch = append(batch, m)
-		if len(batch) >= backfillBatch {
+		if len(batch) >= backfillBatch || time.Since(lastFlush) >= backfillFlushEvery {
 			if flushErr = flush(); flushErr != nil {
 				cancel() // stop feeding; let the pipeline wind down
 			}
 		}
+		p.Step(len(stored)+len(batch), len(ids), "messages")
 	}
 	if flushErr != nil {
 		logging.TraceContext(ctx, "syncer: Backfill aborted", "account", accountID, "stored", len(stored), "dur", time.Since(start), "err", flushErr)
@@ -567,6 +601,7 @@ const htmlBackfillWorkers = 4
 // the UI; the recovered body is read on the message's next open. Returns the
 // number actually re-fetched. A no-op once every body is at the current version.
 func (e *Engine) BackfillHTMLBodies(ctx context.Context, b backend.Backend, accountID int64, max int) (int, error) {
+	ctx = backend.WithPriority(ctx, backend.PriorityBackground)
 	ids, err := e.Store.MessagesMissingHTML(ctx, accountID, max)
 	if err != nil {
 		return 0, fmt.Errorf("list missing-html: %w", err)
@@ -1246,6 +1281,40 @@ func (e *Engine) MarkLabelRead(ctx context.Context, b backend.Backend, accountID
 // additions and label changes are re-fetched and upserted, deletions removed.
 // It returns ErrHistoryExpired if the cursor is too old to use.
 func (e *Engine) Incremental(ctx context.Context, b backend.Backend, accountID int64) (int, error) {
+	return e.IncrementalWithProgress(ctx, b, accountID, nil)
+}
+
+// inboxRefreshAfter is how long after the last completed pass a sync counts as
+// a catch-up and corrects the inbox first (see refreshInbox).
+const inboxRefreshAfter = 10 * time.Minute
+
+// inboxListMax caps the inbox listing. A larger inbox is still corrected, but
+// only by adding what is listed: a message missing from a partial listing may
+// simply be past the cap, so nothing is removed from the cached inbox.
+const inboxListMax = 5000
+
+// inboxFetchMax caps how many uncached inbox messages one inbox refresh fetches,
+// newest first: more than a screenful, and few enough to land within seconds at
+// Gmail's pace. Older ones arrive with the change log or stay as uncached as
+// they were.
+const inboxFetchMax = 100
+
+// incrementalBatch is how many fetched messages an incremental pass commits per
+// checkpoint.
+const incrementalBatch = 20
+
+// inboxCheckEvery is how often a long catch-up's background phase stops to
+// bring the inbox up to date, so new mail is not held behind it.
+const inboxCheckEvery = time.Minute
+
+// IncrementalWithProgress is Incremental reporting to p (nil reports nothing).
+//
+// The visible inbox goes first. After a gap it is listed and corrected before
+// anything else (refreshInbox); then the change log is read, cached messages
+// take their new labels straight from it (a provider message never changes
+// after delivery, so labels are the whole update), new inbox mail is fetched
+// next, and everything else last at background priority, newest first.
+func (e *Engine) IncrementalWithProgress(ctx context.Context, b backend.Backend, accountID int64, p *Progress) (int, error) {
 	mu := e.syncMuFor(accountID)
 	mu.Lock()
 	defer mu.Unlock()
@@ -1261,33 +1330,51 @@ func (e *Engine) Incremental(ctx context.Context, b backend.Backend, accountID i
 		logging.TraceContext(ctx, "syncer: Incremental no cursor; backfill first", "account", accountID)
 		return 0, fmt.Errorf("account %d has no sync cursor; backfill first", accountID)
 	}
+	inboxCtx := backend.WithPriority(ctx, backend.PriorityInbox)
+	changed := 0
+	if e.inboxRefreshDue(accountID) {
+		n, _, rerr := e.refreshInbox(inboxCtx, b, accountID, p)
+		changed += n
+		if rerr != nil {
+			if cerr := ctx.Err(); cerr != nil {
+				return changed, fmt.Errorf("incremental interrupted: %w", cerr)
+			}
+			// The change log below covers the same ground, only later.
+			logging.TraceContext(ctx, "syncer: Incremental inbox refresh failed; continuing", "account", accountID, "err", rerr)
+		}
+	}
 
 	batch, err := e.Store.LoadSyncBatch(ctx, accountID)
 	if err != nil {
-		return 0, err
+		return changed, err
 	}
 	resumed := batch != nil
 	if batch == nil || batch.Cursor != acc.SyncCursor {
-		upserts, deletes, next, err := b.Changes(ctx, acc.SyncCursor)
+		changes, deletes, next, err := e.changeLog(inboxCtx, b, acc.SyncCursor, p)
 		if err != nil {
 			if errors.Is(err, backend.ErrCursorExpired) {
 				logging.TraceContext(ctx, "syncer: Incremental cursor expired -> resync required", "account", accountID, "cursor", acc.SyncCursor, "err", err)
-				return 0, ErrHistoryExpired
+				return changed, ErrHistoryExpired
 			}
 			logging.TraceContext(ctx, "syncer: Incremental changes failed", "account", accountID, "cursor", acc.SyncCursor, "err", err)
-			return 0, fmt.Errorf("incremental changes: %w", err)
+			return changed, fmt.Errorf("incremental changes: %w", err)
 		}
-		batch = &store.SyncBatch{Cursor: acc.SyncCursor, Next: next, Upserts: upserts, Deletes: deletes}
-		if len(upserts) > 0 || len(deletes) > 0 {
+		n, inbox, rest, err := e.applyChangeLabels(ctx, accountID, changes)
+		changed += n
+		if err != nil {
+			return changed, err
+		}
+		batch = &store.SyncBatch{Cursor: acc.SyncCursor, Next: next, Upserts: append(inbox, rest...), Inbox: len(inbox), Deletes: deletes}
+		if len(batch.Upserts) > 0 || len(deletes) > 0 {
 			if err := e.Store.SaveSyncBatch(ctx, accountID, *batch, nil); err != nil {
-				return 0, err
+				return changed, err
 			}
 		}
 	}
 	upserts, deletes, next := batch.Upserts, batch.Deletes, batch.Next
-	logging.TraceContext(ctx, "syncer: Incremental pending", "account", accountID, "resumed", resumed, "cursor", acc.SyncCursor, "next", next, "upserts", len(upserts), "deletes", len(deletes))
+	inboxN := min(max(batch.Inbox, 0), len(upserts))
+	logging.TraceContext(ctx, "syncer: Incremental pending", "account", accountID, "resumed", resumed, "cursor", acc.SyncCursor, "next", next, "upserts", len(upserts), "inbox", inboxN, "deletes", len(deletes))
 
-	changed := 0
 	if len(deletes) > 0 {
 		dstart := time.Now()
 		if err := e.Store.DeleteMessages(ctx, accountID, deletes); err != nil {
@@ -1305,19 +1392,48 @@ func (e *Engine) Incremental(ctx context.Context, b backend.Backend, accountID i
 	batch.Deletes = nil
 	// Keep the provider range fixed until all of its work is applied. A later
 	// Changes call may include newer edits to ids already saved in this range.
+	// Inbox mail is fetched first and at inbox priority; the rest is background
+	// work, shown as its own row when there is enough of it to take a while.
 	var failedIDs []string
-	const incrementalBatch = 20
-	for start := 0; start < len(upserts); start += incrementalBatch {
+	failedInbox := 0
+	rest := len(upserts) - inboxN
+	restFetched := 0
+	lastInboxCheck := time.Now()
+	for start := 0; start < len(upserts); {
 		if err := ctx.Err(); err != nil {
 			return changed, fmt.Errorf("incremental interrupted: %w", err)
 		}
+		inInbox := start < inboxN
+		fetchCtx := inboxCtx
 		end := min(start+incrementalBatch, len(upserts))
-		msgs, fetchedIDs, failed := e.fetchMetadataConcurrent(ctx, b, upserts[start:end])
+		if inInbox {
+			end = min(end, inboxN)
+		} else {
+			fetchCtx = backend.WithPriority(ctx, backend.PriorityBackground)
+			if start == inboxN && rest >= progressRowMin {
+				p.Phase(LabelSyncingOther, changeNote(changed))
+			}
+			// The bulk of a long catch-up takes minutes, and holds this account's
+			// sync loop meanwhile: keep the inbox current while it runs.
+			if time.Since(lastInboxCheck) >= inboxCheckEvery {
+				lastInboxCheck = time.Now()
+				n, _, err := e.refreshInbox(inboxCtx, b, accountID, nil)
+				changed += n
+				if err != nil {
+					logging.TraceContext(ctx, "syncer: Incremental mid-catch-up inbox refresh failed", "account", accountID, "err", err)
+				}
+			}
+		}
+		msgs, fetchedIDs, failed := e.fetchMetadataConcurrent(fetchCtx, b, upserts[start:end])
 		if err := ctx.Err(); err != nil {
 			return changed, fmt.Errorf("incremental fetch interrupted: %w", err)
 		}
 		failedIDs = append(failedIDs, failed...)
+		if inInbox {
+			failedInbox += len(failed)
+		}
 		batch.Upserts = append(append([]string(nil), failedIDs...), upserts[end:]...)
+		batch.Inbox = failedInbox + max(inboxN-end, 0)
 		if err := e.Store.SaveSyncBatch(ctx, accountID, *batch, msgs); err != nil {
 			return changed, err
 		}
@@ -1326,10 +1442,23 @@ func (e *Engine) Incremental(ctx context.Context, b backend.Backend, accountID i
 			e.publish(Change{Kind: MessageUpserted, AccountID: accountID, GmailID: m.GmailID, ThreadID: m.ThreadID})
 		}
 		changed += len(msgs)
-		logging.TraceContext(ctx, "syncer: Incremental checkpoint", "account", accountID, "saved", len(msgs), "remaining", len(batch.Upserts))
+		if inInbox {
+			if inboxN >= progressRowMin {
+				p.Step(end, inboxN, "messages")
+			}
+		} else {
+			restFetched += len(msgs)
+			if rest >= progressRowMin {
+				p.Step(end-inboxN, rest, "messages")
+				p.Note(activity.Plural(restFetched, "message", "messages"))
+			}
+		}
+		logging.TraceContext(ctx, "syncer: Incremental checkpoint", "account", accountID, "inbox", inInbox, "saved", len(msgs), "remaining", len(batch.Upserts))
+		start = end
 	}
 	if len(failedIDs) > 0 && e.noteFetchFailures(accountID, failedIDs) {
 		logging.TraceContext(ctx, "syncer: Incremental holding cursor (transient fetch failure)", "account", accountID, "failed", len(failedIDs))
+		e.markSynced(accountID)
 		return changed, nil
 	}
 
@@ -1342,8 +1471,173 @@ func (e *Engine) Incremental(ctx context.Context, b backend.Backend, accountID i
 	} else {
 		logging.TraceContext(ctx, "syncer: Incremental cursor unchanged; write skipped", "account", accountID)
 	}
+	e.markSynced(accountID)
 	logging.TraceContext(ctx, "syncer: Incremental done", "account", accountID, "changed", changed, "next", next)
 	return changed, nil
+}
+
+// changeNote is how a row reads once it has done n changes ("" for none).
+func changeNote(n int) string {
+	if n == 0 {
+		return ""
+	}
+	return activity.Plural(n, "change", "changes")
+}
+
+// changeLog reads the provider's changes since cursor, with each message's
+// labels when the backend can say (backend.ChangeLogger). A multi-page read
+// shows its progress on p's open row.
+func (e *Engine) changeLog(ctx context.Context, b backend.Backend, cursor string, p *Progress) ([]backend.MessageChange, []string, string, error) {
+	if cl, ok := b.(backend.ChangeLogger); ok {
+		return cl.ChangeLog(ctx, cursor, func(done, total int) { p.Step(done, total, "") })
+	}
+	upserts, deletes, next, err := b.Changes(ctx, cursor)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	changes := make([]backend.MessageChange, len(upserts))
+	for i, id := range upserts {
+		changes[i] = backend.MessageChange{ID: id}
+	}
+	return changes, deletes, next, nil
+}
+
+// applyChangeLabels gives every cached message in changes the labels the change
+// log reported, and splits what is left to fetch into inbox mail and the rest,
+// each in the log's order. It returns how many cached messages changed.
+func (e *Engine) applyChangeLabels(ctx context.Context, accountID int64, changes []backend.MessageChange) (int, []string, []string, error) {
+	var sets []store.MessageLabels
+	for _, c := range changes {
+		if c.Labels != nil {
+			sets = append(sets, store.MessageLabels{GmailID: c.ID, Labels: c.Labels})
+		}
+	}
+	res, err := e.Store.ApplyLabelSets(ctx, accountID, sets)
+	if err != nil {
+		return 0, nil, nil, fmt.Errorf("apply change labels: %w", err)
+	}
+	for _, m := range res.Changed {
+		e.publish(Change{Kind: MessageUpserted, AccountID: accountID, GmailID: m.GmailID, ThreadID: m.ThreadID})
+	}
+	handled := make(map[string]bool, len(res.Changed)+len(res.Unchanged))
+	for _, m := range res.Changed {
+		handled[m.GmailID] = true
+	}
+	for _, id := range res.Unchanged {
+		handled[id] = true
+	}
+	pending := make(map[string]bool, len(res.Pending))
+	for _, id := range res.Pending {
+		pending[id] = true
+	}
+	var inbox, rest []string
+	for _, c := range changes {
+		switch {
+		case handled[c.ID]:
+		case !pending[c.ID] && c.Inbox:
+			inbox = append(inbox, c.ID)
+		default:
+			// Includes messages awaiting their own label mirror: fetched last, by
+			// which time the mirror has usually landed.
+			rest = append(rest, c.ID)
+		}
+	}
+	logging.TraceContext(ctx, "syncer: change labels applied", "account", accountID, "changes", len(changes),
+		"changed", len(res.Changed), "unchanged", len(res.Unchanged), "pending", len(res.Pending), "fetch_inbox", len(inbox), "fetch_rest", len(rest))
+	return len(res.Changed), inbox, rest, nil
+}
+
+// inboxRefreshDue reports whether accountID's next pass should correct the
+// inbox first: its first in this process, or one after a long gap.
+func (e *Engine) inboxRefreshDue(accountID int64) bool {
+	e.syncedMu.Lock()
+	defer e.syncedMu.Unlock()
+	last, ok := e.syncedAt[accountID]
+	return !ok || e.now().Sub(last) > inboxRefreshAfter
+}
+
+func (e *Engine) markSynced(accountID int64) {
+	e.syncedMu.Lock()
+	defer e.syncedMu.Unlock()
+	if e.syncedAt == nil {
+		e.syncedAt = make(map[int64]time.Time)
+	}
+	e.syncedAt[accountID] = e.now()
+}
+
+// refreshInbox corrects the cached inbox against the provider's current one
+// (backend.InboxLister): membership and read state, then the newest uncached
+// inbox messages are fetched. It is how a sync after a long gap shows the right
+// inbox within seconds — reading a week of Gmail history first takes tens of
+// requests. It returns the number of messages changed or fetched and the ids it
+// fetched; a backend without the capability is a no-op.
+func (e *Engine) refreshInbox(ctx context.Context, b backend.Backend, accountID int64, p *Progress) (int, []string, error) {
+	lister, ok := b.(backend.InboxLister)
+	if !ok {
+		return 0, nil, nil
+	}
+	start := time.Now()
+	logging.TraceContext(ctx, "syncer: inbox refresh start", "account", accountID)
+	snap, err := lister.ListInbox(ctx, inboxListMax)
+	if err != nil {
+		logging.TraceContext(ctx, "syncer: inbox refresh list failed", "account", accountID, "err", err)
+		return 0, nil, fmt.Errorf("list inbox: %w", err)
+	}
+	rec, err := e.Store.ReconcileInbox(ctx, accountID, store.InboxState{IDs: snap.IDs, Unread: snap.Unread, Complete: snap.Complete})
+	if err != nil {
+		return 0, nil, err
+	}
+	for _, m := range rec.Changed {
+		e.publish(Change{Kind: MessageUpserted, AccountID: accountID, GmailID: m.GmailID, ThreadID: m.ThreadID})
+	}
+	missing := rec.Missing
+	if len(missing) > inboxFetchMax {
+		logging.TraceContext(ctx, "syncer: inbox refresh capping fetch", "account", accountID, "missing", len(missing), "cap", inboxFetchMax)
+		missing = missing[:inboxFetchMax]
+	}
+	var fetched []string
+	for i := 0; i < len(missing); i += incrementalBatch {
+		end := min(i+incrementalBatch, len(missing))
+		msgs, ids, _ := e.fetchMetadataConcurrent(ctx, b, missing[i:end])
+		if err := ctx.Err(); err != nil {
+			return len(rec.Changed) + len(fetched), fetched, err
+		}
+		if err := e.Store.UpsertMessages(ctx, msgs); err != nil {
+			return len(rec.Changed) + len(fetched), fetched, fmt.Errorf("store inbox messages: %w", err)
+		}
+		for _, m := range msgs {
+			e.publish(Change{Kind: MessageUpserted, AccountID: accountID, GmailID: m.GmailID, ThreadID: m.ThreadID})
+		}
+		fetched = append(fetched, ids...)
+		if len(missing) >= progressRowMin {
+			p.Step(end, len(missing), "messages")
+		}
+	}
+	e.syncedMu.Lock()
+	if e.inboxDone == nil {
+		e.inboxDone = make(map[int64]inboxRefresh)
+	}
+	e.inboxDone[accountID] = inboxRefresh{at: e.now(), fetched: fetched}
+	e.syncedMu.Unlock()
+	logging.TraceContext(ctx, "syncer: inbox refresh done", "account", accountID, "inbox", len(snap.IDs), "complete", snap.Complete,
+		"changed", len(rec.Changed), "missing", len(rec.Missing), "fetched", len(fetched), "dur", time.Since(start))
+	return len(rec.Changed) + len(fetched), fetched, nil
+}
+
+// inboxReuseWithin is how recent an inbox refresh Resync reuses instead of
+// running its own.
+const inboxReuseWithin = 2 * time.Minute
+
+// recentInboxRefresh returns the ids the account's last inbox refresh fetched
+// when it ran within inboxReuseWithin.
+func (e *Engine) recentInboxRefresh(accountID int64) ([]string, bool) {
+	e.syncedMu.Lock()
+	defer e.syncedMu.Unlock()
+	r, ok := e.inboxDone[accountID]
+	if !ok || e.now().Sub(r.at) > inboxReuseWithin {
+		return nil, false
+	}
+	return r.fetched, true
 }
 
 // Resync recovers from an expired history watermark — the ErrHistoryExpired that
@@ -1356,46 +1650,76 @@ func (e *Engine) Incremental(ctx context.Context, b backend.Backend, accountID i
 //
 // The watermark is captured before backfilling (so mail arriving during the
 // backfill isn't missed) but stored only after it succeeds (so a failed backfill
-// never advances past un-fetched history). Deletions made while the watermark was
-// expired aren't reconciled — incremental handles deletions going forward, and a
-// full-mailbox id diff isn't worth its cost here.
+// never advances past un-fetched history). The inbox is corrected first
+// (refreshInbox), so its membership and read state are right even for messages
+// older than the backfill reaches; other deletions and label changes made while
+// the watermark was expired aren't reconciled — a full-mailbox diff isn't worth
+// its cost here.
 //
 // A backend whose cursor enumerates message state rather than a change log
 // (backend.CursorSeeder — IMAP) instead gets its cursor built from exactly the
 // ids the backfill stored: seeding from the pre-backfill Profile snapshot would
 // mark every UID the cap skipped as already-seen, hiding them forever.
 func (e *Engine) Resync(ctx context.Context, b backend.Backend, accountID int64, max int) (int, error) {
+	return e.ResyncWithProgress(ctx, b, accountID, max, nil)
+}
+
+// ResyncWithProgress is Resync reporting to p (nil reports nothing).
+func (e *Engine) ResyncWithProgress(ctx context.Context, b backend.Backend, accountID int64, max int, p *Progress) (int, error) {
 	mu := e.syncMuFor(accountID)
 	mu.Lock()
 	defer mu.Unlock()
 	start := time.Now()
 	logging.TraceContext(ctx, "syncer: Resync start", "account", accountID, "max", max)
-	prof, err := b.Profile(ctx)
+	inboxCtx := backend.WithPriority(ctx, backend.PriorityInbox)
+	prof, err := b.Profile(inboxCtx)
 	if err != nil {
 		logging.TraceContext(ctx, "syncer: Resync profile failed", "account", accountID, "err", err)
 		return 0, fmt.Errorf("resync: profile: %w", err)
 	}
 	watermark := prof.Cursor
 	logging.TraceContext(ctx, "syncer: Resync captured watermark", "account", accountID, "historyId", watermark)
-	storedIDs, err := e.backfill(ctx, b, accountID, "", max)
-	n := len(storedIDs)
+	var changed int
+	var rerr error
+	inboxIDs, fresh := e.recentInboxRefresh(accountID)
+	if fresh {
+		logging.TraceContext(ctx, "syncer: Resync reusing inbox refresh", "account", accountID, "fetched", len(inboxIDs))
+	} else {
+		changed, inboxIDs, rerr = e.refreshInbox(inboxCtx, b, accountID, p)
+	}
+	if rerr != nil {
+		if cerr := ctx.Err(); cerr != nil {
+			return changed, fmt.Errorf("resync: %w", cerr)
+		}
+		logging.TraceContext(ctx, "syncer: Resync inbox refresh failed; continuing", "account", accountID, "err", rerr)
+	}
+	p.Phase(LabelSyncingRecent, changeNote(changed))
+	skip := make(map[string]bool, len(inboxIDs))
+	for _, id := range inboxIDs {
+		skip[id] = true
+	}
+	stored, err := e.backfill(backend.WithPriority(ctx, backend.PriorityBackground), b, accountID, "", max, skip, p)
+	storedIDs := append(append([]string(nil), inboxIDs...), stored...)
+	n := changed + len(stored)
 	if err != nil {
 		logging.TraceContext(ctx, "syncer: Resync backfill failed", "account", accountID, "stored", n, "err", err)
 		return n, fmt.Errorf("resync: backfill: %w", err)
 	}
+	p.Note(activity.Plural(len(stored), "message", "messages"))
 	if seeder, ok := b.(backend.CursorSeeder); ok {
 		cur, serr := seeder.SeedCursor(ctx, storedIDs)
 		if serr != nil {
 			logging.TraceContext(ctx, "syncer: Resync seed cursor failed", "account", accountID, "err", serr)
 			return n, fmt.Errorf("resync: seed cursor: %w", serr)
 		}
-		logging.TraceContext(ctx, "syncer: Resync using seeded cursor (backfilled ids only)", "account", accountID, "stored", n, "cursor_bytes", len(cur))
+		logging.TraceContext(ctx, "syncer: Resync using seeded cursor (backfilled ids only)", "account", accountID, "stored", len(storedIDs), "cursor_bytes", len(cur))
 		watermark = cur
 	}
 	if err := e.Store.SetSyncCursor(ctx, accountID, watermark); err != nil {
 		logging.TraceContext(ctx, "syncer: Resync set cursor failed", "account", accountID, "historyId", watermark, "err", err)
 		return n, fmt.Errorf("resync: set cursor: %w", err)
 	}
+	e.markSynced(accountID)
 	logging.TraceContext(ctx, "syncer: Resync done", "account", accountID, "stored", n, "historyId", watermark, "dur", time.Since(start))
 	return n, nil
 }

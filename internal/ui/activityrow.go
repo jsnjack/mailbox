@@ -81,7 +81,11 @@ type activityOp struct {
 	op      string // hub category ("sync", "ai", …); "" for a directly-driven op
 	started time.Time
 	prog    float64 // determinate fraction, or <0 while indeterminate
-	done    bool
+	// progShort says where a determinate operation is ("120/815"), shown in
+	// place of the elapsed time — the sidebar is too narrow for both and the
+	// phrase they describe; progText is the full form for the tooltip.
+	progShort, progText string
+	done                bool
 }
 
 // finishState is a settled result waiting to be shown (and then to expire).
@@ -248,7 +252,9 @@ func (r *activityRow) feed(e activity.Event, display string) {
 	case activity.Progress:
 		if e.Total > 0 {
 			if op := r.find(display); op != nil {
-				op.prog = float64(e.Done) / float64(e.Total)
+				op.prog = min(float64(e.Done)/float64(e.Total), 1)
+				op.progShort = activity.ProgressShort(e.Done, e.Total, e.Unit)
+				op.progText = activity.ProgressText(e.Done, e.Total, e.Unit)
 				r.repaint()
 			}
 		}
@@ -358,7 +364,7 @@ func (r *activityRow) enterRunning() {
 	// Elapsed rides in its own label so the ticking digits never reflow the
 	// phrase beside them.
 	r.detail.SetVisible(true)
-	r.detail.SetText(humanDuration(time.Since(a.started)))
+	r.showDetail(a)
 	r.progress.SetVisible(a.prog >= 0)
 	if a.prog >= 0 {
 		r.progress.SetFraction(a.prog)
@@ -437,9 +443,22 @@ func (r *activityRow) onTick() bool {
 		r.tick = 0
 		return false
 	}
-	a := r.active[len(r.active)-1]
-	r.detail.SetText(humanDuration(time.Since(a.started)))
+	r.showDetail(r.active[len(r.active)-1])
 	return true
+}
+
+// showDetail fills the text beside a running operation: where it is when it
+// knows ("120/815", the full "120 of 815 messages · 1m02s" in the tooltip),
+// else how long it has run.
+func (r *activityRow) showDetail(a *activityOp) {
+	elapsed := humanDuration(time.Since(a.started))
+	if a.progShort == "" {
+		r.detail.SetText(elapsed)
+		r.detail.SetTooltipText("")
+		return
+	}
+	r.detail.SetText(a.progShort)
+	r.detail.SetTooltipText(a.progText + " · " + elapsed)
 }
 
 func (r *activityRow) stopTick() {

@@ -2,8 +2,11 @@ package gmailapi
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/jsnjack/mailbox/internal/backend"
 )
 
 func TestRateBudgetReserve(t *testing.T) {
@@ -81,4 +84,88 @@ func TestProductionBudgetPacesMessageReads(t *testing.T) {
 			t.Fatalf("300 reads consumed a minute's quota in %v", elapsed)
 		}
 	})
+}
+
+// When the quota runs short, a request someone is waiting for goes ahead of
+// background requests that queued before it, which keep their own order.
+func TestRateBudgetServesUrgentWaitersFirst(t *testing.T) {
+	var mu sync.Mutex
+	clock := time.Unix(0, 0)
+	now := func() time.Time { mu.Lock(); defer mu.Unlock(); return clock }
+	advance := func(d time.Duration) { mu.Lock(); clock = clock.Add(d); mu.Unlock() }
+	// Time only moves when the test says so; a sleeping head just re-checks.
+	sleep := func(ctx context.Context, _ time.Duration) error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Millisecond):
+			return nil
+		}
+	}
+	b := newRateBudget(60, now, sleep) // 1 unit/s
+	ctx := context.Background()
+	if err := b.Reserve(ctx, 60); err != nil {
+		t.Fatal(err)
+	}
+	queued := func() int { b.mu.Lock(); defer b.mu.Unlock(); return len(b.queue) }
+	waitQueued := func(n int) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for queued() != n {
+			if time.Now().After(deadline) {
+				t.Fatalf("queue length %d, want %d", queued(), n)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	granted := make(chan string, 3)
+	reserve := func(name string, ctx context.Context) {
+		go func() {
+			if err := b.Reserve(ctx, 10); err != nil {
+				t.Error(err)
+			}
+			granted <- name
+		}()
+	}
+	bg := backend.WithPriority(ctx, backend.PriorityBackground)
+	reserve("bg1", bg)
+	waitQueued(1)
+	reserve("bg2", bg)
+	waitQueued(2)
+	reserve("user", ctx)
+	waitQueued(3)
+	for _, want := range []string{"user", "bg1", "bg2"} {
+		advance(10 * time.Second)
+		select {
+		case got := <-granted:
+			if got != want {
+				t.Fatalf("granted %s, want %s", got, want)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("nothing granted; want %s", want)
+		}
+	}
+}
+
+// A cancelled waiter leaves the queue, so the ones behind it are not stuck.
+func TestRateBudgetCancelledWaiterLeavesQueue(t *testing.T) {
+	b := newRateBudget(60, time.Now, sleepCtx)
+	ctx := context.Background()
+	if err := b.Reserve(ctx, 60); err != nil {
+		t.Fatal(err)
+	}
+	cctx, cancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- b.Reserve(cctx, 30) }()
+	time.Sleep(10 * time.Millisecond)
+	cancel()
+	if err := <-done; err == nil {
+		t.Fatal("cancelled reserve succeeded")
+	}
+	b.mu.Lock()
+	n := len(b.queue)
+	b.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("queue length %d after cancel, want 0", n)
+	}
 }
