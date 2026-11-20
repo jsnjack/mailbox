@@ -331,12 +331,15 @@ func (e *Engine) backfill(ctx context.Context, b backend.Backend, accountID int6
 // caches the matching messages' metadata that isn't already local, and returns
 // the matching message ids (Gmail's relevance order). This lets the user find
 // mail beyond the local cache.
-func (e *Engine) SearchServer(ctx context.Context, b backend.Backend, accountID int64, query string, max int) ([]string, error) {
+//
+// progress, when non-nil, is told how many results need fetching once the
+// search has listed them, and then each finished fetch (see activity.Steps.Set).
+func (e *Engine) SearchServer(ctx context.Context, b backend.Backend, accountID int64, query string, max int, progress func(done, total int)) ([]string, error) {
 	ids, err := b.SearchIDs(ctx, query, max)
 	if err != nil {
 		return nil, fmt.Errorf("search list ids: %w", err)
 	}
-	missing, err := e.cacheSearchMetadata(ctx, b, accountID, ids)
+	missing, err := e.cacheSearchMetadata(ctx, b, accountID, ids, progress)
 	if err != nil {
 		return nil, err
 	}
@@ -346,8 +349,9 @@ func (e *Engine) SearchServer(ctx context.Context, b backend.Backend, accountID 
 
 // SearchServerPage returns and caches one provider-search page. Providers with
 // cursor pagination keep their cursor opaque; older providers get a compatible
-// offset token over their existing SearchIDs implementation.
-func (e *Engine) SearchServerPage(ctx context.Context, b backend.Backend, accountID int64, query, pageToken string, limit int) (backend.SearchPage, error) {
+// offset token over their existing SearchIDs implementation. progress is as
+// for SearchServer.
+func (e *Engine) SearchServerPage(ctx context.Context, b backend.Backend, accountID int64, query, pageToken string, limit int, progress func(done, total int)) (backend.SearchPage, error) {
 	if limit <= 0 {
 		return backend.SearchPage{}, fmt.Errorf("search page limit must be positive")
 	}
@@ -366,7 +370,7 @@ func (e *Engine) SearchServerPage(ctx context.Context, b backend.Backend, accoun
 	if len(page.IDs) > limit {
 		return backend.SearchPage{}, fmt.Errorf("search provider returned %d ids for page limit %d", len(page.IDs), limit)
 	}
-	missing, err := e.cacheSearchMetadata(ctx, b, accountID, page.IDs)
+	missing, err := e.cacheSearchMetadata(ctx, b, accountID, page.IDs, progress)
 	if err != nil {
 		return backend.SearchPage{}, err
 	}
@@ -409,7 +413,7 @@ func searchIDsOffsetPage(ctx context.Context, b backend.Backend, query, pageToke
 	return page, nil
 }
 
-func (e *Engine) cacheSearchMetadata(ctx context.Context, b backend.Backend, accountID int64, ids []string) (int, error) {
+func (e *Engine) cacheSearchMetadata(ctx context.Context, b backend.Backend, accountID int64, ids []string, progress func(done, total int)) (int, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
@@ -427,7 +431,13 @@ func (e *Engine) cacheSearchMetadata(ctx context.Context, b backend.Backend, acc
 		}
 	}
 	if len(missing) > 0 {
-		fetched, _, _ := e.fetchMetadataConcurrent(ctx, b, missing)
+		var step func(n int)
+		if progress != nil {
+			progress(0, len(missing))
+			var finished atomic.Int64
+			step = func(n int) { progress(int(finished.Add(int64(n))), len(missing)) }
+		}
+		fetched, _, _, _ := e.fetchConcurrent(ctx, b, missing, false, step)
 		if len(fetched) > 0 {
 			if err := e.Store.UpsertMessages(ctx, fetched); err != nil {
 				return 0, fmt.Errorf("search upsert: %w", err)
@@ -600,7 +610,9 @@ const htmlBackfillWorkers = 4
 // them quietly — no per-message change is published, so a bulk pass can't flood
 // the UI; the recovered body is read on the message's next open. Returns the
 // number actually re-fetched. A no-op once every body is at the current version.
-func (e *Engine) BackfillHTMLBodies(ctx context.Context, b backend.Backend, accountID int64, max int) (int, error) {
+// progress, when non-nil, is told the size once it is known and then each
+// finished message (see activity.Steps.Set).
+func (e *Engine) BackfillHTMLBodies(ctx context.Context, b backend.Backend, accountID int64, max int, progress func(done, total int)) (int, error) {
 	ctx = backend.WithPriority(ctx, backend.PriorityBackground)
 	ids, err := e.Store.MessagesMissingHTML(ctx, accountID, max)
 	if err != nil {
@@ -609,10 +621,15 @@ func (e *Engine) BackfillHTMLBodies(ctx context.Context, b backend.Backend, acco
 	if len(ids) == 0 {
 		return 0, nil
 	}
+	if progress == nil {
+		progress = func(int, int) {}
+	}
+	progress(0, len(ids))
 	var (
-		sem = make(chan struct{}, htmlBackfillWorkers)
-		wg  sync.WaitGroup
-		n   atomic.Int64
+		sem      = make(chan struct{}, htmlBackfillWorkers)
+		wg       sync.WaitGroup
+		n        atomic.Int64
+		finished atomic.Int64
 	)
 	for _, id := range ids {
 		if ctx.Err() != nil {
@@ -623,6 +640,7 @@ func (e *Engine) BackfillHTMLBodies(ctx context.Context, b backend.Backend, acco
 		go func(id string) {
 			defer wg.Done()
 			defer func() { <-sem }()
+			defer func() { progress(int(finished.Add(1)), len(ids)) }()
 			m, err := e.Store.GetMessage(ctx, accountID, id)
 			if err != nil {
 				slog.Default().Warn("html backfill: get message", "id", id, "err", err)
@@ -1399,6 +1417,20 @@ func (e *Engine) IncrementalWithProgress(ctx context.Context, b backend.Backend,
 	rest := len(upserts) - inboxN
 	restFetched := 0
 	lastInboxCheck := time.Now()
+	// The bar counts requests as they finish. The rest of a long catch-up has
+	// its own row and bar; otherwise one bar on "Checking mail" covers every
+	// fetch of the pass.
+	ownRow := rest >= progressRowMin
+	position := func(start int) (base, total int) {
+		switch {
+		case !ownRow:
+			return start, len(upserts)
+		case start < inboxN:
+			return start, inboxN
+		default:
+			return start - inboxN, rest
+		}
+	}
 	for start := 0; start < len(upserts); {
 		if err := ctx.Err(); err != nil {
 			return changed, fmt.Errorf("incremental interrupted: %w", err)
@@ -1410,7 +1442,7 @@ func (e *Engine) IncrementalWithProgress(ctx context.Context, b backend.Backend,
 			end = min(end, inboxN)
 		} else {
 			fetchCtx = backend.WithPriority(ctx, backend.PriorityBackground)
-			if start == inboxN && rest >= progressRowMin {
+			if start == inboxN && ownRow {
 				p.Phase(LabelSyncingOther, changeNote(changed))
 			}
 			// The bulk of a long catch-up takes minutes, and holds this account's
@@ -1426,7 +1458,11 @@ func (e *Engine) IncrementalWithProgress(ctx context.Context, b backend.Backend,
 		}
 		// Inbox mail comes with its body, stored in the same transaction, so it
 		// never shows in the list before it can be opened without a download.
-		msgs, bodies, fetchedIDs, failed := e.fetchConcurrent(fetchCtx, b, upserts[start:end], inInbox)
+		base, total := position(start)
+		p.Step(base, total, "messages") // the bar shows from the first request
+		var finished atomic.Int64
+		step := func(n int) { p.Step(base+int(finished.Add(int64(n))), total, "messages") }
+		msgs, bodies, fetchedIDs, failed := e.fetchConcurrent(fetchCtx, b, upserts[start:end], inInbox, step)
 		if err := ctx.Err(); err != nil {
 			return changed, fmt.Errorf("incremental fetch interrupted: %w", err)
 		}
@@ -1444,14 +1480,9 @@ func (e *Engine) IncrementalWithProgress(ctx context.Context, b backend.Backend,
 			e.publish(Change{Kind: MessageUpserted, AccountID: accountID, GmailID: m.GmailID, ThreadID: m.ThreadID})
 		}
 		changed += len(msgs)
-		if inInbox {
-			if inboxN >= progressRowMin {
-				p.Step(end, inboxN, "messages")
-			}
-		} else {
+		if !inInbox {
 			restFetched += len(msgs)
-			if rest >= progressRowMin {
-				p.Step(end-inboxN, rest, "messages")
+			if ownRow {
 				p.Note(activity.Plural(restFetched, "message", "messages"))
 			}
 		}
@@ -1600,7 +1631,10 @@ func (e *Engine) refreshInbox(ctx context.Context, b backend.Backend, accountID 
 	var fetched []string
 	for i := 0; i < len(missing); i += incrementalBatch {
 		end := min(i+incrementalBatch, len(missing))
-		msgs, bodies, ids, _ := e.fetchConcurrent(ctx, b, missing[i:end], true)
+		p.Step(i, len(missing), "messages")
+		var finished atomic.Int64
+		step := func(n int) { p.Step(i+int(finished.Add(int64(n))), len(missing), "messages") }
+		msgs, bodies, ids, _ := e.fetchConcurrent(ctx, b, missing[i:end], true, step)
 		if err := ctx.Err(); err != nil {
 			return len(rec.Changed) + len(fetched), fetched, err
 		}
@@ -1611,9 +1645,6 @@ func (e *Engine) refreshInbox(ctx context.Context, b backend.Backend, accountID 
 			e.publish(Change{Kind: MessageUpserted, AccountID: accountID, GmailID: m.GmailID, ThreadID: m.ThreadID})
 		}
 		fetched = append(fetched, ids...)
-		if len(missing) >= progressRowMin {
-			p.Step(end, len(missing), "messages")
-		}
 	}
 	e.syncedMu.Lock()
 	if e.inboxDone == nil {
@@ -1726,24 +1757,22 @@ func (e *Engine) ResyncWithProgress(ctx context.Context, b backend.Backend, acco
 	return n, nil
 }
 
-// fetchMetadataConcurrent fetches each id's metadata in parallel (bounded by
+// fetchConcurrent fetches each id's metadata in parallel (bounded by
 // backfillWorkers) and returns the converted messages and their ids in input
 // order. An id that is genuinely gone (backend.ErrNotFound) is skipped silently.
 // Any other fetch error is transient (network blip, exhausted retries); the
 // failing ids are returned so the caller can decline to advance the sync cursor
 // past a message it hasn't actually stored yet. Each goroutine writes its own
 // slot, so there is no shared-state contention.
-func (e *Engine) fetchMetadataConcurrent(ctx context.Context, b backend.Backend, ids []string) (msgs []model.Message, fetchedIDs, failedIDs []string) {
-	msgs, _, fetchedIDs, failedIDs = e.fetchConcurrent(ctx, b, ids, false)
-	return msgs, fetchedIDs, failedIDs
-}
-
-// fetchConcurrent is fetchMetadataConcurrent that, when withBodies is set and
-// the backend is a backend.FullFetcher, also returns each message's body, keyed
-// by id, from the same request. Inbox mail is fetched this way so it is stored
-// with its body and opening it never waits for a download; a backend without
-// the capability returns no bodies, and the body prefetch fills them in.
-func (e *Engine) fetchConcurrent(ctx context.Context, b backend.Backend, ids []string, withBodies bool) (msgs []model.Message, bodies map[string]store.FetchedBody, fetchedIDs, failedIDs []string) {
+//
+// When withBodies is set and the backend is a backend.FullFetcher, it also
+// returns each message's body, keyed by id, from the same request. Inbox mail
+// is fetched this way so it is stored with its body and opening it never waits
+// for a download; a backend without the capability returns no bodies, and the
+// body prefetch fills them in. progress, when non-nil, is called with the
+// number of ids each finished request covered (failed ones included), from the
+// fetching goroutines.
+func (e *Engine) fetchConcurrent(ctx context.Context, b backend.Backend, ids []string, withBodies bool, progress func(n int)) (msgs []model.Message, bodies map[string]store.FetchedBody, fetchedIDs, failedIDs []string) {
 	if len(ids) == 0 {
 		return nil, nil, nil, nil
 	}
@@ -1755,7 +1784,7 @@ func (e *Engine) fetchConcurrent(ctx context.Context, b backend.Backend, ids []s
 	// ~200 ids per folder instead of one round-trip per message). Gmail has no
 	// batch metadata endpoint and falls through to the per-id path below.
 	if bf, ok := b.(backend.BatchMetadataFetcher); ok && full == nil {
-		msgs, fetchedIDs, failedIDs = e.fetchMetadataBatched(ctx, bf, ids)
+		msgs, fetchedIDs, failedIDs = e.fetchMetadataBatched(ctx, bf, ids, progress)
 		return msgs, nil, fetchedIDs, failedIDs
 	}
 	logging.TraceContext(ctx, "syncer: fetch messages", "n", len(ids), "withBodies", full != nil)
@@ -1774,6 +1803,9 @@ func (e *Engine) fetchConcurrent(ctx context.Context, b backend.Backend, ids []s
 		go func(i int, id string) {
 			defer wg.Done()
 			defer func() { <-sem }()
+			if progress != nil {
+				defer progress(1)
+			}
 			var (
 				msg  model.Message
 				body *store.FetchedBody
@@ -1855,7 +1887,7 @@ const metadataBatchSize = 200
 // retries), while ids simply absent from a successful chunk's result are treated
 // as gone — mirroring the per-id path's ErrNotFound handling. fetchedIDs is built
 // from the returned messages so it stays parallel to msgs.
-func (e *Engine) fetchMetadataBatched(ctx context.Context, bf backend.BatchMetadataFetcher, ids []string) (msgs []model.Message, fetchedIDs, failedIDs []string) {
+func (e *Engine) fetchMetadataBatched(ctx context.Context, bf backend.BatchMetadataFetcher, ids []string, progress func(n int)) (msgs []model.Message, fetchedIDs, failedIDs []string) {
 	var chunks [][]string
 	for start := 0; start < len(ids); start += metadataBatchSize {
 		end := start + metadataBatchSize
@@ -1877,6 +1909,9 @@ func (e *Engine) fetchMetadataBatched(ctx context.Context, bf backend.BatchMetad
 		go func(i int, chunk []string) {
 			defer wg.Done()
 			defer func() { <-sem }()
+			if progress != nil {
+				defer progress(len(chunk))
+			}
 			got, err := bf.FetchMetadataBatch(ctx, chunk)
 			if err != nil {
 				slog.Default().Warn("incremental: fetch metadata batch", "n", len(chunk), "err", err)

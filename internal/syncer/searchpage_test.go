@@ -59,7 +59,7 @@ func TestSearchServerPageUsesOpaqueCursorAndCachesOnlyPage(t *testing.T) {
 		},
 	}
 	e := &Engine{Store: s}
-	page, err := e.SearchServerPage(ctx, be, acct, "from:a@example.com", "opaque-current", 2)
+	page, err := e.SearchServerPage(ctx, be, acct, "from:a@example.com", "opaque-current", 2, nil)
 	if err != nil {
 		t.Fatalf("SearchServerPage: %v", err)
 	}

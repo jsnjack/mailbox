@@ -37,7 +37,17 @@ structured activity log: one dense line per operation (monospace clock, a
 neutral kind chip — SYNC/AI/FETCH/SEND/SEARCH/ATTACH/DRAFT/MAIL — an account
 chip, the label, the result note inline and dim, right-aligned duration),
 inserted at Start and finished in place (✓/✗/–, error-tinted note on failure;
-capped at 200 rows). Completed notes have a Details button that opens the full
+capped at 200 rows). An operation that knows its size before it starts — so many
+requests, messages or conversations — draws a bar that fills as each unit
+finishes rather than a spinner (`activity.Steps`: `Hub.BeginSteps`, then `Add`
+or `Set`; a bar from `activity.StepsMin` = 2 units, throttled to four updates a
+second, never running backwards). The sync, the body prefetch, the HTML
+re-fetch, server search, the AI summarize and categorize passes and a
+conversation's missing bodies report this way; work that is one request
+(sending, archiving, an attachment) keeps the spinner. A conversation opening
+with several missing bodies is one "Fetching 3 messages" row: the reader marks
+its context with `activity.WithRow`, so the `FetchBody` hook leaves out its own
+per-message "Fetching message" row. Completed notes have a Details button that opens the full
 text in a wrapping, scrollable dialog with selection and a Copy button, so long
 provider errors and URLs remain accessible even when tooltips are clipped.
 Every account-scoped event carries `Event.Account` (the

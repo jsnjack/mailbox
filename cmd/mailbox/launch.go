@@ -639,6 +639,10 @@ func launchUI(mailto string) error {
 		if err != nil {
 			return err
 		}
+		if activity.HasRow(ctx) {
+			// One of several bodies the caller reports as a single row.
+			return engine.FetchBody(ctx, c, accountID, gmailID)
+		}
 		done := act.Begin("fetch", emailOf(accountID), "Fetching message")
 		err = engine.FetchBody(ctx, c, accountID, gmailID)
 		done(doneNote(err))
@@ -744,12 +748,12 @@ func launchUI(mailto string) error {
 		if err != nil {
 			return nil, err
 		}
-		done := act.Begin("search", emailOf(accountID), "Searching all mail")
-		ids, err := engine.SearchServer(ctx, c, accountID, query, max)
+		steps := act.BeginSteps("search", emailOf(accountID), "Searching all mail", 0, "messages")
+		ids, err := engine.SearchServer(ctx, c, accountID, query, max, steps.Set)
 		if err != nil {
-			done(doneNote(err))
+			steps.Done(doneNote(err))
 		} else {
-			done(activity.Plural(len(ids), "result", "results"))
+			steps.Done(activity.Plural(len(ids), "result", "results"))
 		}
 		return ids, err
 	}
@@ -758,12 +762,12 @@ func launchUI(mailto string) error {
 		if err != nil {
 			return ui.ServerSearchPage{}, err
 		}
-		done := act.Begin("search", emailOf(accountID), "Searching all mail")
-		page, err := engine.SearchServerPage(ctx, c, accountID, query, pageToken, limit)
+		steps := act.BeginSteps("search", emailOf(accountID), "Searching all mail", 0, "messages")
+		page, err := engine.SearchServerPage(ctx, c, accountID, query, pageToken, limit, steps.Set)
 		if err != nil {
-			done(doneNote(err))
+			steps.Done(doneNote(err))
 		} else {
-			done(activity.Plural(len(page.IDs), "result", "results"))
+			steps.Done(activity.Plural(len(page.IDs), "result", "results"))
 		}
 		return ui.ServerSearchPage{IDs: page.IDs, Next: page.Next}, err
 	}
@@ -1346,16 +1350,16 @@ func backgroundBackfillHTML(ctx context.Context, engine *syncer.Engine, act *act
 		return
 	case <-time.After(htmlBackfillDelay):
 	}
-	done := act.Begin("sync", email, "Re-fetching HTML bodies")
-	n, err := engine.BackfillHTMLBodies(ctx, b, accountID, htmlBackfillCap)
+	steps := act.BeginSteps("sync", email, "Re-fetching HTML bodies", 0, "messages")
+	n, err := engine.BackfillHTMLBodies(ctx, b, accountID, htmlBackfillCap, steps.Set)
 	switch {
 	case err != nil:
-		done("error: " + err.Error())
+		steps.Done("error: " + err.Error())
 		fmt.Fprintf(os.Stderr, "html backfill for %s: %v\n", email, err)
 	case n > 0:
-		done(fmt.Sprintf("recovered %d", n))
+		steps.Done(fmt.Sprintf("recovered %d", n))
 	default:
-		done("")
+		steps.Done("")
 	}
 }
 

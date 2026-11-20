@@ -119,7 +119,7 @@ func (e *Engine) prefetchBodyBatch(ctx context.Context, b backend.Backend, act *
 	if len(todo) == 0 {
 		return
 	}
-	done := act.Begin("fetch", email, "Prefetching message bodies")
+	steps := act.BeginSteps("fetch", email, "Prefetching message bodies", len(todo), "bodies")
 	type result struct {
 		rowID int64
 		err   error
@@ -138,6 +138,7 @@ feed:
 		go func(m model.Message) {
 			defer wg.Done()
 			defer func() { <-sem }()
+			defer steps.Add(1)
 			fetchCtx, cancel := context.WithTimeout(ctx, bodyPrefetchTimeout)
 			defer cancel()
 			// The conversation may have been archived while waiting for a worker slot.
@@ -173,5 +174,5 @@ feed:
 	if ctx.Err() != nil {
 		note += "; canceled"
 	}
-	done(note)
+	steps.Done(note)
 }

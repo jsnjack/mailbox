@@ -43,6 +43,8 @@ func TestPastTense(t *testing.T) {
 		{"Archiving", "Archived"},
 		{"Sending queued mail", "Queued mail sent"},
 		{"Sending message", "Message sent"},
+		{"Fetching message", "Message fetched"},
+		{"Fetching 3 messages", "Fetched 3 messages"},
 		// Already past tense (every Report publishes one) — left alone.
 		{"Snoozed until Jul 20 09:00", "Snoozed until Jul 20 09:00"},
 		{"Returned from snooze", "Returned from snooze"},

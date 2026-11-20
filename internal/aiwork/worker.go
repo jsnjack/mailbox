@@ -261,13 +261,17 @@ func (w *Worker) gists(ctx context.Context, accountID int64, threads []model.Thr
 	}
 	logging.Trace("aiwork: gist pass", "account", accountID, "todo", len(todo), "remaining", remaining)
 
-	var done func(string)
+	var (
+		done  func(string)
+		steps *activity.Steps // one unit per AI request, as each answers
+	)
 	if w.act != nil {
 		email := ""
 		if acc, aerr := w.st.GetAccountByID(ctx, accountID); aerr == nil {
 			email = acc.Email
 		}
-		done = w.act.Begin("ai", email, "Summarizing "+activity.Plural(len(todo), "message", "messages"))
+		steps = w.act.BeginSteps("ai", email, "Summarizing "+activity.Plural(len(todo), "message", "messages"), len(todo), "messages")
+		done = steps.Done
 	}
 	aiCtx, cancel := context.WithTimeout(ctx, passTimeout)
 	defer cancel()
@@ -301,6 +305,7 @@ func (w *Worker) gists(ctx context.Context, accountID int64, threads []model.Thr
 	var firstErr error
 	written, failed := 0, 0
 	for r := range results {
+		steps.Add(1)
 		if r.err != nil {
 			failed++
 			if firstErr == nil {
@@ -378,13 +383,17 @@ func (w *Worker) categorize(ctx context.Context, accountID int64, threads []mode
 	}
 	logging.Trace("aiwork: categorize pass", "account", accountID, "todo", len(todo), "remaining", remaining)
 
-	var done func(string)
+	var (
+		done  func(string)
+		steps *activity.Steps // one unit per AI request, as each answers
+	)
 	if w.act != nil {
 		email := ""
 		if acc, aerr := w.st.GetAccountByID(ctx, accountID); aerr == nil {
 			email = acc.Email
 		}
-		done = w.act.Begin("ai", email, "Categorizing "+activity.Plural(len(todo), "conversation", "conversations"))
+		steps = w.act.BeginSteps("ai", email, "Categorizing "+activity.Plural(len(todo), "conversation", "conversations"), len(todo), "conversations")
+		done = steps.Done
 	}
 	aiCtx, cancel := context.WithTimeout(ctx, passTimeout)
 	defer cancel()
@@ -423,6 +432,7 @@ func (w *Worker) categorize(ctx context.Context, accountID int64, threads []mode
 	var firstErr error
 	assigned, failed := 0, 0
 	for r := range results {
+		steps.Add(1)
 		if r.err != nil {
 			failed++
 			if firstErr == nil {

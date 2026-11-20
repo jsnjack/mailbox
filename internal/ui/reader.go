@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/diamondburned/gotk4-webkitgtk/pkg/webkit/v6"
+	"github.com/jsnjack/mailbox/internal/activity"
 	"github.com/jsnjack/mailbox/internal/dispatch"
 	"github.com/jsnjack/mailbox/internal/logging"
 	"github.com/jsnjack/mailbox/internal/model"
@@ -142,16 +143,32 @@ func (w *window) renderConversation(msgs []model.Message) {
 				okMu  sync.Mutex
 				okIDs = map[string]bool{} // gmailID → body fetch completed successfully
 			)
+			for _, m := range msgs {
+				if !m.BodyFetched {
+					fetched++
+				}
+			}
+			// Several missing bodies are one operation to the user: a single
+			// "Fetching 3 messages" row whose bar fills as each body arrives,
+			// rather than a spinner row per message.
+			bodyCtx := fetchCtx
+			var steps *activity.Steps
+			if fetched >= activity.StepsMin && w.deps.Activity != nil {
+				steps = w.deps.Activity.BeginSteps("fetch", w.emailForAccount(latest.AccountID),
+					"Fetching "+activity.Plural(fetched, "message", "messages"), fetched, "messages")
+				bodyCtx = activity.WithRow(fetchCtx)
+				logging.Trace("ui: fetch bodies as one row", "thread", threadID, "count", fetched)
+			}
 			sem := make(chan struct{}, 6)
 			var wg sync.WaitGroup
 			for _, m := range msgs {
 				if m.BodyFetched {
 					continue
 				}
-				fetched++
 				wg.Add(1)
 				go func(m model.Message) {
 					defer wg.Done()
+					defer steps.Add(1)
 					// The slot is acquired inside the goroutine (not the spawn loop)
 					// so six stuck fetches can't block spawning — and with it the
 					// bounded wait below — indefinitely.
@@ -162,7 +179,7 @@ func (w *window) renderConversation(msgs []model.Message) {
 					}
 					defer func() { <-sem }()
 					logging.Trace("ui: fetch body", "id", m.GmailID, "account", m.AccountID)
-					if err := w.deps.FetchBody(fetchCtx, m.AccountID, m.GmailID); err != nil {
+					if err := w.deps.FetchBody(bodyCtx, m.AccountID, m.GmailID); err != nil {
 						slog.Warn("ui: fetch body", "id", m.GmailID, "err", err)
 						return
 					}
@@ -191,6 +208,14 @@ func (w *window) renderConversation(msgs []model.Message) {
 				}
 			}
 			okMu.Unlock()
+			switch {
+			case renderCtx.Err() != nil:
+				steps.Done(noteCancelled) // another conversation opened
+			case len(fetchFailed) > 0:
+				steps.Done(fmt.Sprintf("error: %d of %d not loaded", len(fetchFailed), fetched))
+			default:
+				steps.Done("")
+			}
 		}
 		// If a newer thread was opened (renderCtx cancelled), bail before the
 		// sanitization + UI swap — the newer render owns the reader.

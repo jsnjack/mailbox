@@ -23,9 +23,9 @@ const (
 // and the status bar needs a few repaints a second, not hundreds.
 const progressEvery = 250 * time.Millisecond
 
-// progressRowMin is the smallest fetch that shows a done/total bar. A minute's
-// worth of new mail finishes before a bar would mean anything, so ordinary
-// passes stay a plain spinner.
+// progressRowMin is the smallest bulk fetch that moves onto its own row
+// ("Syncing other mail"), so a long catch-up keeps the inbox's row short.
+// Smaller fetches stay on the pass's "Checking mail" row, still with a bar.
 const progressRowMin = 20
 
 // Progress shows one sync pass in the activity hub. Exactly one of its rows is
@@ -42,6 +42,9 @@ type Progress struct {
 	end     func(note string)
 	note    string
 	lastPub time.Time
+	// shown is the position last published, so that concurrent fetches
+	// finishing out of order never run the bar backwards.
+	shown activity.Event
 }
 
 // NewProgress opens a pass's "Checking mail" row for account.
@@ -69,23 +72,31 @@ func (p *Progress) Phase(label, closeNote string) {
 	p.label = label
 	p.note = ""
 	p.lastPub = time.Time{}
+	p.shown = activity.Event{}
 	p.end = p.act.Begin("sync", p.account, label)
 }
 
 // Step reports the open row's position: done of total units (see
-// activity.Event.Unit). Updates are throttled; the final one always shows.
+// activity.Event.Unit), drawn as a bar from activity.StepsMin units. Updates
+// are throttled; the first of a new size and the final one always show.
 func (p *Progress) Step(done, total int, unit string) {
-	if p == nil || total <= 0 {
+	if p == nil || total < activity.StepsMin {
 		return
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	done = max(0, min(done, total))
+	resized := total != p.shown.Total || unit != p.shown.Unit
+	if !resized && done < p.shown.Done {
+		return
+	}
 	now := time.Now()
-	if done < total && now.Sub(p.lastPub) < progressEvery {
+	if !resized && done < total && now.Sub(p.lastPub) < progressEvery {
 		return
 	}
 	p.lastPub = now
-	p.act.Publish(activity.Event{Op: "sync", Phase: activity.Progress, Account: p.account, Label: p.label, Done: done, Total: total, Unit: unit})
+	p.shown = activity.Event{Op: "sync", Phase: activity.Progress, Account: p.account, Label: p.label, Done: done, Total: total, Unit: unit}
+	p.act.Publish(p.shown)
 }
 
 // Note sets what the open row ends with when the pass succeeds.

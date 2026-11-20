@@ -149,7 +149,9 @@ The short form. The file named in each item has the whole text.
 - **The window** (docs/window.md). Colour follows GNOME's HIG: one accent,
   used only for state. The status bar shows the current operation and live
   metrics, its activity log keeps one line per operation, and every AI call
-  is bracketed into it via `aiActivity`. Single-key shortcuts are
+  is bracketed into it via `aiActivity`. Work of known size (so many
+  requests) reports through `activity.Steps`, so it shows a filling bar
+  rather than a spinner. Single-key shortcuts are
   user-rebindable from one `shortcutDefs` table.
 
 ---
