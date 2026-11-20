@@ -40,6 +40,14 @@ sibling fetches still in flight and turn one parallel pass into a round trip per
 message. A body fetched by anything else, or after the render finished, still
 re-renders the open conversation.
 
+Opening another conversation whose bodies are not all cached blanks the pane to
+the "Loading message…" placeholder at once, so the click visibly registers. A
+repaint of the conversation already on screen (a reply arriving in it, older
+messages that hydration added) keeps it up while the missing bodies download
+and swaps in when they are ready (`coverPreviousContent`). Inbox mail rarely
+needs either: the sync stores it with its body, and the body prefetch caches
+the rest of every Inbox conversation (see [accounts.md](accounts.md)).
+
 ## Sanitizing and email CSS
 
 The reader sanitizes with an email-tuned bluemonday policy

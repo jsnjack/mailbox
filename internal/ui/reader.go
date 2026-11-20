@@ -31,9 +31,9 @@ func (w *window) renderConversation(msgs []model.Message) {
 	latest := msgs[len(msgs)-1]
 	noteGen := w.aiNotesGen
 	threadID := w.openThreadID // guard against a newer thread being opened mid-render
-	// Show a loading placeholder immediately when bodies need fetching (not all
-	// cached), so the user sees their click registered instead of staring at the
-	// previous message for up to the fetch timeout.
+	// Show a loading placeholder immediately when another conversation's bodies
+	// need fetching (not all cached), so the user sees their click registered
+	// instead of staring at the previous message for up to the fetch timeout.
 	needsFetch := false
 	if w.deps.FetchBody != nil {
 		for _, m := range msgs {
@@ -43,11 +43,13 @@ func (w *window) renderConversation(msgs []model.Message) {
 			}
 		}
 	}
-	if w.coverPreviousContent(cacheKey(latest.AccountID, threadID), needsFetch) {
+	if w.coverPreviousContent(cacheKey(latest.AccountID, threadID)) {
 		w.blankReaderContent()
 		if needsFetch {
 			w.setReaderHTML(loadingInner)
 		}
+	} else if needsFetch {
+		logging.Trace("ui: repaint keeps the shown conversation up while bodies download", "thread", threadID)
 	}
 	// The pinned header is the thread title: subject plus a message count for a
 	// real conversation. Each message's sender/date/recipients live in its own
@@ -370,9 +372,13 @@ func (w *window) renderConversation(msgs []model.Message) {
 // under the subject the header already changed to, which reads as the wrong
 // email opening — and across accounts, as another account's mail. The render
 // tail is normally sub-frame, but it waits on the store (a background vacuum
-// holds an exclusive lock), so "normally" is not a guarantee. Main-thread only.
-func (w *window) coverPreviousContent(want uiCacheKey, needsFetch bool) bool {
-	return needsFetch || w.readerShows != want
+// holds an exclusive lock), so "normally" is not a guarantee. A repaint that
+// must download bodies first (a reply arriving in the open conversation, its
+// older messages filled in) keeps the conversation up too: what is on screen
+// is still correct, only incomplete, and blanking it to a loading placeholder
+// would take away the mail being read. Main-thread only.
+func (w *window) coverPreviousContent(want uiCacheKey) bool {
+	return w.readerShows != want
 }
 
 // setReaderHTML swaps inner (sanitized conversation HTML) into the persistent
