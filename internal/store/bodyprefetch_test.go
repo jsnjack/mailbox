@@ -75,6 +75,50 @@ func TestMessagesMissingBodies(t *testing.T) {
 	}
 }
 
+// The reader shows a whole conversation, so every message of one that has a
+// message in the Inbox needs its body: the archived start of a thread, a reply
+// filtered past the Inbox. A conversation with nothing in the Inbox does not.
+func TestMessagesMissingBodiesCoversInboxConversations(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	accountID := seedAccount(t, s)
+	other, err := s.UpsertAccount(ctx, model.Account{Email: "other@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range []model.Message{
+		{AccountID: accountID, GmailID: "start", ThreadID: "conv", Labels: []string{"CATEGORY_UPDATES"}},
+		{AccountID: accountID, GmailID: "filtered", ThreadID: "conv", Labels: []string{"CATEGORY_FORUMS"}},
+		{AccountID: accountID, GmailID: "sent", ThreadID: "conv", Labels: []string{model.LabelSent}},
+		{AccountID: accountID, GmailID: "reply", ThreadID: "conv", Labels: []string{model.LabelInbox}},
+		{AccountID: accountID, GmailID: "archived-start", ThreadID: "gone", Labels: []string{"CATEGORY_UPDATES"}},
+		{AccountID: accountID, GmailID: "archived-reply", ThreadID: "gone"},
+		// The same thread id on another account is another conversation.
+		{AccountID: other, GmailID: "elsewhere", ThreadID: "gone", Labels: []string{model.LabelInbox}},
+	} {
+		rowID, err := s.UpsertMessage(ctx, m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if m.GmailID == "reply" {
+			if err := s.UpsertBody(ctx, model.MessageBody{MessageRowID: rowID, Text: "cached"}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	msgs, err := s.MessagesMissingBodies(ctx, accountID, 0, 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, m := range msgs {
+		ids = append(ids, m.GmailID)
+	}
+	if want := []string{"sent", "filtered", "start"}; !slices.Equal(ids, want) {
+		t.Fatalf("missing bodies = %v, want %v", ids, want)
+	}
+}
+
 // Mail stored with the body downloaded alongside it is never visible without
 // that body: message, body and attachment rows land in one transaction.
 func TestUpsertMessagesWithBodies(t *testing.T) {

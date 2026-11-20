@@ -5,12 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"slices"
 	"sync"
 	"time"
 
 	"github.com/jsnjack/mailbox/internal/activity"
 	"github.com/jsnjack/mailbox/internal/backend"
+	"github.com/jsnjack/mailbox/internal/logging"
 	"github.com/jsnjack/mailbox/internal/model"
 	"github.com/jsnjack/mailbox/internal/store"
 )
@@ -22,9 +22,14 @@ const (
 	bodyPrefetchInterval = 60 * time.Second
 )
 
-// RunBodyPrefetch caches unfetched Inbox bodies until ctx is canceled. Store queries
-// recover dropped sync events and unfinished work after restart. cutoff is read
-// for every batch so retention changes apply live; nil keeps all Inbox bodies.
+// RunBodyPrefetch caches the unfetched bodies of Inbox conversations until ctx
+// is canceled: every message of a conversation that has one in the Inbox, since
+// the reader shows them all. New Inbox mail normally arrives with its body (see
+// fetchConcurrent); this fills in the rest — older messages of a conversation a
+// new reply brought back, backends that fetch bodies separately, failures.
+// Store queries recover dropped sync events and unfinished work after restart.
+// cutoff is read for every batch so retention changes apply live; nil keeps
+// all Inbox bodies.
 // Its requests run at inbox priority: ahead of a catch-up's background
 // fetches, behind anything the user is waiting for.
 func (e *Engine) RunBodyPrefetch(ctx context.Context, b backend.Backend, act *activity.Hub, accountID int64, email string, cutoff func() (int64, error)) {
@@ -135,9 +140,10 @@ feed:
 			defer func() { <-sem }()
 			fetchCtx, cancel := context.WithTimeout(ctx, bodyPrefetchTimeout)
 			defer cancel()
-			// A message may have been archived while waiting for a worker slot.
-			current, err := e.Store.GetMessage(fetchCtx, accountID, m.GmailID)
-			if err == nil && !slices.Contains(current.Labels, model.LabelInbox) {
+			// The conversation may have been archived while waiting for a worker slot.
+			labels, err := e.Store.ThreadLabels(fetchCtx, accountID, m.ThreadID)
+			if err == nil && !labels[model.LabelInbox] {
+				logging.TraceContext(fetchCtx, "syncer: body prefetch skip; conversation left the inbox", "account", accountID, "id", m.GmailID, "thread", m.ThreadID)
 				return
 			}
 			if err == nil {

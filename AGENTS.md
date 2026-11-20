@@ -107,7 +107,10 @@ The short form. The file named in each item has the whole text.
   needs a restart. A 60s incremental sync (and IMAP IDLE where the server has
   it) writes SQLite and publishes ID-only events. After a gap (launch, or no
   pass completed for 10 minutes) a pass corrects the inbox before it reads the
-  change log, and fetches new inbox mail before anything else. Gmail requests
+  change log, and fetches new inbox mail before anything else. New inbox mail
+  is stored with its body (Gmail fetches both in one request), and a prefetch
+  caches the bodies of every inbox conversation, so opening inbox mail never
+  waits on the network. Gmail requests
   wait for quota most urgent first by `backend.PriorityOf(ctx)`, and a context
   without a priority counts as a user action, so background work must mark its
   context with `backend.WithPriority`. An expired history

@@ -33,9 +33,12 @@ func TestRunBodyPrefetch(t *testing.T) {
 				{AccountID: accountID, GmailID: "too-old", ThreadID: "too-old", InternalDate: time.Unix(100, 0)},
 				{AccountID: accountID, GmailID: "cached", ThreadID: "cached", InternalDate: time.Unix(200, 0)},
 				{AccountID: accountID, GmailID: "offline", ThreadID: "offline", InternalDate: time.Unix(200, 0)},
+				// Archived, but its conversation is still in the Inbox (m0's).
 				{AccountID: accountID, GmailID: "archived", ThreadID: "m0", InternalDate: time.Unix(200, 0)},
+				// Archived along with its whole conversation.
+				{AccountID: accountID, GmailID: "archived-alone", ThreadID: "archived-alone", InternalDate: time.Unix(200, 0)},
 			} {
-				if m.GmailID != "archived" {
+				if m.GmailID != "archived" && m.GmailID != "archived-alone" {
 					m.Labels = []string{model.LabelInbox}
 				}
 				rowID, err := s.UpsertMessage(ctx, m)
@@ -98,7 +101,7 @@ func TestRunBodyPrefetch(t *testing.T) {
 					}
 				}
 			}
-			waitBodies(tc.count)
+			waitBodies(tc.count + 1) // the Inbox mail and the archived message of m0's conversation
 			if _, err := s.UpsertMessage(ctx, model.Message{AccountID: accountID, GmailID: "arrival", ThreadID: "arrival", InternalDate: time.Unix(200, 0), Labels: []string{model.LabelInbox}}); err != nil {
 				t.Fatal(err)
 			}
@@ -106,8 +109,8 @@ func TestRunBodyPrefetch(t *testing.T) {
 			waitBodies(1)
 			cancel()
 			<-stopped
-			if got := hits.Load(); got != int32(tc.count+2) {
-				t.Fatalf("body fetches = %d, want %d eligible messages plus one failure", got, tc.count+1)
+			if got := hits.Load(); got != int32(tc.count+3) {
+				t.Fatalf("body fetches = %d, want %d eligible messages plus one failure", got, tc.count+3)
 			}
 			if failures.Load() != 1 {
 				t.Fatalf("failed message retried before cooldown: %d fetches", failures.Load())
@@ -229,17 +232,28 @@ func TestBodyPrefetchConcurrencyAndCancellation(t *testing.T) {
 func TestBodyPrefetchRechecksInbox(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
+		sibling bool // another message of the conversation stays in the Inbox
 		archive bool
 		want    int
 	}{
-		{"still in Inbox", false, 1},
-		{"archived after being queued", true, 0},
+		{"still in Inbox", false, false, 1},
+		{"archived after being queued", false, true, 0},
+		{"archived, conversation still in Inbox", true, true, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			s, accountID := newResyncStore(t)
 			if _, err := s.UpsertMessage(ctx, model.Message{AccountID: accountID, GmailID: "m", ThreadID: "t", Labels: []string{model.LabelInbox}}); err != nil {
 				t.Fatal(err)
+			}
+			if tc.sibling {
+				rowID, err := s.UpsertMessage(ctx, model.Message{AccountID: accountID, GmailID: "reply", ThreadID: "t", Labels: []string{model.LabelInbox}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := s.UpsertBody(ctx, model.MessageBody{MessageRowID: rowID, Text: "cached"}); err != nil {
+					t.Fatal(err)
+				}
 			}
 			queued, err := s.MessagesMissingBodies(ctx, accountID, 0, 0, bodyPrefetchBatch)
 			if err != nil || len(queued) != 1 {
@@ -261,7 +275,7 @@ func TestBodyPrefetchRechecksInbox(t *testing.T) {
 				t.Fatalf("body requests = %d, want %d", hits, tc.want)
 			}
 			// Opening an archived message still fetches its body on demand.
-			if tc.archive {
+			if tc.archive && tc.want == 0 {
 				if err := e.FetchBody(ctx, b, accountID, "m"); err != nil {
 					t.Fatal(err)
 				}
