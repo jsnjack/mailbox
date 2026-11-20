@@ -40,6 +40,12 @@ func (s *Store) LoadSyncBatch(ctx context.Context, accountID int64) (*SyncBatch,
 
 // SaveSyncBatch commits downloaded metadata and the remaining work atomically.
 func (s *Store) SaveSyncBatch(ctx context.Context, accountID int64, batch SyncBatch, msgs []model.Message) error {
+	return s.SaveSyncBatchWithBodies(ctx, accountID, batch, msgs, nil)
+}
+
+// SaveSyncBatchWithBodies is SaveSyncBatch that also stores the bodies
+// downloaded with the metadata, keyed by message id, in the same transaction.
+func (s *Store) SaveSyncBatchWithBodies(ctx context.Context, accountID int64, batch SyncBatch, msgs []model.Message, bodies map[string]FetchedBody) error {
 	payload, err := json.Marshal(batch)
 	if err != nil {
 		return fmt.Errorf("encode sync batch: %w", err)
@@ -56,7 +62,7 @@ func (s *Store) SaveSyncBatch(ctx context.Context, accountID int64, batch SyncBa
 			if m.AccountID != accountID {
 				return fmt.Errorf("sync batch message belongs to account %d, expected %d", m.AccountID, accountID)
 			}
-			if _, err := upsertMessageTx(ctx, tx, m); err != nil {
+			if err := upsertMessageWithBodyTx(ctx, tx, m, bodies); err != nil {
 				return fmt.Errorf("save sync batch message: %w", err)
 			}
 		}

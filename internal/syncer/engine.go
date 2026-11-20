@@ -1424,7 +1424,9 @@ func (e *Engine) IncrementalWithProgress(ctx context.Context, b backend.Backend,
 				}
 			}
 		}
-		msgs, fetchedIDs, failed := e.fetchMetadataConcurrent(fetchCtx, b, upserts[start:end])
+		// Inbox mail comes with its body, stored in the same transaction, so it
+		// never shows in the list before it can be opened without a download.
+		msgs, bodies, fetchedIDs, failed := e.fetchConcurrent(fetchCtx, b, upserts[start:end], inInbox)
 		if err := ctx.Err(); err != nil {
 			return changed, fmt.Errorf("incremental fetch interrupted: %w", err)
 		}
@@ -1434,7 +1436,7 @@ func (e *Engine) IncrementalWithProgress(ctx context.Context, b backend.Backend,
 		}
 		batch.Upserts = append(append([]string(nil), failedIDs...), upserts[end:]...)
 		batch.Inbox = failedInbox + max(inboxN-end, 0)
-		if err := e.Store.SaveSyncBatch(ctx, accountID, *batch, msgs); err != nil {
+		if err := e.Store.SaveSyncBatchWithBodies(ctx, accountID, *batch, msgs, bodies); err != nil {
 			return changed, err
 		}
 		e.clearFetchFailures(accountID, fetchedIDs)
@@ -1453,7 +1455,7 @@ func (e *Engine) IncrementalWithProgress(ctx context.Context, b backend.Backend,
 				p.Note(activity.Plural(restFetched, "message", "messages"))
 			}
 		}
-		logging.TraceContext(ctx, "syncer: Incremental checkpoint", "account", accountID, "inbox", inInbox, "saved", len(msgs), "remaining", len(batch.Upserts))
+		logging.TraceContext(ctx, "syncer: Incremental checkpoint", "account", accountID, "inbox", inInbox, "saved", len(msgs), "withBodies", len(bodies), "remaining", len(batch.Upserts))
 		start = end
 	}
 	if len(failedIDs) > 0 && e.noteFetchFailures(accountID, failedIDs) {
@@ -1598,11 +1600,11 @@ func (e *Engine) refreshInbox(ctx context.Context, b backend.Backend, accountID 
 	var fetched []string
 	for i := 0; i < len(missing); i += incrementalBatch {
 		end := min(i+incrementalBatch, len(missing))
-		msgs, ids, _ := e.fetchMetadataConcurrent(ctx, b, missing[i:end])
+		msgs, bodies, ids, _ := e.fetchConcurrent(ctx, b, missing[i:end], true)
 		if err := ctx.Err(); err != nil {
 			return len(rec.Changed) + len(fetched), fetched, err
 		}
-		if err := e.Store.UpsertMessages(ctx, msgs); err != nil {
+		if err := e.Store.UpsertMessagesWithBodies(ctx, msgs, bodies); err != nil {
 			return len(rec.Changed) + len(fetched), fetched, fmt.Errorf("store inbox messages: %w", err)
 		}
 		for _, m := range msgs {
@@ -1732,17 +1734,34 @@ func (e *Engine) ResyncWithProgress(ctx context.Context, b backend.Backend, acco
 // past a message it hasn't actually stored yet. Each goroutine writes its own
 // slot, so there is no shared-state contention.
 func (e *Engine) fetchMetadataConcurrent(ctx context.Context, b backend.Backend, ids []string) (msgs []model.Message, fetchedIDs, failedIDs []string) {
+	msgs, _, fetchedIDs, failedIDs = e.fetchConcurrent(ctx, b, ids, false)
+	return msgs, fetchedIDs, failedIDs
+}
+
+// fetchConcurrent is fetchMetadataConcurrent that, when withBodies is set and
+// the backend is a backend.FullFetcher, also returns each message's body, keyed
+// by id, from the same request. Inbox mail is fetched this way so it is stored
+// with its body and opening it never waits for a download; a backend without
+// the capability returns no bodies, and the body prefetch fills them in.
+func (e *Engine) fetchConcurrent(ctx context.Context, b backend.Backend, ids []string, withBodies bool) (msgs []model.Message, bodies map[string]store.FetchedBody, fetchedIDs, failedIDs []string) {
 	if len(ids) == 0 {
-		return nil, nil, nil
+		return nil, nil, nil, nil
+	}
+	full, _ := b.(backend.FullFetcher)
+	if !withBodies {
+		full = nil
 	}
 	// Prefer a batched fetch when the backend supports it (IMAP: one FETCH per
 	// ~200 ids per folder instead of one round-trip per message). Gmail has no
 	// batch metadata endpoint and falls through to the per-id path below.
-	if bf, ok := b.(backend.BatchMetadataFetcher); ok {
-		return e.fetchMetadataBatched(ctx, bf, ids)
+	if bf, ok := b.(backend.BatchMetadataFetcher); ok && full == nil {
+		msgs, fetchedIDs, failedIDs = e.fetchMetadataBatched(ctx, bf, ids)
+		return msgs, nil, fetchedIDs, failedIDs
 	}
+	logging.TraceContext(ctx, "syncer: fetch messages", "n", len(ids), "withBodies", full != nil)
 	type slot struct {
 		msg       model.Message
+		body      *store.FetchedBody
 		ok        bool
 		transient bool
 	}
@@ -1755,14 +1774,25 @@ func (e *Engine) fetchMetadataConcurrent(ctx context.Context, b backend.Backend,
 		go func(i int, id string) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			msg, err := b.FetchMetadata(ctx, id)
+			var (
+				msg  model.Message
+				body *store.FetchedBody
+				err  error
+			)
+			if full != nil {
+				var fm backend.FullMessage
+				fm, err = full.FetchFull(ctx, id)
+				msg, body = fm.Message, &store.FetchedBody{Body: fm.Body, Attachments: fm.Attachments}
+			} else {
+				msg, err = b.FetchMetadata(ctx, id)
+			}
 			if err != nil {
 				gone := errors.Is(err, backend.ErrNotFound)
-				slog.Default().Warn("incremental: fetch metadata", "id", id, "gone", gone, "err", err)
+				slog.Default().Warn("incremental: fetch message", "id", id, "gone", gone, "withBody", full != nil, "err", err)
 				slots[i] = slot{transient: !gone}
 				return
 			}
-			slots[i] = slot{msg: msg, ok: true}
+			slots[i] = slot{msg: msg, body: body, ok: true}
 		}(i, id)
 	}
 	wg.Wait()
@@ -1773,12 +1803,18 @@ func (e *Engine) fetchMetadataConcurrent(ctx context.Context, b backend.Backend,
 		if s.ok {
 			msgs = append(msgs, s.msg)
 			fetchedIDs = append(fetchedIDs, ids[i])
+			if s.body != nil {
+				if bodies == nil {
+					bodies = make(map[string]store.FetchedBody, len(ids))
+				}
+				bodies[s.msg.GmailID] = *s.body
+			}
 		}
 		if s.transient {
 			failedIDs = append(failedIDs, ids[i])
 		}
 	}
-	return msgs, fetchedIDs, failedIDs
+	return msgs, bodies, fetchedIDs, failedIDs
 }
 
 // fetchChunk fetches metadata for a chunk of ids for backfill, using the

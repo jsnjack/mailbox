@@ -46,15 +46,21 @@ func (s *Store) UpsertMessage(ctx context.Context, m model.Message) (int64, erro
 // incremental sync use this so a run that touches N messages costs one
 // commit/fsync instead of N — the dominant cost when catching up a mailbox.
 func (s *Store) UpsertMessages(ctx context.Context, msgs []model.Message) error {
+	return s.UpsertMessagesWithBodies(ctx, msgs, nil)
+}
+
+// UpsertMessagesWithBodies is UpsertMessages that also stores the bodies
+// downloaded with the metadata, keyed by message id, in the same transaction.
+func (s *Store) UpsertMessagesWithBodies(ctx context.Context, msgs []model.Message, bodies map[string]FetchedBody) error {
 	if len(msgs) == 0 {
 		logging.TraceContext(ctx, "store: upsert messages", "n", 0)
 		return nil
 	}
 	start := time.Now()
-	logging.TraceContext(ctx, "store: upsert messages", "n", len(msgs))
+	logging.TraceContext(ctx, "store: upsert messages", "n", len(msgs), "bodies", len(bodies))
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
 		for _, m := range msgs {
-			if _, err := upsertMessageTx(ctx, tx, m); err != nil {
+			if err := upsertMessageWithBodyTx(ctx, tx, m, bodies); err != nil {
 				return err
 			}
 		}
@@ -64,7 +70,7 @@ func (s *Store) UpsertMessages(ctx context.Context, msgs []model.Message) error 
 		logging.TraceContext(ctx, "store: upsert messages", "n", len(msgs), "err", err)
 		return err
 	}
-	logging.TraceContext(ctx, "store: upsert messages done", "n", len(msgs), "dur", time.Since(start))
+	logging.TraceContext(ctx, "store: upsert messages done", "n", len(msgs), "bodies", len(bodies), "dur", time.Since(start))
 	return nil
 }
 
@@ -158,30 +164,66 @@ func (s *Store) UpsertBody(ctx context.Context, b model.MessageBody) error {
 	start := time.Now()
 	logging.TraceContext(ctx, "store: upsert body", "rowid", b.MessageRowID, "text_bytes", len(b.Text), "html_bytes", len(b.HTML))
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO message_bodies (message_rowid, body_text, body_html, raw_headers)
-			VALUES (?,?,?,?)
-			ON CONFLICT(message_rowid) DO UPDATE SET
-				body_text=excluded.body_text, body_html=excluded.body_html,
-				raw_headers=excluded.raw_headers`,
-			b.MessageRowID, b.Text, b.HTML, b.RawHeaders); err != nil {
-			return fmt.Errorf("upsert body: %w", err)
-		}
-		// body_fetched is a fetch-version marker, not just a bool: 0 = never
-		// fetched, 1 = fetched by a build before externalized-HTML support, 2 =
-		// fetched with it. Stamping 2 here lets the one-time HTML backfill
-		// (MessagesMissingHTML) find and re-fetch the version-1 text-only bodies
-		// once, then never again. Everything else still reads it as "fetched" (!= 0).
-		if _, err := tx.ExecContext(ctx, `UPDATE messages SET body_fetched = 2 WHERE rowid = ?`, b.MessageRowID); err != nil {
-			return fmt.Errorf("mark body fetched: %w", err)
-		}
-		return reindexFTS(ctx, tx, b.MessageRowID)
+		return upsertBodyTx(ctx, tx, b)
 	})
 	if err != nil {
 		logging.TraceContext(ctx, "store: upsert body", "rowid", b.MessageRowID, "err", err)
 		return err
 	}
 	logging.TraceContext(ctx, "store: upsert body done", "rowid", b.MessageRowID, "dur", time.Since(start))
+	return nil
+}
+
+// upsertBodyTx is UpsertBody within tx.
+func upsertBodyTx(ctx context.Context, tx *sql.Tx, b model.MessageBody) error {
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO message_bodies (message_rowid, body_text, body_html, raw_headers)
+		VALUES (?,?,?,?)
+		ON CONFLICT(message_rowid) DO UPDATE SET
+			body_text=excluded.body_text, body_html=excluded.body_html,
+			raw_headers=excluded.raw_headers`,
+		b.MessageRowID, b.Text, b.HTML, b.RawHeaders); err != nil {
+		return fmt.Errorf("upsert body: %w", err)
+	}
+	// body_fetched is a fetch-version marker, not just a bool: 0 = never
+	// fetched, 1 = fetched by a build before externalized-HTML support, 2 =
+	// fetched with it. Stamping 2 here lets the one-time HTML backfill
+	// (MessagesMissingHTML) find and re-fetch the version-1 text-only bodies
+	// once, then never again. Everything else still reads it as "fetched" (!= 0).
+	if _, err := tx.ExecContext(ctx, `UPDATE messages SET body_fetched = 2 WHERE rowid = ?`, b.MessageRowID); err != nil {
+		return fmt.Errorf("mark body fetched: %w", err)
+	}
+	return reindexFTS(ctx, tx, b.MessageRowID)
+}
+
+// FetchedBody is a message body downloaded together with the message's
+// metadata (backend.FullFetcher), stored with it in one transaction so the
+// message is never visible without its body.
+type FetchedBody struct {
+	Body        model.MessageBody
+	Attachments []model.Attachment
+}
+
+// upsertMessageWithBodyTx upserts m and, when bodies holds one for it, its body
+// and attachment rows, all within tx.
+func upsertMessageWithBodyTx(ctx context.Context, tx *sql.Tx, m model.Message, bodies map[string]FetchedBody) error {
+	rowid, err := upsertMessageTx(ctx, tx, m)
+	if err != nil {
+		return err
+	}
+	fb, ok := bodies[m.GmailID]
+	if !ok {
+		return nil
+	}
+	fb.Body.MessageRowID = rowid
+	if err := upsertBodyTx(ctx, tx, fb.Body); err != nil {
+		return fmt.Errorf("store body of %q: %w", m.GmailID, err)
+	}
+	if err := replaceAttachmentsTx(ctx, tx, rowid, fb.Attachments, model.ReferencedCIDs(fb.Body.HTML)); err != nil {
+		return fmt.Errorf("store attachments of %q: %w", m.GmailID, err)
+	}
+	logging.TraceContext(ctx, "store: stored body with message", "account", m.AccountID, "id", m.GmailID, "rowid", rowid,
+		"text_bytes", len(fb.Body.Text), "html_bytes", len(fb.Body.HTML), "attachments", len(fb.Attachments))
 	return nil
 }
 

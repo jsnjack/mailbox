@@ -31,6 +31,7 @@ func New(c *gmailapi.Client, accountID int64) *Backend {
 
 var (
 	_ backend.Backend               = (*Backend)(nil)
+	_ backend.FullFetcher           = (*Backend)(nil)
 	_ backend.LabelManager          = (*Backend)(nil)
 	_ backend.SearchPager           = (*Backend)(nil)
 	_ backend.ThreadMetadataFetcher = (*Backend)(nil)
@@ -140,10 +141,38 @@ func (b *Backend) FetchBody(ctx context.Context, id string) (model.MessageBody, 
 		logging.TraceContext(ctx, "gmailbackend: FetchBody failed", "account", b.accountID, "id", id, "dur", time.Since(start), "err", err)
 		return model.MessageBody{}, nil, err
 	}
+	body, atts := b.bodyOf(ctx, full)
+	logging.TraceContext(ctx, "gmailbackend: FetchBody ok", "account", b.accountID, "id", id, "htmlBytes", len(body.HTML), "textBytes", len(body.Text), "attachments", len(atts), "dur", time.Since(start))
+	return body, atts, nil
+}
+
+// FetchFull fetches a message's metadata and body with one messages.get
+// (format=full), which costs what a metadata fetch does.
+func (b *Backend) FetchFull(ctx context.Context, id string) (backend.FullMessage, error) {
+	start := time.Now()
+	logging.TraceContext(ctx, "gmailbackend: FetchFull", "account", b.accountID, "id", id)
+	full, err := b.c.GetMessageFull(ctx, id)
+	if err != nil {
+		logging.TraceContext(ctx, "gmailbackend: FetchFull failed", "account", b.accountID, "id", id, "dur", time.Since(start), "err", err)
+		if gmailapi.IsNotFound(err) {
+			return backend.FullMessage{}, fmt.Errorf("%w: %s", backend.ErrNotFound, id)
+		}
+		return backend.FullMessage{}, err
+	}
+	msg := gmailapi.ToMessage(b.accountID, full)
+	body, atts := b.bodyOf(ctx, full)
+	logging.TraceContext(ctx, "gmailbackend: FetchFull ok", "account", b.accountID, "id", id, "threadID", msg.ThreadID, "from", msg.FromAddr, "subject", msg.Subject,
+		"htmlBytes", len(body.HTML), "textBytes", len(body.Text), "attachments", len(atts), "dur", time.Since(start))
+	return backend.FullMessage{Message: msg, Body: body, Attachments: atts}, nil
+}
+
+// bodyOf extracts the body and attachment metadata from a full-format message.
+// Gmail serves a large part body (e.g. a 1 MB HTML newsletter) via an
+// attachment id rather than inline; it is fetched so the message renders as
+// HTML instead of falling back to its text/plain alternative.
+func (b *Backend) bodyOf(ctx context.Context, full *gmail.Message) (model.MessageBody, []model.Attachment) {
+	id := full.Id
 	body := gmailapi.ToBody(full)
-	// Gmail serves a large part body (e.g. a 1 MB HTML newsletter) via an
-	// attachment id rather than inline; fetch it so the message renders as HTML
-	// instead of falling back to its text/plain alternative.
 	if textAtt, htmlAtt := gmailapi.ExternalBodyParts(full); textAtt != "" || htmlAtt != "" {
 		logging.TraceContext(ctx, "gmailbackend: FetchBody externalized parts", "account", b.accountID, "id", id, "hasTextAtt", textAtt != "", "hasHTMLAtt", htmlAtt != "", "haveHTML", body.HTML != "", "haveText", body.Text != "")
 		if body.HTML == "" && htmlAtt != "" {
@@ -163,9 +192,7 @@ func (b *Backend) FetchBody(ctx context.Context, id string) (model.MessageBody, 
 			}
 		}
 	}
-	atts := gmailapi.AttachmentsFromMessage(full)
-	logging.TraceContext(ctx, "gmailbackend: FetchBody ok", "account", b.accountID, "id", id, "htmlBytes", len(body.HTML), "textBytes", len(body.Text), "attachments", len(atts), "dur", time.Since(start))
-	return body, atts, nil
+	return body, gmailapi.AttachmentsFromMessage(full)
 }
 
 // FetchAttachment downloads one attachment's decoded bytes.

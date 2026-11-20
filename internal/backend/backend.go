@@ -73,6 +73,24 @@ type BatchMetadataFetcher interface {
 	FetchMetadataBatch(ctx context.Context, ids []string) ([]model.Message, error)
 }
 
+// FullMessage is one message's metadata and body, from one provider request.
+type FullMessage struct {
+	Message     model.Message
+	Body        model.MessageBody
+	Attachments []model.Attachment
+}
+
+// FullFetcher is an optional Backend capability: a provider that returns a
+// message's metadata and body in one request, for what a metadata fetch costs,
+// implements it (Gmail: messages.get format=full costs the same 20 quota units
+// as format=metadata). The engine then stores new Inbox mail with its body, so
+// opening it never waits for a download, and saves the second request.
+type FullFetcher interface {
+	// FetchFull fetches one message's metadata, body and attachment metadata.
+	// A message that no longer exists returns ErrNotFound, as FetchMetadata does.
+	FetchFull(ctx context.Context, id string) (FullMessage, error)
+}
+
 // ThreadMetadataFetcher is an optional Backend capability for providers that
 // can enumerate every message belonging to a server-side conversation. It lets
 // a capped local backfill repair an incomplete thread when the user opens it.

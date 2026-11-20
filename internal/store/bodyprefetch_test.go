@@ -74,3 +74,50 @@ func TestMessagesMissingBodies(t *testing.T) {
 		})
 	}
 }
+
+// Mail stored with the body downloaded alongside it is never visible without
+// that body: message, body and attachment rows land in one transaction.
+func TestUpsertMessagesWithBodies(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	accountID := seedAccount(t, s)
+	msgs := []model.Message{
+		{AccountID: accountID, GmailID: "full", ThreadID: "t1", Subject: "hello", Labels: []string{model.LabelInbox}},
+		{AccountID: accountID, GmailID: "meta", ThreadID: "t2", Labels: []string{model.LabelInbox}},
+	}
+	bodies := map[string]FetchedBody{"full": {
+		Body:        model.MessageBody{Text: "needle body", HTML: `<p>needle body</p><img src="cid:logo">`, RawHeaders: "spf=pass"},
+		Attachments: []model.Attachment{{GmailAttID: "a1", Filename: "report.pdf", MimeType: "application/pdf", SizeBytes: 10}, {GmailAttID: "a2", MimeType: "image/png", ContentID: "logo"}},
+	}}
+	if err := s.UpsertMessagesWithBodies(ctx, msgs, bodies); err != nil {
+		t.Fatal(err)
+	}
+	full, err := s.GetMessage(ctx, accountID, "full")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !full.BodyFetched || !full.HasAttachments {
+		t.Fatalf("full: fetched=%v attachments=%v, want both", full.BodyFetched, full.HasAttachments)
+	}
+	body, err := s.GetBody(ctx, full.RowID)
+	if err != nil || body.Text != "needle body" || body.RawHeaders != "spf=pass" {
+		t.Fatalf("body = %+v, err %v", body, err)
+	}
+	atts, err := s.ListAttachments(ctx, full.RowID)
+	if err != nil || len(atts) != 2 {
+		t.Fatalf("attachments = %v, err %v", atts, err)
+	}
+	meta, err := s.GetMessage(ctx, accountID, "meta")
+	if err != nil || meta.BodyFetched {
+		t.Fatalf("meta: fetched=%v err %v, want metadata only", meta.BodyFetched, err)
+	}
+	// The body is searchable at once, and the prefetch has only the other left.
+	found, err := s.Search(ctx, accountID, "needle", 10)
+	if err != nil || len(found) != 1 || found[0].GmailID != "full" {
+		t.Fatalf("search = %v, err %v; want the stored body", found, err)
+	}
+	missing, err := s.MessagesMissingBodies(ctx, accountID, 0, 0, 10)
+	if err != nil || len(missing) != 1 || missing[0].GmailID != "meta" {
+		t.Fatalf("still missing = %v, err %v; want just meta", missing, err)
+	}
+}
