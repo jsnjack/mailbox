@@ -268,7 +268,7 @@ start. **Every meaningful action and code-path branch must emit a trace log.**
 
 - GTK4 is single-threaded: never touch a widget off the main loop — route through `dispatch.Main`.
 - Build needs system dev packages: `webkitgtk6.0-devel libsoup3-devel libsecret-devel` (plus `gtk4-devel`, `libadwaita-devel`).
-- The Makefile adds `-DENABLE_POINTER_LOCK=1` to `CGO_CPPFLAGS`: WebKitGTK 2.54's umbrella header hides the pointer-lock declarations behind that private macro, although the GTK library still exports the API used by the pinned Go bindings. Direct `go` commands need the same flag.
+- Add no CGO flags of your own: any extra flag changes the build cache key of every cgo package, so mailbox would stop sharing the compiled gotk4 bindings with the other GTK apps. WebKitGTK 2.54.0 briefly needed `-DENABLE_POINTER_LOCK=1`; 2.54.2 includes the pointer-lock header unconditionally.
 - The Makefile is Linux-only (`CGO_ENABLED=1`); the standards cross-compile targets are intentionally dropped.
 - FTS5 is written explicitly by the store (not via triggers) because searchable text spans two tables.
-- Validated GTK binding pins (confirmed to compile + run against system GTK4 4.22.4 / libadwaita 1.9.1 / WebKitGTK 2.52.4 — re-pin these exactly in Phase 2): gotk4 `pkg v0.3.2-0.20250703063411-16654385f59a`, gotk4-adwaita `pkg v0.0.0-20250703085337-e94555b846b6`, gotk4-webkitgtk `pkg v0.0.0-20240108031600-dee1973cf440`. The WebView method is `LoadHtml` (gotk4 lowercases acronyms), not `LoadHTML`.
+- GTK binding versions (gotk4, gotk4-adwaita, gotk4-webkitgtk, `golang.org/x/sync`) follow the shared "GTK binding set" in `AGENTS.go.md`; change them only together with the other GTK apps. The WebView method is `LoadHtml` (gotk4 lowercases acronyms), not `LoadHTML`.
