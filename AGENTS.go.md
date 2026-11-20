@@ -80,6 +80,23 @@ rebuilds with `go env GOCACHE GOMODCACHE` before changing cache configuration.
   fallback is visible. Put the status surface in an existing persistent bottom
   panel when the window has one. Otherwise, use a floating card in a
   `GtkOverlay` so appearing and disappearing does not reflow the main content.
+- Pin the shared **GTK binding set** so the slow cgo build of gotk4 runs once
+  and every GTK app reuses it from `GOCACHE`:
+
+  | Module | Version |
+  |--------|---------|
+  | `github.com/diamondburned/gotk4/pkg` | `v0.4.2-0.20261031093702-169e0f82bca8` |
+  | `github.com/diamondburned/gotk4-adwaita/pkg` | `v0.0.0-20261031204147-41c057c79b39` |
+  | `github.com/diamondburned/gotk4-webkitgtk/pkg` | `v0.0.0-20261109000950-66cf86a3cbde` |
+  | `golang.org/x/sync` | `v0.25.0` |
+
+  Pin `golang.org/x/sync` even when the app itself does not use it: gotk4
+  imports it, so a different version changes the cache key of every gotk4
+  package. After `go get -u`, check that the set has not moved. Change the set
+  here and in all GTK apps together, and add no app-specific CGO flags. In a
+  correctly aligned app, `go list -export -f '{{.Export}}'
+  github.com/diamondburned/gotk4/pkg/gtk/v4` prints the same cache file as in
+  every other GTK app.
 
 **Directory layout (XDG):** Use `os.UserConfigDir`, `os.UserCacheDir`, and
 `os.UserHomeDir` — never hardcode `~`. Respect the XDG env vars automatically
